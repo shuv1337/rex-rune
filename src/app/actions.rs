@@ -413,6 +413,24 @@ impl Spec {
         )
     }
 
+    /// The argument a binding of this action must give, and the words it may be when it is
+    /// one of a few (`direction`: `left`, `right`, …). Nothing for an action that runs as it
+    /// is; no words for an argument that is a number, a key or an id.
+    pub fn argument(&self) -> Option<(String, Vec<String>)> {
+        let schema = self.schema()?;
+        let name = schema["required"][0].as_str()?.to_owned();
+        let choices = schema["properties"][&name]["enum"]
+            .as_array()
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(|word| word.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((name, choices))
+    }
+
     /// Validate before dispatch: invalid arguments must not partially perform an action.
     pub fn accepts(&self, args: &Value) -> bool {
         let Some(object) = args.as_object() else {

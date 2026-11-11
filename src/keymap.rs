@@ -324,6 +324,8 @@ impl Chord {
             }
         }
         caps.push(match self.key {
+            // Spelled out: `Ctrl +` reads as a chord left unfinished.
+            Key::Character('+') => "Plus".into(),
             Key::Character(c) => c.to_uppercase().to_string(),
             Key::Physical(code) => code.into(),
             Key::Named("pageup") => "PageUp".into(),
@@ -777,7 +779,7 @@ mod tests {
             (vec!["ctrl+b".into(), "c".into()], "Ctrl B, C"),
             (vec!["ctrl+[KeyT]".into()], "Ctrl KeyT"),
             (vec!["shift+pageup".into()], "Shift PageUp"),
-            (vec!["ctrl++".into()], "Ctrl +"),
+            (vec!["ctrl++".into()], "Ctrl Plus"),
             (vec!["meta+k".into()], "Super K"),
         ] {
             assert_eq!(display(&keys), expected);

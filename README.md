@@ -414,9 +414,15 @@ No cross-server `servers` list is advertised. A returned action whose original
 host, session, pane or local keymap generation is no longer current is skipped
 with an informational notice rather than applied to a different target.
 
-Settings → Shortcuts lists each effective binding by the name Commands gives its
-action, with its keys as keycaps (“then” between sequence steps), its source,
-persistent Problems and both config paths. Commands shows the highest
+Settings → Shortcuts lists every action, bound or not, by the name Commands gives
+it: its keys as keycaps (“then” between sequence steps, every binding of the
+action on one row), or **Not set**. A row says where a key comes from when it is
+not a default, which other action shares or took one of its keys, and which
+default `shortcuts.json` removed. The **Filter shortcuts…** field above the list
+takes a name or a key: `ctrl+k` lists everything bound to that key, the action it
+performs first, and a key nothing is bound to says so. The page is read-only;
+keys are changed in `shortcuts.json`. Persistent Problems and both config paths
+follow the list. Commands shows the highest
 binding for each action and argument set, or no shortcut when unbound. Only
 settings-source diagnostic sets toast, once per distinct set per host; file and
 default-layer diagnostics stay in Problems. A pending sequence shows `Ctrl B …`

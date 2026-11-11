@@ -255,8 +255,15 @@ fn settings_shows_effective_sequences_sources_and_pending_chip_cancels() {
     rt.frame(0.);
     let words: Vec<_> = rt.elements().into_iter().filter_map(|e| e.text).collect();
     assert!(words.iter().any(|s| s == "then"));
-    assert!(words.iter().any(|s| s == "shortcuts.json"));
-    assert!(!words.iter().any(|s| s == "Switch session"));
+    // The sequence joins New tab's default on one row, which names where it is from.
+    assert!(words.iter().any(|s| s == "Ctrl B, C from shortcuts.json"));
+    // Switch session lost its key to the file: it is still listed, and says so.
+    assert!(words.iter().any(|s| s == "Switch session"));
+    assert!(
+        words
+            .iter()
+            .any(|s| s == "Ctrl K removed in shortcuts.json")
+    );
     assert!(!has(&rt, "shortcut-problem-0"));
     std::fs::remove_file(path).unwrap();
 }
