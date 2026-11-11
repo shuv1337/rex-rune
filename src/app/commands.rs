@@ -18,6 +18,7 @@ use super::{
     actions, find, help, keycaps, pane_header,
     panel::{Entry, Intent, PaneAction, SessionAction, SessionTarget},
     splits::SplitWay,
+    toolbar_reveal,
     workspace::Workspace,
 };
 use rex_linux::{connection::HostCommand, settings::PaneDensity};
@@ -641,6 +642,18 @@ impl Workspace {
             )
             .enabled(self.header_reveal.pinned || pane_header::can_reveal(self))
             .keywords("show title buttons"),
+            Command::action(
+                "view.toolbar",
+                G,
+                if self.toolbar_reveal.pinned {
+                    "Hide toolbar"
+                } else {
+                    "Reveal toolbar"
+                },
+                toolbar_reveal::TOGGLE,
+            )
+            .enabled(self.toolbar_reveal.pinned || toolbar_reveal::can_reveal(self))
+            .keywords("show tabs bar window move drag"),
             Command::action(
                 "view.terminal_theme",
                 G,

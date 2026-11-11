@@ -1,6 +1,6 @@
 //! The chrome palette's tokens, the kit pinned to them, shared surfaces (chips, glass,
 //! cards) and the app's icons.
-use rex_linux::settings::ChromeTheme;
+use rex_linux::settings::{ChromeTheme, interface::AnimationStyle};
 use rune::{Color, El, Icon, Shadow, Spring, SpringPair, TextStyle, Transition};
 use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use std::sync::OnceLock;
@@ -232,7 +232,8 @@ pub const MARGIN: f32 = 10.;
 pub const CARD_RADIUS: f32 = 12.;
 pub const CARD_HEADER: f32 = 30.;
 
-/// Springs for chrome: quick and calm.
+/// Springs for chrome: quick and calm. These are the Snappy animation style's; views take
+/// [`snappy`] and [`pop`], which follow Settings → Interface → Animation style.
 pub const SNAPPY: Spring = Spring {
     duration: 0.28,
     bounce: 0.0,
@@ -241,6 +242,15 @@ pub const POP: Spring = Spring {
     duration: 0.32,
     bounce: 0.12,
 };
+/// The Natural animation style's: slower, settling softly past their mark.
+pub const NATURAL: Spring = Spring {
+    duration: 0.46,
+    bounce: 0.16,
+};
+pub const NATURAL_POP: Spring = Spring {
+    duration: 0.52,
+    bounce: 0.26,
+};
 /// For things that must not move (terminal content).
 pub const STILL: Spring = Spring {
     duration: 0.001,
@@ -248,14 +258,53 @@ pub const STILL: Spring = Spring {
 };
 
 /// A sliding highlight's own entrance and exit: none, so one highlight shows even when its
-/// matched partner isn't mounted (Reduce Motion, a row scrolled in).
+/// matched partner isn't mounted (Reduce Motion, a row scrolled in). Under reduced motion
+/// (Animation style → Off, or the desktop's preference) it is Rune's `none`: a very short
+/// spring would be stretched into the fade that replaces travel there, and a pane card that
+/// left with a tab switch would fade out over the terminal that took its place.
 pub fn no_presence() -> Transition {
-    Transition::identity().springs(SpringPair::new(STILL, STILL))
+    if REDUCED.get() {
+        Transition::none()
+    } else {
+        Transition::identity().springs(SpringPair::new(STILL, STILL))
+    }
+}
+
+thread_local! {
+    // Per thread, as the palette is, and set with it before every build.
+    static ANIMATION: std::cell::Cell<AnimationStyle> =
+        const { std::cell::Cell::new(AnimationStyle::Snappy) };
+    static REDUCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The animation style views on this thread move in, and whether this build reduces motion
+/// (Off, or the desktop's preference). Off needs no springs of its own: the root view asks
+/// Rune to reduce motion, which stops travel whatever spring a view names.
+pub fn set_animation(style: AnimationStyle, reduced: bool) {
+    ANIMATION.set(style);
+    REDUCED.set(reduced);
+}
+
+/// The spring for chrome that moves or resizes: cards, highlights, the sidebar, a header or
+/// toolbar that floats in.
+pub fn snappy() -> Spring {
+    match ANIMATION.get() {
+        AnimationStyle::Natural => NATURAL,
+        AnimationStyle::Snappy | AnimationStyle::Off => SNAPPY,
+    }
+}
+
+/// The spring a popover opens on.
+pub fn pop() -> Spring {
+    match ANIMATION.get() {
+        AnimationStyle::Natural => NATURAL_POP,
+        AnimationStyle::Snappy | AnimationStyle::Off => POP,
+    }
 }
 
 /// A popover's entrance from its anchor: a little scale and a fade on a gentle spring.
 pub fn pop_in() -> Transition {
-    Transition::scale(0.96).springs(SpringPair::new(POP, SNAPPY))
+    Transition::scale(0.96).springs(SpringPair::new(pop(), snappy()))
 }
 
 /// The active palette's kit.

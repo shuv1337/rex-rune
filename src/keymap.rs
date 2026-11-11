@@ -387,6 +387,8 @@ pub fn defaults() -> KeymapDefault {
         ("ctrl+shift+v", "pane.paste"),
         ("ctrl+shift+f", "client.search"),
         ("ctrl+shift+r", "pane.reconnect"),
+        // The way back to a toolbar that On hover or Hidden took off the screen.
+        ("ctrl+alt+shift+t", "client.toolbar.toggle"),
         // Of an action's bindings the last is the one Commands and menus show: the main
         // block's key, not the numpad's.
         ("ctrl+[NumpadAdd]", "client.zoom.in"),
@@ -804,7 +806,7 @@ mod tests {
         let layer = defaults();
         assert_eq!(layer.name, "linux");
         assert!(layer.removals.is_empty());
-        assert_eq!(layer.bindings.len(), 35);
+        assert_eq!(layer.bindings.len(), 36);
         // The terminal font size actions have no default: Ctrl Alt + / - / 0 belong to the
         // program in the terminal until the user binds them.
         assert!(
@@ -821,6 +823,7 @@ mod tests {
             ("ctrl+tab", "client.tab.next_global"),
             ("ctrl+shift+tab", "client.tab.previous_global"),
             ("ctrl+shift+f", "client.search"),
+            ("ctrl+alt+shift+t", "client.toolbar.toggle"),
             ("ctrl++", "client.zoom.in"),
             ("ctrl+[Numpad0]", "client.zoom.reset"),
             ("ctrl+0", "client.zoom.reset"),

@@ -71,6 +71,7 @@ const IDS: &[&str] = &[
     "view.tab_position",
     "view.pane_density",
     "view.pane_headers",
+    "view.toolbar",
     "view.terminal_theme",
     "view.interface_theme",
     "view.zoom.in",
@@ -341,7 +342,7 @@ fn a_search_is_one_list_with_the_best_match_first() {
     search(&mut ws, "quit");
     assert_eq!(labels(&ws), ["Close app"]);
     search(&mut ws, "view");
-    assert_eq!(labels(&ws).len(), 12, "every View command");
+    assert_eq!(labels(&ws).len(), 13, "every View command");
     // A shortcut is found as typed, not by its letters.
     search(&mut ws, "ctrl shift d");
     assert_eq!(labels(&ws), ["Split right"]);

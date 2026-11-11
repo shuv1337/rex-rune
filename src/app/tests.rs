@@ -10,6 +10,8 @@ mod command_tests;
 mod find_tests;
 #[path = "font_settings_tests.rs"]
 mod font_settings_tests;
+#[path = "interface_tests.rs"]
+mod interface_tests;
 #[path = "menu_tests.rs"]
 mod menu_tests;
 #[path = "navigation_tests.rs"]
@@ -3172,39 +3174,6 @@ fn a_clipboard_paste_reaches_only_the_pane_that_asked_while_it_stays_focused() {
         );
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
-}
-
-#[test]
-fn pane_padding_controls_reach_zero_and_save() {
-    let mut ws = workspace();
-    ws.perform(Intent::Settings, &mut rune::Tx::default());
-    let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
-    // Layout is near the foot of the page.
-    rt.pointer_move(700., 400.);
-    rt.wheel(700., 400., -4000.);
-    for _ in 0..30 {
-        rt.frame(1. / 60.);
-    }
-    for _ in 0..9 {
-        click(&mut rt, "pane-padding-smaller");
-    }
-    assert_eq!(rt.state.settings.pane_padding, 0.);
-    assert_eq!(
-        Settings::load(&rt.state.settings_path)
-            .unwrap()
-            .pane_padding,
-        0.
-    );
-    click(&mut rt, "pane-padding-larger");
-    assert_eq!(rt.state.settings.pane_padding, 1.);
-    assert_eq!(
-        Settings::load(&rt.state.settings_path)
-            .unwrap()
-            .pane_padding,
-        1.
-    );
-    std::fs::remove_file(&rt.state.settings_path).unwrap();
 }
 
 #[test]

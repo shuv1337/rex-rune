@@ -70,6 +70,7 @@ fn interface(s: &Workspace) -> El {
                 ),
             ])],
         ),
+        super::interface_page::toolbar(s),
         section(
             "Panes",
             [card([
@@ -113,6 +114,7 @@ fn interface(s: &Workspace) -> El {
                         tx.instant();
                     },
                 ),
+                super::interface_page::customize_panes(),
             ])],
         ),
         section(
@@ -162,6 +164,8 @@ fn interface(s: &Workspace) -> El {
                 },
             )])],
         ),
+        super::interface_page::animation(s),
+        super::interface_page::window(s),
     ])
 }
 
@@ -706,10 +710,12 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
         SettingsSection::Updates => super::updates::section(s),
         SettingsSection::About => super::about::section(s),
         SettingsSection::AdvancedFont => super::font_page::advanced(s),
+        SettingsSection::Panes => super::interface_page::panes(s),
     };
     let width = PANEL_WIDTH.min(viewport[0] * 0.92);
-    // Under the toolbar, which stays whole above it, with a margin at both ends.
-    let height = PANEL_HEIGHT.min((viewport[1] - TOOLBAR - 2. * CLEARANCE).max(0.));
+    // Under the toolbar's row, which stays whole above it, with a margin at both ends.
+    let toolbar = super::toolbar_reveal::row_height(s);
+    let height = PANEL_HEIGHT.min((viewport[1] - toolbar - 2. * CLEARANCE).max(0.));
     let nav_width = NAV_WIDTH.min(width * 0.3);
     let (page_width, page_height) = (width - nav_width - 1., height - HEADER);
     let thumb = s.settings_fx.thumb.clone();
@@ -781,12 +787,22 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
 }
 
 pub fn settings(s: &Workspace, viewport: [f32; 2]) -> El {
-    modal_layer(s, surface(s, viewport), false, TOOLBAR)
+    modal_layer(
+        s,
+        surface(s, viewport),
+        false,
+        super::toolbar_reveal::row_height(s),
+    )
 }
 
 /// Settings under a list opened from one of its controls: drawn where it was, taking no input.
 pub fn settings_under(s: &Workspace, viewport: [f32; 2]) -> El {
-    modal_layer(s, surface(s, viewport), true, TOOLBAR)
+    modal_layer(
+        s,
+        surface(s, viewport),
+        true,
+        super::toolbar_reveal::row_height(s),
+    )
 }
 
 #[cfg(test)]

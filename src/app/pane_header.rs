@@ -263,7 +263,7 @@ pub fn floating(header: El, carded: bool) -> El {
         .continuous_corners()
         .fill(rgb(popover()))
         .box_shadow(shadow(0., 6., 16., black(0.35)))
-        .transition(Transition::opacity().springs(SpringPair::new(SNAPPY, SNAPPY)))
+        .transition(Transition::opacity().springs(SpringPair::new(snappy(), snappy())))
         .child(header)
         .child(
             el().pin(Some(0.), None, Some(0.), Some(0.))

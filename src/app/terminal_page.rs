@@ -396,28 +396,6 @@ fn selection(s: &Workspace, inks: &Inks) -> El {
     )
 }
 
-fn layout(s: &Workspace) -> El {
-    section(
-        "Layout",
-        [card([setting(
-            "Pane padding",
-            "Space around each terminal's content, from 0 to 32 pt.",
-            stepper(
-                "pane-padding",
-                format!("{} pt", s.settings.pane_padding),
-                |s, _| {
-                    s.settings.pane_padding = (s.settings.pane_padding - 1.).max(0.);
-                    s.save();
-                },
-                |s, _| {
-                    s.settings.pane_padding = (s.settings.pane_padding + 1.).min(32.);
-                    s.save();
-                },
-            ),
-        )])],
-    )
-}
-
 fn shells(s: &Workspace) -> El {
     let rows = s.settings.hosts.iter().enumerate().map(|(i, host)| {
         disclosure(
@@ -447,7 +425,6 @@ pub fn terminal(s: &Workspace) -> El {
         cursor(s, &inks),
         keyboard(s),
         selection(s, &inks),
-        layout(s),
         shells(s),
     ])
 }

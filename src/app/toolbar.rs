@@ -1,6 +1,7 @@
 //! The 52pt bar on the window ground: sidebar toggle, identity chip, tab track, drag space,
 //! Commands, New tab and Settings, a divider, and Close. Tooltips name each control's shortcut
-//! from the effective keymap (`keycaps.rs`), never from a literal.
+//! from the effective keymap (`keycaps.rs`), never from a literal. Whether the bar has its
+//! row, floats over the window's top or isn't drawn is `toolbar_reveal`'s to say.
 use super::{
     activity::{program_icon, progress_bar, tab_activity, tab_name, tab_progress, tab_word},
     panel::Intent,
@@ -169,7 +170,7 @@ fn tab_track(s: &Workspace) -> El {
                         .box_shadow(inset(1., white(0.09)))
                         .matched(format!("tab-pill:{session}"))
                         .transition(no_presence())
-                        .motion(SNAPPY),
+                        .motion(snappy()),
                 );
             } else {
                 tab_el = tab_el.radius(8.).hover(white(0.05));
@@ -318,6 +319,28 @@ fn bar_button(
         )
 }
 
+/// The keys pressed so far of a shortcut that is waiting for its next key, while there is
+/// one to show.
+pub fn sequence_chip(s: &Workspace) -> Option<El> {
+    let label = s.sequence_hint()?;
+    Some(chip(
+        el().key("pending-sequence")
+            .h(28.)
+            .max_w(170.)
+            .px(8.)
+            .center_y()
+            .help(format!(
+                "{label} — waiting for the next key; Escape cancels"
+            ))
+            .child(
+                text(format!("{label} …"))
+                    .font(medium(11.5))
+                    .color(rgb(ink()))
+                    .truncate(),
+            ),
+    ))
+}
+
 pub fn toolbar(s: &Workspace) -> El {
     row()
         .key("toolbar")
@@ -337,25 +360,7 @@ pub fn toolbar(s: &Workspace) -> El {
         ))
         .child(identity(s))
         .child(if s.sidebar_tabs() { el() } else { tab_track(s) })
-        .child(match s.sequence_hint() {
-            Some(label) => chip(
-                el().key("pending-sequence")
-                    .h(28.)
-                    .max_w(170.)
-                    .px(8.)
-                    .center_y()
-                    .help(format!(
-                        "{label} — waiting for the next key; Escape cancels"
-                    ))
-                    .child(
-                        text(format!("{label} …"))
-                            .font(medium(11.5))
-                            .color(rgb(ink()))
-                            .truncate(),
-                    ),
-            ),
-            None => el(),
-        })
+        .child(sequence_chip(s).unwrap_or_else(el))
         // Always at least 48pt of window to drag, outside the tabs.
         .child(el().key("title-drag").grow(1.).min_w(48.).h_full())
         .child(

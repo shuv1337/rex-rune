@@ -252,6 +252,8 @@ pub enum SettingsSection {
     About,
     /// Advanced font settings: a page of Terminal's, not in the section list.
     AdvancedFont,
+    /// Customize panes: a page of Interface's, not in the section list.
+    Panes,
 }
 impl SettingsSection {
     pub const ALL: [SettingsSection; 8] = [
@@ -275,6 +277,7 @@ impl SettingsSection {
             SettingsSection::Updates => "Updates",
             SettingsSection::About => "About",
             SettingsSection::AdvancedFont => "Advanced font settings",
+            SettingsSection::Panes => "Panes",
         }
     }
     pub fn key(self) -> &'static str {
@@ -288,6 +291,7 @@ impl SettingsSection {
             SettingsSection::Updates => "updates",
             SettingsSection::About => "about",
             SettingsSection::AdvancedFont => "advanced-font",
+            SettingsSection::Panes => "panes",
         }
     }
     /// The section a page opened from one of its rows belongs to: the section list keeps
@@ -295,6 +299,7 @@ impl SettingsSection {
     pub fn parent(self) -> Option<SettingsSection> {
         match self {
             SettingsSection::AdvancedFont => Some(SettingsSection::Terminal),
+            SettingsSection::Panes => Some(SettingsSection::Interface),
             _ => None,
         }
     }

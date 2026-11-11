@@ -96,7 +96,6 @@ fn the_page_is_headed_cards_in_order_with_a_preview_in_three_of_them() {
             "Cursor",
             "Keyboard",
             "Selection",
-            "Layout",
             "Default shell"
         ]
     );

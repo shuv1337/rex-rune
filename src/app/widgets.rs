@@ -164,7 +164,7 @@ pub fn highlight(id: &str, radius: f32, destructive: bool) -> El {
         .border(1., outline)
         .matched(id.to_owned())
         .transition(no_presence())
-        .motion(SNAPPY)
+        .motion(snappy())
 }
 
 /// A list row. The keyboard highlight follows the pointer, so exactly one row is lit.

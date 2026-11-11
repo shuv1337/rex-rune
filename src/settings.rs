@@ -1,3 +1,4 @@
+pub mod interface;
 pub mod shortcuts;
 pub mod terminal;
 pub mod typography;
@@ -212,6 +213,8 @@ pub struct Settings {
     pub terminal_theme_declared: bool,
     /// The cursor, the selection and what selecting copies, from Settings → Terminal.
     pub terminal: terminal::TerminalConfig,
+    /// The toolbar, motion, pane cues and launch switches of Settings → Interface.
+    pub interface: interface::InterfaceConfig,
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
@@ -254,6 +257,7 @@ impl Default for Settings {
             terminal_theme_chosen: false,
             terminal_theme_declared: false,
             terminal: terminal::TerminalConfig::default(),
+            interface: interface::InterfaceConfig::default(),
             muted_tabs: Vec::new(),
             shortcut_file: shortcuts::Shortcuts::default(),
         }
@@ -306,6 +310,7 @@ impl Settings {
             normalize_font_preferences(&settings.font_family, &settings.font_fallbacks)?;
         settings.font_size = settings.font_size.clamp(8., 48.);
         settings.pane_padding = settings.pane_padding.clamp(0., 32.);
+        settings.interface.normalize();
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
         // Import before the first save loses nivox's unknown keybindings field.

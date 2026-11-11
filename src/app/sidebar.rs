@@ -176,7 +176,7 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                 .box_shadow(shadow(0., 1., 3., black(0.3)))
                 .matched("sb-current")
                 .transition(no_presence())
-                .motion(SNAPPY),
+                .motion(snappy()),
         );
     } else {
         e = e.hover(white(0.05));
@@ -565,7 +565,7 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .transition(
             Transition::move_edge(Edge::Leading)
                 .combined(Transition::opacity())
-                .springs(SpringPair::new(SNAPPY, SNAPPY)),
+                .springs(SpringPair::new(snappy(), snappy())),
         )
         .child(panel)
 }
