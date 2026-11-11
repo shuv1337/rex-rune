@@ -266,7 +266,7 @@ fn terminal(s: &Workspace) -> El {
             &host.label,
             "",
             host.shell.as_deref().unwrap_or("Server default"),
-            move |s, tx| s.perform(Intent::HostShell(i), tx),
+            move |s, tx| s.open_anchored(&format!("host-shell:{i}"), Intent::HostShell(i), tx),
         )
     });
     page([
@@ -278,7 +278,7 @@ fn terminal(s: &Workspace) -> El {
                     "Font family",
                     "Applies when you reopen the client.",
                     saved,
-                    |s, tx| s.perform(Intent::Fonts, tx),
+                    |s, tx| s.open_anchored("font-change", Intent::Fonts, tx),
                 ),
                 setting(
                     "Font size",

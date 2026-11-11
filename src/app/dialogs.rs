@@ -75,7 +75,15 @@ fn title(t: &str) -> El {
 fn form(s: &Workspace, form: &Form) -> El {
     let panel = s.panel.as_ref().expect("form panel");
     let k = kit();
-    let mut body = col().gap(12.).child(title(&panel.title));
+    // Against the row that opened it the form is a popover, and its heading a label.
+    let heading = if super::anchored_form::anchor(panel).is_some() {
+        text(panel.title.clone())
+            .font(strong(14.))
+            .color(rgb(ink()))
+    } else {
+        title(&panel.title)
+    };
+    let mut body = col().gap(12.).child(heading);
     for (i, edit) in panel.inputs.iter().enumerate() {
         let (label, placeholder) = &panel.fields[i];
         body = body.child(
@@ -237,7 +245,12 @@ fn confirm_with(panel_title: &str, description: &str, keep: &str, danger: &str) 
 pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
     let panel = s.panel.as_ref()?;
     let body = match &panel.kind {
-        PanelKind::Form(f) => form(s, f),
+        PanelKind::Form(f) => match super::anchored_form::row(s) {
+            Some(row) => {
+                return Some(super::anchored_form::popover(s, viewport, row, form(s, f)));
+            }
+            None => form(s, f),
+        },
         PanelKind::Confirm { description, .. } => confirm(&panel.title, description),
         PanelKind::Settings => return Some(super::settings_view::settings(s, viewport)),
         PanelKind::RemoveHost(host) => {

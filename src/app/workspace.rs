@@ -1216,8 +1216,8 @@ impl Workspace {
             }
             Intent::RetryHost(host) => self.send(host, HostCommand::Reconnect),
             Intent::ChooseTheme => {
-                self.themes = self.theme_dirs.list();
-                self.open_panel(PanelKind::Themes, "Terminal theme", &[("", "Filter themes…", "")]);
+                self.read_themes();
+                self.open_panel(PanelKind::Themes, "Terminal theme", &[("", "Search terminal themes…", "")]);
                 if let Some(current) = self.entries().iter().position(|e| e.current) {
                     let panel = self.panel.as_mut().unwrap();
                     panel.selected = current;
@@ -1225,7 +1225,7 @@ impl Workspace {
                 }
             }
             Intent::ChooseChrome => {
-                self.open_panel(PanelKind::Chromes, "Theme", &[]);
+                self.open_panel(PanelKind::Chromes, "Window colours", &[]);
                 if let Some(current) = self.entries().iter().position(|e| e.current) {
                     self.panel.as_mut().unwrap().selected = current;
                 }
@@ -1678,6 +1678,10 @@ impl Workspace {
     }
 
     pub fn picker(&mut self, sessions: bool) {
+        // A Commands search names the themes installed now.
+        if !sessions {
+            self.read_themes();
+        }
         self.open_panel(
             PanelKind::Picker(sessions),
             if sessions {
@@ -1690,7 +1694,7 @@ impl Workspace {
                 if sessions {
                     "Filter sessions or hosts…"
                 } else {
-                    "Search commands, sessions, and tabs…"
+                    "Search commands, sessions, tabs and themes…"
                 },
                 "",
             )],

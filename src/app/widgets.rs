@@ -123,7 +123,13 @@ pub struct Row<'a> {
     /// The row's shortcut, drawn as keycaps in place of the detail text.
     pub keys: &'a [Vec<String>],
     pub height: f32,
+    /// A check before the label when the row is the current one; `Some` keeps its column.
     pub check: Option<bool>,
+    /// The row is the current one of a list that checks it at the end, in the column the
+    /// follow-up chevron has in other lists.
+    pub check_end: bool,
+    /// The parts of the label a search matched, as byte ranges of it.
+    pub marks: &'a [std::ops::Range<usize>],
     pub followup: bool,
     pub enabled: bool,
     /// A destructive row: its label is in `DANGER`, and its selection tints in `DANGER`.
@@ -165,6 +171,25 @@ pub fn highlight(id: &str, radius: f32, destructive: bool) -> El {
         .matched(id.to_owned())
         .transition(no_presence())
         .motion(SNAPPY)
+}
+
+/// The letters of a name a search matched: in `ACCENT` and heavier, so the match is told
+/// apart by weight as well as colour. On the selected row, whose tint is `ACCENT` too, the
+/// colour is halfway to `INK`, which keeps its contrast there.
+pub fn matched(marks: &[std::ops::Range<usize>], selected: bool) -> Vec<rune::Span> {
+    let color = rgb(if selected {
+        mix(accent(), ink(), 0.5)
+    } else {
+        accent()
+    });
+    marks
+        .iter()
+        .map(|mark| {
+            rune::Span::new(mark.start, mark.end)
+                .weight(650.)
+                .color(color)
+        })
+        .collect()
 }
 
 /// A list row. The keyboard highlight follows the pointer, so exactly one row is lit.
@@ -227,10 +252,13 @@ pub fn list_row(
             el()
         }));
     }
-    let label = text(r.label.to_owned())
+    let mut label = text(r.label.to_owned())
         .font(if r.selected { medium(13.) } else { ui(13.) })
         .color(fg)
         .truncate();
+    if r.enabled && !r.marks.is_empty() {
+        label = label.spans(matched(r.marks, r.selected));
+    }
     let (label, columns) = match r.columns {
         // A box as wide as the label, so the row never shrinks it; the label is cut only
         // once it reaches the box's limit.
@@ -258,7 +286,9 @@ pub fn list_row(
                         .opacity(if r.enabled { 1. } else { 0.5 })
                 }
             })
-            .child(el().w(CHEVRON_COLUMN).child(if r.followup {
+            .child(el().w(CHEVRON_COLUMN).child(if r.check_end {
+                glyph(&CHECK, 14., rgb(accent())).key("check")
+            } else if r.followup {
                 glyph(&RIGHT, 13., detail)
             } else {
                 el()

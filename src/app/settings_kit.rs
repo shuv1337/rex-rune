@@ -516,11 +516,16 @@ pub fn disclosure(
 }
 
 impl Workspace {
-    /// Perform `open` (an intent that opens a list panel) for the control keyed `control`,
-    /// so the list is placed against it.
+    /// Perform `open` (an intent that opens a list panel, or one of the forms
+    /// `anchored_form` draws as a popover) for the control keyed `control`, so the list or
+    /// form is placed against it.
     pub fn open_anchored(&mut self, control: &str, open: Intent, tx: &mut Tx) {
         self.perform(open, tx);
-        if let Some(panel) = self.panel.as_mut().filter(|p| p.is_list()) {
+        if let Some(panel) = self
+            .panel
+            .as_mut()
+            .filter(|p| p.is_list() || super::anchored_form::anchors(&p.kind))
+        {
             panel.anchor_to = Some(control.to_owned());
         }
     }

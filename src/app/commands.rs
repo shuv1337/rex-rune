@@ -1,8 +1,9 @@
 //! Commands: every row the command list offers, in one table.
 //!
 //! The rows are grouped by what they act on (the session, tab, pane and host on screen, then
-//! the view and the app) and listed under those headings until something is typed; a search
-//! shows the matches as one list, best match first. A row's keyboard hint is the effective
+//! the view, its appearance and the app) and listed under those headings until something is
+//! typed; a search shows the matches as one list, best match first, and then the sessions,
+//! tabs, window colours and terminal themes it names (`panel.rs`, `theme_list.rs`). A row's keyboard hint is the effective
 //! binding of its action, so it follows `shortcuts.json` and the host's keymap.
 //!
 //! To add a command, add its row to its group's function below and its id to the pinned list
@@ -67,6 +68,8 @@ pub enum Group {
     /// Actions the host's Rex server offers, not this client.
     Server,
     View,
+    /// How the window and its terminals look: themes, density and sizes.
+    Appearance,
     App,
 }
 
@@ -79,6 +82,7 @@ impl Group {
             Group::Host => "Host",
             Group::Server => "Server actions",
             Group::View => "View",
+            Group::Appearance => "Appearance",
             Group::App => "App",
         }
     }
@@ -589,9 +593,7 @@ impl Workspace {
     fn view_commands(&self) -> Vec<Command> {
         use Group::View as G;
         let sidebar_tabs = self.settings.vertical_tabs;
-        let compact = self.settings.pane_density == PaneDensity::Compact;
-        let zoom = (self.settings.ui_scale * 100.).round() as i32;
-        let mut rows = vec![
+        vec![
             Command::action(
                 "view.sidebar",
                 G,
@@ -614,6 +616,37 @@ impl Workspace {
                 Intent::Command(Run::TabsInSidebar(!sidebar_tabs)),
             )
             .keywords("position vertical top"),
+            Command::action(
+                "view.pane_headers",
+                G,
+                if self.header_reveal.pinned {
+                    "Hide pane headers"
+                } else {
+                    "Reveal pane headers"
+                },
+                pane_header::TOGGLE,
+            )
+            .enabled(self.header_reveal.pinned || pane_header::can_reveal(self))
+            .keywords("show title buttons"),
+        ]
+    }
+
+    /// The Appearance group: the terminal theme and the window colours, then the pane
+    /// style, the interface zoom and the terminal font size, each after a hairline.
+    fn appearance_commands(&self) -> Vec<Command> {
+        use Group::Appearance as G;
+        let compact = self.settings.pane_density == PaneDensity::Compact;
+        let zoom = (self.settings.ui_scale * 100.).round() as i32;
+        let mut rows = vec![
+            Command::action("view.terminal_theme", G, "Change theme…", CHOOSE_THEME)
+                .keywords("terminal colors colours switch select"),
+            Command::new(
+                "view.interface_theme",
+                G,
+                "Change window colours…",
+                Intent::ChooseChrome,
+            )
+            .keywords("colors interface theme chrome palette"),
             Command::new(
                 "view.pane_density",
                 G,
@@ -628,39 +661,15 @@ impl Workspace {
                     PaneDensity::Compact
                 })),
             )
+            .section(1)
             .keywords("density style headers"),
-            Command::action(
-                "view.pane_headers",
-                G,
-                if self.header_reveal.pinned {
-                    "Hide pane headers"
-                } else {
-                    "Reveal pane headers"
-                },
-                pane_header::TOGGLE,
-            )
-            .enabled(self.header_reveal.pinned || pane_header::can_reveal(self))
-            .keywords("show title buttons"),
-            Command::action(
-                "view.terminal_theme",
-                G,
-                "Change terminal theme…",
-                CHOOSE_THEME,
-            )
-            .keywords("colors colours appearance"),
-            Command::new(
-                "view.interface_theme",
-                G,
-                "Change interface theme…",
-                Intent::ChooseChrome,
-            )
-            .keywords("window colors colours chrome appearance"),
             Command::action(
                 "view.zoom.in",
                 G,
                 "Increase interface zoom",
                 "client.zoom.in",
             )
+            .section(2)
             .enabled(zoom < 150)
             .keywords("enlarge bigger scale size"),
             Command::action(
@@ -669,6 +678,7 @@ impl Workspace {
                 "Decrease interface zoom",
                 "client.zoom.out",
             )
+            .section(2)
             .enabled(zoom > 70)
             .keywords("shrink smaller scale size"),
             Command::action(
@@ -677,6 +687,7 @@ impl Workspace {
                 "Reset interface zoom",
                 "client.zoom.reset",
             )
+            .section(2)
             .enabled(zoom != 100)
             .keywords("scale size"),
         ];
@@ -688,7 +699,7 @@ impl Workspace {
             ]
             .into_iter()
             .zip(self.font_commands())
-            .map(|(id, entry)| Command::row(id, G, entry).keywords("text")),
+            .map(|(id, entry)| Command::row(id, G, entry).section(3).keywords("text")),
         );
         rows
     }
@@ -800,6 +811,7 @@ impl Workspace {
         commands.extend(self.host_commands());
         let after_host = commands.len();
         commands.extend(self.view_commands());
+        commands.extend(self.appearance_commands());
         commands.extend(self.app_commands());
         for command in &mut commands {
             self.shortcut_details(std::slice::from_mut(&mut command.entry));
@@ -822,7 +834,7 @@ impl Workspace {
                 .and_then(|p| p.target.as_ref().map(|t| t.name.clone()))
                 .or_else(|| self.focused_block().map(|b| self.pane_name(&b))),
             Group::Host | Group::Server => Some(self.settings.hosts[self.active].label.clone()),
-            Group::View | Group::App => None,
+            Group::View | Group::Appearance | Group::App => None,
         };
         match subject.filter(|s| !s.is_empty()) {
             Some(subject) => (format!("{} · {subject}", group.title()), Some(subject)),

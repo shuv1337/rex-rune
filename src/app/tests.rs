@@ -28,6 +28,8 @@ mod settings_nav_tests;
 mod settings_tests;
 #[path = "tab_tests.rs"]
 mod tab_tests;
+#[path = "theme_switcher_tests.rs"]
+mod theme_switcher_tests;
 #[path = "wiring_tests.rs"]
 mod wiring_tests;
 #[path = "workspace_fixes_tests.rs"]
@@ -75,7 +77,13 @@ fn workspace_hosts(count: usize) -> Workspace {
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    Workspace::new(options, settings, path, handle, None)
+    let mut ws = Workspace::new(options, settings, path, handle, None);
+    // Not this machine's Ghostty themes: a test names the themes it lists.
+    ws.theme_dirs = ThemeDirs {
+        user: None,
+        system: vec![],
+    };
+    ws
 }
 
 /// A second launch on the settings `ws` saved.

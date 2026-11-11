@@ -69,10 +69,10 @@ const IDS: &[&str] = &[
     "host.remove",
     "view.sidebar",
     "view.tab_position",
-    "view.pane_density",
     "view.pane_headers",
     "view.terminal_theme",
     "view.interface_theme",
+    "view.pane_density",
     "view.zoom.in",
     "view.zoom.out",
     "view.zoom.reset",
@@ -246,7 +246,7 @@ fn every_registered_action_has_a_row_or_a_stated_reason() {
 }
 
 #[test]
-fn rows_sit_under_six_headings_that_name_what_is_on_screen() {
+fn rows_sit_under_seven_headings_that_name_what_is_on_screen() {
     let (mut ws, ..) = fixture();
     ws.picker(false);
     let mut headings: Vec<String> = Vec::new();
@@ -263,6 +263,7 @@ fn rows_sit_under_six_headings_that_name_what_is_on_screen() {
             "Pane · editor",
             "Host · test-0",
             "View",
+            "Appearance",
             "App"
         ]
     );
@@ -275,7 +276,17 @@ fn rows_sit_under_six_headings_that_name_what_is_on_screen() {
     ws.picker(false);
     let mut headings: Vec<String> = ws.entries().into_iter().map(|e| e.group).collect();
     headings.dedup();
-    assert_eq!(headings, ["Session", "Tab", "Host · test-0", "View", "App"]);
+    assert_eq!(
+        headings,
+        [
+            "Session",
+            "Tab",
+            "Host · test-0",
+            "View",
+            "Appearance",
+            "App"
+        ]
+    );
     let enabled = |id: &str| command(&ws, id).entry.enabled;
     for id in [
         "session.new",
@@ -341,7 +352,9 @@ fn a_search_is_one_list_with_the_best_match_first() {
     search(&mut ws, "quit");
     assert_eq!(labels(&ws), ["Close app"]);
     search(&mut ws, "view");
-    assert_eq!(labels(&ws).len(), 12, "every View command");
+    assert_eq!(labels(&ws).len(), 3, "every View command");
+    search(&mut ws, "appearance");
+    assert_eq!(labels(&ws).len(), 9, "every Appearance command");
     // A shortcut is found as typed, not by its letters.
     search(&mut ws, "ctrl shift d");
     assert_eq!(labels(&ws), ["Split right"]);
@@ -867,7 +880,13 @@ fn the_list_shows_about_twenty_rows_and_scrolls_to_the_rest() {
             .filter_map(|e| e.label)
             .collect()
     };
-    for heading in ["Session · s-label", "Tab · dev", "View", "App"] {
+    for heading in [
+        "Session · s-label",
+        "Tab · dev",
+        "View",
+        "Appearance",
+        "App",
+    ] {
         assert!(headings(&rt).iter().any(|w| w == heading), "{heading}");
     }
     for (caps, name) in [("Session ·", "s-label"), ("Tab ·", "dev")] {
@@ -879,7 +898,7 @@ fn the_list_shows_about_twenty_rows_and_scrolls_to_the_rest() {
     assert!(
         words
             .iter()
-            .any(|w| w == "More below: Pane · Host · View · App"),
+            .any(|w| w == "More below: Pane · Host · View · Appearance · App"),
         "the hint names the groups further down: {words:?}"
     );
     let new_tab = rt
