@@ -137,6 +137,13 @@ fn interface(s: &Workspace) -> El {
                         |s, i, _| s.set_vertical_tabs(i == 1),
                     ),
                 ),
+                disclosure(
+                    "customize-tabs",
+                    "Customize tabs",
+                    "Their width and their programs' icons.",
+                    "",
+                    |s, _| s.navigate(Page::Sub(SubPage::Tabs)),
+                ),
             ])],
         ),
         section(
@@ -678,6 +685,7 @@ pub(super) fn body(s: &Workspace, page: Page) -> El {
             SettingsSection::About => super::about::section(s),
         },
         Page::Sub(SubPage::Panes) => super::settings_pages::panes(s),
+        Page::Sub(SubPage::Tabs) => super::tab_settings::page(s),
         Page::Sub(SubPage::Status(status)) => super::settings_pages::status(s, status),
     }
 }

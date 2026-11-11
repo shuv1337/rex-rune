@@ -34,6 +34,8 @@ mod splits;
 mod sprites;
 mod ssh_setup;
 mod stats;
+mod tab_icons;
+mod tab_settings;
 mod tabs;
 mod term;
 mod theme;

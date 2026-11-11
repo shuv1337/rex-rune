@@ -2,8 +2,9 @@
 //! Commands, New tab and Settings, a divider, and Close. Tooltips name each control's shortcut
 //! from the effective keymap (`keycaps.rs`), never from a literal.
 use super::{
-    activity::{program_icon, progress_bar, tab_activity, tab_name, tab_progress, tab_word},
+    activity::{progress_bar, tab_activity, tab_name, tab_programs, tab_progress, tab_word},
     panel::Intent,
+    tab_icons::{icons_of, tab_icons},
     tabs::{muted_mark, target_ring},
     theme::*,
     widgets::{chrome_button, glyph},
@@ -96,6 +97,58 @@ fn identity(s: &Workspace) -> El {
     ))
 }
 
+/// The narrowest a tab is.
+const PILL_MIN: f32 = 96.;
+
+/// The narrowest a tab that shares the strip gets before the strip scrolls instead: any
+/// tab's floor, or the room for its `icons`, 40 pt of its name and what follows the name
+/// (the activity `word`, which is never cut, and the muted mark). The word's width is an
+/// estimate on the generous side.
+pub fn fill_floor(icons: usize, word: Option<&str>, quiet: bool) -> f32 {
+    let mut floor = 2. * 14. + 40.;
+    if icons > 0 {
+        floor += super::tab_icons::row_width(icons) + 8.;
+    }
+    if let Some(word) = word {
+        floor += 8. + word.chars().count() as f32 * 7.;
+    }
+    if quiet {
+        floor += 8. + 14.;
+    }
+    floor.max(PILL_MIN)
+}
+
+/// A tab pill's frame: as wide as its content, between 96 and 240 pt. With `fill` it takes
+/// an equal share of the strip instead, never less than that floor, with its content
+/// centred.
+pub fn pill_frame(fill: Option<f32>) -> El {
+    let frame = row().h_full().px(14.).gap(8.).center_y();
+    match fill {
+        Some(floor) => frame.grow(1.).min_w(floor).justify_center(),
+        None => frame.min_w(PILL_MIN).max_w(240.),
+    }
+}
+
+/// The fill and rim under the tab on screen.
+pub fn pill_highlight() -> El {
+    el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
+        .radius(8.)
+        .continuous_corners()
+        .fill(white(0.11))
+        .box_shadow(shadow(0., 1., 3., black(0.35)))
+        .box_shadow(inset(1., white(0.09)))
+}
+
+/// A tab's name on its pill. It is cut short before anything else on the pill gives way.
+pub fn pill_label(label: String, active: bool) -> El {
+    text(label.clone())
+        .font(if active { medium(12.5) } else { ui(12.5) })
+        .color(rgb(if active { ink() } else { muted() }))
+        .truncate()
+        .help_when_truncated(label)
+        .shrink()
+}
+
 /// The session's tabs on their track. With no tab to show (no session on screen, or one whose
 /// view hasn't arrived) there is no track: an empty one would be a sliver of chip.
 fn tab_track(s: &Workspace) -> El {
@@ -107,11 +160,15 @@ fn tab_track(s: &Workspace) -> El {
         return el();
     }
     let session = model.selected.clone().unwrap_or_default();
+    let fill = s.settings.tabs.fill;
+    let look = s.tab_icon_look();
     let mut names = row()
         .key("tab-names")
         .h(28.)
         .gap(2.)
         .on_layout(|s: &mut Workspace, r| s.tab_strip.content = r[2]);
+    // With `fill`: the least the tabs need together, where the strip starts to scroll.
+    let mut floors = -2.;
     if let Some(view) = model.view() {
         for tab in &view.windows {
             let Some(id) = tab.window_id.clone() else {
@@ -126,7 +183,16 @@ fn tab_track(s: &Workspace) -> El {
                 tab_word(&activity, s.unseen(&id), s.bell_on(s.active, &id)).filter(|_| shown);
             let (press_id, rename_id, menu_id) = (id.clone(), id.clone(), id.clone());
             let menu_session = session.clone();
-            let mut tab_el = row()
+            let icons = icons_of(&tab_programs(model, tab));
+            let floor = fill.then(|| {
+                fill_floor(
+                    icons.len().min(look.count),
+                    word.as_ref().map(|(word, _)| word.as_ref()),
+                    quiet,
+                )
+            });
+            floors += floor.unwrap_or_default() + 2.;
+            let mut tab_el = pill_frame(floor)
                 .key(format!("tab:{id}"))
                 .role("tab")
                 .focus_selected(active)
@@ -135,12 +201,6 @@ fn tab_track(s: &Workspace) -> El {
                     None if quiet => format!("{label} · Muted"),
                     None => label.clone(),
                 })
-                .h_full()
-                .min_w(96.)
-                .max_w(240.)
-                .px(14.)
-                .gap(8.)
-                .center_y()
                 .cursor(Cursor::Pointer)
                 .preserve_focus_on_press(true)
                 .pointer_buttons([PointerButton::Middle])
@@ -161,12 +221,7 @@ fn tab_track(s: &Workspace) -> El {
                 });
             if active {
                 tab_el = tab_el.child(
-                    el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
-                        .radius(8.)
-                        .continuous_corners()
-                        .fill(white(0.11))
-                        .box_shadow(shadow(0., 1., 3., black(0.35)))
-                        .box_shadow(inset(1., white(0.09)))
+                    pill_highlight()
                         .matched(format!("tab-pill:{session}"))
                         .transition(no_presence())
                         .motion(SNAPPY),
@@ -174,24 +229,9 @@ fn tab_track(s: &Workspace) -> El {
             } else {
                 tab_el = tab_el.radius(8.).hover(white(0.05));
             }
-            let program = activity.program.as_deref();
-            let mut icon = el().key(format!("tab-icon:{id}")).child(glyph(
-                program_icon(program),
-                15.,
-                rgb(if active { ink() } else { muted() }),
-            ));
-            if let Some(program) = program {
-                icon = icon.help(program.to_owned());
-            }
-            tab_el = tab_el.child(icon);
-            tab_el = tab_el.child(
-                text(label.clone())
-                    .font(if active { medium(12.5) } else { ui(12.5) })
-                    .color(rgb(if active { ink() } else { muted() }))
-                    .truncate()
-                    .help_when_truncated(label)
-                    .shrink(),
-            );
+            tab_el = tab_el
+                .children(tab_icons(&format!("tab-icon:{id}"), &icons, active, &look))
+                .child(pill_label(label, active));
             // The label truncates first; the word always stays whole.
             if let Some((word, tone)) = word {
                 let done = word == "Done";
@@ -216,6 +256,10 @@ fn tab_track(s: &Workspace) -> El {
             names = names.child(tab_el);
         }
     }
+    if fill {
+        // As wide as the strip, and as its tabs at their narrowest once those need more.
+        names = names.grow(1.).min_w(floors.max(0.));
+    }
     let overflow = s.tab_strip.overflows();
     let (fade, pos) = (s.tab_fade.clone(), s.tab_pos.clone());
     let strip = row()
@@ -236,6 +280,7 @@ fn tab_track(s: &Workspace) -> El {
             });
         })
         .child(names);
+    let strip = if fill { strip.grow(1.) } else { strip };
     let mut track = row()
         .key("tab-track")
         .h(34.)
@@ -244,6 +289,9 @@ fn tab_track(s: &Workspace) -> El {
         .center_y()
         .min_w(0.)
         .shrink();
+    if fill {
+        track = track.grow(1.);
+    }
     if overflow {
         track = track.child(
             chrome_button(
@@ -356,8 +404,13 @@ pub fn toolbar(s: &Workspace) -> El {
             ),
             None => el(),
         })
-        // Always at least 48pt of window to drag, outside the tabs.
-        .child(el().key("title-drag").grow(1.).min_w(48.).h_full())
+        // Always at least 48pt of window to drag, outside the tabs. Tabs that fill the bar
+        // take the rest.
+        .child(if s.tabs_fill_toolbar() {
+            el().key("title-drag").w(48.).h_full()
+        } else {
+            el().key("title-drag").grow(1.).min_w(48.).h_full()
+        })
         .child(
             row()
                 .center_y()
@@ -408,6 +461,16 @@ pub fn toolbar(s: &Workspace) -> El {
 }
 
 impl Workspace {
+    /// The toolbar's tabs are there and share its width.
+    fn tabs_fill_toolbar(&self) -> bool {
+        self.settings.tabs.fill
+            && !self.sidebar_tabs()
+            && self
+                .model()
+                .view()
+                .is_some_and(|view| view.windows.iter().any(|tab| tab.window_id.is_some()))
+    }
+
     pub fn scroll_tabs(&mut self, direction: i32, tx: &mut Tx) {
         let step = (self.tab_strip.viewport * 0.6).max(80.);
         let [offset, max] = self.tab_pos.get();

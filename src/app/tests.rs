@@ -26,6 +26,8 @@ mod remote_tests;
 mod settings_nav_tests;
 #[path = "settings_tests.rs"]
 mod settings_tests;
+#[path = "tab_appearance_tests.rs"]
+mod tab_appearance_tests;
 #[path = "tab_tests.rs"]
 mod tab_tests;
 #[path = "theme_library_tests.rs"]

@@ -95,6 +95,62 @@ impl Default for NotificationsConfig {
     }
 }
 
+/// When a tab's icons are drawn in colour rather than in the chrome's ink. A value this
+/// version doesn't know reads as Never.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabIconColor {
+    Always,
+    /// The focused pane's icon, in the tab on screen.
+    ActivePane,
+    /// Every icon of the tab on screen.
+    ActiveTab,
+    #[default]
+    #[serde(other)]
+    Never,
+}
+
+/// The colours of a shell's icon while it is drawn in colour. A value this version doesn't
+/// know reads as Default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellIconTheme {
+    /// The terminal theme's green on its background.
+    Theme,
+    /// The window colours' accent.
+    Accent,
+    /// A green prompt on a dark tile.
+    #[default]
+    #[serde(other)]
+    Default,
+}
+
+/// How tabs are drawn, in the toolbar and in the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabsConfig {
+    /// Toolbar tabs share the width there is instead of taking their names' width.
+    pub fill: bool,
+    /// How many of its panes' programs a tab shows as icons, the focused pane's first:
+    /// 0 to [`TabsConfig::MAX_ICONS`].
+    pub icons: u8,
+    pub icon_color: TabIconColor,
+    pub shell_icon: ShellIconTheme,
+}
+impl TabsConfig {
+    pub const MAX_ICONS: u8 = 5;
+}
+impl Default for TabsConfig {
+    fn default() -> Self {
+        Self {
+            fill: false,
+            icons: 1,
+            icon_color: TabIconColor::default(),
+            shell_icon: ShellIconTheme::default(),
+        }
+    }
+}
+
 /// Whether the client checks for signed release metadata in the background.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -211,6 +267,7 @@ pub struct Settings {
     /// The sidebar was open when the app last saved, so it opens again at launch.
     pub sidebar_open: bool,
     pub vertical_tabs: bool,
+    pub tabs: TabsConfig,
     pub pane_density: PaneDensity,
     pub pane_header: PaneHeader,
     pub pane_padding: f32,
@@ -264,6 +321,7 @@ impl Default for Settings {
             sidebar_width: 236.,
             sidebar_open: false,
             vertical_tabs: false,
+            tabs: TabsConfig::default(),
             pane_density: PaneDensity::default(),
             pane_header: PaneHeader::default(),
             pane_padding: 8.,
@@ -350,6 +408,7 @@ impl Settings {
             normalize_font_preferences(&settings.font_family, &settings.font_fallbacks)?;
         settings.font_size = settings.font_size.clamp(8., 48.);
         settings.pane_padding = settings.pane_padding.clamp(0., 32.);
+        settings.tabs.icons = settings.tabs.icons.min(TabsConfig::MAX_ICONS);
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
         // A theme id emptied by hand is the default again, never a theme that can't be read.
@@ -726,6 +785,79 @@ mod tests {
         let newer: Settings =
             serde_json::from_value(serde_json::json!({ "pane_header": "on_focus" })).unwrap();
         assert_eq!(newer.pane_header, PaneHeader::Auto);
+    }
+
+    #[test]
+    fn tab_appearance_defaults_to_what_tabs_were_round_trips_and_reads_unknown_values() {
+        // A file from before these settings: one icon, no colour, tabs as wide as their names.
+        let old: Settings = serde_json::from_str(r#"{"vertical_tabs":true}"#).unwrap();
+        assert_eq!(
+            old.tabs,
+            TabsConfig {
+                fill: false,
+                icons: 1,
+                icon_color: TabIconColor::Never,
+                shell_icon: ShellIconTheme::Default,
+            }
+        );
+        // A file with some of them keeps the rest at their defaults.
+        let part: Settings =
+            serde_json::from_value(serde_json::json!({"tabs": {"fill": true}})).unwrap();
+        assert_eq!(
+            part.tabs,
+            TabsConfig {
+                fill: true,
+                ..TabsConfig::default()
+            }
+        );
+        for (color, saved) in [
+            (TabIconColor::Always, "always"),
+            (TabIconColor::ActivePane, "active_pane"),
+            (TabIconColor::ActiveTab, "active_tab"),
+            (TabIconColor::Never, "never"),
+        ] {
+            for (shell, shell_saved) in [
+                (ShellIconTheme::Default, "default"),
+                (ShellIconTheme::Theme, "theme"),
+                (ShellIconTheme::Accent, "accent"),
+            ] {
+                let settings = Settings {
+                    tabs: TabsConfig {
+                        fill: true,
+                        icons: 4,
+                        icon_color: color,
+                        shell_icon: shell,
+                    },
+                    ..Settings::default()
+                };
+                let json = serde_json::to_value(&settings).unwrap();
+                assert_eq!(
+                    json["tabs"],
+                    serde_json::json!({"fill": true, "icons": 4, "icon_color": saved,
+                        "shell_icon": shell_saved})
+                );
+                let back: Settings = serde_json::from_value(json).unwrap();
+                assert_eq!(back.tabs, settings.tabs);
+            }
+        }
+        // Values a newer version wrote read as the defaults, and a count past the most a tab
+        // shows is the most.
+        let path = std::env::temp_dir().join(format!("rex-linux-tabs-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"hosts":[{"label":"a","endpoint":"unix:///run/rex.sock"}],
+                "tabs":{"icons":9,"icon_color":"on_hover","shell_icon":"rainbow"}}"#,
+        )
+        .unwrap();
+        let newer = Settings::load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            newer.tabs,
+            TabsConfig {
+                icons: TabsConfig::MAX_ICONS,
+                ..TabsConfig::default()
+            }
+        );
     }
 
     #[test]

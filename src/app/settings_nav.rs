@@ -76,13 +76,16 @@ impl Status {
 pub enum SubPage {
     /// Interface → Customize panes.
     Panes,
+    /// Interface → Customize tabs.
+    Tabs,
     /// Notifications → one program state.
     Status(Status),
 }
 
 impl SubPage {
-    pub const ALL: [SubPage; 5] = [
+    pub const ALL: [SubPage; 6] = [
         SubPage::Panes,
+        SubPage::Tabs,
         SubPage::Status(Status::Blocked),
         SubPage::Status(Status::Error),
         SubPage::Status(Status::Done),
@@ -92,7 +95,7 @@ impl SubPage {
     /// The section whose page it was pushed from, which stays selected in the sidebar.
     pub fn section(self) -> SettingsSection {
         match self {
-            SubPage::Panes => SettingsSection::Interface,
+            SubPage::Panes | SubPage::Tabs => SettingsSection::Interface,
             SubPage::Status(_) => SettingsSection::Notifications,
         }
     }
@@ -132,6 +135,7 @@ impl Page {
         match self {
             Page::Section(section) => section.title(),
             Page::Sub(SubPage::Panes) => "Panes",
+            Page::Sub(SubPage::Tabs) => "Tabs",
             Page::Sub(SubPage::Status(status)) => status.title(),
         }
     }
@@ -141,6 +145,7 @@ impl Page {
         match self {
             Page::Section(section) => section.key().into(),
             Page::Sub(SubPage::Panes) => "panes".into(),
+            Page::Sub(SubPage::Tabs) => "tabs".into(),
             Page::Sub(SubPage::Status(status)) => format!("status-{}", status.key()),
         }
     }
@@ -168,6 +173,7 @@ impl Page {
                 SettingsSection::About => "version build license licence credits",
             },
             Page::Sub(SubPage::Panes) => "splits padding space customize",
+            Page::Sub(SubPage::Tabs) => "icons color programs width stretch customize",
             Page::Sub(SubPage::Status(status)) => match status {
                 Status::Blocked => "blocked approval question sign-in waiting",
                 Status::Error => "error failed",
