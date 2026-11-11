@@ -6,13 +6,14 @@ use super::{
     settings_kit::{card, footnote, page, section, setting, stepper, value, value_popup},
     settings_nav::Status,
     settings_view::notify_switch,
+    tab_icons::icons_of,
     theme::*,
     theme_pair,
-    widgets::glyph,
+    toolbar::{PILL, sample_pill},
     workspace::Workspace,
 };
 use rex_linux::settings::NotificationsConfig;
-use rune::{El, row, text};
+use rune::{El, text};
 
 /// The colours of the window and of its terminals, over the library of terminal themes.
 pub fn themes(s: &Workspace) -> El {
@@ -143,34 +144,30 @@ impl Status {
 }
 
 /// A tab as the strip draws it in this state. A picture: it takes no input.
-fn sample_tab(status: Status) -> El {
-    let mut tab = row()
-        .key("status-sample")
-        .role("img")
-        .label(match status.word() {
-            Some((word, _)) => format!("A tab named build that reads {word}"),
-            None => "A tab named build with a progress bar".to_owned(),
-        })
-        .h(28.)
-        .px(11.)
-        .gap(7.)
-        .center_y()
-        .radius(8.)
-        .continuous_corners()
-        .fill(white(0.09))
-        .child(glyph(&TERMINAL, 14., rgb(ink())))
-        .child(text("build").font(medium(12.5)).color(rgb(ink())));
+fn sample_tab(s: &Workspace, status: Status) -> El {
+    let tab = sample_pill(
+        "status-sample",
+        &icons_of(&[]),
+        "build",
+        true,
+        None,
+        &s.tab_icon_look(),
+    )
+    .role("img")
+    .label(match status.word() {
+        Some((word, _)) => format!("A tab named build that reads {word}"),
+        None => "A tab named build with a progress bar".to_owned(),
+    })
+    .h(PILL)
+    .inert();
     match status.word() {
-        Some((word, tone)) => tab = tab.child(text(word).font(medium(11.5)).color(rgb(tone))),
-        None => {
-            tab = tab.child(progress_bar(
-                "status-sample-progress".into(),
-                (Some(60), accent()),
-                11.,
-            ))
-        }
+        Some((word, tone)) => tab.child(text(word).font(medium(11.5)).color(rgb(tone))),
+        None => tab.child(progress_bar(
+            "status-sample-progress".into(),
+            (Some(60), accent()),
+            14.,
+        )),
     }
-    tab
 }
 
 /// Notifications → one program state: how it shows in tabs, and whether it sends a desktop
@@ -179,7 +176,7 @@ pub fn status(s: &Workspace, status: Status) -> El {
     let n = &s.settings.notifications;
     let off = !n.system_notifications;
     let tabs = if n.show_in_tabs {
-        setting("In tabs", status.in_tabs(), sample_tab(status))
+        setting("In tabs", status.in_tabs(), sample_tab(s, status))
     } else {
         setting(
             "In tabs",

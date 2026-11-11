@@ -575,7 +575,7 @@ fn a_single_pane_is_full_bleed_and_a_split_keeps_its_cards() {
         .unwrap()
         .rect;
     assert_eq!((r[0], r[2]), (0., 1024.), "edge to edge: {r:?}");
-    assert!(!has(&rt, "close-tab:single"), "tabs have no close button");
+    assert!(has(&rt, "tab-close:single"), "the tab on screen has its ×");
     std::fs::remove_file(&rt.state.settings_path).ok();
 
     let (ws, _rx) = tabbed_workspace("split");

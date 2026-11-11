@@ -8,15 +8,23 @@ use rune::{Color, El, Icon, el, row};
 /// An icon's box, and the room between two of a tab's icons.
 const SIZE: f32 = 15.;
 const GAP: f32 = 6.;
-/// How far a shell's tile reaches past its icon's box on every side. The tile is an overlay,
-/// so an icon takes the same room in colour and out of it and a tab keeps its width.
-const TILE_OUTSET: f32 = 2.5;
+/// The badge a tab's first icon sits on: the focused pane's program, which is what the tab
+/// is doing. A rounded square, so it is never taken for a button.
+const BADGE: f32 = 20.;
+const BADGE_RADIUS: f32 = 6.;
+/// How far a shell's tile reaches past its icon's box on every side, where the shell isn't
+/// the first icon: as large as the badge. The tile is an overlay, so an icon takes the same
+/// room in colour and out of it and a tab keeps its width.
+const TILE_OUTSET: f32 = (BADGE - SIZE) / 2.;
 /// The green of a shell's prompt, on its dark tile.
 const PROMPT: u32 = 0x7fdc8c;
 
 /// How wide a row of `count` icons is.
 pub fn row_width(count: usize) -> f32 {
-    count as f32 * SIZE + count.saturating_sub(1) as f32 * GAP
+    match count {
+        0 => 0.,
+        more => BADGE + (more - 1) as f32 * (GAP + SIZE),
+    }
 }
 
 /// One of a tab's icons.
@@ -76,7 +84,8 @@ pub fn tint(icon: &Icon) -> u32 {
     }
 }
 
-/// A shell's icon in colour: a small tile and the prompt on it.
+/// A shell's icon in colour: a tile (the badge itself, when the shell is the tab's first
+/// icon) and the prompt on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellTile {
     pub fill: Color,
@@ -171,9 +180,9 @@ impl Workspace {
 }
 
 /// A tab's icons in a row: as many as `look` shows, each in colour or in the tab's own ink
-/// (`INK` on the tab on screen, `MUTED` on the others). The first is keyed `key`, the rest
-/// `key:1`, `key:2` and so on; each names its program in a tooltip. None when tabs show no
-/// icons.
+/// (`INK` on the tab on screen, `MUTED` on the others). The first sits on a badge. It is
+/// keyed `key`, the rest `key:1`, `key:2` and so on; each names its program in a tooltip.
+/// None when tabs show no icons.
 pub fn tab_icons(key: &str, icons: &[TabIcon], on_screen: bool, look: &IconLook) -> Option<El> {
     if look.count == 0 {
         return None;
@@ -181,14 +190,26 @@ pub fn tab_icons(key: &str, icons: &[TabIcon], on_screen: bool, look: &IconLook)
     let plain = rgb(if on_screen { ink() } else { muted() });
     let mut icons_row = row().gap(GAP).center_y();
     for (index, icon) in icons.iter().take(look.count).enumerate() {
-        let mut cell = el().key(if index == 0 {
+        let first = index == 0;
+        let colored = look.in_color(icon, on_screen);
+        let tile = colored && icon.shell();
+        let mut cell = el().key(if first {
             key.to_owned()
         } else {
             format!("{key}:{index}")
         });
-        let color = if !look.in_color(icon, on_screen) {
-            plain
-        } else if icon.shell() {
+        if first {
+            cell = cell
+                .size(BADGE, BADGE)
+                .center()
+                .radius(BADGE_RADIUS)
+                .continuous_corners();
+            cell = if tile {
+                cell.fill(look.shell.fill).border(1., look.shell.edge)
+            } else {
+                cell.fill(white(0.06))
+            };
+        } else if tile {
             cell = cell.child(
                 el().key("tile")
                     .pin(
@@ -197,14 +218,18 @@ pub fn tab_icons(key: &str, icons: &[TabIcon], on_screen: bool, look: &IconLook)
                         Some(-TILE_OUTSET),
                         Some(-TILE_OUTSET),
                     )
-                    .radius(5.5)
+                    .radius(BADGE_RADIUS)
                     .continuous_corners()
                     .fill(look.shell.fill)
                     .border(1., look.shell.edge),
             );
+        }
+        let color = if tile {
             rgb(look.shell.ink)
-        } else {
+        } else if colored {
             rgb(tint(icon.icon))
+        } else {
+            plain
         };
         cell = cell.child(glyph(icon.icon, SIZE, color));
         if let Some(program) = &icon.program {

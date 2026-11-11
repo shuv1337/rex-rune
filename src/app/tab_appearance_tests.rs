@@ -44,7 +44,9 @@ fn with_tabs(ws: &mut Workspace, tabs: TabsConfig) {
     ws.settings.tabs = tabs;
 }
 
-/// The colour of the glyph in the icon cell keyed `key`, and whether a tile is under it.
+/// The colour of the glyph in the icon cell keyed `key`, and whether it is on a shell's
+/// tile: one drawn under it, or for a tab's first icon its badge in other than the plain
+/// 6% white.
 fn icon(rt: &Runtime<Workspace>, key: &str) -> (Color, bool) {
     let elements = rt.elements();
     let cell = elements
@@ -55,7 +57,10 @@ fn icon(rt: &Runtime<Workspace>, key: &str) -> (Color, bool) {
         .iter()
         .filter(|e| !e.exiting && e.parent == Some(cell))
         .collect();
-    let tile = inside.iter().any(|e| e.key.as_deref() == Some("tile"));
+    let badge = elements[cell].fill;
+    let plain = crate::app::theme::white(0.06);
+    let tile = inside.iter().any(|e| e.key.as_deref() == Some("tile"))
+        || (badge.a > 0. && !(same(badge, plain) && (badge.a - plain.a).abs() < 1e-4));
     let color = inside
         .iter()
         .find_map(|e| e.text_color)
@@ -80,12 +85,14 @@ fn by_default_a_tab_shows_its_focused_panes_icon_alone_in_the_tabs_ink() {
     assert!(same(on_screen, rgb(ink())) && !tile);
     let (other, tile) = icon(&rt, "tab-icon:single");
     assert!(same(other, rgb(muted())) && !tile);
-    // The pill as it has always been: 28 pt tall, 14 pt to a 15 pt icon, 8 pt to the name.
-    let (pill, glyph) = (rect(&rt, "tab:split"), rect(&rt, "tab-icon:split"));
-    assert_eq!(pill[3], 28.);
-    assert_eq!(glyph[0] - pill[0], 14.);
-    assert_eq!([glyph[2], glyph[3]], [15., 15.]);
-    assert_eq!(rect(&rt, "tab:single")[2], 96., "a short name keeps 96 pt");
+    // The pill: a 30 pt capsule on the 34 pt track, its icon on a 20 pt badge 6 pt in.
+    let (pill, badge) = (rect(&rt, "tab:split"), rect(&rt, "tab-icon:split"));
+    assert_eq!(pill[3], 30.);
+    assert_eq!(rect(&rt, "tab-track")[3], 34.);
+    assert_eq!(badge[0] - pill[0], 6.);
+    assert_eq!([badge[2], badge[3]], [20., 20.]);
+    assert_eq!(pill[2], 96., "a short name keeps 96 pt");
+    assert!((96. ..=240.).contains(&rect(&rt, "tab:single")[2]));
     // The window's drag space takes what the tabs leave.
     let drag = rect(&rt, "title-drag");
     assert!(drag[2] > 300., "{drag:?}");
@@ -122,9 +129,11 @@ fn a_tab_shows_as_many_icons_as_the_setting_allows_one_for_each_program() {
     let (three, triple) = widths(3);
     assert_eq!(three, [true, true, true]);
     assert_eq!(widths(5), (three, triple));
-    // "dev" is short, so the pill is at its 96 pt floor until icons need more.
-    assert_eq!([bare, single, double], [96., 96., 96.]);
-    assert!(triple > 96. || (triple - 96.).abs() < 0.01);
+    // "dev" is short, so the pill is at its 96 pt floor until icons need more; then each
+    // icon adds its 15 pt and the 6 pt before it.
+    assert_eq!([bare, single], [96., 96.]);
+    assert!(double > single);
+    assert_eq!(triple - double, 21.);
 
     // The order is the focused pane's program, then the others in the server's order, and
     // each names its program.
@@ -136,7 +145,8 @@ fn a_tab_shows_as_many_icons_as_the_setting_allows_one_for_each_program() {
         .map(|key| rect(&rt, key)[0])
         .collect();
     assert!(xs[0] < xs[1] && xs[1] < xs[2], "{xs:?}");
-    assert_eq!(xs[1] - xs[0], 21., "15 pt icons 6 pt apart");
+    assert_eq!(xs[1] - xs[0], 26., "6 pt after the 20 pt badge");
+    assert_eq!(xs[2] - xs[1], 21., "15 pt icons 6 pt apart");
     let name = rect(&rt, "tab:split");
     assert!(xs[2] + 15. < name[0] + name[2]);
     std::fs::remove_file(&rt.state.settings_path).ok();
@@ -145,6 +155,7 @@ fn a_tab_shows_as_many_icons_as_the_setting_allows_one_for_each_program() {
 #[test]
 fn each_colour_mode_colours_the_icons_it_names_and_a_shell_gets_its_tile() {
     // (mode, [claude on screen, nvim on screen, the other tab's shell]) in colour or not.
+    let mut widths = Vec::new();
     for (mode, expect) in [
         (TabIconColor::Always, [true, true, true]),
         (TabIconColor::ActiveTab, [true, true, false]),
@@ -183,10 +194,11 @@ fn each_colour_mode_colours_the_icons_it_names_and_a_shell_gets_its_tile() {
         if !expect[2] {
             assert!(same(shell, rgb(muted())));
         }
-        // A tile is drawn around its icon and never moves it: the pill keeps its width.
-        assert_eq!(rect(&rt, "tab:single")[2], 96., "{mode:?}");
+        widths.push([rect(&rt, "tab:single")[2], rect(&rt, "tab:split")[2]]);
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
+    // Colour never moves anything: every pill is as wide in each mode.
+    assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
 }
 
 #[test]
@@ -273,6 +285,80 @@ fn tabs_that_fill_the_toolbar_share_its_width_and_leave_the_drag_space() {
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
+#[test]
+fn the_tab_on_screen_and_a_tab_under_the_pointer_show_a_close_button() {
+    let (ws, rx) = programs("single");
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    let opacity = |rt: &Runtime<Workspace>, key: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("missing {key}"))
+            .opacity
+    };
+    // On the tab on screen it is always there; on another only under the pointer.
+    assert_eq!(opacity(&rt, "tab-close:single"), 1.);
+    assert_eq!(opacity(&rt, "tab-close:split"), 0.);
+    // In room the pill keeps for it: 18 pt, 6 pt from the pill's end, after the name.
+    for tab in ["single", "split"] {
+        let (pill, close) = (
+            rect(&rt, &format!("tab:{tab}")),
+            rect(&rt, &format!("tab-close:{tab}")),
+        );
+        assert_eq!([close[2], close[3]], [18., 18.]);
+        assert_eq!(pill[0] + pill[2] - (close[0] + close[2]), 6.);
+        assert_eq!(close[1] - pill[1], 6.);
+    }
+    let name = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.text.as_deref() == Some("server"))
+        .expect("the tab's name")
+        .rect;
+    assert!(name[0] + name[2] <= rect(&rt, "tab-close:single")[0]);
+    let before = rect(&rt, "tab:split");
+    let over = (before[0] + 20., before[1] + before[3] / 2.);
+    rt.pointer_move(over.0, over.1);
+    settle(&mut rt);
+    assert_eq!(opacity(&rt, "tab-close:split"), 1.);
+    assert_eq!(
+        rect(&rt, "tab:split"),
+        before,
+        "nothing moves when it shows"
+    );
+
+    // It asks before closing, as the tab's menu and a middle-click do, and names its own
+    // tab; the tab on screen stays.
+    click(&mut rt, "tab-close:split");
+    let panel = rt.state.panel.as_ref().expect("a close confirmation");
+    assert!(
+        matches!(&panel.kind, PanelKind::Confirm { method, payload, .. }
+            if method == "session.close_window" && payload["window_id"] == "split")
+    );
+    assert!(
+        requests(&rx).iter().all(|r| r.0 != "session.focus_window"),
+        "closing from the × doesn't switch tabs"
+    );
+    press(&mut rt, Key::Escape);
+    assert!(rt.state.panel.is_none());
+    click(&mut rt, "tab-close:single");
+    let panel = rt.state.panel.as_ref().expect("a close confirmation");
+    assert!(matches!(&panel.kind, PanelKind::Confirm { payload, .. }
+            if payload["window_id"] == "single"));
+    // A button by name, and the pointer's: the Tab key never lands on it.
+    assert!(
+        rt.elements()
+            .iter()
+            .filter(|e| e
+                .key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("tab-close:")))
+            .all(|e| e.role == "button" && e.label.as_deref() == Some("Close tab"))
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
 fn many_tabs(count: usize) -> (Workspace, flume::Receiver<HostCommand>) {
     let (mut ws, rx) = tabbed_workspace("t0");
     let windows: Vec<Value> = (0..count)
@@ -302,8 +388,9 @@ fn a_crowded_strip_of_filling_tabs_scrolls_before_a_name_is_cut_to_nothing() {
     assert!(rt.state.tab_strip.overflows());
     assert!(has(&rt, "next-tabs") && has(&rt, "previous-tabs"));
     let tab = rect(&rt, "tab:t0");
-    // Every tab at its floor: the 96 pt of any tab.
-    assert_eq!(tab[2], 96.);
+    // Every tab at its floor: room for the ×, the same again before the badge so the
+    // content stays centred, the badge, and 40 pt of the name.
+    assert_eq!(tab[2], 2. * 28. + 20. + 8. + 40.);
     assert!((tab[2] - rect(&rt, "tab:t5")[2]).abs() < 0.5);
     // A tab in trouble keeps its word whole, however crowded.
     use rex_linux::connection::activity::{BlockedKind, ProgramState::Blocked};
@@ -313,7 +400,7 @@ fn a_crowded_strip_of_filling_tabs_scrolls_before_a_name_is_cut_to_nothing() {
     settle(&mut rt);
     let (pill, word) = (rect(&rt, "tab:t1"), rect(&rt, "tab-word:t1"));
     assert!(
-        word[0] + word[2] <= pill[0] + pill[2] - 13.5,
+        word[0] + word[2] <= pill[0] + pill[2] - 27.5,
         "{pill:?} {word:?}"
     );
     assert!(pill[2] > tab[2]);
@@ -396,8 +483,8 @@ fn the_tabs_page_changes_and_saves_each_setting_and_its_preview_follows() {
             .all(|e| e.inert && !e.focusable)
     );
     // By default: one icon each, out of colour, tabs as wide as their names.
-    assert!(has(&rt, "tabs-preview-icon:0") && !has(&rt, "tabs-preview-icon:0:1"));
-    let (prompt, tile) = icon(&rt, "tabs-preview-icon:0");
+    assert!(has(&rt, "tabs-preview-tab:0-icon") && !has(&rt, "tabs-preview-tab:0-icon:1"));
+    let (prompt, tile) = icon(&rt, "tabs-preview-tab:0-icon");
     assert!(same(prompt, rgb(ink())) && !tile);
     let narrow = rect(&rt, "tabs-preview-tab:0")[2];
     assert!(narrow < 240.);
@@ -424,7 +511,7 @@ fn the_tabs_page_changes_and_saves_each_setting_and_its_preview_follows() {
     click(&mut rt, "tab-icons-larger");
     assert_eq!(saved(&rt).icons, 5);
     settle(&mut rt);
-    assert!(has(&rt, "tabs-preview-icon:0:4") && has(&rt, "tabs-preview-icon:1:4"));
+    assert!(has(&rt, "tabs-preview-tab:0-icon:4") && has(&rt, "tabs-preview-tab:1-icon:4"));
 
     // Colour.
     choose(&mut rt, "tab-icon-color", "Active pane");
@@ -435,21 +522,21 @@ fn the_tabs_page_changes_and_saves_each_setting_and_its_preview_follows() {
             .as_ref()
             .is_some_and(|p| matches!(p.kind, PanelKind::Settings))
     );
-    let (prompt, tile) = icon(&rt, "tabs-preview-icon:0");
+    let (prompt, tile) = icon(&rt, "tabs-preview-tab:0-icon");
     assert!(tile && !same(prompt, rgb(ink())));
-    let (claude, _) = icon(&rt, "tabs-preview-icon:0:1");
+    let (claude, _) = icon(&rt, "tabs-preview-tab:0-icon:1");
     assert!(same(claude, rgb(ink())), "only the focused pane's");
     choose(&mut rt, "tab-icon-color", "Always");
     assert_eq!(saved(&rt).icon_color, TabIconColor::Always);
-    let (claude, _) = icon(&rt, "tabs-preview-icon:0:1");
+    let (claude, _) = icon(&rt, "tabs-preview-tab:0-icon:1");
     assert!(same(claude, rgb(tint(&CLAUDE))));
-    let (_, tile) = icon(&rt, "tabs-preview-icon:1:1");
+    let (_, tile) = icon(&rt, "tabs-preview-tab:1-icon:1");
     assert!(tile, "the other tab's shell too");
 
     // The shell's tile.
     choose(&mut rt, "shell-icon", "Accent");
     assert_eq!(saved(&rt).shell_icon, ShellIconTheme::Accent);
-    let (prompt, _) = icon(&rt, "tabs-preview-icon:0");
+    let (prompt, _) = icon(&rt, "tabs-preview-tab:0-icon");
     assert!(same(prompt, rgb(accent())));
     choose(&mut rt, "shell-icon", "Terminal theme");
     assert_eq!(saved(&rt).shell_icon, ShellIconTheme::Theme);
@@ -460,7 +547,7 @@ fn the_tabs_page_changes_and_saves_each_setting_and_its_preview_follows() {
     }
     settle(&mut rt);
     assert_eq!(saved(&rt).icons, 0);
-    assert!(!has(&rt, "tabs-preview-icon:0"));
+    assert!(!has(&rt, "tabs-preview-tab:0-icon"));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 

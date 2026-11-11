@@ -1,14 +1,15 @@
 //! Settings → Interface → Customize tabs: whether toolbar tabs share its width, and the icons
 //! a tab shows for its panes' programs. Two sample tabs at the top are drawn by the toolbar's
-//! own pieces with the settings as they are, so every control shows what it does at once.
+//! own pieces (`toolbar::sample_pill`) with the settings as they are, so every control shows
+//! what it does at once.
 use super::{
     settings_kit::{
         INSET, card, footnote, page as kit_page, popup_button, section, select_row, setting,
         stepper,
     },
-    tab_icons::{TabIcon, tab_icons},
+    tab_icons::TabIcon,
     theme::*,
-    toolbar::{fill_floor, pill_frame, pill_highlight, pill_label},
+    toolbar::{PILL, TRACK, capsule, fill_floor, sample_pill},
     workspace::Workspace,
 };
 use rex_linux::settings::{ShellIconTheme, TabIconColor, TabsConfig};
@@ -61,13 +62,12 @@ const SAMPLES: [(&str, [(&Icon, &str); 5]); 2] = [
 fn preview(s: &Workspace) -> El {
     let fill = s.settings.tabs.fill;
     let look = s.tab_icon_look();
-    let mut names = row().h(28.).gap(2.);
+    let mut names = row().h(PILL).gap(2.);
     if fill {
         names = names.grow(1.);
     }
     let floor = fill.then(|| fill_floor(look.count.min(5), None, false));
     for (index, (name, programs)) in SAMPLES.into_iter().enumerate() {
-        let active = index == 0;
         let icons: Vec<TabIcon> = programs
             .into_iter()
             .enumerate()
@@ -77,21 +77,16 @@ fn preview(s: &Workspace) -> El {
                 focused: pane == 0,
             })
             .collect();
-        let mut tab = pill_frame(floor).key(format!("tabs-preview-tab:{index}"));
-        if active {
-            tab = tab.child(pill_highlight());
-        }
-        names = names.child(
-            tab.children(tab_icons(
-                &format!("tabs-preview-icon:{index}"),
-                &icons,
-                active,
-                &look,
-            ))
-            .child(pill_label(name.to_owned(), active)),
-        );
+        names = names.child(sample_pill(
+            &format!("tabs-preview-tab:{index}"),
+            &icons,
+            name,
+            index == 0,
+            floor,
+            &look,
+        ));
     }
-    let mut track = chip(row().h(34.).px(3.).center_y().child(names));
+    let mut track = capsule(row().px((TRACK - PILL) / 2.).center_y().child(names), TRACK);
     if fill {
         track = track.grow(1.);
     }
