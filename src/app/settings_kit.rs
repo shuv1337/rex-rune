@@ -9,8 +9,8 @@
 //!   (the whole row is a button that opens a form or a sub-page) and [`row_frame`] for a row
 //!   with its own content. Search Settings finds a row by the label and helper it was built
 //!   with ([`found`]), so a new row needs no entry anywhere else.
-//! - Controls: [`segmented`] and [`segmented_fixed`], [`value_popup`], [`select`], [`stepper`],
-//!   [`button`], and the [`value`], [`mono_value`] and [`state_chip`] read-outs.
+//! - Controls: [`switch`], [`segmented`] and [`segmented_fixed`], [`value_popup`], [`select`],
+//!   [`stepper`], [`button`], and the [`value`], [`mono_value`] and [`state_chip`] read-outs.
 //! - [`preview_well`]: a card's first row when its settings change how something is drawn, a
 //!   sample of it drawn that way.
 //!
@@ -23,7 +23,7 @@ use super::{
     workspace::Workspace,
 };
 use rune::{Cursor, El, Icon, Key, KeyEvent, Shadow, Tx, col, el, row, text};
-use rune_kit::IconButton;
+use rune_kit::{IconButton, Switch};
 
 /// The Settings dialog, clamped to the window by `settings_view::settings`.
 pub const PANEL_WIDTH: f32 = 816.;
@@ -182,6 +182,17 @@ pub fn setting(label: &str, detail: &str, control: El) -> El {
 /// themselves; a row built on [`row_frame`] that should be found wraps its frame in it.
 pub fn found(label: &str, detail: &str, frame: El) -> El {
     super::settings_nav::row(label, detail, frame)
+}
+
+/// A switch in a row's trailing slot. The row's words name it on screen; `label` names it
+/// to assistive technology. `flip` runs when it is pressed.
+pub fn switch(key: &str, label: &str, on: bool, flip: impl Fn(&mut Workspace) + 'static) -> El {
+    Switch::new(on)
+        .label(label.to_owned())
+        .hide_label()
+        .on_toggle(flip)
+        .build(kit())
+        .key(key.to_owned())
 }
 
 /// A read-only value in a row's trailing slot.

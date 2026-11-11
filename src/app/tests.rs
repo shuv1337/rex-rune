@@ -34,6 +34,8 @@ mod remote_tests;
 mod settings_nav_tests;
 #[path = "settings_tests.rs"]
 mod settings_tests;
+#[path = "settings_wave2_tests.rs"]
+mod settings_wave2_tests;
 #[path = "shortcuts_page_tests.rs"]
 mod shortcuts_page_tests;
 #[path = "tab_appearance_tests.rs"]

@@ -342,6 +342,16 @@ impl Nav {
         self.offset.set(0.);
     }
 
+    /// The page Back would show from `page`, the one on screen.
+    fn back_of(&self, page: Page) -> Option<Page> {
+        let at = if self.current(page) {
+            self.at.checked_sub(1)?
+        } else {
+            self.at
+        };
+        self.stops.get(at).map(|stop| stop.page)
+    }
+
     /// Whether Back (-1) or Forward (1) has somewhere to go from `page`, the one on screen.
     fn can_go(&self, page: Page, direction: isize) -> bool {
         if !self.current(page) {
@@ -565,19 +575,24 @@ impl Workspace {
         tx.focus("settings-back", tx.focus_visible());
     }
 
-    /// Escape on a page opened from a section's row: back to that section. False when
-    /// Settings isn't on such a page (or isn't what is open).
-    pub fn leave_settings_page(&mut self) -> bool {
+    /// Escape, or the crumb, on a page opened from a section's row: back to that section,
+    /// where it was scrolled when the row was pressed, or at its top when the page was
+    /// reached another way (a search). False when Settings isn't on such a page (or isn't
+    /// what is open).
+    pub fn leave_settings_page(&mut self, tx: &mut Tx) -> bool {
         if !self.settings_open() {
             return false;
         }
-        match self.settings_page() {
-            Page::Sub(sub) => {
-                self.navigate(Page::Section(sub.section()));
-                true
-            }
-            Page::Section(_) => false,
+        let Page::Sub(sub) = self.settings_page() else {
+            return false;
+        };
+        let section = Page::Section(sub.section());
+        if self.settings_nav.back_of(Page::Sub(sub)) == Some(section) {
+            self.settings_history(-1, tx);
+        } else {
+            self.navigate(section);
         }
+        true
     }
 
     /// Whether Back (-1) or Forward (1) has a page to show.

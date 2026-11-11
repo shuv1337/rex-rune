@@ -16,6 +16,7 @@ use super::{
     panel::{Intent, PanelKind},
     settings_kit::{
         ChipTone, Segment, found, popup_button, row_frame, segmented_fixed, setting, state_chip,
+        switch,
     },
     theme::*,
     themes_view::{Picture, swatch_strip},
@@ -26,7 +27,6 @@ use rex_linux::{
     terminal_theme::{TerminalTheme, builtin, paired},
 };
 use rune::{El, Tx, el, row, text};
-use rune_kit::Switch;
 
 /// The popup buttons of the two themes on Settings → Themes. A theme switcher opened from
 /// one lists that appearance's themes.
@@ -285,17 +285,17 @@ pub fn pair_switch(s: &Workspace) -> El {
     setting(
         "Light and dark themes",
         "One terminal theme while the desktop is light and another while it is dark.",
-        Switch::new(s.pairs_themes())
-            .label("Light and dark themes")
-            .hide_label()
-            .on_toggle(|s: &mut Workspace| {
+        switch(
+            "theme-pair",
+            "Light and dark themes",
+            s.pairs_themes(),
+            |s| {
                 let on = !s.pairs_themes();
                 if let Err(error) = s.pair_themes(on) {
                     s.notify(format!("{error:#}"));
                 }
-            })
-            .build(kit())
-            .key("theme-pair"),
+            },
+        ),
     )
 }
 

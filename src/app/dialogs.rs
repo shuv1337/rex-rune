@@ -52,7 +52,12 @@ pub fn modal_layer(s: &Workspace, surface: El, under: bool, top: f32) -> El {
     // The list over it has the keyboard: a focus trap here would take focus for the layer
     // itself and keep the list's keys (handled with nothing focused) from reaching it.
     if !under {
-        layer = layer.modal(false, |s: &mut Workspace| s.cancel_panel_quiet());
+        // Escape on a page of a Settings section's goes back to the section first.
+        layer = layer.modal_tx(false, |s: &mut Workspace, tx: &mut Tx| {
+            if !s.leave_settings_page(tx) {
+                s.cancel_panel_quiet();
+            }
+        });
     }
     let mut layer = layer.child(
         el().key("scrim")

@@ -3,11 +3,12 @@
 //! preview drawn by the terminal's own code (`term::preview`), so a control's effect shows
 //! as it is changed. Previews are steady, as terminals are: the cursor never blinks.
 use super::{
-    panel::Intent,
+    panel::{Intent, SettingsSection},
     settings_kit::{
-        button, card, disclosure, footnote, page, preview_well, row_frame, section, select_row,
-        setting, stepper, value_popup, words,
+        button, card, disclosure, footnote, found, page, preview_well, row_frame, section,
+        select_row, setting, stepper, switch, words,
     },
+    settings_nav::Page,
     term::{
         self,
         preview::{Run, Sample, plain},
@@ -21,7 +22,6 @@ use rex_linux::settings::{
     typography::FontStyle,
 };
 use rune::{El, TextStyle, row, text};
-use rune_kit::Switch;
 
 /// What the previews draw in: the colours panes draw in now, and the terminal's default
 /// text, cursor and a few of its palette's colours.
@@ -86,16 +86,11 @@ pub(super) fn preview(
 
 /// A switch for one of the terminal settings, saved as soon as it flips.
 fn toggle(key: &str, label: &str, on: bool, field: fn(&mut TerminalConfig) -> &mut bool) -> El {
-    Switch::new(on)
-        .label(label.to_owned())
-        .hide_label()
-        .on_toggle(move |s: &mut Workspace| {
-            let value = field(&mut s.settings.terminal);
-            *value = !*value;
-            s.save();
-        })
-        .build(kit())
-        .key(key.to_owned())
+    switch(key, label, on, move |s| {
+        let value = field(&mut s.settings.terminal);
+        *value = !*value;
+        s.save();
+    })
 }
 
 /// Regular, bold and italic text, as a build's output has them.
@@ -122,11 +117,9 @@ pub(super) fn typography_sample(inks: &Inks) -> Sample<'static> {
 /// the interface font otherwise) and the button that opens the picker.
 fn terminal_font(s: &Workspace) -> El {
     let saved = &s.settings.font_family;
-    row_frame(true)
-        .child(words(
-            "Terminal font",
-            "Applies when you reopen the client.",
-        ))
+    let (label, helper) = ("Terminal font", "Applies when you reopen the client.");
+    found(label, helper, row_frame(true))
+        .child(words(label, helper))
         .child(
             row()
                 .gap(12.)
@@ -223,17 +216,17 @@ fn colours(s: &Workspace) -> El {
     section(
         "Colours",
         [
-            card([setting(
+            // The theme is chosen on Themes, with the window colours and the library: this
+            // row says what it is and goes there.
+            card([disclosure(
+                "open-themes",
                 "Theme",
                 "",
-                value_popup(
-                    "terminal-theme",
-                    Workspace::theme_label(&s.settings.terminal_theme),
-                    Intent::ChooseTheme,
-                ),
+                Workspace::theme_label(&s.settings.terminal_theme),
+                |s, _| s.navigate(Page::Section(SettingsSection::Themes)),
             )]),
             footnote(
-                "Declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection.",
+                "Terminal themes, a light and dark pair and the window's own colours are in Themes.",
             ),
         ],
     )

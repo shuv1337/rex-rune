@@ -406,9 +406,13 @@ fn title(page: Page) -> El {
                 .hover(white(0.06))
                 .focusable(true)
                 .focus_ring(2., 0., rgb(accent()))
-                .on_press(move |s: &mut Workspace| s.navigate(Page::Section(section)))
+                .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
+                    s.leave_settings_page(tx);
+                })
                 .child(text(section.title()).font(medium(17.)).color(rgb(muted()))),
-            move |s, _| s.navigate(Page::Section(section)),
+            |s, tx| {
+                s.leave_settings_page(tx);
+            },
         ))
         .child(glyph(&RIGHT, 16., rgb(muted())))
         .child(name.ml(4.))

@@ -3,15 +3,13 @@
 use super::{
     settings_kit::{
         SEGMENT, Segment, card, footnote, page, section, segmented_fixed, select_row, setting,
-        stepper,
+        stepper, switch,
     },
-    theme::*,
     toolbar_reveal,
     workspace::Workspace,
 };
 use rex_linux::settings::interface::{AnimationStyle, InterfaceConfig, ToolbarBehavior};
 use rune::{El, Tx};
-use rune_kit::Switch;
 use serde_json::Value;
 
 /// The Toolbar choices, in the order the control lists them.
@@ -30,16 +28,11 @@ const ANIMATIONS: [AnimationStyle; 3] = [
 
 /// A switch for one of the interface settings, saved as soon as it flips.
 fn toggle(key: &str, label: &str, on: bool, field: fn(&mut InterfaceConfig) -> &mut bool) -> El {
-    Switch::new(on)
-        .label(label.to_owned())
-        .hide_label()
-        .on_toggle(move |s: &mut Workspace| {
-            let value = field(&mut s.settings.interface);
-            *value = !*value;
-            s.save();
-        })
-        .build(kit())
-        .key(key.to_owned())
+    switch(key, label, on, move |s| {
+        let value = field(&mut s.settings.interface);
+        *value = !*value;
+        s.save();
+    })
 }
 
 /// When the toolbar shows, and how to bring it out where it has no row.
@@ -161,17 +154,17 @@ pub fn panes(s: &Workspace) -> El {
                 card([setting(
                     "Highlight active pane",
                     "An accent outline on the pane with the keyboard, in a tab with several.",
-                    Switch::new(s.settings.highlights_active_pane())
-                        .label("Highlight active pane")
-                        .hide_label()
-                        .on_toggle(|s: &mut Workspace| {
+                    switch(
+                        "highlight-active-pane",
+                        "Highlight active pane",
+                        s.settings.highlights_active_pane(),
+                        |s| {
                             // From here on it is a choice, and no longer follows the density.
                             let on = s.settings.highlights_active_pane();
                             s.settings.interface.highlight_active_pane = Some(!on);
                             s.save();
-                        })
-                        .build(kit())
-                        .key("highlight-active-pane"),
+                        },
+                    ),
                 )]),
                 card([
                     setting(

@@ -450,7 +450,8 @@ fn a_status_page_goes_back_to_notifications_where_it_was_scrolled() {
         Some(PanelKind::Settings)
     ));
 
-    // The crumb goes to the section as a visit, so Back returns to the sub-page.
+    // The crumb goes back to the section the page was opened from, so Forward returns to
+    // the sub-page.
     alt(&mut rt, Key::Right);
     alt(&mut rt, Key::Right);
     click(&mut rt, "settings-crumb");
@@ -458,7 +459,7 @@ fn a_status_page_goes_back_to_notifications_where_it_was_scrolled() {
         rt.state.settings_page(),
         Page::Section(SettingsSection::Notifications)
     );
-    alt(&mut rt, Key::Left);
+    alt(&mut rt, Key::Right);
     assert_eq!(
         rt.state.settings_page(),
         Page::Sub(SubPage::Status(Status::Blocked))

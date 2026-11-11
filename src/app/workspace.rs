@@ -1828,9 +1828,6 @@ impl Workspace {
 
     /// Escape on a modal: back to the panel it came from, or closed.
     pub fn cancel_panel_quiet(&mut self) {
-        if self.leave_settings_page() {
-            return;
-        }
         if let Some(mut back) = self.panel.as_mut().and_then(|p| p.back.take()) {
             if let Some(input) = back.inputs.first_mut() {
                 input.focused = true;

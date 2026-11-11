@@ -5,7 +5,7 @@
 use super::{
     settings_kit::{
         INSET, card, footnote, page as kit_page, popup_button, section, select_row, setting,
-        stepper,
+        stepper, switch,
     },
     tab_icons::TabIcon,
     theme::*,
@@ -14,7 +14,6 @@ use super::{
 };
 use rex_linux::settings::{ShellIconTheme, TabIconColor, TabsConfig};
 use rune::{El, Icon, Tx, row};
-use rune_kit::Switch;
 
 /// The colour choices, in the order their list has them.
 const COLORS: [TabIconColor; 4] = [
@@ -178,15 +177,10 @@ pub fn page(s: &Workspace) -> El {
             [card([setting(
                 "Tabs fill the toolbar",
                 "Tabs share the toolbar's width equally instead of taking their names' width.",
-                Switch::new(tabs.fill)
-                    .label("Tabs fill the toolbar")
-                    .hide_label()
-                    .on_toggle(|s: &mut Workspace| {
-                        s.settings.tabs.fill = !s.settings.tabs.fill;
-                        s.save();
-                    })
-                    .build(kit())
-                    .key("tabs-fill"),
+                switch("tabs-fill", "Tabs fill the toolbar", tabs.fill, |s| {
+                    s.settings.tabs.fill = !s.settings.tabs.fill;
+                    s.save();
+                }),
             )])],
         ),
         section(
