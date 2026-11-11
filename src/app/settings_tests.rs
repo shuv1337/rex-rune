@@ -372,6 +372,11 @@ fn disclosure_rows_and_segments_work_from_the_keyboard() {
         "{:?}",
         element_text(&rt, "host-shell:0")
     );
+    // The shells are at the foot of the page.
+    let page = rect(&rt, "settings-scroll:terminal");
+    rt.pointer_move(page[0] + 40., page[1] + 40.);
+    rt.wheel(page[0] + 40., page[1] + 40., -4000.);
+    settle(&mut rt);
     click(&mut rt, "host-shell:1");
     assert!(matches!(
         kind(&rt),

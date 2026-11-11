@@ -26,6 +26,8 @@ mod remote_tests;
 mod settings_tests;
 #[path = "tab_tests.rs"]
 mod tab_tests;
+#[path = "terminal_settings_tests.rs"]
+mod terminal_settings_tests;
 #[path = "wiring_tests.rs"]
 mod wiring_tests;
 #[path = "workspace_fixes_tests.rs"]
@@ -3175,6 +3177,12 @@ fn pane_padding_controls_reach_zero_and_save() {
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:terminal");
+    // Layout is near the foot of the page.
+    rt.pointer_move(700., 400.);
+    rt.wheel(700., 400., -4000.);
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
     for _ in 0..9 {
         click(&mut rt, "pane-padding-smaller");
     }

@@ -8,10 +8,12 @@ publish = false
 
 [features]
 default = ["ui"]
-ui = ["dep:rune", "dep:rune-kit", "dep:rune-theme-opencode", "dep:zbus"]
+ui = ["dep:arboard", "dep:rune", "dep:rune-kit", "dep:rune-theme-opencode", "dep:zbus"]
 
 [dependencies]
 anyhow = "1"
+# The primary selection; Rune's own clipboard is the same crate with the same features.
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"], optional = true }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 flume = "0.11"

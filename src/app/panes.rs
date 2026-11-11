@@ -303,8 +303,10 @@ fn pane_card(
                 CursorLook::Hollow
             };
             let colors = s.term_colors();
+            let config = &s.settings.terminal;
             let look = GridLook {
                 cursor: Some(cursor),
+                cursor_force: config.cursor_force.then(|| config.cursor_style.shape()),
                 ime: keyboard,
                 colors,
             };
@@ -334,8 +336,9 @@ fn pane_card(
                 } else {
                     Cursor::Text
                 });
-            // The middle button only presses the grid while a program wants it.
-            if t.tracking() {
+            // The middle button only presses the grid while a program wants it, or while it
+            // pastes the primary selection.
+            if t.tracking() || config.primary_selection {
                 grid = grid.pointer_buttons([PointerButton::Middle]);
             }
             let grid = grid
@@ -354,6 +357,8 @@ fn pane_card(
                 .on_drag(move |s: &mut Workspace, d, tx| {
                     let cell = term::metrics(s.settings.font_size).cell;
                     let focused = s.focused_block().as_deref() == Some(k2.1.as_str());
+                    let config = &s.settings.terminal;
+                    let copies = config.copy_on_selection || config.primary_selection;
                     let Some(t) = s.terminals.get_mut(&k2) else {
                         return;
                     };
@@ -421,6 +426,11 @@ fn pane_card(
                         return;
                     }
                     if button != "left" {
+                        // A middle-click no program asked for pastes the primary selection,
+                        // on release as in xterm.
+                        if button == "middle" && d.phase == Phase::Up {
+                            s.paste_primary(&k2.1);
+                        }
                         return;
                     }
                     let i = t.index(d.x, d.y, cell);
@@ -436,6 +446,10 @@ fn pane_card(
                         Phase::Up => SelectionPhase::Up,
                     };
                     t.selection_event(phase, d.x, d.y, cell);
+                    // The selection's text comes with a frame: it is copied when that arrives.
+                    if copies && d.phase == Phase::Up {
+                        t.want_selected_text();
+                    }
                 })
                 // Pointer motion with no button held: Ctrl shows the link under it, and programs
                 // that track every move (1003) hear it (the server drops it for the others).

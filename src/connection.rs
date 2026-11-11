@@ -117,6 +117,9 @@ pub enum Command {
     Reset,
     /// `terminal.clear`: the screen and scrollback cleared, the current line kept.
     Clear,
+    /// The cursor this client draws in the pane until its program asks for a shape. It stays
+    /// in the pane's worker: nothing is sent to the server.
+    CursorStyle(crate::terminal::CursorShape),
 }
 
 #[derive(Default)]
@@ -662,6 +665,7 @@ impl PaneShared {
 
 enum DataCommand {
     Selection(crate::terminal::selection::Input),
+    CursorStyle(crate::terminal::CursorShape),
     Visible(bool),
     Scroll(isize),
     Search(String),
@@ -1645,11 +1649,12 @@ fn reject_navigation(shared: &Shared, id: u64) {
 
 /// A search runs on the pane's own terminal, so it needs no server: it reaches the pane's worker
 /// even while the host reconnects, or closing a search then would leave its highlights behind.
-/// False for any other command.
+/// The same goes for the cursor this client draws. False for any other command.
 fn forward_search(workers: &HashMap<String, PaneWorker>, block: &str, command: &Command) -> bool {
     let command = match command {
         Command::Search(needle) => DataCommand::Search(needle.clone()),
         Command::SearchStep(older) => DataCommand::SearchStep(*older),
+        Command::CursorStyle(shape) => DataCommand::CursorStyle(*shape),
         _ => return false,
     };
     if let Some(worker) = workers.get(block) {
@@ -1921,6 +1926,10 @@ async fn handle_command(
                 Command::SearchStep(older) => {
                     let _ = worker.commands.send(DataCommand::SearchStep(older));
                 }
+                // Local drawing only: never a request, never a claim.
+                Command::CursorStyle(shape) => {
+                    let _ = worker.commands.send(DataCommand::CursorStyle(shape));
+                }
                 Command::Reconnect => {
                     let _ = worker.commands.send(DataCommand::Reconnect);
                 }
@@ -2088,6 +2097,8 @@ async fn run_data(
     let mut selection = None;
     let mut search = crate::terminal::search::Controller::default();
     let mut visible = true;
+    // Kept across reconnects: each restored terminal starts with it.
+    let mut cursor_style = crate::terminal::CursorShape::Block;
     let mut renderer = match Renderer::new() {
         Ok(r) => r,
         Err(e) => {
@@ -2110,7 +2121,9 @@ async fn run_data(
                 let (next, fresh) = open_data(&endpoint, &session, &block, &host).await?;
                 selection = Some(crate::terminal::selection::Controller::new()?);
                 search.forget_terminal();
-                stream = Some(TerminalStream::new(fresh.nonce)); welcome = Some(fresh);
+                let mut restored = TerminalStream::new(fresh.nonce);
+                restored.set_cursor_style(cursor_style)?;
+                stream = Some(restored); welcome = Some(fresh);
                 shared.update(|m|m.restore_generation+=1);
                 renderer = Renderer::new()?; socket = Some(next);
                 shared.status("Restoring terminal…", false);
@@ -2129,6 +2142,7 @@ async fn run_data(
                     }
                     command = commands.recv_async() => match command {
                         Ok(DataCommand::Selection(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &stream.terminal { selection.apply(terminal, input)?; dirty = true; },
+                        Ok(DataCommand::CursorStyle(shape)) => { cursor_style = shape; stream.set_cursor_style(shape)?; dirty = true; },
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } else if !value && let Some(terminal) = &stream.terminal { selection.stop(terminal)?; } visible = value; }
                         Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); selection.after_scroll(terminal)?; dirty = true; },
                         Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); dirty = true; },

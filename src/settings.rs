@@ -1,4 +1,5 @@
 pub mod shortcuts;
+pub mod terminal;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -208,6 +209,8 @@ pub struct Settings {
     /// client's last declaration per block across launches, so Follow server then resets
     /// eligible blocks to Rex's colours. Never cleared automatically.
     pub terminal_theme_declared: bool,
+    /// The cursor, the selection and what selecting copies, from Settings → Terminal.
+    pub terminal: terminal::TerminalConfig,
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
@@ -249,6 +252,7 @@ impl Default for Settings {
             terminal_theme: TerminalThemeChoice::default(),
             terminal_theme_chosen: false,
             terminal_theme_declared: false,
+            terminal: terminal::TerminalConfig::default(),
             muted_tabs: Vec::new(),
             shortcut_file: shortcuts::Shortcuts::default(),
         }

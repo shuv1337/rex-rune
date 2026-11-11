@@ -178,9 +178,13 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     // Lists that mark the current value keep the check's column on every row, so names align.
     let checks = values || matches!(panel.kind, PanelKind::Themes);
     let [vw, vh] = viewport;
-    // The control a Settings popup button opened this list from, `[x, y, w, h]` where layout
-    // put it: the list goes right under it, or right above when there is more room there.
-    let control = panel.anchor_to.as_deref().and_then(rune::memo::layout);
+    // The control a Settings popup button opened this list from, `[x, y, w, h]` where the
+    // window shows it now, however far its page has scrolled: the list goes right under it,
+    // or right above when there is more room there.
+    let control = panel
+        .anchor_to
+        .as_deref()
+        .and_then(rune::memo::window_layout);
     let room = control.map(|[_, y, _, h]| {
         let below = vh - (y + h + CONTROL_GAP) - 8.;
         let above = y - CONTROL_GAP - 8.;

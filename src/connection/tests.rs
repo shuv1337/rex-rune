@@ -1804,3 +1804,45 @@ async fn a_worker_gets_its_search_whatever_the_control_connection_is_doing() {
     ));
     assert!(received.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn the_cursor_this_client_draws_reaches_the_pane_worker_even_while_the_host_reconnects() {
+    use crate::terminal::CursorShape;
+    // To the pane's worker whatever the control connection is doing.
+    let (commands, received) = flume::unbounded();
+    let workers = HashMap::from([(
+        "b".to_owned(),
+        PaneWorker {
+            session: "s".into(),
+            commands,
+            task: tokio::spawn(async {}),
+            size: None,
+        },
+    )]);
+    assert!(forward_search(
+        &workers,
+        "b",
+        &Command::CursorStyle(CursorShape::Bar)
+    ));
+    assert!(matches!(
+        received.try_recv(),
+        Ok(DataCommand::CursorStyle(CursorShape::Bar))
+    ));
+
+    // And while the host is between attempts it is no input that failed to send.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let host = HostConnection::spawn(endpoint, None, None, None, true, None);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    host.commands
+        .send(HostCommand::Terminal {
+            session: "s".into(),
+            block: "b".into(),
+            command: Command::CursorStyle(CursorShape::Underline),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(host.model.lock().unwrap().notice, None);
+    drop(host);
+}

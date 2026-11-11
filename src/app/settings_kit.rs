@@ -10,6 +10,8 @@
 //!   with its own content.
 //! - Controls: [`segmented`] and [`segmented_fixed`], [`value_popup`], [`stepper`],
 //!   [`button`], and the [`value`], [`mono_value`] and [`state_chip`] read-outs.
+//! - [`preview_well`]: a card's first row when its settings change how something is drawn, a
+//!   sample of it drawn that way.
 //!
 //! A popup opened from a [`value_popup`] is a list panel drawn over Settings and placed
 //! against the control (`Panel::anchor_to`, read by `popups::list_popup`).
@@ -98,6 +100,34 @@ pub fn mono_footnote(words: impl Into<String>) -> El {
         .wrap()
         .selectable(true)
         .px(INSET)
+}
+
+/// A preview well's inset from its card's edges, and its content's from the well's.
+pub const WELL_INSET: f32 = 6.;
+const WELL_PADDING: (f32, f32) = (10., 6.);
+
+/// A card row that previews the settings under it: `content`, `height` tall, on `ground`
+/// (the surface it is drawn on where it is used) inside a hairline, 6 pt in from the card.
+/// Content wider than the well is cut at its edge. `label` says what the preview shows; the
+/// well is one image to assistive technology, never a control.
+pub fn preview_well(key: &str, label: &str, ground: u32, height: f32, content: El) -> El {
+    const RADIUS: f32 = CARD_RADIUS - WELL_INSET + 2.;
+    row().w_full().padding(WELL_INSET).child(
+        row()
+            .key(key.to_owned())
+            .role("img")
+            .label(label.to_owned())
+            .w_full()
+            .h(height + 2. * WELL_PADDING.1)
+            .px(WELL_PADDING.0)
+            .center_y()
+            .radius(RADIUS)
+            .continuous_corners()
+            .clip_rounded(RADIUS)
+            .fill(rgb(ground))
+            .border(1., white(0.09))
+            .child(content),
+    )
 }
 
 /// The frame every card row shares: full width, the card's inset, content centred on the
