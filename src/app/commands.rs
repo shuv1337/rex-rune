@@ -722,6 +722,13 @@ impl Workspace {
         let mut rows = vec![
             Command::action("app.settings", G, "Settings…", "client.settings")
                 .keywords("preferences options"),
+            Command::action(
+                "app.shortcuts",
+                G,
+                "Change shortcuts…",
+                super::recorder::EDIT,
+            )
+            .keywords("keys keyboard bindings keymap rebind record"),
             Command::new(
                 "app.check_updates",
                 G,

@@ -580,14 +580,17 @@ fn the_page_draws_a_row_for_every_action_with_its_keys_or_not_set() {
         .map(Vec::len)
         .sum();
     assert_eq!(caps, bound, "a chip a key");
-    // An unbound action reads Not set; the pointer's two say how the pointer runs them.
-    let unbound = rt
-        .state
-        .shortcut_rows()
-        .iter()
-        .filter(|row| row.keys.is_empty() && row.pointer.is_none())
-        .count();
-    assert_eq!(text_rects(&rt, "Not set").len(), unbound);
+    // An unbound action has Record shortcut, or reads Not set when it needs an argument no
+    // key recorded here gives; the pointer's two say how the pointer runs them.
+    let rows = rt.state.shortcut_rows();
+    let unbound = |recordable: bool| {
+        rows.iter()
+            .filter(|row| row.keys.is_empty() && row.recordable == recordable)
+            .count()
+    };
+    assert!(unbound(true) > 20 && unbound(false) >= 1);
+    assert_eq!(text_rects(&rt, "Record shortcut").len(), unbound(true));
+    assert_eq!(text_rects(&rt, "Not set").len(), unbound(false));
     assert_eq!(text_rects(&rt, "Mouse Back").len(), 1);
     assert_eq!(text_rects(&rt, "Mouse Forward").len(), 1);
     // Named as Commands and the menus name them, each once.
@@ -616,9 +619,16 @@ fn the_filter_stays_above_the_rows_and_narrows_them_by_key() {
     let mut rt = shortcuts_open(workspace_hosts(2));
     let field = rect(&rt, "shortcut-filter");
     let scroll = rect(&rt, "settings-scroll:shortcuts");
+    // The Configuration menu's button ends the filter's row.
+    let menu = rect(&rt, crate::app::recorder::MENU);
     assert!(
-        field[1] + field[3] <= scroll[1] && close(field[0] + field[2], scroll[0] + scroll[2] - 20.),
-        "the filter is above the scroll region, inset as the page is: {field:?} over {scroll:?}"
+        field[1] + field[3] <= scroll[1]
+            && close(field[0], scroll[0] + 20.)
+            && close(field[0] + field[2], menu[0] - 8.)
+            && close(menu[0] + menu[2], scroll[0] + scroll[2] - 20.)
+            && close(menu[1], field[1])
+            && close(menu[3], field[3]),
+        "the filter is above the scroll region, inset as the page is: {field:?} and {menu:?} over {scroll:?}"
     );
     // Scrolled, the rows move and the filter does not.
     rt.wheel(
@@ -837,7 +847,13 @@ fn the_helper_names_the_layers_and_the_filter() {
         .find(|e| e.key.as_deref() == Some("shortcuts-help"))
         .and_then(|e| e.text)
         .expect("the helper");
-    for words in ["Not set", "shortcuts.json", "ctrl+k", "first result"] {
+    for words in [
+        "Record shortcut",
+        "recorded here wins",
+        "shortcuts.json",
+        "ctrl+k",
+        "first result",
+    ] {
         assert!(help.contains(words), "{words}: {help}");
     }
     // It is the first thing on the page, above the first heading.

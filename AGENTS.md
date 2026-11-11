@@ -28,12 +28,13 @@ Some probes connect to the configured Rex server and create sessions there. Of t
   - `transport.rs`, `wire.rs`: Unix/HTTPS WebSockets, data tickets, snapshot framing.
   - `connection.rs` (and `connection/`): one control connection per host, block-keyed terminal streams, the `Options` CLI definition. `connection/server_info.rs`: the server's version and status on `HostModel::server_info`, read-only and once per connection.
   - `terminal.rs`: Ghostty decoding and render frames. `terminal/search.rs`: searching the screen and scrollback with Ghostty's search. `links.rs`: OSC 8 hyperlinks and text URLs in a frame.
-  - `layout.rs`: split placement. `settings.rs`: local configuration.
+  - `layout.rs`: split placement. `settings.rs`: local configuration. `settings/shortcuts.rs`: the user's `shortcuts.json`, read and never written. `settings/recorded.rs`: the keymap layer of shortcuts recorded in Settings, saved in the app's settings file.
   - `download.rs` and `download/`: the file download core for API 13 (`name.rs` sanitizes hostile names, `store.rs` the destination folder, partial files and crash records, `stream.rs` the data stream, `open.rs` the "never Open" list); driven by `HostCommand::Download` in `connection/downloads.rs`. No UI yet.
   - `ssh.rs`: `ssh://` endpoints, a Rex socket forwarded with `ssh -L`. `tailnet.rs`: the machines in `tailscale status --json` and the check for a Rex server on each.
 - `src/main.rs` and `src/app/`: the Rune front end (behind the default `ui` feature).
   - `workspace.rs`: workspace state and behavior (hosts, sessions, tabs, panes, requests, preferences, notices). Host and terminal workers wake the UI through `rune::AppHandle::update`.
   - `panel.rs`: popup and dialog state and the switcher and pane-menu lists. `commands.rs`: every Commands row in one table, grouped by what it acts on; an action without a row there needs a stated reason, and `command_tests.rs` pins the ids. `discover.rs`: the Add host list of the tailnet's machines.
+  - `shortcuts_page.rs`: Settings → Shortcuts, a row for every action. `recorder.rs`: recording a shortcut on a row, the Configuration menu and Reset all.
   - `actions.rs`: the named actions and their `Spec::remote()` decisions. `keycaps.rs`: the one formatter for shortcut hints, read from the effective keymap. `wiring_tests.rs` checks what every action owes: a Commands row, a heading and title on Settings → Shortcuts, a remote decision and its keys as a hint.
   - `pane_verbs.rs`: the pane menu's Copy, Paste, Select all, Copy pane ID, Clear and Reset. `pane_header.rs`: a pane header's buttons and where the Pane headers setting puts a header. `find.rs`: the find bar, its placement and Find next / Find previous.
   - `tabs.rs`: the tab menu on toolbar pills and sidebar rows, moving a tab in its session's order, muting it on this client, closing the other tabs and its default title.

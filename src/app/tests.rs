@@ -18,6 +18,8 @@ mod pane_header_tests;
 mod pane_verb_tests;
 #[path = "polish_tests.rs"]
 mod polish_tests;
+#[path = "recorder_tests.rs"]
+mod recorder_tests;
 #[path = "registry_tests.rs"]
 mod registry_tests;
 #[path = "remote_session_tests.rs"]

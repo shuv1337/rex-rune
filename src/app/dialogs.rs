@@ -251,6 +251,12 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
                 "Remove host",
             )
         }
+        PanelKind::ResetShortcuts => confirm_with(
+            &panel.title,
+            &s.reset_shortcuts_words(),
+            "Keep shortcuts",
+            "Reset all",
+        ),
         PanelKind::StartSsh { endpoint } => super::ssh_setup::dialog(s, endpoint),
         PanelKind::AgentChange { change, steps } => {
             super::integrations::confirm(s, &panel.title, change, steps)

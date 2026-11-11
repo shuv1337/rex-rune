@@ -8,18 +8,20 @@
 //! - [`listing`] narrows the rows to a query. `ctrl+k` is read as a key and lists what is
 //!   bound to it, the one the key performs first; anything else is looked for in the names
 //!   and the keys.
-//! - [`filter_field`] and [`page`] draw them, from `settings_kit` and `keycaps`.
+//! - [`filter_field`] and [`page`] draw them, from `settings_kit` and `keycaps`. A row's keys
+//!   are buttons that record a new shortcut in place (`recorder`).
 use super::{
     actions::{self, Kind},
     commands::Run,
-    keycaps::{Chords, keycaps, spell},
+    keycaps::{Chords, spell},
     panel::Intent,
-    settings_kit::{card, footnote, page as stack, row_frame, section, words},
+    recorder::{self, Recorder},
+    settings_kit::{INSET, card, footnote, page as stack, row_frame, section, words},
     settings_view::SHORTCUT_CATEGORIES,
     theme::*,
     workspace::Workspace,
 };
-use rex_linux::keymap::{Chord, Key as BoundKey, Resolved};
+use rex_linux::keymap::{Chord, Key as BoundKey, RECORDED, Resolved};
 use rexrs::api::client::{Binding, InspectResponseAction, Removal};
 use rune::{El, Key, KeyEvent, Tx, col, row, text};
 use rune_kit::TextInput;
@@ -32,8 +34,10 @@ const FIELD: f32 = 32.;
 const SCROLL: &str = "settings-scroll:shortcuts";
 /// The heading of what the host's server offers.
 const SERVER: &str = "Server";
+/// Where a shortcut recorded on this page is from, in a row's helper line.
+const HERE: &str = "Recorded here";
 
-const HELP: &str = "Every action is listed, with its keys or Not set. Keys come from the Linux defaults, the host's Rex configuration and your shortcuts.json, the last winning. Filter by a key, such as ctrl+k, to see everything bound to it; the first result is the one the key performs.";
+const HELP: &str = "Every action is listed. Press a row's keys to record others, or Record shortcut to give it some; in Commands, Ctrl Enter opens the highlighted command here. A shortcut recorded here wins over your shortcuts.json, which wins over the host's Rex configuration and the Linux defaults. Filter by a key, such as ctrl+k, to see everything bound to it; the first result is the one the key performs.";
 
 /// One action on the page.
 #[derive(Clone, Debug, PartialEq)]
@@ -51,9 +55,25 @@ pub struct Row {
     pub notes: Vec<String>,
     /// How the pointer runs it (`Mouse Back`), for the two actions it does.
     pub pointer: Option<&'static str>,
-    /// Every binding of it, also one whose key another action took, with its place in the
-    /// order keys are tried.
-    bound: Vec<(usize, Vec<Chord>)>,
+    /// Whether a key can be recorded for it here: not for a row that only says which
+    /// argument its action needs.
+    pub recordable: bool,
+    /// Every binding of it, also one whose key another action took.
+    pub held: Vec<Held>,
+}
+
+/// One binding of a row's action.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Held {
+    /// Its place in the order keys are tried.
+    place: usize,
+    pub chords: Vec<Chord>,
+    /// As the keymap has it: its keys as spelled there, its arguments and its layer.
+    pub binding: Binding,
+    /// No binding tried before it has its key, so the key runs the action.
+    pub live: bool,
+    /// The numpad's key for another of the row's keys: said in words, not shown.
+    folded: bool,
 }
 
 impl Row {
@@ -76,6 +96,16 @@ impl Row {
         id.replace('/', "_")
     }
 
+    /// The bindings whose keys the row shows, in the order of `keys`.
+    pub fn shown(&self) -> impl Iterator<Item = &Held> {
+        self.held.iter().filter(|held| held.live && !held.folded)
+    }
+
+    /// Whether the row is for `action` with `args`, a binding's `when` aside.
+    pub fn runs(&self, action: &str, args: Option<&Value>) -> bool {
+        identity(&self.action, self.args.as_ref()) == identity(action, args)
+    }
+
     /// Whether `needle` (lower case, single spaces) is in the row's name, its action, its
     /// heading or the keycaps of one of its bindings.
     fn mentions(&self, needle: &str) -> bool {
@@ -87,9 +117,9 @@ impl Row {
                 .pointer
                 .is_some_and(|words| words.to_lowercase().contains(needle))
             || self
-                .bound
+                .held
                 .iter()
-                .any(|(_, chords)| spell(&caps(chords)).to_lowercase().contains(needle))
+                .any(|held| spell(&caps(&held.chords)).to_lowercase().contains(needle))
     }
 }
 
@@ -133,9 +163,9 @@ fn bound<'a>(map: &'a Resolved, server: &[InspectResponseAction]) -> Vec<Bound<'
 /// What tells one row from another: the action and its arguments, none and `{}` alike. A
 /// binding's `when` is not among them: a key that runs the action only at certain times is
 /// on the action's row, which says when.
-type Identity = (String, String);
+pub(super) type Identity = (String, String);
 
-fn identity(action: &str, args: Option<&Value>) -> Identity {
+pub(super) fn identity(action: &str, args: Option<&Value>) -> Identity {
     let args = args
         .map(actions::without_when)
         .filter(|args| !args.is_null() && args.as_object().is_none_or(|a| !a.is_empty()))
@@ -202,6 +232,7 @@ fn argument_words(args: &Value) -> String {
 /// an id one for each value something is bound with (or one that says what it needs).
 fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<Plan> {
     let mut plans = Vec::new();
+    let defaults = rex_linux::keymap::defaults().bindings;
     for spec in actions::SPECS {
         let argument = spec.argument();
         let mut listed: Vec<Option<Value>> = match &argument {
@@ -222,6 +253,23 @@ fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<P
             .filter_map(|(_, indices)| bound[indices[0]].binding.args.as_ref())
             .map(actions::without_when)
             .collect();
+        // A value a Linux default binds keeps its row while the key is taken off it, so the
+        // row can say so and take another.
+        for default in defaults
+            .iter()
+            .filter(|default| default.action == spec.name)
+        {
+            let Some(args) = default.args.as_ref().map(actions::without_when) else {
+                continue;
+            };
+            let id = identity(spec.name, Some(&args));
+            let known = |other: Option<&Value>| identity(spec.name, other) == id;
+            if !listed.iter().any(|args| known(args.as_ref()))
+                && !others.iter().any(|args| known(Some(args)))
+            {
+                others.push(args);
+            }
+        }
         others.sort_by_cached_key(argument_order);
         listed.extend(others.into_iter().map(Some));
         let unbindable = listed.is_empty();
@@ -306,6 +354,7 @@ fn source(binding: &Binding) -> Option<&str> {
     match binding.source.as_deref() {
         Some("linux") => None,
         Some("settings") => Some("shortcuts.json"),
+        Some(RECORDED) => Some(HERE),
         Some(source) => Some(source),
         None => Some("Server"),
     }
@@ -397,6 +446,8 @@ pub fn rows(
             for (index, source) in &sources {
                 note(if one_source {
                     (*source).to_owned()
+                } else if *source == HERE {
+                    format!("{} recorded here", keys_of(*index))
                 } else {
                     format!("{} from {source}", keys_of(*index))
                 });
@@ -442,6 +493,7 @@ pub fn rows(
                     note(format!("{} is taken by {}", keys_of(index), titles[winner]));
                 }
             }
+            let recordable = plan.hint.is_none();
             if let Some(hint) = plan.hint {
                 note(hint);
             }
@@ -464,9 +516,16 @@ pub fn rows(
                     .collect(),
                 notes,
                 pointer,
-                bound: indices
+                recordable,
+                held: indices
                     .iter()
-                    .map(|&index| (index, bound[index].chords.to_vec()))
+                    .map(|&index| Held {
+                        place: index,
+                        chords: bound[index].chords.to_vec(),
+                        binding: bound[index].binding.clone(),
+                        live: bound[index].taken_by.is_none(),
+                        folded: folded.contains(&index),
+                    })
                     .collect(),
             }
         })
@@ -508,10 +567,10 @@ pub fn listing(rows: Vec<Row>, query: &str) -> Listing {
         .map(|chord| Chord::parse(chord).ok())
         .collect();
     let place = |row: &Row, chords: &[Chord]| {
-        row.bound
+        row.held
             .iter()
-            .filter(|(_, keys)| keys.starts_with(chords))
-            .map(|(place, _)| *place)
+            .filter(|held| held.chords.starts_with(chords))
+            .map(|held| held.place)
             .min()
     };
     let chords = chords.filter(|chords| {
@@ -536,7 +595,7 @@ pub fn listing(rows: Vec<Row>, query: &str) -> Listing {
     let tie = chords.as_ref().is_some_and(|chords| {
         on_key
             .iter()
-            .filter(|(_, row)| row.bound.iter().any(|(_, keys)| keys == chords))
+            .filter(|(_, row)| row.held.iter().any(|held| held.chords == *chords))
             .count()
             > 1
     });
@@ -552,8 +611,43 @@ pub fn listing(rows: Vec<Row>, query: &str) -> Listing {
     }
 }
 
-/// Say on a row which of its default keys shortcuts.json took away, so `Not set` is not
-/// the whole story of an action that had a key.
+/// The binding that has `chords` now, or a sequence they start, or the start of theirs: the
+/// one a new binding of `chords` would take the key from. `except` is a binding about to go.
+pub fn holder<'a>(
+    rows: &'a [Row],
+    chords: &[Chord],
+    except: Option<&Binding>,
+) -> Option<(&'a Row, &'a Held)> {
+    rows.iter()
+        .flat_map(|row| row.held.iter().map(move |held| (row, held)))
+        .filter(|(_, held)| {
+            held.live
+                && except != Some(&held.binding)
+                && (held.chords.starts_with(chords) || chords.starts_with(&held.chords))
+        })
+        .min_by_key(|(_, held)| held.place)
+}
+
+/// Say on a row which of its keys was taken off it on this page.
+pub fn note_recorded_removals(rows: &mut [Row], changes: &[rex_linux::settings::recorded::Change]) {
+    for change in changes.iter().filter(|change| change.remove) {
+        let Ok(chords) = rex_linux::keymap::parse_keys(&change.keys) else {
+            continue;
+        };
+        if let Some(row) = rows.iter_mut().find(|row| {
+            row.runs(&change.action, change.args.as_ref())
+                && !row.held.iter().any(|held| held.chords == chords)
+        }) {
+            let note = format!("{} removed here", spell(&caps(&chords)));
+            if !row.notes.contains(&note) {
+                row.notes.push(note);
+            }
+        }
+    }
+}
+
+/// Say on a row which of its default keys shortcuts.json took away, so an action that had a
+/// key says where it went.
 pub fn note_removals(rows: &mut [Row], removals: &[Removal]) {
     for default in rex_linux::keymap::defaults().bindings {
         let removed = removals.iter().any(|removal| {
@@ -573,7 +667,7 @@ pub fn note_removals(rows: &mut [Row], removals: &[Removal]) {
         let id = identity(&default.action, default.args.as_ref());
         if let Some(row) = rows.iter_mut().find(|row| {
             identity(&row.action, row.args.as_ref()) == id
-                && !row.bound.iter().any(|(_, keys)| *keys == chords)
+                && !row.held.iter().any(|held| held.chords == chords)
         }) {
             row.notes.push(format!(
                 "{} removed in shortcuts.json",
@@ -591,6 +685,7 @@ impl Workspace {
             &mut rows,
             &self.settings.shortcut_file.overrides.layer.removals,
         );
+        note_recorded_removals(&mut rows, self.settings.recorded_shortcuts.changes());
         rows
     }
 
@@ -656,28 +751,76 @@ pub fn filter_field(s: &Workspace, inset: f32) -> El {
         .w_full()
         .h(FILTER)
         .px(inset)
-        .child(field.build(kit()).key("shortcut-filter"))
+        .gap(8.)
+        .child(field.build(kit()).key("shortcut-filter").grow(1.).min_w(0.))
+        .child(recorder::menu_button())
 }
 
 /// A row: what it runs on the left, in the name Commands and the menus use, and every
-/// binding of it on the right as the same keycaps, one under another.
-fn row_el(found: &Row) -> El {
+/// binding of it on the right as the same keycaps, one under another. Each binding is a
+/// button that records another in its place, and a row with none has Record shortcut. The
+/// row `recording` is on shows the recorder instead, and what its keys would do.
+fn row_el(found: &Row, recording: Option<&(Recorder, recorder::Verdict)>) -> El {
     let id = found.id();
-    let detail = found.notes.join(" · ");
-    let keys = if found.keys.is_empty() {
-        // Words, not a control: nothing here sets a key yet.
-        let words = found.pointer.unwrap_or("Not set");
-        text(words)
+    if let Some((recorder, verdict)) = recording.filter(|(recorder, _)| recorder.row == id) {
+        let (status, warn) = recorder.status(verdict);
+        let status = text(status)
+            .key("shortcut-recording-status")
+            .font(ui(11.5))
+            .color(rgb(if warn { warning() } else { muted() }))
+            .wrap();
+        // The recorder beside the name, and what it says on a line of its own: the words
+        // keep their width whatever the recorder shows.
+        return col()
+            .key(format!("shortcut:{id}"))
+            .w_full()
+            .px(INSET)
+            .py(6.)
+            .gap(4.)
+            .child(
+                row()
+                    .w_full()
+                    .gap(12.)
+                    .center_y()
+                    .child(
+                        text(found.title.clone())
+                            .font(ui(13.))
+                            .color(rgb(ink()))
+                            .truncate()
+                            .help_when_truncated(found.title.clone())
+                            .grow(1.)
+                            .shrink()
+                            .min_w(96.),
+                    )
+                    .child(recorder::control(recorder).key(format!("shortcut-keys:{id}"))),
+            )
+            .child(status);
+    }
+    let mut notes = found.notes.clone();
+    // The pointer's way to run it, which the keys' place said until it could take a key.
+    if let Some(pointer) = found.pointer.filter(|_| found.keys.is_empty()) {
+        notes.insert(0, pointer.to_owned());
+    }
+    let detail = notes.join(" · ");
+    let keys = if !found.keys.is_empty() {
+        let said: Vec<String> = found.keys.iter().map(|chords| spell(chords)).collect();
+        col().gap(4.).items_end().label(said.join(" or ")).children(
+            found
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(index, chords)| recorder::key_button(&id, index, &found.title, chords)),
+        )
+    } else if found.recordable {
+        row()
+            .label("Not set")
+            .child(recorder::record_button(&id, &found.title))
+    } else {
+        // Words, not a control: the action needs an argument no key recorded here gives.
+        text("Not set")
             .font(ui(12.))
             .color(rgb(muted()))
-            .label(words.to_owned())
-    } else {
-        let said: Vec<String> = found.keys.iter().map(|chords| spell(chords)).collect();
-        col()
-            .gap(5.)
-            .items_end()
-            .label(said.join(" or "))
-            .children(found.keys.iter().map(|chords| keycaps(chords, false)))
+            .label("Not set")
     };
     row_frame(!detail.is_empty())
         .key(format!("shortcut:{id}"))
@@ -753,7 +896,7 @@ fn problems_and_files(s: &Workspace, sections: &mut Vec<El>) {
         [
             card(files),
             footnote(
-                "Edit the overrides file, then return to Rex to reload. Escape cancels a sequence; unbound keys reach the terminal.",
+                "Edit shortcuts.json, then return to Rex to reload it. Shortcuts recorded on this page are saved in the app's settings file, never in shortcuts.json. Escape cancels a sequence; unbound keys reach the terminal.",
             ),
         ],
     ));
@@ -762,7 +905,13 @@ fn problems_and_files(s: &Workspace, sections: &mut Vec<El>) {
 /// The page under the filter: every row under its heading, or what the filter leaves.
 pub fn page(s: &Workspace) -> El {
     let query = s.shortcut_filter.text.trim().to_owned();
-    let found = listing(s.shortcut_rows(), &query);
+    let all = s.shortcut_rows();
+    // What the keys typed into the recorder would do, said on its row.
+    let recording = s
+        .recording()
+        .map(|recorder| (recorder.clone(), recorder.verdict(&all)));
+    let row_el = |row: &Row| row_el(row, recording.as_ref());
+    let found = listing(all, &query);
     let mut sections = Vec::new();
     if query.is_empty() {
         sections.push(footnote(HELP).key("shortcuts-help"));
@@ -780,7 +929,7 @@ pub fn page(s: &Workspace) -> El {
         if rows.is_empty() {
             body.push(footnote("Nothing; the key goes to the terminal.").key("shortcuts-none"));
         } else {
-            body.push(card(rows.iter().map(row_el)).key("shortcuts-on-key"));
+            body.push(card(rows.iter().map(&row_el)).key("shortcuts-on-key"));
         }
         if found.tie {
             body.push(footnote("The first is the one the key performs."));
@@ -792,7 +941,7 @@ pub fn page(s: &Workspace) -> El {
             .rows
             .iter()
             .filter(|row| row.category == name)
-            .map(row_el)
+            .map(&row_el)
             .collect();
         if !rows.is_empty() {
             sections.push(section(name, [card(rows)]));

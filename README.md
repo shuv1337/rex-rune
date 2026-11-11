@@ -298,6 +298,7 @@ The following actions have no default key binding:
 | `client.theme.choose` | None | Open the terminal theme list |
 | `client.font.increase` / `client.font.decrease` / `client.font.reset` | None | Step the terminal font size one point within 8–48 pt, or return it to 15 pt. It applies to every terminal and is saved as `font_size`; interface zoom is untouched. `Ctrl Alt =`, `Ctrl Alt -` and `Ctrl Alt 0` are free to bind, but then stop reaching terminal programs |
 | `client.about` | None | Open Settings → About |
+| `client.shortcuts` | None | Open Settings → Shortcuts |
 | `client.version.copy` | None | Copy the version info, as Settings → About does |
 | `client.debug.copy` | None | Copy the debug info, as Settings → About does |
 | `client.issue.report` | None | Open the issue form in the browser |
@@ -337,7 +338,9 @@ show it only while it would run.
 For the default workspace, edit `$XDG_CONFIG_HOME/rex-linux/shortcuts.json` (normally
 `~/.config/rex-linux/shortcuts.json`). With a custom `--config /path/demo.json`,
 edit `/path/demo.shortcuts.json`. The app never writes this file, except for the
-one-time import of custom bindings from nivox's legacy `keybindings` field.
+one-time import of custom bindings from nivox's legacy `keybindings` field. Shortcuts
+recorded in Settings → Shortcuts are kept apart from it, in the app's own settings file
+(see [Recording shortcuts](#recording-shortcuts)).
 
 The preferred format is an object; a bare array also works. A missing, empty or
 whitespace-only file means no overrides. Bad entries are skipped; invalid JSON
@@ -353,14 +356,55 @@ uses defaults and appears in Settings → Shortcuts → Problems.
 }
 ```
 
-Layers run lowest to highest: **Linux defaults → each server’s Rex config → client overrides**.
-The app sends its defaults, override layer and action registry to `client.keymap`;
+Layers run lowest to highest: **Linux defaults → each server’s Rex config → `shortcuts.json` →
+shortcuts recorded in Settings**. The app sends its defaults, its override layers (the file's,
+then the recorded one when anything is recorded) and its action registry to `client.keymap`;
 `rex.bind`, `rex.unbind`, Lua-function sequences and config-file actions participate
 in the same resolution. The active host’s map is used—not a union of hosts.
 When that host is offline, has not answered, or rejects the keymap request, local
 defaults plus overrides work instead. A keymap error never disconnects the host;
 Settings → Shortcuts retains its explanation. Config changes refresh by hash and
 server instance, and every reconnect registers again.
+
+### Recording shortcuts
+
+In Settings → Shortcuts every binding of an action is a button, and an action with no key
+has **Record shortcut**. Pressing one turns the row into a recorder: type the keys, and
+**Enter** or **Save** gives them to the action in place of the binding you pressed.
+**Esc**, the × button or a press anywhere else cancels; the bin button, or **Backspace**
+with nothing typed, removes the binding you pressed and leaves the action without it.
+A shortcut starts with Ctrl, Alt or Super, with a function key, or with Shift and a named
+key such as Page Up; keys typed after the first make a sequence of up to four (`Ctrl B`,
+then `C`), and those may be plain. While the recorder is open every key is its own: a
+workspace shortcut pressed there is recorded, not run, and keys an input method is
+composing with are ignored.
+
+Before anything is saved the row says what the keys would do: **Also bound to** names the
+action that has them now and would lose them, and a sequence that overlaps another
+binding names that. A saved shortcut works at once, on every host, and is in effect again
+at the next launch. The row then reads **Recorded here**, and names a key it took off the
+action (`Ctrl Shift D removed here`). Typing a removed default again brings it back as it
+was. An action that needs an argument no key could give (Send key, Show session) has no
+recorder; bind it in `shortcuts.json`.
+
+Recordings are a fourth keymap layer, above `shortcuts.json`, saved as
+`recorded_shortcuts` in the app's settings file (`workspace.json`, or the `--config`
+file). `shortcuts.json` is never written. The **⋯** button beside the filter says how
+much is recorded, copies the path of `shortcuts.json`, copies the recordings as a
+`shortcuts.json` file to paste there (a key taken off an action is written as an
+unbinding of that key, `"action": null`, which is all that file can say), and has
+**Reset all…**, which asks and then forgets every recording so each action goes back to
+its key from the layers below.
+
+In Commands, **Ctrl Enter** opens the highlighted command's row in Settings → Shortcuts,
+recording; a row that is not an action (a session or a tab a search found, Check for
+updates) says it has no action a shortcut could run. **Change shortcuts…** in Commands
+(`client.shortcuts`) opens the page.
+
+Not checked against a live Rex server: that a server keeps the recorded layer above the
+file's and reports `recorded` as a binding's source, and that it honours a removal that
+names its action. Both follow Rex's `client.keymap` documentation and are covered here
+by headless tests and the local resolver only.
 
 ### Remote control
 
@@ -431,13 +475,13 @@ with an informational notice rather than applied to a different target.
 
 Settings → Shortcuts lists every action, bound or not, by the name Commands gives
 it: its keys as keycaps (“then” between sequence steps, every binding of the
-action on one row), or **Not set**. A row says where a key comes from when it is
+action on one row), or **Record shortcut**. A row says where a key comes from when it is
 not a default, which other action shares or took one of its keys, and which
-default `shortcuts.json` removed. The **Filter shortcuts…** field above the list
+key `shortcuts.json` or a recording removed. The **Filter shortcuts…** field above the list
 takes a name or a key: `ctrl+k` lists everything bound to that key, the action it
-performs first, and a key nothing is bound to says so. The page is read-only;
-keys are changed in `shortcuts.json`. Persistent Problems and both config paths
-follow the list. Commands shows the highest
+performs first, and a key nothing is bound to says so. Keys are changed on the page
+(see [Recording shortcuts](#recording-shortcuts)) or in `shortcuts.json`. Persistent
+Problems and both config paths follow the list. Commands shows the highest
 binding for each action and argument set, or no shortcut when unbound. Only
 settings-source diagnostic sets toast, once per distinct set per host; file and
 default-layer diagnostics stay in Problems. A pending sequence shows `Ctrl B …`
@@ -469,7 +513,7 @@ server’s original prefix spellings. Action arguments are checked before dispat
 Keys accept modifier aliases, named keys, F1–F12, W3C physical codes and `>` sequences.
 Letters follow the keyboard layout, with physical US-position fallbacks on
 non-Latin layouts; Shift stays a modifier instead of being folded into the key.
-Key modes and a recording editor are not implemented. Commands
+Key modes are not implemented. Commands
 runs a server action with `client.action` (origin `palette`) for the session and pane
 on screen, once: a failure is a notice and is never retried. Server actions that
 require arguments are not listed. Cross-server `client_call_requested` relaying is also not

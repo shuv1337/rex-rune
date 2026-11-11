@@ -1,3 +1,4 @@
+pub mod recorded;
 pub mod shortcuts;
 
 use anyhow::{Context, Result, ensure};
@@ -211,6 +212,9 @@ pub struct Settings {
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
+    /// Shortcuts recorded in Settings → Shortcuts: a keymap layer above `shortcut_file`.
+    #[serde(skip_serializing_if = "recorded::Recorded::is_empty")]
+    pub recorded_shortcuts: recorded::Recorded,
     /// Read-only sibling file, never serialized into workspace.json.
     #[serde(skip)]
     pub shortcut_file: shortcuts::Shortcuts,
@@ -250,6 +254,7 @@ impl Default for Settings {
             terminal_theme_chosen: false,
             terminal_theme_declared: false,
             muted_tabs: Vec::new(),
+            recorded_shortcuts: recorded::Recorded::default(),
             shortcut_file: shortcuts::Shortcuts::default(),
         }
     }

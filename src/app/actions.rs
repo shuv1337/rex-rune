@@ -76,6 +76,7 @@ enum Handler {
     ResizePane,
     CloseOtherPanes,
     GotoSession,
+    Shortcuts,
 }
 
 pub struct Spec {
@@ -152,6 +153,7 @@ specs! {
     super::pane_moves::RESIZE => ResizePane,
     super::pane_moves::CLOSE_OTHERS => CloseOtherPanes,
     super::session_numbers::GOTO => GotoSession,
+    super::recorder::EDIT => Shortcuts,
 }
 
 pub fn find(name: &str) -> Option<&'static Spec> {
@@ -243,7 +245,7 @@ impl Spec {
             ),
             RenameTab => Remote::Never("Use rex window rename instead."),
             RenameSession => Remote::Never("Use rex session rename instead."),
-            Palette | Settings | Search | SwitchSession | PaneActions => {
+            Palette | Settings | Search | SwitchSession | PaneActions | Shortcuts => {
                 Remote::Never("Only the person at this computer can open dialogs and popups.")
             }
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
@@ -396,6 +398,7 @@ impl Spec {
             Handler::ResizePane => "Resize pane",
             Handler::CloseOtherPanes => "Close other panes",
             Handler::GotoSession => "Go to session",
+            Handler::Shortcuts => "Change shortcuts",
         }
     }
     pub fn category(&self) -> &'static str {
@@ -413,7 +416,8 @@ impl Spec {
             | Handler::CopyVersion
             | Handler::ReportIssue
             | Handler::About
-            | Handler::CopyDebug => "Interface",
+            | Handler::CopyDebug
+            | Handler::Shortcuts => "Interface",
             Handler::NextTab
             | Handler::PreviousTab
             | Handler::NextGlobal
@@ -739,6 +743,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             }
         }
         Handler::GotoSession => s.goto_session(args["index"].as_i64().unwrap_or_default(), tx),
+        Handler::Shortcuts => s.open_shortcuts(tx),
         Handler::FocusNextPane => s.cycle_pane(true),
         Handler::FocusPreviousPane => s.cycle_pane(false),
         Handler::FontIncrease => s.step_font_size(1),
@@ -900,9 +905,17 @@ pub fn declarations() -> Vec<rexrs::api::client::InspectResponseAction> {
 
 /// Resolve once per file generation, including argument diagnostics. Invalid bindings
 /// are skipped at match time, so a lower valid action can still be selected.
+#[cfg(test)]
 pub fn resolve(overrides: &rex_linux::keymap::Overrides) -> rex_linux::keymap::Resolved {
+    resolve_all(&[overrides])
+}
+
+/// [`resolve`] with every override layer, lowest first: the user's file, then what was
+/// recorded in Settings.
+pub fn resolve_all(overrides: &[&rex_linux::keymap::Overrides]) -> rex_linux::keymap::Resolved {
     let actions = declarations();
-    let mut map = rex_linux::keymap::resolve(&[rex_linux::keymap::defaults()], overrides, &actions);
+    let mut map =
+        rex_linux::keymap::resolve_all(&[rex_linux::keymap::defaults()], overrides, &actions);
     for binding in &map.bindings {
         let binding = &binding.binding;
         if find(&binding.action)

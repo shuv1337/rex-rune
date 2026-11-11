@@ -190,6 +190,15 @@ pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.navigate_panel(if ev.key == Key::Up { -1 } else { 1 });
             tx.instant();
         }
+        // Commands: the highlighted command's shortcut, in Settings.
+        Key::Enter
+            if ctrl(ev)
+                && s.panel
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.kind, PanelKind::Picker(false))) =>
+        {
+            s.edit_selected_shortcut(tx)
+        }
         Key::Enter => s.submit(tx),
         Key::Escape => s.cancel_panel(tx),
         Key::Function(2) => {
@@ -339,6 +348,10 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn on_ime(s: &mut Workspace, ime: &Ime, _: &mut Tx) -> bool {
+    // A shortcut being recorded takes no composed text, and none of it reaches a terminal.
+    if super::recorder::ime(s, ime) {
+        return true;
+    }
     let Some(term) = s.active_terminal_mut() else {
         return false;
     };
