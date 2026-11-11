@@ -1,10 +1,11 @@
 //! The optional host → session sidebar. It slides in and out; rows activate on click only
 //! (keyboard session navigation is the Ctrl K switcher, so arrows never switch sessions).
 use super::{
-    activity::{program_icon, progress_bar, tab_activity, tab_name, tab_progress, tab_word},
+    activity::{progress_bar, tab_activity, tab_name, tab_programs, tab_progress, tab_word},
     keycaps::keycaps,
     panel::Intent,
     panes::divider_handle,
+    tab_icons::{icons_of, tab_icons},
     tabs::{TabAction, muted_mark, target_ring},
     theme::*,
     widgets::{chrome_button, glyph},
@@ -289,10 +290,11 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
         .on_secondary_press(move |s: &mut Workspace, p, _| {
             s.tab_menu(index, &menu_session, &menu_window, (p.x, p.y))
         })
-        .child(glyph(
-            program_icon(activity.program.as_deref()),
-            15.,
-            rgb(if active { ink() } else { muted() }),
+        .children(tab_icons(
+            &format!("sidebar-tab-icon:{index}:{session}:{id}"),
+            &icons_of(&tab_programs(model, tab)),
+            active,
+            &s.tab_icon_look(),
         ))
         .child(
             text(label)

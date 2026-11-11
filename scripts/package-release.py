@@ -73,6 +73,8 @@ def main():
         shutil.copy2(root / "vendor/rune/LICENSE", licenses / "Rune-LICENSE")
         # Ghostty is fetched by the build script, rather than appearing in Cargo metadata.
         shutil.copy2(root / "resources/icons/README.md", licenses / "ICON-PROVENANCE.md")
+        # The built-in terminal themes' authors and licences.
+        shutil.copy2(root / "docs/terminal-themes.md", licenses / "TERMINAL-THEMES.md")
         (licenses / "dependencies.json").write_text(json.dumps(index, indent=2) + "\n")
         shutil.copy2(root / "vendor/ghostty-vt/LICENSE-GHOSTTY", licenses / "Ghostty-LICENSE")
         (stage / "BUILD-INFO").write_text(

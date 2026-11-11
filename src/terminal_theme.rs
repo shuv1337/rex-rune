@@ -1,10 +1,12 @@
-//! Terminal colour themes this client can declare: the built-in ones paired with the chrome
-//! palettes, and Ghostty theme files from the user's own install.
+//! Terminal colour themes this client can declare: the built-in ones (those paired with the
+//! chrome palettes, Merino Light and Merino Dark, and a set of well-known themes), and
+//! Ghostty theme files from the user's own install.
 //!
 //! A theme reaches the terminal only through the server (`terminal.set_theme`), which applies
 //! the owner's declaration and sends it back on the block's stream; the client never recolours
 //! output itself. Ghostty's cursor-text and selection colours have no protocol field and are
-//! drawn locally.
+//! drawn locally. [`TerminalTheme::swatch`] gives a theme's colours for a picture of it (a
+//! card in the theme library, a strip in the switcher), which touches no terminal.
 //!
 //! A Ghostty theme file is `key = value` lines; `#` starts a comment and later lines win. The
 //! keys read are `background`, `foreground`, `cursor-color`, `cursor-text`,
@@ -19,6 +21,8 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
+
+mod builtin;
 
 /// Midnight's background: the navy the Midnight chrome is drawn in.
 pub const MIDNIGHT_BACKGROUND: u32 = 0x001528;
@@ -43,44 +47,56 @@ pub struct TerminalTheme {
     pub scheme: Option<&'static str>,
 }
 
-/// A terminal theme that ships with the client, paired with a chrome palette.
+/// A terminal theme that ships with the client: the ones paired with the chrome palettes,
+/// Merino Light and Merino Dark, and a set of well-known themes (`builtin.rs`).
 pub struct Builtin {
     /// Its id in the `terminal_theme` setting, after [`BUILTIN_PREFIX`].
     pub id: &'static str,
     pub name: &'static str,
-    pub chrome: ChromeTheme,
-    pub theme: fn() -> TerminalTheme,
+    /// The chrome palette it is paired with, when it is one's: its background is that
+    /// chrome's ground.
+    pub chrome: Option<ChromeTheme>,
+    colours: Colours,
+}
+
+enum Colours {
+    /// One of the themes made by hand below.
+    Made(fn() -> TerminalTheme),
+    /// Every colour, as [`TerminalTheme::full`] takes them.
+    Full {
+        background: u32,
+        text: [u32; 5],
+        palette: [u32; 16],
+    },
+}
+
+impl Builtin {
+    pub fn theme(&self) -> TerminalTheme {
+        match self.colours {
+            Colours::Made(theme) => theme(),
+            Colours::Full {
+                background,
+                text,
+                palette,
+            } => TerminalTheme::full(background, text, palette),
+        }
+    }
+
+    /// A theme for the light appearance: one on a light background.
+    pub fn light(&self) -> bool {
+        self.theme().is_light()
+    }
+
+    /// Its id as a `named:` choice holds it.
+    pub fn choice_id(&self) -> String {
+        format!("{BUILTIN_PREFIX}{}", self.id)
+    }
 }
 
 /// Built-in theme ids carry this prefix; Ghostty theme names never contain a slash.
 pub const BUILTIN_PREFIX: &str = "rex/";
 
-pub const BUILTINS: &[Builtin] = &[
-    Builtin {
-        id: "midnight",
-        name: "Midnight",
-        chrome: ChromeTheme::Midnight,
-        theme: TerminalTheme::midnight,
-    },
-    Builtin {
-        id: "rose-pine",
-        name: "Rosé Pine",
-        chrome: ChromeTheme::RosePine,
-        theme: TerminalTheme::rose_pine,
-    },
-    Builtin {
-        id: "rose-pine-moon",
-        name: "Rosé Pine Moon",
-        chrome: ChromeTheme::RosePineMoon,
-        theme: TerminalTheme::rose_pine_moon,
-    },
-    Builtin {
-        id: "gruvbox-dark",
-        name: "Gruvbox Dark",
-        chrome: ChromeTheme::GruvboxDark,
-        theme: TerminalTheme::gruvbox_dark,
-    },
-];
+pub use builtin::BUILTINS;
 
 /// The built-in theme a `named:` id refers to, if it names one.
 pub fn builtin(id: &str) -> Option<&'static Builtin> {
@@ -92,7 +108,7 @@ pub fn builtin(id: &str) -> Option<&'static Builtin> {
 pub fn paired(chrome: ChromeTheme) -> &'static Builtin {
     BUILTINS
         .iter()
-        .find(|b| b.chrome == chrome)
+        .find(|b| b.chrome == Some(chrome))
         .expect("every chrome palette has a paired theme")
 }
 
@@ -142,8 +158,8 @@ impl TerminalTheme {
         }
     }
 
-    /// A dark theme with every colour: foreground, cursor, cursor text, selection background
-    /// and selection foreground, then palette colours 0–15.
+    /// A theme with every colour: foreground, cursor, cursor text, selection background and
+    /// selection foreground, then palette colours 0–15. Its scheme is its background's.
     fn full(
         background: u32,
         [fg, cursor, cursor_text, sel_bg, sel_fg]: [u32; 5],
@@ -157,7 +173,20 @@ impl TerminalTheme {
             selection_background: Some(sel_bg),
             selection_foreground: Some(sel_fg),
             palette: (0..).zip(palette).collect(),
-            scheme: Some("dark"),
+            scheme: Some(if is_light(background) {
+                "light"
+            } else {
+                "dark"
+            }),
+        }
+    }
+
+    /// Whether this is a theme for the light appearance: what it says it is, else what its
+    /// background is. A theme with neither is a dark one, as Rex's own colours are.
+    pub fn is_light(&self) -> bool {
+        match self.scheme {
+            Some(scheme) => scheme == "light",
+            None => self.background.is_some_and(is_light),
         }
     }
 
@@ -235,6 +264,53 @@ impl TerminalTheme {
     }
 }
 
+/// Ghostty's own colours 0 to 7, which a terminal draws in when its theme sets no palette.
+pub const DEFAULT_ANSI: [u32; 8] = [
+    0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6,
+];
+/// The text colour a terminal draws in when its theme sets none.
+pub const DEFAULT_FOREGROUND: u32 = 0xffffff;
+
+/// The colours a picture of a theme is drawn in, every one of them filled in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Swatch {
+    pub background: u32,
+    pub foreground: u32,
+    pub cursor: u32,
+    pub cursor_text: u32,
+    pub selection_background: u32,
+    pub selection_foreground: u32,
+    /// Palette colours 0 to 7: black, red, green, yellow, blue, magenta, cyan and white.
+    pub ansi: [u32; 8],
+}
+
+impl TerminalTheme {
+    /// What a picture of this theme shows. A colour the theme leaves out is the one a
+    /// terminal draws under it: `background` and `selection` are the client's own stand-ins
+    /// (the chrome's card and its selection), text is [`DEFAULT_FOREGROUND`], the cursor is
+    /// the text's colour over the background's, selected text keeps its colour, and palette
+    /// colours are [`DEFAULT_ANSI`].
+    pub fn swatch(&self, background: u32, selection: u32) -> Swatch {
+        let background = self.background.unwrap_or(background);
+        let foreground = self.foreground.unwrap_or(DEFAULT_FOREGROUND);
+        let mut ansi = DEFAULT_ANSI;
+        for &(index, color) in &self.palette {
+            if let Some(slot) = ansi.get_mut(usize::from(index)) {
+                *slot = color;
+            }
+        }
+        Swatch {
+            background,
+            foreground,
+            cursor: self.cursor.unwrap_or(foreground),
+            cursor_text: self.cursor_text.unwrap_or(background),
+            selection_background: self.selection_background.unwrap_or(selection),
+            selection_foreground: self.selection_foreground.unwrap_or(foreground),
+            ansi,
+        }
+    }
+}
+
 /// Whether a colour reads as light: perceived brightness above half.
 pub fn is_light(color: u32) -> bool {
     let (r, g, b) = ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff);
@@ -303,6 +379,7 @@ impl ThemeDirs {
                         light: theme.background.is_some_and(is_light),
                         name,
                         custom,
+                        theme,
                     });
                 }
             }
@@ -332,9 +409,14 @@ impl ThemeDirs {
         Ok(match choice {
             TerminalThemeChoice::FollowServer => None,
             TerminalThemeChoice::RexDefault => Some(TerminalTheme::default()),
-            TerminalThemeChoice::FollowChrome => Some((paired(chrome).theme)()),
+            TerminalThemeChoice::FollowChrome => Some(paired(chrome).theme()),
+            // Which of its two themes depends on the appearance, which only the caller
+            // knows: it resolves `Settings::theme_in_use` instead.
+            TerminalThemeChoice::LightDark => {
+                bail!("The light and dark themes are chosen by the appearance")
+            }
             TerminalThemeChoice::Named(id) => Some(match builtin(id) {
-                Some(builtin) => (builtin.theme)(),
+                Some(builtin) => builtin.theme(),
                 None => self.load(id)?,
             }),
         })
@@ -348,6 +430,8 @@ pub struct ThemeInfo {
     pub light: bool,
     /// Found in the user's own theme directory.
     pub custom: bool,
+    /// Its colours, for a picture of it beside its name.
+    pub theme: TerminalTheme,
 }
 
 /// A file name in a theme directory: never a path that leaves it.
@@ -394,6 +478,62 @@ selection-foreground = #1e1e2e
 
     fn args(theme: &TerminalTheme) -> serde_json::Value {
         serde_json::to_value(theme.args()).unwrap()
+    }
+
+    #[test]
+    fn a_swatch_fills_in_what_a_theme_leaves_out_as_a_terminal_draws_it() {
+        let mocha = TerminalTheme::parse("Catppuccin Mocha", MOCHA)
+            .unwrap()
+            .swatch(0x001528, 0x2f4a6e);
+        assert_eq!(
+            (mocha.background, mocha.foreground, mocha.cursor),
+            (0x1e1e2e, 0xcdd6f4, 0xf5e0dc)
+        );
+        assert_eq!(
+            (
+                mocha.cursor_text,
+                mocha.selection_background,
+                mocha.selection_foreground
+            ),
+            (0x1e1e2e, 0xf5e0dc, 0x1e1e2e)
+        );
+        // Colours 0 and 1 are the file's, 2 to 7 Ghostty's own; 15 is not one of the eight.
+        assert_eq!(mocha.ansi[..2], [0x45475a, 0xf38ba8]);
+        assert_eq!(mocha.ansi[2..], DEFAULT_ANSI[2..]);
+
+        // Midnight sets its background only: the rest is what its terminal draws.
+        assert_eq!(
+            TerminalTheme::midnight().swatch(0x191724, 0x403d52),
+            Swatch {
+                background: MIDNIGHT_BACKGROUND,
+                foreground: DEFAULT_FOREGROUND,
+                cursor: DEFAULT_FOREGROUND,
+                cursor_text: MIDNIGHT_BACKGROUND,
+                selection_background: 0x403d52,
+                selection_foreground: DEFAULT_FOREGROUND,
+                ansi: DEFAULT_ANSI,
+            }
+        );
+        // No colours at all, Rex's own: the client's background stands in, as in a pane.
+        let rex = TerminalTheme::default().swatch(0x191724, 0x403d52);
+        assert_eq!((rex.background, rex.cursor_text), (0x191724, 0x191724));
+    }
+
+    #[test]
+    fn the_default_colours_are_the_ones_the_terminal_draws_without_a_theme() {
+        use crate::terminal::{Renderer, rgb};
+        use ghostty_vt::{Terminal, TerminalOptions, style::Palette};
+        let palette = Palette::default();
+        let own: Vec<u32> = palette.0[..8].iter().map(|c| rgb(*c)).collect();
+        assert_eq!(own, DEFAULT_ANSI);
+        let terminal = Terminal::new(TerminalOptions {
+            cols: 4,
+            rows: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let frame = Renderer::new().unwrap().frame(&terminal).unwrap();
+        assert_eq!(frame.fg, DEFAULT_FOREGROUND);
     }
 
     #[test]
@@ -476,12 +616,20 @@ selection-foreground = #1e1e2e
                 ThemeInfo {
                     name: "only system".into(),
                     light: false,
-                    custom: false
+                    custom: false,
+                    theme: TerminalTheme {
+                        background: Some(0x101010),
+                        ..TerminalTheme::default()
+                    },
                 },
                 ThemeInfo {
                     name: "Shared".into(),
                     light: true,
-                    custom: true
+                    custom: true,
+                    theme: TerminalTheme {
+                        background: Some(0xffffff),
+                        ..TerminalTheme::default()
+                    },
                 },
             ]
         );
@@ -522,10 +670,10 @@ selection-foreground = #1e1e2e
                 .resolve(&TerminalThemeChoice::FollowChrome, chrome)
                 .unwrap()
                 .unwrap();
-            assert_eq!(theme, (builtin.theme)());
+            assert_eq!(theme, builtin.theme());
             assert_eq!(
                 dirs.resolve(
-                    &TerminalThemeChoice::Named(format!("{BUILTIN_PREFIX}{}", builtin.id)),
+                    &TerminalThemeChoice::Named(builtin.choice_id()),
                     ChromeTheme::Midnight
                 )
                 .unwrap(),

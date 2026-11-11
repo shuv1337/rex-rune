@@ -41,9 +41,11 @@ Some probes connect to the configured Rex server and create sessions there. Of t
   - `splits.rs`: which side a new split goes on (right, left, down, up or best fit) and focus through a tab's panes. `font_size.rs`: terminal font size actions. `help.rs`: Rex help.
   - `input.rs`, `keys.rs`: workspace shortcuts first, then every other key to the focused pane's PTY; Rune key events to Rex `client.key` payloads; IME.
   - `term.rs`: one pane's view state and cell grid. Rows are text segments placed at `column × cell width`; a character joins a segment only if it advances exactly one cell; ligatures and kerning are off; rows are memoized by content.
+  - `tab_icons.rs`: the icons a tab shows for its panes' programs (count, colour, a shell's tile), shared by toolbar pills, sidebar tab rows and the preview on Settings → Interface → Tabs (`tab_settings.rs`).
   - `sprites.rs`: box-drawing and block element characters drawn as shapes on whole device pixels, as Ghostty does, instead of font glyphs.
   - `toolbar.rs`, `sidebar.rs`, `panes.rs`, `popups.rs`, `dialogs.rs`, `widgets.rs`: views on rune-kit, with design tokens pinned onto the kit in `theme.rs`.
   - `settings_view.rs`: the Settings dialog and its pages. `settings_kit.rs`: what every Settings page is built from (`page`, `section`, `card`, `footnote`, `setting`, `select_row`, `disclosure`, `segmented`, `value_popup`, `stepper`, `button`). A card draws the dividers between its rows; pages never place one. A popup button's list opens over Settings against its control (`Panel::anchor_to`).
+  - `themes_view.rs`: pictures of terminal themes drawn from their own colours (`theme_swatch`, the card; `swatch_strip`, the dots at the end of a switcher row) and the theme library on Settings → Themes, a searched grid that builds only the rows near the viewport (`El::virtual_rows`). `terminal_theme.rs` gives a theme's colours for a picture (`TerminalTheme::swatch`).
   - `tests.rs`: headless UI tests.
 - `src/bin/`: `rex-probe` and `rex-workspace-probe`, live protocol probes.
 - `examples/`: `chrome_spike` (borderless window chrome).

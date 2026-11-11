@@ -2,11 +2,13 @@
 mod about;
 mod actions;
 mod activity;
+mod anchored_form;
 mod bindings;
 mod commands;
 mod dialogs;
 mod discover;
 mod find;
+mod fold;
 mod font_size;
 mod fonts;
 mod help;
@@ -26,6 +28,9 @@ mod recorder;
 mod remote;
 mod session_numbers;
 mod settings_kit;
+mod settings_nav;
+mod settings_pages;
+mod settings_shell;
 mod settings_view;
 mod shortcuts_page;
 mod sidebar;
@@ -33,9 +38,14 @@ mod splits;
 mod sprites;
 mod ssh_setup;
 mod stats;
+mod tab_icons;
+mod tab_settings;
 mod tabs;
 mod term;
 mod theme;
+mod theme_list;
+mod theme_pair;
+mod themes_view;
 mod toolbar;
 mod updates;
 mod upload;
@@ -128,7 +138,9 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .h_full()
         .fill(rgb(ground()))
         .on_layout(|s: &mut Workspace, r| s.viewport = [r[2], r[3]])
-        .child(root);
+        .child(root)
+        // What the desktop asks for, light or dark, for a pair of terminal themes.
+        .child(theme_pair::desktop_probe(cx.system_dark()));
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
     if !cx.window_maximized() {
@@ -151,7 +163,9 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     let now = std::time::Instant::now();
     let remote_changed = s.poll_remote_navigation(now);
     let updates_changed = s.poll_updates(now, tx);
-    let mut changed = s.poll_navigation(now, tx) || remote_changed || updates_changed;
+    let settings_changed = s.poll_settings(now, tx);
+    let mut changed =
+        s.poll_navigation(now, tx) || remote_changed || updates_changed || settings_changed;
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {

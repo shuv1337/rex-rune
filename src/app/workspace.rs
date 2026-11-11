@@ -120,6 +120,10 @@ pub struct Workspace {
     scratch: TextEdit,
     next_host: u64,
     pub settings_section: SettingsSection,
+    /// The page pushed over that section, the pages visited and the search (`settings_nav`).
+    pub settings_nav: super::settings_nav::Nav,
+    /// The theme library on Settings → Themes: its search (`themes_view`).
+    pub theme_library: super::themes_view::Library,
     /// Each tab's folded activity state when last synced.
     pub tab_states: TabStates,
     /// Tabs whose programs finished while the user wasn't looking; they show "Done".
@@ -140,6 +144,8 @@ pub struct Workspace {
     pub theme_dirs: ThemeDirs,
     /// The Ghostty themes the theme picker lists, read when it opens.
     pub themes: Vec<ThemeInfo>,
+    /// Whether the desktop asks for dark, once the window has said (`theme_pair`).
+    pub desktop_dark: Option<bool>,
     pub updates: super::updates::Updates,
 }
 
@@ -204,11 +210,15 @@ impl Workspace {
         // file is back.
         let theme_dirs = ThemeDirs::from_env();
         set_palette(palette_of(settings.chrome_theme));
-        let (term_theme, theme_error) =
-            match theme_dirs.resolve(&settings.terminal_theme, settings.chrome_theme) {
-                Ok(theme) => (theme, None),
-                Err(error) => (None, Some(error)),
-            };
+        // A light and dark pair that follows the desktop waits for the window to say which
+        // the desktop is (`theme_pair`).
+        let (term_theme, theme_error) = match super::theme_pair::at_launch(&settings)
+            .map(|choice| theme_dirs.resolve(&choice, settings.chrome_theme))
+        {
+            Some(Ok(theme)) => (theme, None),
+            Some(Err(error)) => (None, Some(error)),
+            None => (None, None),
+        };
         let local_keymap = super::recorder::local_keymap(&settings);
         let mut this = Self {
             logo: None,
@@ -260,6 +270,8 @@ impl Workspace {
             scratch: TextEdit::new(""),
             next_host: 0,
             settings_section: SettingsSection::default(),
+            settings_nav: Default::default(),
+            theme_library: Default::default(),
             tab_states: HashMap::new(),
             unseen_done: HashSet::new(),
             unseen_bells: HashSet::new(),
@@ -272,6 +284,7 @@ impl Workspace {
             term_theme,
             theme_dirs,
             themes: Vec::new(),
+            desktop_dark: None,
             updates: Default::default(),
         };
         this.init_updates();
@@ -1035,6 +1048,10 @@ impl Workspace {
     /// it; chrome palettes leave it alone from then on. Nothing changes when the theme can't
     /// be read.
     pub fn apply_theme(&mut self, choice: TerminalThemeChoice) -> anyhow::Result<()> {
+        // With a light and a dark theme, a theme by name becomes one of the two.
+        if let Some(done) = self.apply_to_pair(&choice) {
+            return done;
+        }
         self.term_theme = self
             .theme_dirs
             .resolve(&choice, self.settings.chrome_theme)?;
@@ -1061,7 +1078,7 @@ impl Workspace {
             self.settings.terminal_theme = TerminalThemeChoice::FollowChrome;
         }
         if self.settings.terminal_theme == TerminalThemeChoice::FollowChrome {
-            self.term_theme = Some((paired(chrome).theme)());
+            self.term_theme = Some(paired(chrome).theme());
             self.declare_theme();
         }
         self.save();
@@ -1071,13 +1088,17 @@ impl Workspace {
     /// without one, Rex's own colours once this client has ever declared a theme, since Rex
     /// keeps a client's last declaration per block across launches.
     pub fn declared_theme(&self) -> Option<SetTheme> {
+        // Not yet known which of the light and the dark theme: nothing, rather than a reset.
+        if self.theme_waits_for_desktop() {
+            return None;
+        }
         match &self.term_theme {
             Some(theme) => Some(theme.args()),
             None => self.settings.terminal_theme_declared.then(SetTheme::new),
         }
     }
 
-    fn declare_theme(&mut self) {
+    pub(super) fn declare_theme(&mut self) {
         let args = self.declared_theme();
         for index in 0..self.hosts.len() {
             self.send(index, HostCommand::Theme(args.clone()));
@@ -1101,6 +1122,7 @@ impl Workspace {
             TerminalThemeChoice::FollowServer => "Follow server",
             TerminalThemeChoice::RexDefault => "Rex default colours",
             TerminalThemeChoice::FollowChrome => "Follow chrome",
+            TerminalThemeChoice::LightDark => "Light and dark",
             TerminalThemeChoice::Named(id) => {
                 rex_linux::terminal_theme::builtin(id).map_or(id, |b| b.name)
             }
@@ -1212,8 +1234,8 @@ impl Workspace {
             }
             Intent::RetryHost(host) => self.send(host, HostCommand::Reconnect),
             Intent::ChooseTheme => {
-                self.themes = self.theme_dirs.list();
-                self.open_panel(PanelKind::Themes, "Terminal theme", &[("", "Filter themes…", "")]);
+                self.read_themes();
+                self.open_panel(PanelKind::Themes, "Terminal theme", &[("", "Search terminal themes…", "")]);
                 if let Some(current) = self.entries().iter().position(|e| e.current) {
                     let panel = self.panel.as_mut().unwrap();
                     panel.selected = current;
@@ -1221,7 +1243,7 @@ impl Workspace {
                 }
             }
             Intent::ChooseChrome => {
-                self.open_panel(PanelKind::Chromes, "Theme", &[]);
+                self.open_panel(PanelKind::Chromes, "Window colours", &[]);
                 if let Some(current) = self.entries().iter().position(|e| e.current) {
                     self.panel.as_mut().unwrap().selected = current;
                 }
@@ -1324,6 +1346,11 @@ impl Workspace {
                 self.reload_shortcuts();
                 self.shortcut_filter = TextEdit::new("");
                 self.recorder = None;
+                self.settings_nav.opened();
+                self.theme_library = Default::default();
+                if self.settings_section == SettingsSection::Themes {
+                    self.show_theme_library();
+                }
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
@@ -1677,6 +1704,10 @@ impl Workspace {
     }
 
     pub fn picker(&mut self, sessions: bool) {
+        // A Commands search names the themes installed now.
+        if !sessions {
+            self.read_themes();
+        }
         self.open_panel(
             PanelKind::Picker(sessions),
             if sessions {
@@ -1689,7 +1720,7 @@ impl Workspace {
                 if sessions {
                     "Filter sessions or hosts…"
                 } else {
-                    "Search commands, sessions, and tabs…"
+                    "Search commands, sessions, tabs and themes…"
                 },
                 "",
             )],
@@ -1759,12 +1790,18 @@ impl Workspace {
         None
     }
 
-    /// Show a Settings section; Integrations reads the agents' state when first shown.
+    /// Show a Settings section's own page; Integrations reads the agents' state when first
+    /// shown, and Themes lists the themes installed now. A visit the user makes goes through
+    /// `navigate`, which keeps the history.
     pub fn open_section(&mut self, section: SettingsSection) {
         self.settings_section = section;
         self.recorder = None;
+        self.settings_nav.show_section();
         if section == SettingsSection::Shortcuts {
             self.reload_shortcuts();
+        }
+        if section == SettingsSection::Themes {
+            self.show_theme_library();
         }
         if section == SettingsSection::Integrations
             && self.integrations.status == super::integrations::AgentStatus::Unknown

@@ -3,10 +3,7 @@ use super::splits::SplitWay;
 use super::tabs::{TabAction, TabTarget};
 use super::theme::{MONITOR, SERVER};
 use super::workspace::Workspace;
-use rex_linux::{
-    settings::{ChromeTheme, TerminalThemeChoice},
-    terminal_theme::{BUILTIN_PREFIX, BUILTINS, paired},
-};
+use rex_linux::settings::{ChromeTheme, TerminalThemeChoice};
 use rune::TextEdit;
 use serde_json::Value;
 
@@ -52,13 +49,15 @@ pub enum Intent {
     EditHost(usize),
     RemoveHost(usize),
     Retry,
-    /// The terminal theme picker, from Settings.
+    /// The terminal theme switcher: from Settings, Commands or its action's shortcut.
     ChooseTheme,
-    /// Declare this terminal theme from now on, then return to Settings.
+    /// Declare this terminal theme from now on, then return to Settings when the list was
+    /// opened from there.
     Theme(TerminalThemeChoice),
-    /// The chrome palette picker, from Settings.
+    /// The chrome palette picker, from Settings or Commands.
     ChooseChrome,
-    /// Draw the chrome in this palette from now on, then return to Settings.
+    /// Draw the chrome in this palette from now on, then return to Settings when the list
+    /// was opened from there.
     Chrome(ChromeTheme),
     /// Open Settings → Updates.
     Updates,
@@ -247,28 +246,31 @@ pub struct Choice {
 pub enum SettingsSection {
     #[default]
     Interface,
+    Themes,
     Terminal,
-    Notifications,
-    Integrations,
-    Hosts,
     Shortcuts,
+    Integrations,
+    Notifications,
+    Hosts,
     Updates,
     About,
 }
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 8] = [
+    pub const ALL: [SettingsSection; 9] = [
         SettingsSection::Interface,
+        SettingsSection::Themes,
         SettingsSection::Terminal,
-        SettingsSection::Notifications,
-        SettingsSection::Integrations,
-        SettingsSection::Hosts,
         SettingsSection::Shortcuts,
+        SettingsSection::Integrations,
+        SettingsSection::Notifications,
+        SettingsSection::Hosts,
         SettingsSection::Updates,
         SettingsSection::About,
     ];
     pub fn title(self) -> &'static str {
         match self {
             SettingsSection::Interface => "Interface",
+            SettingsSection::Themes => "Themes",
             SettingsSection::Terminal => "Terminal",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Integrations => "Integrations",
@@ -281,6 +283,7 @@ impl SettingsSection {
     pub fn key(self) -> &'static str {
         match self {
             SettingsSection::Interface => "interface",
+            SettingsSection::Themes => "themes",
             SettingsSection::Terminal => "terminal",
             SettingsSection::Notifications => "notifications",
             SettingsSection::Integrations => "integrations",
@@ -428,6 +431,11 @@ pub struct Entry {
     pub group_icon: Option<&'static rune::Icon>,
     /// A create button at the right of the group header, with its help text.
     pub group_create: Option<(Intent, String)>,
+    /// The parts of `label` a search matched, as byte ranges in order: the list marks them.
+    pub marks: Vec<std::ops::Range<usize>>,
+    /// The colours of a terminal theme or a chrome palette, drawn as a strip of dots at the
+    /// end of its row.
+    pub picture: Option<super::themes_view::Picture>,
 }
 impl Entry {
     pub fn new(
@@ -451,6 +459,8 @@ impl Entry {
             group_name: None,
             group_icon: None,
             group_create: None,
+            marks: Vec::new(),
+            picture: None,
         }
     }
 
@@ -584,57 +594,6 @@ impl Workspace {
         }
     }
 
-    /// The server's own colours, the built-in themes, then the dark and the light Ghostty
-    /// themes, each kept when its name contains `lower`.
-    fn theme_entries(&self, lower: &str) -> Vec<Entry> {
-        let current = &self.settings.terminal_theme;
-        let mut entries = Vec::new();
-        let mut add = |label: &str, detail: &str, group: &str, choice: TerminalThemeChoice| {
-            if label.to_lowercase().contains(lower) {
-                let mut e = Entry::new(label, detail, group, Intent::Theme(choice.clone()));
-                e.current = *current == choice;
-                entries.push(e);
-            }
-        };
-        add(
-            "Follow server",
-            if self.settings.terminal_theme_declared {
-                "Resets to Rex's colours"
-            } else {
-                "Declares nothing"
-            },
-            "Server",
-            TerminalThemeChoice::FollowServer,
-        );
-        add(
-            "Rex default colours",
-            "",
-            "Server",
-            TerminalThemeChoice::RexDefault,
-        );
-        add(
-            "Follow chrome",
-            paired(self.settings.chrome_theme).name,
-            "Built in",
-            TerminalThemeChoice::FollowChrome,
-        );
-        for builtin in BUILTINS {
-            let id = format!("{BUILTIN_PREFIX}{}", builtin.id);
-            add(builtin.name, "", "Built in", TerminalThemeChoice::Named(id));
-        }
-        for (group, light) in [("Dark", false), ("Light", true)] {
-            for theme in self.themes.iter().filter(|t| t.light == light) {
-                add(
-                    &theme.name,
-                    if theme.custom { "Custom" } else { "" },
-                    group,
-                    TerminalThemeChoice::Named(theme.name.clone()),
-                );
-            }
-        }
-        entries
-    }
-
     pub fn entries(&self) -> Vec<Entry> {
         let Some(panel) = &self.panel else {
             return vec![];
@@ -642,7 +601,7 @@ impl Workspace {
         let query = self.query();
         let lower = query.to_lowercase();
         if matches!(panel.kind, PanelKind::Themes) {
-            return self.theme_entries(&lower);
+            return self.theme_entries(&query);
         }
         if matches!(panel.kind, PanelKind::Discover) {
             return self.discovery_entries(&lower);
@@ -653,6 +612,7 @@ impl Workspace {
                 .map(|chrome| {
                     let mut e = Entry::new(chrome.name(), "", "", Intent::Chrome(chrome));
                     e.current = chrome == self.settings.chrome_theme;
+                    e.picture = Some(super::themes_view::Picture::Chrome(chrome));
                     e
                 })
                 .collect();
@@ -859,11 +819,13 @@ impl Workspace {
                     .contains(&lower)
             });
         }
-        // Commands: its rows first, then the sessions and tabs a search found.
+        // Commands: its rows first, then the sessions and tabs a search found, then the
+        // window colours and terminal themes it names.
         if !sessions_only && !pane_only {
             let mut commands = self.command_entries(&query);
             commands.append(&mut entries);
             entries = commands;
+            entries.extend(self.appearance_matches(&query));
         }
         if sessions_only {
             let (create, elsewhere, key) = match &named {

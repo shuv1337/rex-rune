@@ -140,11 +140,13 @@ def run():
             key("ctrl+comma")  # Settings, focused on its section list
             original_size = json.loads(config.read_text())["font_size"]
             key("Down")
-            key("Return")  # Terminal
+            key("Down")
+            key("Return")  # past Themes to Terminal
             key("Tab")
             key("Tab")
             key("Tab")
-            key("Tab")  # Close, change family, font smaller, font larger
+            key("Tab")
+            key("Tab")  # Back, Close, change family, font smaller, font larger
             key("Return")
             assert json.loads(config.read_text())["font_size"] == original_size + 1
             key("shift+Tab")

@@ -389,7 +389,7 @@ impl Spec {
             Handler::PreviousSession => "Previous session",
             Handler::RefreshSessions => "Refresh sessions",
             Handler::CollapseOtherHosts => "Collapse other hosts",
-            Handler::ChooseTheme => "Change terminal theme",
+            Handler::ChooseTheme => "Change theme",
             Handler::CopyVersion => "Copy version info",
             Handler::ReportIssue => "Report an issue",
             Handler::About => "About Rex Linux",

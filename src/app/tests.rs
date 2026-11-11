@@ -26,12 +26,22 @@ mod registry_tests;
 mod remote_session_tests;
 #[path = "remote_tests.rs"]
 mod remote_tests;
+#[path = "settings_nav_tests.rs"]
+mod settings_nav_tests;
 #[path = "settings_tests.rs"]
 mod settings_tests;
 #[path = "shortcuts_page_tests.rs"]
 mod shortcuts_page_tests;
+#[path = "tab_appearance_tests.rs"]
+mod tab_appearance_tests;
 #[path = "tab_tests.rs"]
 mod tab_tests;
+#[path = "theme_library_tests.rs"]
+mod theme_library_tests;
+#[path = "theme_pair_tests.rs"]
+mod theme_pair_tests;
+#[path = "theme_switcher_tests.rs"]
+mod theme_switcher_tests;
 #[path = "wiring_tests.rs"]
 mod wiring_tests;
 #[path = "workspace_fixes_tests.rs"]
@@ -79,7 +89,13 @@ fn workspace_hosts(count: usize) -> Workspace {
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    Workspace::new(options, settings, path, handle, None)
+    let mut ws = Workspace::new(options, settings, path, handle, None);
+    // Not this machine's Ghostty themes: a test names the themes it lists.
+    ws.theme_dirs = ThemeDirs {
+        user: None,
+        system: vec![],
+    };
+    ws
 }
 
 /// A second launch on the settings `ws` saved.
@@ -565,7 +581,7 @@ fn a_single_pane_is_full_bleed_and_a_split_keeps_its_cards() {
         .unwrap()
         .rect;
     assert_eq!((r[0], r[2]), (0., 1024.), "edge to edge: {r:?}");
-    assert!(!has(&rt, "close-tab:single"), "tabs have no close button");
+    assert!(has(&rt, "tab-close:single"), "the tab on screen has its ×");
     std::fs::remove_file(&rt.state.settings_path).ok();
 
     let (ws, _rx) = tabbed_workspace("split");
@@ -1314,7 +1330,7 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
     // The existing Settings section list exposes About without another shortcut.
-    for _ in 0..7 {
+    for _ in 0..8 {
         press(&mut rt, Key::Down);
     }
     press(&mut rt, Key::Enter);
@@ -1337,6 +1353,7 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     // The header's two copies come first, then the project links.
     let clipboard = rune::clipboard::memory();
     rt.use_clipboard(&clipboard);
+    press(&mut rt, Key::Tab); // Back, now that About was a visit
     press(&mut rt, Key::Tab); // Close
     press(&mut rt, Key::Tab);
     assert!(focused(&rt).unwrap().ends_with("about-copy"));
@@ -1445,7 +1462,9 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
         path.ends_with("settings-section:interface"),
         "settings focus {path}"
     );
-    // The keyboard path scripts/x11-smoke.py takes to the font stepper.
+    // The keyboard path scripts/x11-smoke.py takes to the font stepper: past Themes to
+    // Terminal, then Back, Close, the font family and the stepper's two buttons.
+    press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);
     assert_eq!(
@@ -1453,7 +1472,7 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
         super::panel::SettingsSection::Terminal
     );
     let font = rt.state.settings.font_size;
-    for _ in 0..4 {
+    for _ in 0..5 {
         press(&mut rt, Key::Tab);
     }
     let path = focused(&rt).expect("a focused control");
@@ -1534,6 +1553,7 @@ fn a_disabled_notification_switch_leaves_settings_open() {
     ws.perform(Intent::Settings, &mut tx);
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:notifications");
+    click(&mut rt, "notify-status:blocked");
     click(&mut rt, "notify-blocked");
     assert!(
         matches!(
@@ -1664,7 +1684,7 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
     let hosts = [capture_host(&mut ws, 0), capture_host(&mut ws, 1)];
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
+    click(&mut rt, "settings-section:themes");
     click(&mut rt, "terminal-theme");
     assert!(matches!(
         rt.state.panel.as_ref().map(|p| &p.kind),
@@ -1677,18 +1697,30 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
             .collect::<Vec<_>>()
     };
     let row = |label: &str, group: &str, current| (label.to_owned(), group.to_owned(), current);
+    // The server's colours, Follow chrome and every built-in theme, then Ghostty's.
+    let mut listed = vec![
+        row("Follow server", "Server", true),
+        row("Rex default colours", "Server", false),
+        row("Follow chrome", "Built in", false),
+    ];
+    listed.extend(
+        rex_linux::terminal_theme::BUILTINS
+            .iter()
+            .map(|builtin| row(builtin.name, "Built in", false)),
+    );
+    listed.extend([
+        row("Rex Test Mocha", "Dark", false),
+        row("Paper", "Light", false),
+    ]);
+    assert_eq!(rows(&rt.state), listed);
     assert_eq!(
-        rows(&rt.state),
+        rows(&rt.state)[3..8],
         [
-            row("Follow server", "Server", true),
-            row("Rex default colours", "Server", false),
-            row("Follow chrome", "Built in", false),
+            row("Merino Dark", "Built in", false),
             row("Midnight", "Built in", false),
             row("Rosé Pine", "Built in", false),
             row("Rosé Pine Moon", "Built in", false),
             row("Gruvbox Dark", "Built in", false),
-            row("Rex Test Mocha", "Dark", false),
-            row("Paper", "Light", false),
         ]
     );
     press(&mut rt, Key::Escape);
@@ -1703,7 +1735,7 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
 
     click(&mut rt, "terminal-theme");
     rt.update(|s, _| {
-        s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("mocha");
+        s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("test mocha");
         s.query_changed();
     });
     assert_eq!(rows(&rt.state), [row("Rex Test Mocha", "Dark", false)]);
@@ -3180,7 +3212,7 @@ fn pane_padding_controls_reach_zero_and_save() {
     let mut ws = workspace();
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
+    click(&mut rt, "customize-panes");
     for _ in 0..9 {
         click(&mut rt, "pane-padding-smaller");
     }
@@ -3521,6 +3553,7 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
     for _ in 0..60 {
         rt.frame(1. / 60.);
     }
+    click(&mut rt, "settings-section:themes");
     click(&mut rt, "chrome-theme");
     assert!(matches!(
         rt.state.panel.as_ref().map(|p| &p.kind),

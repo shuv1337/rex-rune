@@ -14,6 +14,12 @@ use rune_kit::TextInput;
 const HEADER: f32 = 26.;
 /// Commands shows about this many rows and scrolls to the rest, whatever the window's height.
 const COMMAND_ROWS: f32 = 20.;
+/// The theme switcher is this wide, as the session switcher is, and never taller than this,
+/// its field and its hint line included: it scrolls to the rest.
+const THEMES_WIDTH: f32 = 340.;
+const THEMES_MAX_HEIGHT: f32 = 420.;
+/// The Window colours list: wider than other value lists, for the strip in each row.
+const CHROMES_WIDTH: f32 = 252.;
 
 #[derive(Clone)]
 enum Hidden {
@@ -97,7 +103,7 @@ pub fn overlay() -> El {
         .pin(Some(0.), Some(0.), Some(0.), Some(0.))
 }
 
-fn dismiss_layer() -> El {
+pub(super) fn dismiss_layer() -> El {
     el().key("popup-dismiss")
         .pin(Some(0.), Some(0.), Some(0.), Some(0.))
         .preserve_focus_on_press(true)
@@ -187,10 +193,11 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         PanelKind::Pane | PanelKind::Session | PanelKind::Host(_) | PanelKind::Window
     );
     let commands = matches!(panel.kind, PanelKind::Picker(false));
-    // The values of one setting: a short list with the current one checked.
+    // The values of one setting: a short list with the current one checked. It keeps the
+    // check's column on every row, so names align.
     let values = matches!(panel.kind, PanelKind::Choice(_) | PanelKind::Chromes);
-    // Lists that mark the current value keep the check's column on every row, so names align.
-    let checks = values || matches!(panel.kind, PanelKind::Themes);
+    // The theme switcher: a searched list that checks the theme in use at the end of its row.
+    let themes = matches!(panel.kind, PanelKind::Themes);
     let [vw, vh] = viewport;
     // The control a Settings popup button opened this list from, `[x, y, w, h]` where layout
     // put it: the list goes right under it, or right above when there is more room there.
@@ -202,12 +209,17 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     });
     // Add host: machines in columns, each name whole.
     let discover = matches!(panel.kind, PanelKind::Discover);
-    let width = (if values {
+    let width = (if matches!(panel.kind, PanelKind::Chromes) {
+        // A palette's name, whole, beside its strip of colours.
+        CHROMES_WIDTH
+    } else if values {
         220.
     } else if pane || matches!(panel.kind, PanelKind::ShortcutMenu) {
         280.
     } else if sessions {
         340.
+    } else if themes {
+        THEMES_WIDTH
     } else if discover {
         super::discover::LIST_WIDTH
     } else {
@@ -252,6 +264,10 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     };
     if commands {
         list_max = list_max.min(COMMAND_ROWS * (row_height + 1.));
+    }
+    if themes {
+        // The surface's padding and gaps, and the hint line a list this long always has.
+        list_max = list_max.min(THEMES_MAX_HEIGHT - input_height - 12. - 24.);
     }
     // Commands under their headings, rather than the one list a search shows.
     let headed = commands && s.query().is_empty();
@@ -371,6 +387,14 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                         },
                     ))
             });
+            // A theme or a palette in use is checked at the end of its row, where the eye
+            // lands after the name; in Commands that is beside what the row says it is.
+            let check_end = entry.current
+                && match entry.action {
+                    Intent::Theme(_) => themes || commands,
+                    Intent::Chrome(_) => commands,
+                    _ => false,
+                };
             let mut r = list_row(
                 Row {
                     key: format!("entry:{i}"),
@@ -380,8 +404,11 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                     keys: &entry.keys,
                     height: if entry.footer { 28. } else { row_height },
                     // The Add host list marks an added machine with its chip instead.
-                    check: (sessions || checks || (entry.current && !discover))
+                    check: (sessions || values || (entry.current && !discover && !check_end))
                         .then_some(entry.current),
+                    check_end,
+                    marks: &entry.marks,
+                    picture: entry.picture,
                     followup: entry.followup,
                     enabled,
                     danger: entry.danger,

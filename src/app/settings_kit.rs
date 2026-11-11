@@ -7,7 +7,8 @@
 //! - Rows: [`setting`] (a label, at most one sentence of help, and a control in the trailing
 //!   slot), [`select_row`] (a setting whose control is a [`value_popup`]), [`disclosure`]
 //!   (the whole row is a button that opens a form or a sub-page) and [`row_frame`] for a row
-//!   with its own content.
+//!   with its own content. Search Settings finds a row by the label and helper it was built
+//!   with ([`found`]), so a new row needs no entry anywhere else.
 //! - Controls: [`segmented`] and [`segmented_fixed`], [`value_popup`], [`stepper`],
 //!   [`button`], and the [`value`], [`mono_value`] and [`state_chip`] read-outs.
 //!
@@ -57,7 +58,10 @@ pub fn section(title: &str, children: impl IntoIterator<Item = El>) -> El {
                 .px(INSET),
         );
     }
-    body.children(children)
+    let body = body.children(children);
+    // Search Settings files the rows just built under this heading.
+    super::settings_nav::heading(title);
+    body
 }
 
 /// Rows on one inset surface, with a hairline between each pair.
@@ -138,9 +142,16 @@ pub fn words(label: &str, detail: &str) -> El {
 /// A labelled setting: its words on the left and its control in the trailing slot, which
 /// ends at the card's inset on every row.
 pub fn setting(label: &str, detail: &str, control: El) -> El {
-    row_frame(!detail.is_empty())
+    found(label, detail, row_frame(!detail.is_empty()))
         .child(words(label, detail))
         .child(control)
+}
+
+/// A labelled row's frame, made known to Search Settings: it lists the row by its label and
+/// helper, and marks it when a search lands on it. [`setting`] and [`disclosure`] do this
+/// themselves; a row built on [`row_frame`] that should be found wraps its frame in it.
+pub fn found(label: &str, detail: &str, frame: El) -> El {
+    super::settings_nav::row(label, detail, frame)
 }
 
 /// A read-only value in a row's trailing slot.
@@ -392,7 +403,8 @@ pub fn value_popup(key: &str, value: &str, open: Intent) -> El {
     popup_button(key, value, press)
 }
 
-fn popup_button(
+/// [`value_popup`] for a list that `press` opens itself.
+pub fn popup_button(
     key: &str,
     value: &str,
     press: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
@@ -477,7 +489,7 @@ pub fn disclosure(
     current: &str,
     open: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
 ) -> El {
-    let mut e = row_frame(!detail.is_empty())
+    let mut e = found(label, detail, row_frame(!detail.is_empty()))
         .key(key.to_owned())
         .role("button")
         .label(label.to_owned())
@@ -505,11 +517,16 @@ pub fn disclosure(
 }
 
 impl Workspace {
-    /// Perform `open` (an intent that opens a list panel) for the control keyed `control`,
-    /// so the list is placed against it.
+    /// Perform `open` (an intent that opens a list panel, or one of the forms
+    /// `anchored_form` draws as a popover) for the control keyed `control`, so the list or
+    /// form is placed against it.
     pub fn open_anchored(&mut self, control: &str, open: Intent, tx: &mut Tx) {
         self.perform(open, tx);
-        if let Some(panel) = self.panel.as_mut().filter(|p| p.is_list()) {
+        if let Some(panel) = self
+            .panel
+            .as_mut()
+            .filter(|p| p.is_list() || super::anchored_form::anchors(&p.kind))
+        {
             panel.anchor_to = Some(control.to_owned());
         }
     }

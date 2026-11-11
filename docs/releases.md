@@ -133,7 +133,7 @@ python3 scripts/test-arch-repo.py       # Docker, gpg, minisign, zstd; throwaway
 actionlint .github/workflows/release.yml
 ```
 
-To package locally after a native `cargo build --locked --release --bin rex-linux`, run `python3 scripts/package-release.py` (tarball) or add `--deb` (also requires `dpkg-dev`). Outputs go into ignored `dist/`. Packages include source commit/toolchain information, desktop integration, dependency license declarations, available license texts, font licenses, and icon provenance. Icon redistribution is authorized by the project owner; it is not covered by the project's MIT license.
+To package locally after a native `cargo build --locked --release --bin rex-linux`, run `python3 scripts/package-release.py` (tarball) or add `--deb` (also requires `dpkg-dev`). Outputs go into ignored `dist/`. Packages include source commit/toolchain information, desktop integration, dependency license declarations, available license texts, font licenses, icon provenance, and the sources and licences of the built-in terminal themes (`licenses/TERMINAL-THEMES.md`, from [terminal-themes.md](terminal-themes.md)). Icon redistribution is authorized by the project owner; it is not covered by the project's MIT license.
 
 The standalone installer is separately signed with trusted comment
 `rex-linux vX.Y.Z install.sh`, attested alongside the packages, and excluded from
