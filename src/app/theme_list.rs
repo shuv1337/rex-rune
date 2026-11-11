@@ -10,7 +10,7 @@ use super::{
 };
 use rex_linux::{
     settings::{ChromeTheme, TerminalThemeChoice},
-    terminal_theme::{BUILTIN_PREFIX, BUILTINS, TerminalTheme, paired},
+    terminal_theme::{BUILTINS, TerminalTheme, paired},
 };
 
 /// The heading themes and window colours are under in a Commands search.
@@ -23,12 +23,20 @@ const COMMANDS_MIN_QUERY: usize = 2;
 
 impl Workspace {
     /// The server's own colours, the built-in themes, then the dark and the light Ghostty
-    /// themes, each kept when its name holds every word of `query`. `named_only` leaves out
+    /// themes, each kept when its name holds every word of `query`. `word_starts` leaves out
     /// the choices that are not a theme by name (Follow server, Rex default colours, Follow
-    /// chrome) and has a word of the query count only where a word of the name begins.
-    fn themes_matching(&self, query: &str, named_only: bool) -> Vec<Entry> {
+    /// chrome) and has a word of the query count only where a word of the name begins. With
+    /// a light and a dark theme, the list is the themes of one appearance
+    /// (`listed_appearance`), by name, and the one checked is that appearance's.
+    fn themes_matching(&self, query: &str, word_starts: bool) -> Vec<Entry> {
         let query = fold(query);
-        let current = &self.settings.terminal_theme;
+        // With a light and a dark theme, a list is for one of them: its themes by name.
+        let pair = self.listed_appearance();
+        let current = match pair {
+            Some(light) => self.settings.theme_in_use(light),
+            None => self.settings.terminal_theme.clone(),
+        };
+        let named_only = word_starts || pair.is_some();
         let mut entries = Vec::new();
         // Each row ends with its theme's colours as a strip of dots; Follow server, whose
         // colours are the server's, has none to show.
@@ -40,9 +48,9 @@ impl Workspace {
             if named_only && !matches!(choice, TerminalThemeChoice::Named(_)) {
                 return;
             }
-            if let Some(marks) = Name::new(label).find(&query, named_only) {
+            if let Some(marks) = Name::new(label).find(&query, word_starts) {
                 let mut e = Entry::new(label, detail, group, Intent::Theme(choice.clone()));
-                e.current = *current == choice;
+                e.current = current == choice;
                 e.marks = marks;
                 e.picture = Some(match theme {
                     Some(theme) => Picture::Theme(self.swatch(theme)),
@@ -75,20 +83,24 @@ impl Workspace {
             chrome.name,
             "Built in",
             TerminalThemeChoice::FollowChrome,
-            Some(&(chrome.theme)()),
+            Some(&chrome.theme()),
         );
-        for builtin in BUILTINS {
-            let id = format!("{BUILTIN_PREFIX}{}", builtin.id);
+        let listed = |light: bool| pair.is_none_or(|of| of == light);
+        for builtin in BUILTINS.iter().filter(|b| listed(b.light())) {
             add(
                 builtin.name,
                 "",
                 "Built in",
-                TerminalThemeChoice::Named(id),
-                Some(&(builtin.theme)()),
+                TerminalThemeChoice::Named(builtin.choice_id()),
+                Some(&builtin.theme()),
             );
         }
         for (group, light) in [("Dark", false), ("Light", true)] {
-            for theme in self.themes.iter().filter(|t| t.light == light) {
+            for theme in self
+                .themes
+                .iter()
+                .filter(|t| t.light == light && listed(light))
+            {
                 add(
                     &theme.name,
                     if theme.custom { "Custom" } else { "" },

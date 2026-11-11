@@ -689,7 +689,7 @@ mod tests {
             assert_eq!(p.card, p.ground, "{name}: one surface");
             let paired = rex_linux::terminal_theme::paired(chrome);
             assert_eq!(
-                (paired.theme)().background,
+                paired.theme().background,
                 Some(p.ground),
                 "{name}: the paired theme sits on the ground"
             );

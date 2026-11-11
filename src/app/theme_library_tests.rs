@@ -256,34 +256,42 @@ fn the_library_groups_every_theme_and_marks_the_one_in_use() {
         headings(&rt),
         [
             "Default 3",
-            "Built in 4",
+            "Built in dark 17",
+            "Built in light 10",
             "Custom 1",
             "Ghostty dark 2",
             "Ghostty light 1"
         ]
     );
+    // The cards of every group, in order: the built-in themes dark first, Rex's own first
+    // of each.
+    let mut listed: Vec<String> = ["follow_server", "builtin_default", "follow_chrome"]
+        .map(str::to_owned)
+        .into();
+    listed.extend(
+        rex_linux::terminal_theme::BUILTINS
+            .iter()
+            .map(|builtin| format!("named:{}", builtin.choice_id())),
+    );
+    listed.extend(["named:Mine", "named:Abyss", "named:Mocha", "named:Paper"].map(str::to_owned));
+    assert_eq!(cards(&rt), listed);
     assert_eq!(
-        cards(&rt),
+        listed[3..8],
         [
-            "follow_server",
-            "builtin_default",
-            "follow_chrome",
+            "named:rex/merino-dark",
             "named:rex/midnight",
             "named:rex/rose-pine",
             "named:rex/rose-pine-moon",
             "named:rex/gruvbox-dark",
-            "named:Mine",
-            "named:Abyss",
-            "named:Mocha",
-            "named:Paper",
         ]
     );
-    assert_eq!(element_text(&rt, "theme-count"), ["11 themes"]);
+    assert_eq!(listed[20], "named:rex/merino-light", "the first light one");
+    assert_eq!(element_text(&rt, "theme-count"), ["34 themes"]);
     // Four cards to a row at the dialog's full width: the first on the cards' text edge
     // and the fourth ending on it.
     let search = rect(&rt, "theme-search-box");
-    let first = rect(&rt, "theme-card:named:rex/midnight");
-    let last = rect(&rt, "theme-card:named:rex/gruvbox-dark");
+    let first = rect(&rt, "theme-card:named:rex/merino-dark");
+    let last = rect(&rt, "theme-card:named:rex/rose-pine-moon");
     assert_eq!(first[1], last[1], "one row");
     assert!((first[0] - (search[0] + 12.)).abs() < 0.5);
     assert!((last[0] + last[2] - (search[0] + search[2] - 12.)).abs() < 0.5);
@@ -319,9 +327,12 @@ fn the_library_groups_every_theme_and_marks_the_one_in_use() {
         let (_, dirs) = self::dirs("library-groups");
         library(dirs, 1, (700., 700.))
     };
-    let first = rect(&narrow, "theme-card:named:rex/midnight");
-    let fourth = rect(&narrow, "theme-card:named:rex/gruvbox-dark");
-    assert!(fourth[1] > first[1], "Gruvbox Dark wraps to a second row");
+    let first = rect(&narrow, "theme-card:named:rex/merino-dark");
+    let fourth = rect(&narrow, "theme-card:named:rex/rose-pine-moon");
+    assert!(
+        fourth[1] > first[1],
+        "the fourth card wraps to a second row"
+    );
     assert!((fourth[0] - first[0]).abs() < 0.5);
     std::fs::remove_file(&narrow.state.settings_path).ok();
     std::fs::remove_file(&rt.state.settings_path).ok();
@@ -418,6 +429,7 @@ fn the_library_search_folds_accents_marks_matches_and_says_when_nothing_is_found
         [
             "named:rex/rose-pine",
             "named:rex/rose-pine-moon",
+            "named:rex/rose-pine-dawn",
             "named:Rose Pine",
             "named:Rose Pine Dawn"
         ],
@@ -425,10 +437,15 @@ fn the_library_search_folds_accents_marks_matches_and_says_when_nothing_is_found
     );
     assert_eq!(
         headings(&rt),
-        ["Built in 2", "Ghostty dark 1", "Ghostty light 1"],
+        [
+            "Built in dark 2",
+            "Built in light 1",
+            "Ghostty dark 1",
+            "Ghostty light 1"
+        ],
         "a group with nothing found has no heading"
     );
-    assert_eq!(element_text(&rt, "theme-count"), ["4 of 11"]);
+    assert_eq!(element_text(&rt, "theme-count"), ["5 of 34"]);
     // Words in any order, every one of them in the name.
     type_text(&mut rt, " moon");
     assert_eq!(cards(&rt), ["named:rex/rose-pine-moon"]);
@@ -449,7 +466,7 @@ fn the_library_search_folds_accents_marks_matches_and_says_when_nothing_is_found
     press(&mut rt, Key::Escape);
     assert!(rt.state.theme_library.query().is_empty());
     assert!(rt.state.panel.is_some());
-    assert_eq!(cards(&rt).len(), 11);
+    assert_eq!(element_text(&rt, "theme-count"), ["34 themes"]);
 
     type_text(&mut rt, "zzz");
     assert!(cards(&rt).is_empty() && find(&rt, "theme-grid").is_none());
@@ -457,7 +474,7 @@ fn the_library_search_folds_accents_marks_matches_and_says_when_nothing_is_found
         element_text(&rt, "theme-none"),
         ["No theme is named “zzz”."]
     );
-    assert_eq!(element_text(&rt, "theme-count"), ["0 of 11"]);
+    assert_eq!(element_text(&rt, "theme-count"), ["0 of 34"]);
     // Escape in the field empties it first, and closes Settings only when it is empty.
     press(&mut rt, Key::Escape);
     assert!(rt.state.theme_library.query().is_empty() && rt.state.panel.is_some());
@@ -469,7 +486,8 @@ fn the_library_search_folds_accents_marks_matches_and_says_when_nothing_is_found
     rt.update(|s, tx| s.perform(Intent::Settings, tx));
     settle(&mut rt);
     assert_eq!(rt.state.settings_section, SettingsSection::Themes);
-    assert_eq!(cards(&rt).len(), 11);
+    assert_eq!(element_text(&rt, "theme-count"), ["34 themes"]);
+    assert_eq!(cards(&rt)[0], "follow_server");
     std::fs::remove_file(&rt.state.settings_path).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -512,22 +530,43 @@ fn the_arrows_move_among_the_cards_and_a_letter_starts_a_search() {
     for expected in [
         "builtin_default",
         "follow_chrome",
+        "named:rex/merino-dark",
         "named:rex/midnight",
-        "named:rex/rose-pine",
     ] {
         press(&mut rt, Key::Right);
         assert_eq!(at(&rt), expected);
     }
-    // Down and Up keep the column, into a shorter row at its last card.
+    // Down and Up keep the column, through the groups, and enter a shorter row at its last
+    // card: five rows of dark built-in themes, the last of one card, three rows of light
+    // ones, then Ghostty's two.
     press(&mut rt, Key::Down);
-    assert_eq!(at(&rt), "named:Mocha", "the second card of Ghostty dark");
+    assert_eq!(
+        at(&rt),
+        "named:rex/ayu-dark",
+        "the second card of the next row"
+    );
+    for _ in 0..3 {
+        press(&mut rt, Key::Down);
+    }
+    assert_eq!(
+        at(&rt),
+        "named:rex/solarized-dark",
+        "the one card of the last dark row"
+    );
+    for _ in 0..4 {
+        press(&mut rt, Key::Down);
+    }
+    assert_eq!(at(&rt), "named:Abyss", "the first card of Ghostty dark");
     press(&mut rt, Key::Down);
-    assert_eq!(at(&rt), "named:Mocha", "the last row");
-    press(&mut rt, Key::Up);
-    assert_eq!(at(&rt), "named:rex/rose-pine");
-    press(&mut rt, Key::Right);
-    press(&mut rt, Key::Right);
-    assert_eq!(at(&rt), "named:rex/gruvbox-dark");
+    assert_eq!(at(&rt), "named:Abyss", "the last row");
+    for _ in 0..8 {
+        press(&mut rt, Key::Up);
+    }
+    assert_eq!(at(&rt), "named:rex/merino-dark");
+    for _ in 0..3 {
+        press(&mut rt, Key::Right);
+    }
+    assert_eq!(at(&rt), "named:rex/rose-pine-moon");
     press(&mut rt, Key::Up);
     assert_eq!(at(&rt), "follow_chrome", "Default has three cards");
     assert_eq!(
@@ -581,14 +620,14 @@ fn six_hundred_themes_build_only_the_rows_near_the_viewport() {
         );
     }
     let mut rt = library(dirs, 1, (1440., 1000.));
-    assert_eq!(element_text(&rt, "theme-count"), ["607 themes"]);
+    assert_eq!(element_text(&rt, "theme-count"), ["630 themes"]);
     let built = cards(&rt).len();
     assert!(
         (8..=120).contains(&built),
-        "a few screens of cards are built, not 607: {built}"
+        "a few screens of cards are built, not 630: {built}"
     );
     let elements = rt.elements().len();
-    assert!(elements < 4000, "{elements} elements for 607 themes");
+    assert!(elements < 4000, "{elements} elements for 630 themes");
     assert!(find(&rt, "theme-card:named:Theme 599").is_none());
 
     // Scrolling builds the rows that come into view and lets go of the ones that left.
@@ -639,7 +678,11 @@ fn switcher_rows_end_with_their_colours_as_a_strip() {
         .into_iter()
         .map(|e| (e.label, e.picture))
         .collect();
-    assert_eq!(pictures.len(), 8);
+    assert_eq!(
+        pictures.len(),
+        31,
+        "three choices, twenty-seven built-in themes and Mocha"
+    );
     assert_eq!(
         pictures[0],
         ("Follow server".to_owned(), Some(Picture::Server))
@@ -680,7 +723,7 @@ fn switcher_rows_end_with_their_colours_as_a_strip() {
             .collect()
     };
     assert_eq!(strip(&rt, 0).len(), 1, "Follow server: no dots");
-    let mocha_row = strip(&rt, 7);
+    let mocha_row = strip(&rt, 30);
     assert_eq!(mocha_row[0].fill, rgb(0x1e1e2e));
     assert_eq!(
         mocha_row[1..]

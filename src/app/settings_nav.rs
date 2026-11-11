@@ -158,7 +158,7 @@ impl Page {
         match self {
             Page::Section(section) => match section {
                 SettingsSection::Interface => "appearance layout window scale zoom sidebar tabs",
-                SettingsSection::Themes => "colors colours palette appearance dark chrome",
+                SettingsSection::Themes => "colors colours palette appearance dark light chrome",
                 SettingsSection::Terminal => "font shell text",
                 SettingsSection::Shortcuts => "keys keyboard bindings keymap hotkeys",
                 SettingsSection::Integrations => "agents skill hooks claude codex opencode pi",

@@ -30,6 +30,8 @@ mod settings_tests;
 mod tab_tests;
 #[path = "theme_library_tests.rs"]
 mod theme_library_tests;
+#[path = "theme_pair_tests.rs"]
+mod theme_pair_tests;
 #[path = "theme_switcher_tests.rs"]
 mod theme_switcher_tests;
 #[path = "wiring_tests.rs"]
@@ -1687,18 +1689,30 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
             .collect::<Vec<_>>()
     };
     let row = |label: &str, group: &str, current| (label.to_owned(), group.to_owned(), current);
+    // The server's colours, Follow chrome and every built-in theme, then Ghostty's.
+    let mut listed = vec![
+        row("Follow server", "Server", true),
+        row("Rex default colours", "Server", false),
+        row("Follow chrome", "Built in", false),
+    ];
+    listed.extend(
+        rex_linux::terminal_theme::BUILTINS
+            .iter()
+            .map(|builtin| row(builtin.name, "Built in", false)),
+    );
+    listed.extend([
+        row("Rex Test Mocha", "Dark", false),
+        row("Paper", "Light", false),
+    ]);
+    assert_eq!(rows(&rt.state), listed);
     assert_eq!(
-        rows(&rt.state),
+        rows(&rt.state)[3..8],
         [
-            row("Follow server", "Server", true),
-            row("Rex default colours", "Server", false),
-            row("Follow chrome", "Built in", false),
+            row("Merino Dark", "Built in", false),
             row("Midnight", "Built in", false),
             row("Rosé Pine", "Built in", false),
             row("Rosé Pine Moon", "Built in", false),
             row("Gruvbox Dark", "Built in", false),
-            row("Rex Test Mocha", "Dark", false),
-            row("Paper", "Light", false),
         ]
     );
     press(&mut rt, Key::Escape);
@@ -1713,7 +1727,7 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
 
     click(&mut rt, "terminal-theme");
     rt.update(|s, _| {
-        s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("mocha");
+        s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("test mocha");
         s.query_changed();
     });
     assert_eq!(rows(&rt.state), [row("Rex Test Mocha", "Dark", false)]);

@@ -403,7 +403,8 @@ pub fn value_popup(key: &str, value: &str, open: Intent) -> El {
     popup_button(key, value, press)
 }
 
-fn popup_button(
+/// [`value_popup`] for a list that `press` opens itself.
+pub fn popup_button(
     key: &str,
     value: &str,
     press: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,

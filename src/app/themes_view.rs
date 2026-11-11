@@ -5,7 +5,9 @@
 //!   [`swatch_strip`] is the same theme in the width of a word, for a row of the switcher,
 //!   and a chrome palette the same way, for a row of the Window colours list.
 //! - [`library`] lists every theme this client can declare as a grid of those cards under
-//!   Default, Built in, Custom and Ghostty headings, with a search field over it. Only the
+//!   Default, Built in, Custom and Ghostty headings, dark themes apart from light ones, with
+//!   a search field over it. With a light and a dark theme (`theme_pair`) both cards are
+//!   marked, and choosing a card sets the one its background makes it. Only the
 //!   rows near the viewport are built (`El::virtual_rows`), so a Ghostty install's six
 //!   hundred themes cost what a screenful does.
 //!
@@ -23,7 +25,7 @@ use super::{
 };
 use rex_linux::{
     settings::{ChromeTheme, TerminalThemeChoice},
-    terminal_theme::{BUILTIN_PREFIX, BUILTINS, Swatch, TerminalTheme, paired},
+    terminal_theme::{BUILTINS, Swatch, TerminalTheme, paired},
 };
 use rune::{
     Cursor, El, GrowthSpec, Key, KeyEvent, TextEdit, TextStyle, Tx, col, edge, el, memo, row, text,
@@ -432,67 +434,92 @@ impl Workspace {
         let page = super::settings_view::page_width(self.viewport[0] / self.ui_scale());
         let (cols, gap) = columns(page - 2. * PAGE_INSET);
         let query = fold(self.theme_library.query());
-        let current = &self.settings.terminal_theme;
+        // With a light and a dark theme, both are marked, and each says which it is.
+        let pair = self.pairs_themes();
+        let in_use = self.light_appearance();
+        let mark = |choice: &TerminalThemeChoice| -> Option<&'static str> {
+            if !pair {
+                return (self.settings.terminal_theme == *choice).then_some("");
+            }
+            [true, false]
+                .into_iter()
+                .find(|light| self.settings.theme_in_use(*light) == *choice)
+                .map(|light| match (light, in_use == Some(light)) {
+                    (true, true) => "The light theme, in use now.",
+                    (true, false) => "The light theme.",
+                    (false, true) => "The dark theme, in use now.",
+                    (false, false) => "The dark theme.",
+                })
+        };
         let mut total = 0;
-        let mut groups: Vec<(&'static str, Vec<Item>)> = ["Default", "Built in", "Custom"]
-            .into_iter()
-            .chain(["Ghostty dark", "Ghostty light"])
-            .map(|title| (title, Vec::new()))
-            .collect();
+        let mut groups: Vec<(&'static str, Vec<Item>)> =
+            ["Default", "Built in dark", "Built in light", "Custom"]
+                .into_iter()
+                .chain(["Ghostty dark", "Ghostty light"])
+                .map(|title| (title, Vec::new()))
+                .collect();
         let mut add =
             |group: usize, name: &str, help: &str, choice: TerminalThemeChoice, swatch| {
                 total += 1;
                 if let Some(marks) = Name::new(name).find(&query, false) {
+                    let marked = mark(&choice);
                     groups[group].1.push(Item {
-                        current: *current == choice,
+                        current: marked.is_some(),
                         id: String::from(choice),
                         name: name.to_owned(),
                         swatch,
-                        help: help.to_owned(),
+                        help: marked
+                            .filter(|which| !which.is_empty())
+                            .unwrap_or(help)
+                            .to_owned(),
                         marks,
                     });
                 }
             };
-        add(
-            0,
-            "Follow server",
-            if self.settings.terminal_theme_declared {
-                "Resets panes to Rex's own colours."
-            } else {
-                "Declares nothing: panes show the colours the server has."
-            },
-            TerminalThemeChoice::FollowServer,
-            None,
-        );
-        add(
-            0,
-            "Rex default colours",
-            "Rex's own text and palette, on this window's background.",
-            TerminalThemeChoice::RexDefault,
-            Some(self.swatch(&TerminalTheme::default())),
-        );
-        let chrome = paired(self.settings.chrome_theme);
-        add(
-            0,
-            "Follow chrome",
-            &format!("The theme of the window colours: {}.", chrome.name),
-            TerminalThemeChoice::FollowChrome,
-            Some(self.swatch(&(chrome.theme)())),
-        );
+        // One theme for both appearances: not offered while there is one for each (the
+        // switch above the library goes back to one).
+        if !pair {
+            add(
+                0,
+                "Follow server",
+                if self.settings.terminal_theme_declared {
+                    "Resets panes to Rex's own colours."
+                } else {
+                    "Declares nothing: panes show the colours the server has."
+                },
+                TerminalThemeChoice::FollowServer,
+                None,
+            );
+            add(
+                0,
+                "Rex default colours",
+                "Rex's own text and palette, on this window's background.",
+                TerminalThemeChoice::RexDefault,
+                Some(self.swatch(&TerminalTheme::default())),
+            );
+            let chrome = paired(self.settings.chrome_theme);
+            add(
+                0,
+                "Follow chrome",
+                &format!("The theme of the window colours: {}.", chrome.name),
+                TerminalThemeChoice::FollowChrome,
+                Some(self.swatch(&chrome.theme())),
+            );
+        }
         for builtin in BUILTINS {
             add(
-                1,
+                if builtin.light() { 2 } else { 1 },
                 builtin.name,
                 "",
-                TerminalThemeChoice::Named(format!("{BUILTIN_PREFIX}{}", builtin.id)),
-                Some(self.swatch(&(builtin.theme)())),
+                TerminalThemeChoice::Named(builtin.choice_id()),
+                Some(self.swatch(&builtin.theme())),
             );
         }
         for theme in &self.themes {
             let group = match (theme.custom, theme.light) {
-                (true, _) => 2,
-                (false, false) => 3,
-                (false, true) => 4,
+                (true, _) => 3,
+                (false, false) => 4,
+                (false, true) => 5,
             };
             add(
                 group,

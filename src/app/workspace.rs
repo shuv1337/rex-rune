@@ -140,6 +140,8 @@ pub struct Workspace {
     pub theme_dirs: ThemeDirs,
     /// The Ghostty themes the theme picker lists, read when it opens.
     pub themes: Vec<ThemeInfo>,
+    /// Whether the desktop asks for dark, once the window has said (`theme_pair`).
+    pub desktop_dark: Option<bool>,
     pub updates: super::updates::Updates,
 }
 
@@ -204,11 +206,15 @@ impl Workspace {
         // file is back.
         let theme_dirs = ThemeDirs::from_env();
         set_palette(palette_of(settings.chrome_theme));
-        let (term_theme, theme_error) =
-            match theme_dirs.resolve(&settings.terminal_theme, settings.chrome_theme) {
-                Ok(theme) => (theme, None),
-                Err(error) => (None, Some(error)),
-            };
+        // A light and dark pair that follows the desktop waits for the window to say which
+        // the desktop is (`theme_pair`).
+        let (term_theme, theme_error) = match super::theme_pair::at_launch(&settings)
+            .map(|choice| theme_dirs.resolve(&choice, settings.chrome_theme))
+        {
+            Some(Ok(theme)) => (theme, None),
+            Some(Err(error)) => (None, Some(error)),
+            None => (None, None),
+        };
         let local_keymap = super::actions::resolve(&settings.shortcut_file.overrides);
         let mut this = Self {
             logo: None,
@@ -272,6 +278,7 @@ impl Workspace {
             term_theme,
             theme_dirs,
             themes: Vec::new(),
+            desktop_dark: None,
             updates: Default::default(),
         };
         this.init_updates();
@@ -1042,6 +1049,10 @@ impl Workspace {
     /// it; chrome palettes leave it alone from then on. Nothing changes when the theme can't
     /// be read.
     pub fn apply_theme(&mut self, choice: TerminalThemeChoice) -> anyhow::Result<()> {
+        // With a light and a dark theme, a theme by name becomes one of the two.
+        if let Some(done) = self.apply_to_pair(&choice) {
+            return done;
+        }
         self.term_theme = self
             .theme_dirs
             .resolve(&choice, self.settings.chrome_theme)?;
@@ -1068,7 +1079,7 @@ impl Workspace {
             self.settings.terminal_theme = TerminalThemeChoice::FollowChrome;
         }
         if self.settings.terminal_theme == TerminalThemeChoice::FollowChrome {
-            self.term_theme = Some((paired(chrome).theme)());
+            self.term_theme = Some(paired(chrome).theme());
             self.declare_theme();
         }
         self.save();
@@ -1078,13 +1089,17 @@ impl Workspace {
     /// without one, Rex's own colours once this client has ever declared a theme, since Rex
     /// keeps a client's last declaration per block across launches.
     pub fn declared_theme(&self) -> Option<SetTheme> {
+        // Not yet known which of the light and the dark theme: nothing, rather than a reset.
+        if self.theme_waits_for_desktop() {
+            return None;
+        }
         match &self.term_theme {
             Some(theme) => Some(theme.args()),
             None => self.settings.terminal_theme_declared.then(SetTheme::new),
         }
     }
 
-    fn declare_theme(&mut self) {
+    pub(super) fn declare_theme(&mut self) {
         let args = self.declared_theme();
         for index in 0..self.hosts.len() {
             self.send(index, HostCommand::Theme(args.clone()));
@@ -1108,6 +1123,7 @@ impl Workspace {
             TerminalThemeChoice::FollowServer => "Follow server",
             TerminalThemeChoice::RexDefault => "Rex default colours",
             TerminalThemeChoice::FollowChrome => "Follow chrome",
+            TerminalThemeChoice::LightDark => "Light and dark",
             TerminalThemeChoice::Named(id) => {
                 rex_linux::terminal_theme::builtin(id).map_or(id, |b| b.name)
             }

@@ -38,6 +38,7 @@ mod tabs;
 mod term;
 mod theme;
 mod theme_list;
+mod theme_pair;
 mod themes_view;
 mod toolbar;
 mod updates;
@@ -131,7 +132,9 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .h_full()
         .fill(rgb(ground()))
         .on_layout(|s: &mut Workspace, r| s.viewport = [r[2], r[3]])
-        .child(root);
+        .child(root)
+        // What the desktop asks for, light or dark, for a pair of terminal themes.
+        .child(theme_pair::desktop_probe(cx.system_dark()));
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
     if !cx.window_maximized() {

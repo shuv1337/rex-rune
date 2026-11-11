@@ -135,10 +135,29 @@ impl ChromeTheme {
     }
 }
 
+/// Which of the light and the dark terminal theme terminals take (`light_theme` and
+/// `dark_theme`, under [`TerminalThemeChoice::LightDark`]). A value this version doesn't know
+/// reads as Auto.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorScheme {
+    Light,
+    Dark,
+    /// The desktop's light or dark setting, followed as it changes.
+    #[default]
+    #[serde(other)]
+    Auto,
+}
+
+/// The theme terminals take while the appearance is light, and while it is dark, until the
+/// user chooses others: ids as in `named:<id>`.
+pub const DEFAULT_LIGHT_THEME: &str = "rex/merino-light";
+pub const DEFAULT_DARK_THEME: &str = "rex/merino-dark";
+
 /// The terminal theme this client declares to the server, saved as `follow_server`,
-/// `builtin_default`, `follow_chrome` or `named:<id>`. An id is a Ghostty theme's file name,
-/// or a built-in theme's after `rex/`. A value this version doesn't know reads as Follow
-/// server.
+/// `builtin_default`, `follow_chrome`, `light_dark` or `named:<id>`. An id is a Ghostty
+/// theme's file name, or a built-in theme's after `rex/`. A value this version doesn't know
+/// reads as Follow server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum TerminalThemeChoice {
@@ -150,6 +169,9 @@ pub enum TerminalThemeChoice {
     /// Declare the built-in theme paired with the chrome palette, whose background is the
     /// chrome's ground.
     FollowChrome,
+    /// Declare `light_theme` while the appearance is light and `dark_theme` while it is dark
+    /// (`color_scheme`), the other one once each time the appearance changes.
+    LightDark,
     Named(String),
 }
 impl From<String> for TerminalThemeChoice {
@@ -157,6 +179,7 @@ impl From<String> for TerminalThemeChoice {
         match value.as_str() {
             "builtin_default" => Self::RexDefault,
             "follow_chrome" => Self::FollowChrome,
+            "light_dark" => Self::LightDark,
             _ => match value.strip_prefix("named:") {
                 Some(id) if !id.is_empty() => Self::Named(id.to_owned()),
                 _ => Self::FollowServer,
@@ -170,6 +193,7 @@ impl From<TerminalThemeChoice> for String {
             TerminalThemeChoice::FollowServer => "follow_server".into(),
             TerminalThemeChoice::RexDefault => "builtin_default".into(),
             TerminalThemeChoice::FollowChrome => "follow_chrome".into(),
+            TerminalThemeChoice::LightDark => "light_dark".into(),
             TerminalThemeChoice::Named(id) => format!("named:{id}"),
         }
     }
@@ -208,6 +232,12 @@ pub struct Settings {
     /// client's last declaration per block across launches, so Follow server then resets
     /// eligible blocks to Rex's colours. Never cleared automatically.
     pub terminal_theme_declared: bool,
+    /// The appearance terminal themes follow under `light_dark`. The chrome stays dark.
+    pub color_scheme: ColorScheme,
+    /// The theme of the light appearance and the theme of the dark one, as theme ids. Kept
+    /// whatever `terminal_theme` is, so the pair is there when it is turned on again.
+    pub light_theme: String,
+    pub dark_theme: String,
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
@@ -249,12 +279,31 @@ impl Default for Settings {
             terminal_theme: TerminalThemeChoice::default(),
             terminal_theme_chosen: false,
             terminal_theme_declared: false,
+            color_scheme: ColorScheme::default(),
+            light_theme: DEFAULT_LIGHT_THEME.into(),
+            dark_theme: DEFAULT_DARK_THEME.into(),
             muted_tabs: Vec::new(),
             shortcut_file: shortcuts::Shortcuts::default(),
         }
     }
 }
 impl Settings {
+    /// The theme choice in effect in the light (`light`) or the dark appearance: under
+    /// `light_dark` that appearance's theme by name, otherwise the one choice there is.
+    pub fn theme_in_use(&self, light: bool) -> TerminalThemeChoice {
+        match &self.terminal_theme {
+            TerminalThemeChoice::LightDark => TerminalThemeChoice::Named(
+                if light {
+                    &self.light_theme
+                } else {
+                    &self.dark_theme
+                }
+                .clone(),
+            ),
+            choice => choice.clone(),
+        }
+    }
+
     pub fn client_label(&self) -> String {
         self.client_label
             .as_deref()
@@ -303,6 +352,13 @@ impl Settings {
         settings.pane_padding = settings.pane_padding.clamp(0., 32.);
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
+        // A theme id emptied by hand is the default again, never a theme that can't be read.
+        if settings.light_theme.trim().is_empty() {
+            settings.light_theme = DEFAULT_LIGHT_THEME.into();
+        }
+        if settings.dark_theme.trim().is_empty() {
+            settings.dark_theme = DEFAULT_DARK_THEME.into();
+        }
         // Import before the first save loses nivox's unknown keybindings field.
         let imported = shortcuts::import_nivox(&value, &shortcuts::Shortcuts::path(path));
         settings.shortcut_file = shortcuts::Shortcuts::load(path);
@@ -531,6 +587,7 @@ mod tests {
             (TerminalThemeChoice::FollowServer, "follow_server"),
             (TerminalThemeChoice::RexDefault, "builtin_default"),
             (TerminalThemeChoice::FollowChrome, "follow_chrome"),
+            (TerminalThemeChoice::LightDark, "light_dark"),
             (
                 TerminalThemeChoice::Named("rex/midnight".into()),
                 "named:rex/midnight",
@@ -558,6 +615,74 @@ mod tests {
                 "{unknown}"
             );
         }
+    }
+
+    #[test]
+    fn the_light_and_dark_themes_round_trip_and_older_files_keep_one_theme() {
+        // A file from before the pair: one theme as it was, and the pair's defaults waiting.
+        let old: Settings =
+            serde_json::from_str(r#"{"terminal_theme":"named:Catppuccin Mocha"}"#).unwrap();
+        assert_eq!(
+            old.terminal_theme,
+            TerminalThemeChoice::Named("Catppuccin Mocha".into())
+        );
+        assert_eq!(old.color_scheme, ColorScheme::Auto);
+        assert_eq!(
+            (old.light_theme.as_str(), old.dark_theme.as_str()),
+            ("rex/merino-light", "rex/merino-dark")
+        );
+        for light in [true, false] {
+            assert_eq!(old.theme_in_use(light), old.terminal_theme, "one theme");
+        }
+
+        let path =
+            std::env::temp_dir().join(format!("rex-pair-settings-{}.json", std::process::id()));
+        for (scheme, saved) in [
+            (ColorScheme::Auto, "auto"),
+            (ColorScheme::Light, "light"),
+            (ColorScheme::Dark, "dark"),
+        ] {
+            let settings = Settings {
+                terminal_theme: TerminalThemeChoice::LightDark,
+                color_scheme: scheme,
+                light_theme: "Catppuccin Latte".into(),
+                dark_theme: "rex/nord".into(),
+                ..Settings::default()
+            };
+            settings.save(&path).unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(json["terminal_theme"], "light_dark");
+            assert_eq!(json["color_scheme"], saved);
+            assert_eq!(json["light_theme"], "Catppuccin Latte");
+            assert_eq!(json["dark_theme"], "rex/nord");
+            let back = Settings::load(&path).unwrap();
+            assert_eq!(back.terminal_theme, TerminalThemeChoice::LightDark);
+            assert_eq!(back.color_scheme, scheme);
+            assert_eq!(
+                back.theme_in_use(true),
+                TerminalThemeChoice::Named("Catppuccin Latte".into())
+            );
+            assert_eq!(
+                back.theme_in_use(false),
+                TerminalThemeChoice::Named("rex/nord".into())
+            );
+        }
+        // A scheme this version doesn't know follows the desktop; an emptied id is the
+        // default again.
+        std::fs::write(
+            &path,
+            r#"{"hosts":[{"label":"a","endpoint":"unix:///run/rex.sock"}],
+                "color_scheme":"sunset","light_theme":"","dark_theme":"  "}"#,
+        )
+        .unwrap();
+        let odd = Settings::load(&path).unwrap();
+        assert_eq!(odd.color_scheme, ColorScheme::Auto);
+        assert_eq!(
+            (odd.light_theme.as_str(), odd.dark_theme.as_str()),
+            (DEFAULT_LIGHT_THEME, DEFAULT_DARK_THEME)
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

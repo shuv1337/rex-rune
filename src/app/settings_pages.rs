@@ -7,6 +7,7 @@ use super::{
     settings_nav::Status,
     settings_view::notify_switch,
     theme::*,
+    theme_pair,
     widgets::glyph,
     workspace::Workspace,
 };
@@ -18,36 +19,37 @@ pub fn themes(s: &Workspace) -> El {
     page([pickers(s), super::themes_view::library(s)])
 }
 
-/// What the window and its terminals are drawn in now, each with its list.
+/// What the window and its terminals are drawn in now, each with its list: one terminal
+/// theme, or a light and a dark one with the appearance they follow.
 fn pickers(s: &Workspace) -> El {
-    section(
-        "",
-        [
-            card([
-                setting(
-                    "Window colours",
-                    "Terminals take the matching theme until you choose one.",
-                    value_popup(
-                        "chrome-theme",
-                        s.settings.chrome_theme.name(),
-                        Intent::ChooseChrome,
-                    ),
-                ),
-                setting(
-                    "Terminal theme",
-                    "The colours programs draw in.",
-                    value_popup(
-                        "terminal-theme",
-                        Workspace::theme_label(&s.settings.terminal_theme),
-                        Intent::ChooseTheme,
-                    ),
-                ),
-            ]),
-            footnote(
-                "A terminal theme is declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection.",
+    let mut rows = vec![
+        setting(
+            "Window colours",
+            "Terminals take the matching theme until you choose one.",
+            value_popup(
+                "chrome-theme",
+                s.settings.chrome_theme.name(),
+                Intent::ChooseChrome,
             ),
-        ],
-    )
+        ),
+        theme_pair::pair_switch(s),
+    ];
+    let note = if s.pairs_themes() {
+        rows.extend(theme_pair::pair_rows(s));
+        theme_pair::PAIR_FOOTNOTE
+    } else {
+        rows.push(setting(
+            "Terminal theme",
+            "The colours programs draw in.",
+            value_popup(
+                "terminal-theme",
+                Workspace::theme_label(&s.settings.terminal_theme),
+                Intent::ChooseTheme,
+            ),
+        ));
+        "A terminal theme is declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection."
+    };
+    section("", [card(rows), footnote(note)])
 }
 
 /// Interface → Customize panes.

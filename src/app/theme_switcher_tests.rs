@@ -111,6 +111,7 @@ fn the_switcher_finds_names_without_their_accents_and_marks_what_matched() {
         [
             hit("Rosé Pine", "Built in", &["Rosé"]),
             hit("Rosé Pine Moon", "Built in", &["Rosé"]),
+            hit("Rosé Pine Dawn", "Built in", &["Rosé"]),
             hit("Rose Pine", "Dark", &["Rose"]),
             hit("Rose Pine Dawn", "Light", &["Rose"]),
         ]
@@ -120,7 +121,10 @@ fn the_switcher_finds_names_without_their_accents_and_marks_what_matched() {
     query(&mut ws, "ROSÉ PINE D");
     assert_eq!(
         found(&ws),
-        [hit("Rose Pine Dawn", "Light", &["Rose", "Pine", "D"])]
+        [
+            hit("Rosé Pine Dawn", "Built in", &["Rosé", "Pine", "D"]),
+            hit("Rose Pine Dawn", "Light", &["Rose", "Pine", "D"]),
+        ]
     );
     // Words in any order, each marked where it is; every word must be there.
     query(&mut ws, "moon rose");
@@ -137,8 +141,14 @@ fn the_switcher_finds_names_without_their_accents_and_marks_what_matched() {
         ]
     );
     // The switcher finds the middle of a word, and the choices that are not theme names.
-    query(&mut ws, "ccin");
-    assert_eq!(found(&ws), [hit("Catppuccin Mocha", "Dark", &["ccin"])]);
+    query(&mut ws, "ccin mo");
+    assert_eq!(
+        found(&ws),
+        [
+            hit("Catppuccin Mocha", "Built in", &["ccin", "Mo"]),
+            hit("Catppuccin Mocha", "Dark", &["ccin", "Mo"]),
+        ]
+    );
     query(&mut ws, "follow");
     assert_eq!(
         found(&ws),
@@ -344,6 +354,7 @@ fn a_commands_search_lists_window_colours_and_themes_under_appearance() {
             row("Rosé Pine Moon", "Window colours", false),
             row("Rosé Pine", "Terminal theme", false),
             row("Rosé Pine Moon", "Terminal theme", false),
+            row("Rosé Pine Dawn", "Terminal theme", false),
             // A word of the name starts with it: Primrose does not.
             row("Aurora Rose", "Terminal theme", false),
             row("Rose Pine", "Terminal theme", true),
@@ -363,7 +374,7 @@ fn a_commands_search_lists_window_colours_and_themes_under_appearance() {
         .filter(|e| !e.exiting && e.key.as_deref() == Some("check"))
         .collect();
     assert_eq!(checks.len(), 1);
-    assert!(checks[0].path.contains("entry:5"), "{}", checks[0].path);
+    assert!(checks[0].path.contains("entry:6"), "{}", checks[0].path);
 
     // Return on a window colour draws the chrome in it and closes Commands.
     press(&mut rt, Key::Enter);
@@ -383,8 +394,13 @@ fn a_commands_search_lists_window_colours_and_themes_under_appearance() {
     type_text(&mut rt, "pine dawn");
     assert_eq!(
         found(&rt.state),
-        [hit("Rose Pine Dawn", "Appearance", &["Pine", "Dawn"])]
+        [
+            hit("Rosé Pine Dawn", "Appearance", &["Pine", "Dawn"]),
+            hit("Rose Pine Dawn", "Appearance", &["Pine", "Dawn"]),
+        ]
     );
+    // Ghostty's, the second row.
+    press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);
     assert!(rt.state.panel.is_none());
     assert_eq!(
@@ -438,13 +454,22 @@ fn a_commands_search_names_themes_from_two_letters_and_never_the_follow_choices(
     }
     // Gruvbox Dark is the window colours, then the theme.
     assert_eq!(
-        appearance(&mut ws, "dark"),
-        ["Gruvbox Dark", "Gruvbox Dark", "Solarized Dark"]
+        appearance(&mut ws, "gruvbox d"),
+        ["Gruvbox Dark", "Gruvbox Dark"]
+    );
+    // The built-in Solarized Dark, then Ghostty's.
+    assert_eq!(
+        appearance(&mut ws, "sol dark"),
+        ["Solarized Dark", "Solarized Dark"]
     );
     ws.picker(false);
     query(&mut ws, "gruv");
     let details: Vec<String> = ws.entries().into_iter().map(|e| e.detail).collect();
-    assert_eq!(details, ["Window colours", "Terminal theme"]);
+    assert_eq!(
+        details,
+        ["Window colours", "Terminal theme", "Terminal theme"],
+        "the palette, then Gruvbox Dark and Gruvbox Light"
+    );
 
     // A theme installed since is listed the next time Commands opens.
     std::fs::write(root.join("Renewed"), "background = #101010\n").unwrap();
