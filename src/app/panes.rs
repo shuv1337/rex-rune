@@ -708,6 +708,10 @@ fn empty(s: &Workspace) -> El {
 /// The block a pane-specific panel targets, if one is open.
 fn target_block(s: &Workspace) -> Option<String> {
     let panel = s.panel.as_ref()?;
+    // Close other panes acts on the other panes: the popup's outlines mark those.
+    if super::pane_moves::closing_others(panel).is_some() {
+        return None;
+    }
     matches!(
         panel.kind,
         PanelKind::Pane | PanelKind::Form(Form::RenamePane(_)) | PanelKind::Confirm { .. }

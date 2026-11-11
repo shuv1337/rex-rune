@@ -108,13 +108,26 @@ fn an_action_with_a_number_or_a_key_has_a_row_for_each_bound_value() {
         .map(|row| row.title.as_str())
         .collect();
     assert_eq!(scroll, ["Scroll up · 20 lines", "Scroll down · 20 lines"]);
-    // Bound with nothing: one row that says what it needs.
-    let goto = titled(&rows, "Go to tab");
-    assert!(goto.keys.is_empty());
+    // Bound by default with nine: the numbered tabs in order, then the last.
+    let goto: Vec<_> = rows
+        .iter()
+        .filter(|row| row.action == "client.tab.goto")
+        .map(|row| (row.title.as_str(), row.keys.clone()))
+        .collect();
+    assert_eq!(goto.len(), 9);
     assert_eq!(
-        goto.notes,
-        ["Bound in shortcuts.json with an argument: index"]
+        goto[0],
+        ("Go to tab 1", vec![caps(&[&["Ctrl", "Alt", "1"]])])
     );
+    assert_eq!(
+        goto[7],
+        ("Go to tab 8", vec![caps(&[&["Ctrl", "Alt", "8"]])])
+    );
+    assert_eq!(
+        goto[8],
+        ("Go to last tab", vec![caps(&[&["Ctrl", "Alt", "9"]])])
+    );
+    // Bound with nothing: one row that says what it needs.
     assert_eq!(
         titled(&rows, "Send key").notes,
         ["Bound in shortcuts.json with an argument: key"]
@@ -134,22 +147,29 @@ fn an_action_with_a_number_or_a_key_has_a_row_for_each_bound_value() {
         .filter(|row| row.action == "client.tab.goto")
         .map(|row| (row.title.as_str(), row.keys.clone(), row.notes.clone()))
         .collect();
-    let from_file = vec!["shortcuts.json".to_owned()];
     assert_eq!(
-        goto,
+        goto[..2],
         [
             (
-                "Go to tab -1",
-                vec![caps(&[&["Alt", "9"]])],
-                from_file.clone()
+                "Go to tab 1",
+                vec![caps(&[&["Alt", "1"]]), caps(&[&["Ctrl", "Alt", "1"]])],
+                vec!["Alt 1 from shortcuts.json".to_owned()]
             ),
             (
-                "Go to tab 1",
-                vec![caps(&[&["Alt", "1"]])],
-                from_file.clone()
+                "Go to tab 2",
+                vec![caps(&[&["Alt", "2"]]), caps(&[&["Ctrl", "Alt", "2"]])],
+                vec!["Alt 2 from shortcuts.json".to_owned()]
             ),
-            ("Go to tab 2", vec![caps(&[&["Alt", "2"]])], from_file),
         ]
+    );
+    // The last tab's row follows the numbered ones, whatever its keys.
+    assert_eq!(
+        goto[8],
+        (
+            "Go to last tab",
+            vec![caps(&[&["Alt", "9"]]), caps(&[&["Ctrl", "Alt", "9"]])],
+            vec!["Alt 9 from shortcuts.json".to_owned()]
+        )
     );
 }
 
@@ -278,9 +298,11 @@ fn the_first_result_of_a_key_is_the_action_the_key_performs() {
         let (_, on_key) = found.key.unwrap_or_else(|| panic!("{query} is a key"));
         let first = on_key.first().unwrap_or_else(|| panic!("{query}: no row"));
         assert_eq!(first.action, binding.binding.action, "{query}");
+        // A row's arguments are what its bindings run; when they run is in its helper line.
+        let runs = binding.binding.args.clone().unwrap_or(Value::Null);
         assert_eq!(
             first.args.clone().unwrap_or(Value::Null),
-            binding.binding.args.clone().unwrap_or(Value::Null),
+            actions::without_when(&runs),
             "{query}"
         );
     }

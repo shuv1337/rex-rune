@@ -4,7 +4,7 @@
 //! scrolling. So no default button may exist outside an open modal (the main view has none),
 //! and `on_key` takes every key it forwards.
 use super::{
-    actions,
+    actions::{self, Place, When},
     bindings::{Context, Input, Step},
     keys::{self, Action},
     panel::{Intent, PanelKind},
@@ -25,10 +25,30 @@ fn space(ev: &KeyEvent, tx: &Tx) -> bool {
 
 /// Global actions also reach fields and dialogs. Matching is still data-driven.
 pub fn global_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    dispatch(s, ev, tx, true)
+    dispatch(s, ev, tx, Place::Elsewhere)
 }
 
-fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) -> bool {
+impl Workspace {
+    /// Whether what a binding's `when` waits for is so now.
+    pub(super) fn holds(&self, when: When) -> bool {
+        match when {
+            When::Searching => self
+                .active_terminal()
+                .is_some_and(|term| term.search.is_some()),
+            When::Switching => self.switching(),
+        }
+    }
+}
+
+/// Whether a chord, pressed in the switcher's field, would type into it: a character with
+/// no more than Shift held.
+fn types_text(chord: &rex_linux::keymap::Chord) -> bool {
+    let mods = chord.modifiers;
+    matches!(chord.key, rex_linux::keymap::Key::Character(_))
+        && !(mods.ctrl || mods.alt || mods.logo)
+}
+
+fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, place: Place) -> bool {
     let input = Input {
         event: ev,
         code: tx.physical_key(),
@@ -57,6 +77,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
         s.bindings.sequence.clear();
         s.bindings.context = Some(context);
     }
+    let (searching, switching) = (s.holds(When::Searching), s.holds(When::Switching));
     let model = &s.hosts[s.active].model;
     let snapshot = model
         .keymap
@@ -69,12 +90,30 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
         .filter(|k| model.connected && k.generation == s.keymap_generation)
         .map(|k| &k.resolved)
         .unwrap_or(&s.local_keymap);
+    // The switcher is typed into: what it adds to the global actions must not take a
+    // character from its field.
+    let field = place == Place::Switcher;
     let step = s.bindings.sequence.advance(map, input, |i| {
-        let binding = &map.bindings[i].binding;
+        let bound = &map.bindings[i];
+        let binding = &bound.binding;
         match actions::classify(binding, server_actions) {
-            actions::Kind::Local(spec) => !global_only || spec.global(),
+            actions::Kind::Local(spec) => {
+                let waits = binding.args.as_ref().and_then(actions::when);
+                spec.runs_in(place)
+                    && waits.is_none_or(|when| match when {
+                        When::Searching => searching,
+                        When::Switching => switching,
+                    })
+                    && (!field
+                        || spec.global()
+                        || !bound
+                            .chords
+                            .as_ref()
+                            .and_then(|chords| chords.first())
+                            .is_some_and(types_text))
+            }
             actions::Kind::Forward | actions::Kind::Server { .. } => {
-                !global_only && model.connected
+                place == Place::Workspace && model.connected
             }
             actions::Kind::Skip => false,
         }
@@ -134,7 +173,13 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
 
 /// Keys a list popup (switcher, Commands, host step, pane menu) takes, from its field or root.
 pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if global_key(s, ev, tx) {
+    // The switcher's rows also answer to Go to session, by the numbers they show.
+    let place = if s.switching() {
+        Place::Switcher
+    } else {
+        Place::Elsewhere
+    };
+    if dispatch(s, ev, tx, place) {
         return true;
     }
     if s.panel.as_ref().is_some_and(|p| p.rename.is_some()) {
@@ -220,7 +265,7 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     // The main view consumes both shortcuts (including sequence prefixes) and PTY keys.
     s.last_keypress = Some(std::time::Instant::now());
-    if dispatch(s, ev, tx, false) {
+    if dispatch(s, ev, tx, Place::Workspace) {
         return true;
     }
     forward(s, ev, tx, Vec::new())

@@ -1624,6 +1624,7 @@ impl Workspace {
             | PaneAction::CopyId
             | PaneAction::Clear
             | PaneAction::Reset => self.pane_verb(target, action, tx),
+            PaneAction::CloseOthers => self.close_other_panes(target),
         }
     }
 
@@ -2020,6 +2021,9 @@ impl Workspace {
                     return;
                 }
                 match target.filter(|_| method == "block.close") {
+                    Some(target) if payload.get("block_ids").is_some() => {
+                        self.confirmed_pane_close(&target, &payload)
+                    }
                     Some(target) => {
                         self.send(target.host, HostCommand::Request { method, payload })
                     }

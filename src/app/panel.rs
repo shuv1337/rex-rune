@@ -105,6 +105,7 @@ impl Intent {
                 PaneAction::CopyId => ("pane.copy_id", Value::Null),
                 PaneAction::Clear => ("pane.clear", Value::Null),
                 PaneAction::Reset => ("pane.reset", Value::Null),
+                PaneAction::CloseOthers => (super::pane_moves::CLOSE_OTHERS, Value::Null),
                 _ => return None,
             },
             _ => return None,
@@ -149,7 +150,10 @@ impl Intent {
                 | Intent::AddHostManually
                 | Intent::EditHost(_)
                 | Intent::RemoveHost(_)
-                | Intent::Pane(_, PaneAction::Rename | PaneAction::Close)
+                | Intent::Pane(
+                    _,
+                    PaneAction::Rename | PaneAction::Close | PaneAction::CloseOthers
+                )
                 | Intent::Session(_, SessionAction::Rename | SessionAction::Close)
         )
     }
@@ -203,6 +207,8 @@ pub enum PaneAction {
     Clear,
     /// `terminal.reset`: the terminal's starting state; the program keeps running.
     Reset,
+    /// Close every other pane of the pane's tab, after asking.
+    CloseOthers,
 }
 
 #[derive(Clone, Debug)]
@@ -873,6 +879,7 @@ impl Workspace {
                 }
                 entries.push(e);
             }
+            self.number_sessions(&mut entries);
         }
         self.shortcut_details(&mut entries);
         entries

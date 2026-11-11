@@ -130,15 +130,26 @@ fn bound<'a>(map: &'a Resolved, server: &[InspectResponseAction]) -> Vec<Bound<'
     list
 }
 
-/// What tells one row from another: the action and its arguments, none and `{}` alike.
+/// What tells one row from another: the action and its arguments, none and `{}` alike. A
+/// binding's `when` is not among them: a key that runs the action only at certain times is
+/// on the action's row, which says when.
 type Identity = (String, String);
 
 fn identity(action: &str, args: Option<&Value>) -> Identity {
     let args = args
+        .map(actions::without_when)
         .filter(|args| !args.is_null() && args.as_object().is_none_or(|a| !a.is_empty()))
-        .map(Value::to_string)
+        .map(|args| args.to_string())
         .unwrap_or_default();
     (action.to_owned(), args)
+}
+
+/// When a binding with a `when` runs, for its row's helper line.
+fn waits(binding: &Binding) -> Option<&'static str> {
+    Some(match actions::when(binding.args.as_ref()?)? {
+        actions::When::Searching => "while the find bar is open",
+        actions::When::Switching => "in the session switcher",
+    })
 }
 
 /// A row before its bindings are read.
@@ -157,12 +168,17 @@ impl Plan {
     }
 }
 
-/// Arguments in the order their rows are listed: numbers by value, then words.
+/// Arguments in the order their rows are listed: numbers by value, then words. An `index`
+/// of -1 is the last of a list, so it follows the numbered places.
 fn argument_order(args: &Value) -> (i64, String) {
-    let number = args
-        .as_object()
-        .and_then(|args| args.values().next())
-        .and_then(Value::as_i64);
+    let number = match args["index"].as_i64() {
+        Some(place) if place < 0 => Some(i64::MAX - 1),
+        Some(place) => Some(place),
+        None => args
+            .as_object()
+            .and_then(|args| args.values().next())
+            .and_then(Value::as_i64),
+    };
     (number.unwrap_or(i64::MAX), args.to_string())
 }
 
@@ -195,7 +211,7 @@ fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<P
                 .map(|choice| Some(json!({ name.as_str(): choice })))
                 .collect(),
         };
-        let mut others: Vec<&Value> = groups
+        let mut others: Vec<Value> = groups
             .iter()
             .filter(|((action, _), _)| action == spec.name)
             .filter(|(id, _)| {
@@ -204,9 +220,10 @@ fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<P
                     .any(|args| identity(spec.name, args.as_ref()) == *id)
             })
             .filter_map(|(_, indices)| bound[indices[0]].binding.args.as_ref())
+            .map(actions::without_when)
             .collect();
-        others.sort_by_cached_key(|args| argument_order(args));
-        listed.extend(others.into_iter().cloned().map(Some));
+        others.sort_by_cached_key(argument_order);
+        listed.extend(others.into_iter().map(Some));
         let unbindable = listed.is_empty();
         if unbindable {
             listed.push(None);
@@ -386,6 +403,19 @@ pub fn rows(
             }
             if !folded.is_empty() {
                 note("Also on the numpad".into());
+            }
+            // A key that runs the action only at certain times, and is the program's
+            // otherwise.
+            let waiting: Vec<(usize, &str)> = shown
+                .iter()
+                .filter_map(|&index| Some((index, waits(bound[index].binding)?)))
+                .collect();
+            for (index, times) in &waiting {
+                note(if shown.len() == 1 {
+                    format!("Only {times}")
+                } else {
+                    format!("{} only {times}", keys_of(*index))
+                });
             }
             // A key of this row that a lower binding of another action has too.
             for (index, loser) in bound.iter().enumerate() {

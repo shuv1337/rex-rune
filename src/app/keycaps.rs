@@ -19,8 +19,18 @@ impl Workspace {
         self.effective_bindings()
             .iter()
             .find(|b| {
+                if b.binding.action != action {
+                    return false;
+                }
                 let bound = b.binding.args.as_ref().unwrap_or(&Value::Null);
-                b.binding.action == action && (bound == args || (empty(bound) && empty(args)))
+                // A binding that waits for something counts while that is so, and its
+                // `when` is no part of what it runs.
+                let bound = match super::actions::when(bound) {
+                    Some(when) if !self.holds(when) => return false,
+                    Some(_) => std::borrow::Cow::Owned(super::actions::without_when(bound)),
+                    None => std::borrow::Cow::Borrowed(bound),
+                };
+                *bound == *args || (empty(&bound) && empty(args))
             })
             .and_then(|b| b.chords.as_ref())
             .map(|chords| chords.iter().map(|c| c.keycaps()).collect())

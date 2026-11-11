@@ -16,7 +16,10 @@ use serde_json::{Value, json};
 fn sample_args(name: &str) -> Value {
     match name {
         "session.select" => json!({"session_id": "s"}),
-        "pane.split" | "client.tab.move" => json!({"direction": "right"}),
+        "pane.split" | "client.tab.move" | "pane.move" | "pane.resize" => {
+            json!({"direction": "right"})
+        }
+        "session.goto" => json!({"index": 2}),
         "pane.focus" => json!({"direction": "up"}),
         "pane.scroll" => json!({"lines": 3}),
         "client.tab.goto" => json!({"index": 2}),

@@ -389,6 +389,8 @@ pub fn defaults() -> KeymapDefault {
         ("ctrl+shift+v", "pane.paste"),
         ("ctrl+shift+f", "client.search"),
         ("ctrl+shift+r", "pane.reconnect"),
+        ("ctrl+alt+[", "pane.focus_previous"),
+        ("ctrl+alt+]", "pane.focus_next"),
         // Of an action's bindings the last is the one Commands and menus show: the main
         // block's key, not the numpad's.
         ("ctrl+[NumpadAdd]", "client.zoom.in"),
@@ -420,6 +422,36 @@ pub fn defaults() -> KeymapDefault {
     }
     for (keys, lines) in [("shift+pageup", -20), ("shift+pagedown", 20)] {
         bindings.push(Binding::new([keys], "pane.scroll").args(json!({"lines": lines})));
+    }
+    for direction in ["left", "right", "up", "down"] {
+        bindings.push(
+            Binding::new([format!("ctrl+alt+shift+{direction}")], "pane.move")
+                .args(json!({"direction": direction})),
+        );
+    }
+    // Tabs by number, the ninth key the last tab, as browsers have it. With Alt alone these
+    // would be taken from readline and from programs that number their own windows.
+    for number in 1..=9 {
+        let index = if number == 9 { -1 } else { number };
+        bindings.push(
+            Binding::new([format!("ctrl+alt+{number}")], "client.tab.goto")
+                .args(json!({"index": index})),
+        );
+    }
+    // A `when` keeps a key with the terminal program except while its condition holds: F3
+    // steps through matches only while the find bar is open, and Ctrl with a number picks a
+    // session only in the switcher.
+    for (keys, action) in [
+        ("f3", "client.search.next"),
+        ("shift+f3", "client.search.previous"),
+    ] {
+        bindings.push(Binding::new([keys], action).args(json!({"when": "searching"})));
+    }
+    for number in 1..=9 {
+        bindings.push(
+            Binding::new([format!("ctrl+{number}")], "session.goto")
+                .args(json!({"index": number, "when": "switching"})),
+        );
     }
     KeymapDefault::new("linux").bindings(bindings)
 }
@@ -806,7 +838,7 @@ mod tests {
         let layer = defaults();
         assert_eq!(layer.name, "linux");
         assert!(layer.removals.is_empty());
-        assert_eq!(layer.bindings.len(), 35);
+        assert_eq!(layer.bindings.len(), 61);
         // The terminal font size actions have no default: Ctrl Alt + / - / 0 belong to the
         // program in the terminal until the user binds them.
         assert!(
@@ -815,6 +847,28 @@ mod tests {
                 .iter()
                 .any(|b| b.action.starts_with("client.font."))
         );
+        // The ninth tab key is the last tab; the keys that wait say what for.
+        let args = |key: &str| {
+            let binding = layer.bindings.iter().find(|b| b.keys == [key]).unwrap();
+            binding.args.clone().unwrap_or_default()
+        };
+        assert_eq!(args("ctrl+alt+8"), json!({"index": 8}));
+        assert_eq!(args("ctrl+alt+9"), json!({"index": -1}));
+        assert_eq!(args("ctrl+9"), json!({"index": 9, "when": "switching"}));
+        assert_eq!(args("shift+f3"), json!({"when": "searching"}));
+        // Only those two kinds of binding wait: every other default always runs.
+        for binding in &layer.bindings {
+            let waits = binding
+                .args
+                .as_ref()
+                .is_some_and(|a| a.get("when").is_some());
+            assert_eq!(
+                waits,
+                binding.action == "session.goto" || binding.action.starts_with("client.search."),
+                "{}",
+                binding.action
+            );
+        }
         for binding in &layer.bindings {
             assert_eq!(normalize(&binding.keys.join(">")).unwrap(), binding.keys);
             assert!(binding.source.is_none() && binding.mode.is_none());
@@ -828,6 +882,14 @@ mod tests {
             ("ctrl+0", "client.zoom.reset"),
             ("ctrl+shift+pageup", "client.tab.move"),
             ("ctrl+shift+pagedown", "client.tab.move"),
+            ("ctrl+alt+[", "pane.focus_previous"),
+            ("ctrl+alt+]", "pane.focus_next"),
+            ("ctrl+alt+shift+left", "pane.move"),
+            ("ctrl+alt+1", "client.tab.goto"),
+            ("ctrl+alt+9", "client.tab.goto"),
+            ("f3", "client.search.next"),
+            ("shift+f3", "client.search.previous"),
+            ("ctrl+9", "session.goto"),
         ] {
             assert!(
                 layer
