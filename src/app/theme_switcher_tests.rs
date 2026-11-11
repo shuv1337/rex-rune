@@ -532,8 +532,16 @@ fn settings_at(section: SettingsSection, scale: f32, size: (f32, f32)) -> Runtim
     rt
 }
 
+/// Scroll the Terminal page to its foot, where the hosts' shells are.
+fn foot_of_terminal(rt: &mut Runtime<Workspace>) {
+    let page = rect(rt, "settings-scroll:terminal");
+    rt.pointer_move(page[0] + 40., page[1] + 40.);
+    rt.wheel(page[0] + 40., page[1] + 40., -8000.);
+    settle(rt);
+}
+
 #[test]
-fn the_font_form_opens_over_settings_against_its_row() {
+fn a_rows_form_opens_over_settings_against_its_row() {
     for (scale, size) in [
         (1., (1440., 1000.)),
         (1.3, (1024., 700.)),
@@ -541,10 +549,14 @@ fn the_font_form_opens_over_settings_against_its_row() {
     ] {
         let at = format!("at {scale} in {size:?}");
         let mut rt = settings_at(SettingsSection::Terminal, scale, size);
+        foot_of_terminal(&mut rt);
         let page = rect(&rt, "settings-scroll:terminal");
-        click(&mut rt, "font-change");
+        click(&mut rt, "host-shell:0");
         settle(&mut rt);
-        assert!(matches!(kind(&rt), Some(PanelKind::Form(Form::Fonts))));
+        assert!(matches!(
+            kind(&rt),
+            Some(PanelKind::Form(Form::HostShell(0)))
+        ));
         // Settings stays where it was under the form, and takes no input.
         assert_eq!(rect(&rt, "settings-scroll:terminal"), page, "{at}");
         let dialog = rt
@@ -553,7 +565,7 @@ fn the_font_form_opens_over_settings_against_its_row() {
             .find(|e| e.key.as_deref() == Some("dialog"))
             .unwrap();
         assert!(dialog.inert, "{at}: the page under the form is inert");
-        let (row, form) = (rect(&rt, "font-change"), rect(&rt, "form-popover"));
+        let (row, form) = (rect(&rt, "host-shell:0"), rect(&rt, "form-popover"));
         let gap = 4. * scale;
         assert!(
             close(form[0] + form[2], row[0] + row[2]),
@@ -599,16 +611,19 @@ fn the_font_form_opens_over_settings_against_its_row() {
         settle(&mut rt);
         assert!(matches!(kind(&rt), Some(PanelKind::Settings)), "{at}");
         assert!(
-            focused(&rt).is_some_and(|path| path.ends_with("font-change")),
+            focused(&rt).is_some_and(|path| path.ends_with("host-shell:0")),
             "{at}: focus returns to the row, not {:?}",
             focused(&rt)
         );
-        assert!(!rt.state.settings.font_family.ends_with('X'), "not saved");
+        assert_eq!(rt.state.settings.hosts[0].shell, None, "not saved");
 
         // Return opens it again; a press outside it goes back to Settings too.
         press(&mut rt, Key::Enter);
         settle(&mut rt);
-        assert!(matches!(kind(&rt), Some(PanelKind::Form(Form::Fonts))));
+        assert!(matches!(
+            kind(&rt),
+            Some(PanelKind::Form(Form::HostShell(0)))
+        ));
         let dialog = rect(&rt, "dialog");
         rt.pointer_down(dialog[0] + 40., dialog[1] + dialog[3] - 20.);
         rt.pointer_up(dialog[0] + 40., dialog[1] + dialog[3] - 20.);
@@ -619,15 +634,15 @@ fn the_font_form_opens_over_settings_against_its_row() {
         );
 
         // Saving from it keeps Settings open.
-        click(&mut rt, "font-change");
+        click(&mut rt, "host-shell:0");
         settle(&mut rt);
         rt.update(|s, _| {
-            s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("Hack Nerd Font Mono");
+            s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("fish");
         });
         click(&mut rt, "save-form");
         settle(&mut rt);
         assert!(matches!(kind(&rt), Some(PanelKind::Settings)), "{at}");
-        assert_eq!(rt.state.settings.font_family, "Hack Nerd Font Mono");
+        assert_eq!(rt.state.settings.hosts[0].shell.as_deref(), Some("fish"));
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
 }
@@ -635,6 +650,7 @@ fn the_font_form_opens_over_settings_against_its_row() {
 #[test]
 fn a_hosts_shell_form_opens_against_its_row_and_shows_its_error_there() {
     let mut rt = settings_at(SettingsSection::Terminal, 1., (1024., 700.));
+    foot_of_terminal(&mut rt);
     click(&mut rt, "host-shell:1");
     settle(&mut rt);
     assert!(matches!(
@@ -796,9 +812,10 @@ fn the_switcher_commands_and_forms_draw() {
     std::fs::remove_file(&rt.state.settings_path).ok();
 
     let mut rt = open(Some(SettingsSection::Terminal));
-    click(&mut rt, "font-change");
+    foot_of_terminal(&mut rt);
+    click(&mut rt, "host-shell:0");
     settle(&mut rt);
-    snap(&mut rt, "font-form");
+    snap(&mut rt, "shell-form");
     press(&mut rt, Key::Escape);
     settle(&mut rt);
     click(&mut rt, "host-shell:1");
@@ -816,9 +833,10 @@ fn the_switcher_commands_and_forms_draw() {
     let mut rt = Runtime::new(ws, view, (640., 480.), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
-    click(&mut rt, "font-change");
+    foot_of_terminal(&mut rt);
+    click(&mut rt, "host-shell:0");
     settle(&mut rt);
-    snap(&mut rt, "font-form-smallest");
+    snap(&mut rt, "shell-form-smallest");
     std::fs::remove_file(&rt.state.settings_path).ok();
     std::fs::remove_dir_all(root).ok();
 }

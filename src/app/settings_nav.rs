@@ -78,14 +78,17 @@ pub enum SubPage {
     Panes,
     /// Interface → Customize tabs.
     Tabs,
+    /// Terminal → Advanced font settings.
+    AdvancedFont,
     /// Notifications → one program state.
     Status(Status),
 }
 
 impl SubPage {
-    pub const ALL: [SubPage; 6] = [
+    pub const ALL: [SubPage; 7] = [
         SubPage::Panes,
         SubPage::Tabs,
+        SubPage::AdvancedFont,
         SubPage::Status(Status::Blocked),
         SubPage::Status(Status::Error),
         SubPage::Status(Status::Done),
@@ -96,7 +99,19 @@ impl SubPage {
     pub fn section(self) -> SettingsSection {
         match self {
             SubPage::Panes | SubPage::Tabs => SettingsSection::Interface,
+            SubPage::AdvancedFont => SettingsSection::Terminal,
             SubPage::Status(_) => SettingsSection::Notifications,
+        }
+    }
+
+    /// The key of the row on its section's page that opens it, where the keyboard returns
+    /// when the page is left.
+    pub fn opener(self) -> String {
+        match self {
+            SubPage::Panes => "customize-panes".into(),
+            SubPage::Tabs => "customize-tabs".into(),
+            SubPage::AdvancedFont => "open-advanced-font".into(),
+            SubPage::Status(status) => format!("notify-status:{}", status.key()),
         }
     }
 }
@@ -136,6 +151,7 @@ impl Page {
             Page::Section(section) => section.title(),
             Page::Sub(SubPage::Panes) => "Panes",
             Page::Sub(SubPage::Tabs) => "Tabs",
+            Page::Sub(SubPage::AdvancedFont) => "Advanced font settings",
             Page::Sub(SubPage::Status(status)) => status.title(),
         }
     }
@@ -146,6 +162,7 @@ impl Page {
             Page::Section(section) => section.key().into(),
             Page::Sub(SubPage::Panes) => "panes".into(),
             Page::Sub(SubPage::Tabs) => "tabs".into(),
+            Page::Sub(SubPage::AdvancedFont) => "advanced-font".into(),
             Page::Sub(SubPage::Status(status)) => format!("status-{}", status.key()),
         }
     }
@@ -172,7 +189,8 @@ impl Page {
                 SettingsSection::Updates => "upgrade version release",
                 SettingsSection::About => "version build license licence credits",
             },
-            Page::Sub(SubPage::Panes) => "splits padding space customize",
+            Page::Sub(SubPage::Panes) => "splits padding space customize highlight fade hover",
+            Page::Sub(SubPage::AdvancedFont) => "leading tracking kerning glyphs",
             Page::Sub(SubPage::Tabs) => "icons color programs width stretch customize",
             Page::Sub(SubPage::Status(status)) => match status {
                 Status::Blocked => "blocked approval question sign-in waiting",
@@ -538,6 +556,28 @@ impl Workspace {
         self.settings_nav.push(page);
         self.settings_nav.found = None;
         self.show_page(page);
+    }
+
+    /// Open the page a section's row leads to. The row goes with its page, so the keyboard
+    /// goes to the way back.
+    pub fn open_sub_page(&mut self, sub: SubPage, tx: &mut Tx) {
+        self.navigate(Page::Sub(sub));
+        tx.focus("settings-back", tx.focus_visible());
+    }
+
+    /// Escape on a page opened from a section's row: back to that section. False when
+    /// Settings isn't on such a page (or isn't what is open).
+    pub fn leave_settings_page(&mut self) -> bool {
+        if !self.settings_open() {
+            return false;
+        }
+        match self.settings_page() {
+            Page::Sub(sub) => {
+                self.navigate(Page::Section(sub.section()));
+                true
+            }
+            Page::Section(_) => false,
+        }
     }
 
     /// Whether Back (-1) or Forward (1) has a page to show.

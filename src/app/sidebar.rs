@@ -177,7 +177,7 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                 .box_shadow(shadow(0., 1., 3., black(0.3)))
                 .matched("sb-current")
                 .transition(no_presence())
-                .motion(SNAPPY),
+                .motion(snappy()),
         );
     } else {
         e = e.hover(white(0.05));
@@ -244,7 +244,7 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
             .get(session)
             .is_some_and(|v| v.active_window_id.as_deref() == Some(id));
     let activity = tab_activity(model, tab);
-    let label = tab_name(model, tab);
+    let label = tab_name(model, tab, s.generated_titles());
     let (target_session, target_window) = (session.to_owned(), id.to_owned());
     let (rename_session, rename_window) = (session.to_owned(), id.to_owned());
     let (menu_session, menu_window) = (session.to_owned(), id.to_owned());
@@ -567,7 +567,7 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .transition(
             Transition::move_edge(Edge::Leading)
                 .combined(Transition::opacity())
-                .springs(SpringPair::new(SNAPPY, SNAPPY)),
+                .springs(SpringPair::new(snappy(), snappy())),
         )
         .child(panel)
 }

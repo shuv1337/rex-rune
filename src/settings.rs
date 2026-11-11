@@ -1,5 +1,8 @@
+pub mod interface;
 pub mod recorded;
 pub mod shortcuts;
+pub mod terminal;
+pub mod typography;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -296,6 +299,10 @@ pub struct Settings {
     /// whatever `terminal_theme` is, so the pair is there when it is turned on again.
     pub light_theme: String,
     pub dark_theme: String,
+    /// The cursor, the selection and what selecting copies, from Settings → Terminal.
+    pub terminal: terminal::TerminalConfig,
+    /// The toolbar, motion, pane cues and launch switches of Settings → Interface.
+    pub interface: interface::InterfaceConfig,
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
@@ -344,6 +351,8 @@ impl Default for Settings {
             color_scheme: ColorScheme::default(),
             light_theme: DEFAULT_LIGHT_THEME.into(),
             dark_theme: DEFAULT_DARK_THEME.into(),
+            terminal: terminal::TerminalConfig::default(),
+            interface: interface::InterfaceConfig::default(),
             muted_tabs: Vec::new(),
             recorded_shortcuts: recorded::Recorded::default(),
             shortcut_file: shortcuts::Shortcuts::default(),
@@ -414,6 +423,7 @@ impl Settings {
         settings.font_size = settings.font_size.clamp(8., 48.);
         settings.pane_padding = settings.pane_padding.clamp(0., 32.);
         settings.tabs.icons = settings.tabs.icons.min(TabsConfig::MAX_ICONS);
+        settings.interface.normalize();
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
         // A theme id emptied by hand is the default again, never a theme that can't be read.

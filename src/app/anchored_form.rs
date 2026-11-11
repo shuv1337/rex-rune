@@ -1,4 +1,4 @@
-//! A form opened from a Settings row (the terminal fonts, a host's default shell), drawn over
+//! A form opened from a Settings row (a host's default shell), drawn over
 //! Settings against that row instead of in its place: Settings stays where it was, inert, as
 //! under a popup button's list (`settings_kit::value_popup`, `popups::list_popup`).
 use super::{
@@ -17,7 +17,7 @@ const PADDING: f32 = 16.;
 
 /// The forms that open against the row that asked for them.
 pub fn anchors(kind: &PanelKind) -> bool {
-    matches!(kind, PanelKind::Form(Form::Fonts | Form::HostShell(_)))
+    matches!(kind, PanelKind::Form(Form::HostShell(_)))
 }
 
 /// The key of the row `panel`'s form is drawn against, when it was opened from one in
@@ -41,7 +41,7 @@ fn estimate(panel: &Panel) -> f32 {
 /// Where the row the open form is drawn against is, `[x, y, w, h]`. None when the form was
 /// not opened from a row, or the row is not laid out: the form is a dialog then.
 pub fn row(s: &Workspace) -> Option<[f32; 4]> {
-    rune::memo::layout(anchor(s.panel.as_ref()?)?)
+    rune::memo::window_layout(anchor(s.panel.as_ref()?)?)
 }
 
 /// `body`, the form's heading, fields and buttons, in a popover against its row, which is

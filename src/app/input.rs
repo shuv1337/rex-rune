@@ -267,7 +267,9 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             return true;
         }
         if ev.key == Key::Escape && tx.focused().is_none() {
-            s.cancel_panel(tx);
+            if !s.leave_settings_page() {
+                s.cancel_panel(tx);
+            }
             return true;
         }
         return false;

@@ -5,9 +5,8 @@ use super::{
     dialogs::modal_layer,
     panel::{Intent, SettingsSection},
     settings_kit::{
-        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote,
-        mono_footnote, page, row_frame, section, segmented, select_row, setting, stepper,
-        unavailable, value,
+        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote, page,
+        row_frame, section, segmented, select_row, setting, stepper, unavailable,
     },
     settings_nav::{HEADER, PAGE_INSET, Page, Status, SubPage},
     theme::*,
@@ -56,6 +55,7 @@ fn interface(s: &Workspace) -> El {
                     })),
             )])],
         ),
+        super::interface_page::toolbar(s),
         section(
             "Panes",
             [card([
@@ -100,11 +100,11 @@ fn interface(s: &Workspace) -> El {
                     },
                 ),
                 disclosure(
-                    "customize-panes",
+                    &SubPage::Panes.opener(),
                     "Customize panes",
-                    "The space around each terminal's content.",
+                    "Padding, the active pane's cues and focus.",
                     "",
-                    |s, _| s.navigate(Page::Sub(SubPage::Panes)),
+                    |s, tx| s.open_sub_page(SubPage::Panes, tx),
                 ),
             ])],
         ),
@@ -137,11 +137,11 @@ fn interface(s: &Workspace) -> El {
                     ),
                 ),
                 disclosure(
-                    "customize-tabs",
+                    &SubPage::Tabs.opener(),
                     "Customize tabs",
                     "Their width and their programs' icons.",
                     "",
-                    |s, _| s.navigate(Page::Sub(SubPage::Tabs)),
+                    |s, tx| s.open_sub_page(SubPage::Tabs, tx),
                 ),
             ])],
         ),
@@ -162,6 +162,8 @@ fn interface(s: &Workspace) -> El {
                 },
             )])],
         ),
+        super::interface_page::animation(s),
+        super::interface_page::window(s),
     ])
 }
 
@@ -218,12 +220,13 @@ fn notifications(s: &Workspace) -> El {
         section(
             "When a program",
             [card(Status::ALL.map(|status| {
+                let sub = SubPage::Status(status);
                 disclosure(
-                    &format!("notify-status:{}", status.key()),
+                    &sub.opener(),
                     status.title(),
                     status.detail(),
                     &status.summary(n),
-                    move |s, _| s.navigate(Page::Sub(SubPage::Status(status))),
+                    move |s, tx| s.open_sub_page(sub, tx),
                 )
             }))],
         ),
@@ -240,85 +243,6 @@ fn notifications(s: &Workspace) -> El {
                     |n| &mut n.program_messages,
                 ),
             )])],
-        ),
-    ])
-}
-
-fn terminal(s: &Workspace) -> El {
-    let saved = &s.settings.font_family;
-    let active = s.terminal_family.unwrap_or("IBM Plex Mono (bundled)");
-    // The row's helper is one sentence. What terminals are drawn in now goes under the card,
-    // and only while that isn't the family the row names.
-    let drawn = if *saved != s.launch_saved_font {
-        Some(format!(
-            "{saved} is saved and applies when you reopen the client. Until then terminals use {active}."
-        ))
-    } else if s.terminal_family.is_none() {
-        Some(format!(
-            "{} isn't installed, so terminals use {active}.",
-            s.launch_font
-        ))
-    } else {
-        None
-    };
-    let fallbacks = if s.settings.font_fallbacks.is_empty() {
-        "Automatic".to_owned()
-    } else {
-        s.settings.font_fallbacks.join(", ")
-    };
-    let shells = s.settings.hosts.iter().enumerate().map(|(i, host)| {
-        disclosure(
-            &format!("host-shell:{i}"),
-            &host.label,
-            "",
-            host.shell.as_deref().unwrap_or("Server default"),
-            move |s, tx| s.open_anchored(&format!("host-shell:{i}"), Intent::HostShell(i), tx),
-        )
-    });
-    page([
-        section(
-            "Typography",
-            std::iter::once(card([
-                disclosure(
-                    "font-change",
-                    "Font family",
-                    "Applies when you reopen the client.",
-                    saved,
-                    |s, tx| s.open_anchored("font-change", Intent::Fonts, tx),
-                ),
-                setting(
-                    "Font size",
-                    "From 8 to 48 pt, for every terminal.",
-                    stepper(
-                        "font",
-                        format!("{} pt", s.settings.font_size),
-                        |s, _| s.change_font(-1.),
-                        |s, _| s.change_font(1.),
-                    ),
-                ),
-                setting(
-                    "Fallback fonts",
-                    "For glyphs the font lacks, before the system's own fallbacks.",
-                    value(fallbacks).truncate().max_w(260.),
-                ),
-            ]))
-            .chain(drawn.map(|words| footnote(words).key("font-drawn"))),
-        ),
-        section(
-            "Default shell",
-            [
-                card(shells),
-                footnote(
-                    "What new sessions, tabs and splits start on each host. Running terminals keep theirs.",
-                ),
-            ],
-        ),
-        section(
-            "",
-            [
-                footnote("These settings are saved in"),
-                mono_footnote(s.settings_path.display().to_string()).mt(-6.),
-            ],
         ),
     ])
 }
@@ -453,7 +377,7 @@ pub(super) fn body(s: &Workspace, page: Page) -> El {
         Page::Section(section) => match section {
             SettingsSection::Interface => interface(s),
             SettingsSection::Themes => super::settings_pages::themes(s),
-            SettingsSection::Terminal => terminal(s),
+            SettingsSection::Terminal => super::terminal_page::terminal(s),
             SettingsSection::Notifications => notifications(s),
             SettingsSection::Integrations => super::integrations::section(s),
             SettingsSection::Hosts => hosts(s),
@@ -461,7 +385,8 @@ pub(super) fn body(s: &Workspace, page: Page) -> El {
             SettingsSection::Updates => super::updates::section(s),
             SettingsSection::About => super::about::section(s),
         },
-        Page::Sub(SubPage::Panes) => super::settings_pages::panes(s),
+        Page::Sub(SubPage::Panes) => super::interface_page::panes(s),
+        Page::Sub(SubPage::AdvancedFont) => super::font_page::advanced(s),
         Page::Sub(SubPage::Tabs) => super::tab_settings::page(s),
         Page::Sub(SubPage::Status(status)) => super::settings_pages::status(s, status),
     }
@@ -479,8 +404,9 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
     let page = s.settings_page();
     let body = super::settings_nav::draw(s, page);
     let width = PANEL_WIDTH.min(viewport[0] * 0.92);
-    // Under the toolbar, which stays whole above it, with a margin at both ends.
-    let height = PANEL_HEIGHT.min((viewport[1] - TOOLBAR - 2. * CLEARANCE).max(0.));
+    // Under the toolbar's row, which stays whole above it, with a margin at both ends.
+    let toolbar = super::toolbar_reveal::row_height(s);
+    let height = PANEL_HEIGHT.min((viewport[1] - toolbar - 2. * CLEARANCE).max(0.));
     let nav_width = NAV_WIDTH.min(width * 0.3);
     // What stays above the page while it scrolls: the Shortcuts filter.
     let pinned = (page == Page::Section(SettingsSection::Shortcuts))
@@ -548,19 +474,40 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
         .child(super::settings_shell::sidebar(s, nav_width))
         .child(el().w(1.).h_full().fill(white(0.06)))
         .child(content);
-    row()
+    let mut dialog = row()
         .w(width)
         .h(height)
         // Alt Left and Alt Right, whichever of its controls has the keyboard.
         .on_key(|s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| s.settings_key(ev, tx))
-        .child(frame)
+        .child(frame);
+    // Leaving a page opened from a section's row hands the keyboard back to that row: this
+    // empty marker goes with the page, and Rune returns focus that was in the dialog.
+    if let Page::Sub(sub) = page {
+        dialog = dialog.child(
+            el().key("page-focus-return")
+                .absolute(0., 0.)
+                .size(0., 0.)
+                .focus_return(sub.opener()),
+        );
+    }
+    dialog
 }
 
 pub fn settings(s: &Workspace, viewport: [f32; 2]) -> El {
-    modal_layer(s, surface(s, viewport), false, TOOLBAR)
+    modal_layer(
+        s,
+        surface(s, viewport),
+        false,
+        super::toolbar_reveal::row_height(s),
+    )
 }
 
 /// Settings under a list opened from one of its controls: drawn where it was, taking no input.
 pub fn settings_under(s: &Workspace, viewport: [f32; 2]) -> El {
-    modal_layer(s, surface(s, viewport), true, TOOLBAR)
+    modal_layer(
+        s,
+        surface(s, viewport),
+        true,
+        super::toolbar_reveal::row_height(s),
+    )
 }

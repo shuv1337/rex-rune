@@ -3,7 +3,7 @@
 use super::{
     activity::progress_bar,
     panel::Intent,
-    settings_kit::{card, footnote, page, section, setting, stepper, value, value_popup},
+    settings_kit::{card, footnote, page, section, setting, value, value_popup},
     settings_nav::Status,
     settings_view::notify_switch,
     tab_icons::icons_of,
@@ -51,29 +51,6 @@ fn pickers(s: &Workspace) -> El {
         "A terminal theme is declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection."
     };
     section("", [card(rows), footnote(note)])
-}
-
-/// Interface → Customize panes.
-pub fn panes(s: &Workspace) -> El {
-    page([section(
-        "Padding",
-        [card([setting(
-            "Pane padding",
-            "Space around each terminal's content, from 0 to 32 pt.",
-            stepper(
-                "pane-padding",
-                format!("{} pt", s.settings.pane_padding),
-                |s, _| {
-                    s.settings.pane_padding = (s.settings.pane_padding - 1.).max(0.);
-                    s.save();
-                },
-                |s, _| {
-                    s.settings.pane_padding = (s.settings.pane_padding + 1.).min(32.);
-                    s.save();
-                },
-            ),
-        )])],
-    )])
 }
 
 impl Status {

@@ -11,6 +11,10 @@ use ghostty_vt::style::Underline;
 use rex_linux::{
     connection::{Command, Connection},
     links::Link,
+    settings::{
+        terminal::{SelectionColor, TerminalConfig},
+        typography::Typography,
+    },
     terminal::{
         Cell, CursorShape, Frame, SelectionUnit,
         graphics::{Image as TermImage, ImagePixels},
@@ -18,7 +22,7 @@ use rex_linux::{
     terminal_theme::{TerminalTheme, is_light},
 };
 use rune::{
-    El, Family, LineCap, Mods, Path, Shape, Span, TextEdit, TextStyle, canvas, el, memo, rich, text,
+    El, LineCap, Mods, Path, Shape, Span, TextEdit, TextStyle, canvas, el, memo, rich, text,
 };
 use serde_json::json;
 use std::{
@@ -27,6 +31,15 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+pub mod preview;
+#[cfg(test)]
+mod selection_tests;
+#[cfg(test)]
+mod typography_tests;
+
+/// The radius of the selection's outer corners, when they are rounded.
+const SELECTION_RADIUS: f32 = 3.;
 
 pub struct Term {
     pub connection: Connection,
@@ -43,6 +56,11 @@ pub struct Term {
     pub selecting: bool,
     selection_revision: u64,
     last_selection_input: Option<rex_linux::terminal::selection::Input>,
+    /// The revision of a selection the pointer just finished, while its text is wanted
+    /// (Copy on selection, the primary selection) and has not arrived with a frame yet.
+    copy_wanted: Option<u64>,
+    /// The cursor this pane's worker was last told to draw until the program chooses one.
+    cursor_style: CursorShape,
     restore_generation: u64,
     pub preedit: String,
     pub notice: Option<String>,
@@ -151,21 +169,56 @@ pub struct Metrics {
     /// Device pixels per point the grid is drawn at, so box drawing lands on whole pixels:
     /// 1 from `metrics`, the window's own in the pane view.
     pub px: f32,
+    /// Whether the bold and the italic attributes programs set are drawn (Settings →
+    /// Terminal → Advanced font settings → Render bold and italic).
+    pub bold: bool,
+    pub italic: bool,
+    /// How far right of its cell's edge a glyph starts: half the character spacing, so the
+    /// space added to a cell is shared between its two sides.
+    pub inset: f32,
+    /// How far the text's own line box is in from the top and the bottom of its row: half
+    /// of what the line height setting adds, in whole points. Underlines and overlines stay
+    /// with the text by it.
+    pub leading: f32,
 }
 
 const FEATURES: &str = "'liga' 0, 'calt' 0, 'clig' 0, 'kern' 0";
 
+/// The cell and text style at `size` with the typography settings at their defaults.
+#[cfg(test)]
 pub fn metrics(size: f32) -> Metrics {
-    let base = TextStyle::new(size, 400.)
-        .lh((size * 1.4).ceil())
+    metrics_for(size, &Typography::default())
+}
+
+/// The cell and text style at `size` under `font`. The cell is the primary face's advance
+/// plus the character spacing, by the row height the size gives scaled by the line height
+/// setting; sprites and decorations are drawn from the cell, so they follow both.
+pub fn metrics_for(size: f32, font: &Typography) -> Metrics {
+    let natural = (size * 1.4).ceil();
+    let height = (size * 1.4 * font.line_scale()).ceil().max(1.);
+    let mut base = TextStyle::new(size, if font.style.bold() { 700. } else { 400. })
+        .lh(height)
         .features(FEATURES);
+    if font.style.italic() {
+        base = base.italic();
+    }
     // The mono slot keeps the primary face first and supplies missing glyphs from fallbacks.
     let style = base.mono();
-    let width = rune::text::advance("M", style).max(1.);
+    let advance = rune::text::advance("M", style).max(1.);
+    // Never so tight that a cell vanishes.
+    let spacing = font.spacing_points(advance).max(1. - advance);
     Metrics {
-        cell: (width, (size * 1.4).ceil()),
-        style,
+        cell: (advance + spacing, height),
+        style: if spacing == 0. {
+            style
+        } else {
+            style.tracking(spacing)
+        },
         px: 1.,
+        bold: font.bold_italic.bold(),
+        italic: font.bold_italic.italic(),
+        inset: spacing / 2.,
+        leading: ((height - natural) / 2.).floor(),
     }
 }
 
@@ -193,6 +246,8 @@ impl Term {
             selecting: false,
             selection_revision: 0,
             last_selection_input: None,
+            copy_wanted: None,
+            cursor_style: CursorShape::Block,
             restore_generation,
             preedit: String::new(),
             notice: None,
@@ -224,6 +279,7 @@ impl Term {
             self.selection_anchor = None;
             self.selecting = false;
             self.last_selection_input = None;
+            self.copy_wanted = None;
             self.restore_generation = generation;
         }
         if let Some(frame) = &frame {
@@ -332,13 +388,12 @@ impl Term {
     }
 
     /// A non-owner never resizes; an owner sends its grid size whenever it changes.
-    pub fn resize_if_owner(&mut self, font: f32) {
+    pub fn resize_if_owner(&mut self, cell: (f32, f32)) {
         let status = self.status();
         self.initial_size.transition(&status);
         if self.rect[2] <= 0. || self.rect[3] <= 0. {
             return;
         }
-        let Metrics { cell, .. } = metrics(font);
         let cols = (self.rect[2] / cell.0).floor().clamp(1., 65535.) as u16;
         let rows = (self.rect[3] / cell.1).floor().clamp(1., 65535.) as u16;
         self.initial_size.layout(
@@ -462,6 +517,7 @@ impl Term {
         let index = self.index(x, y, cell);
         let cols = usize::from(self.frame.as_ref().map_or(1, |f| f.cols));
         self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.copy_wanted = None;
         let input = Input {
             generation: self.restore_generation,
             revision: self.selection_revision,
@@ -496,6 +552,7 @@ impl Term {
         self.selection = None;
         self.selection_anchor = None;
         self.selecting = false;
+        self.copy_wanted = None;
         if let Some(mut input) = self.last_selection_input.take() {
             self.selection_revision = self.selection_revision.wrapping_add(1);
             input.revision = self.selection_revision;
@@ -512,6 +569,7 @@ impl Term {
         self.selection = None;
         self.selection_anchor = None;
         self.selecting = false;
+        self.copy_wanted = None;
         self.selection_revision = self.selection_revision.wrapping_add(1);
         let input = Input {
             generation: self.restore_generation,
@@ -549,6 +607,38 @@ impl Term {
             return frame.selection_text.as_ref().map(ToString::to_string);
         }
         Some(frame.selected_text(a, b))
+    }
+
+    /// The pointer has just finished a selection (its release was the last selection event):
+    /// ask for its text once, when the frame that carries it arrives. Anything that changes
+    /// or clears the selection before then withdraws the request.
+    pub fn want_selected_text(&mut self) {
+        self.copy_wanted = Some(self.selection_revision);
+    }
+
+    /// The text asked for with [`Term::want_selected_text`], the one time its frame is here.
+    /// A click that selected nothing gives none.
+    pub fn take_selected_text(&mut self) -> Option<String> {
+        let frame = self.frame.as_ref()?;
+        if self.copy_wanted != Some(frame.selection_revision) {
+            return None;
+        }
+        self.copy_wanted = None;
+        frame
+            .selection_text
+            .as_ref()
+            .filter(|text| !text.is_empty())
+            .map(ToString::to_string)
+    }
+
+    /// Have this pane draw `shape` until its program asks for a cursor of its own. The
+    /// pane's worker is told only when the shape changes, so a pane left at the block it
+    /// starts with is sent nothing.
+    pub fn set_cursor_style(&mut self, shape: CursorShape) {
+        if self.cursor_style != shape {
+            self.cursor_style = shape;
+            self.send(Command::CursorStyle(shape));
+        }
     }
 }
 
@@ -619,11 +709,11 @@ fn glyph_run(content: String, style: RunStyle, x: f32, y: f32, m: &Metrics) -> E
     if style.strike {
         e = e.strike(0, len, Some(color));
     }
-    e.no_wrap().font(font).color(color).absolute(x, y)
+    e.no_wrap().font(font).color(color).absolute(x + m.inset, y)
 }
 
-/// (character, bold, italic, size bits, family) → advances exactly one cell.
-type FitCache = std::collections::HashMap<(char, bool, bool, u32, &'static str), bool>;
+/// (character, bold, italic, the grid's text style) → advances exactly one cell.
+type FitCache = std::collections::HashMap<(char, bool, bool, u64), bool>;
 
 thread_local! {
     /// Whether a character, in a given face, advances exactly one cell: only those join
@@ -631,12 +721,13 @@ thread_local! {
     static FITS: std::cell::RefCell<FitCache> = Default::default();
 }
 
+/// The grid's style for text a program marked bold or italic, where those are drawn.
 fn face(m: &Metrics, bold: bool, italic: bool) -> TextStyle {
     let mut font = m.style;
-    if bold {
+    if bold && m.bold {
         font.weight = 700.;
     }
-    if italic {
+    if italic && m.italic {
         font = font.italic();
     }
     font
@@ -646,11 +737,12 @@ fn fits_cell(ch: char, bold: bool, italic: bool, m: &Metrics) -> bool {
     if ch.is_ascii_graphic() || ch == ' ' {
         return true;
     }
-    let family = match m.style.family {
-        Family::Named(name) => name,
-        _ => "",
-    };
-    let key = (ch, bold, italic, m.style.size.to_bits(), family);
+    // The style carries the size, the family, the face ordinary text is drawn in and the
+    // character spacing: every one of them changes what fits.
+    let (bold, italic) = (bold && m.bold, italic && m.italic);
+    let mut style = DefaultHasher::new();
+    m.style.hash(&mut style);
+    let key = (ch, bold, italic, style.finish());
     FITS.with_borrow_mut(|cache| {
         *cache.entry(key).or_insert_with(|| {
             let advance = rune::text::advance(&ch.to_string(), face(m, bold, italic));
@@ -728,7 +820,7 @@ impl Segment {
             // The server owns line breaks. Fractional-DPI rounding must not wrap a run again.
             .no_wrap()
             .font(m.style)
-            .absolute(self.col as f32 * m.cell.0, 0.);
+            .absolute(self.col as f32 * m.cell.0 + m.inset, 0.);
         for (a, b, fg) in self.strikes {
             e = e.strike(a, b, Some(rgb(fg)));
         }
@@ -748,13 +840,83 @@ enum RowPass {
 #[derive(Default, Hash)]
 struct Marks<'a> {
     selection: Option<(usize, usize)>,
+    /// Which corners of the row's selection are outer corners of the whole selection, so
+    /// they can be rounded: top-left, top-right, bottom-right, bottom-left.
+    corners: [bool; 4],
     search: &'a [(usize, usize, bool)],
+}
+
+/// The outer corners of one row's selection `on`, given the rows above and below it: a
+/// corner the neighbouring row's selection runs past stays square, so a selection of
+/// several rows reads as one shape.
+fn selection_corners(
+    on: (usize, usize),
+    above: Option<(usize, usize)>,
+    below: Option<(usize, usize)>,
+) -> [bool; 4] {
+    let open =
+        |row: Option<(usize, usize)>, col: usize| !row.is_some_and(|(a, b)| (a..=b).contains(&col));
+    [
+        open(above, on.0),
+        open(above, on.1),
+        open(below, on.1),
+        open(below, on.0),
+    ]
+}
+
+/// How the selection is drawn, from Settings → Terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SelectionLook {
+    pub foreground: SelectionColor,
+    pub background: SelectionColor,
+    pub rounded: bool,
+}
+impl Default for SelectionLook {
+    fn default() -> Self {
+        Self::of(&Default::default())
+    }
+}
+impl SelectionLook {
+    pub fn of(config: &TerminalConfig) -> Self {
+        Self {
+            foreground: config.selection_foreground,
+            background: config.selection_background,
+            rounded: config.selection_rounded,
+        }
+    }
+}
+
+/// A selected cell's fill and text colour. `text` is the cell's text as it draws unselected
+/// and `ground` its background (the default background already as the pane's own).
+fn selected_colors(colors: &TermColors, text: u32, ground: u32) -> (u32, u32) {
+    let look = colors.selection;
+    let fill = match look.background {
+        SelectionColor::Theme => colors.selection_bg,
+        SelectionColor::CellForeground => text,
+        SelectionColor::CellBackground => ground,
+    };
+    let ink = match look.foreground {
+        SelectionColor::Theme => colors.selection_fg.unwrap_or(text),
+        SelectionColor::CellForeground => text,
+        SelectionColor::CellBackground => ground,
+    };
+    // A cell colour on either side can leave text in the colour of its fill (Cell
+    // foreground as the background, under text that keeps its own): the text takes the
+    // cell's other colour, which is what makes that choice the classic inverse selection.
+    let cells =
+        look.background != SelectionColor::Theme || look.foreground != SelectionColor::Theme;
+    if cells && ink == fill && text != ground {
+        (fill, if fill == ground { text } else { ground })
+    } else {
+        (fill, ink)
+    }
 }
 
 #[cfg(test)]
 fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m: &Metrics) -> El {
     let marks = Marks {
         selection: sel,
+        corners: [true; 4],
         ..Marks::default()
     };
     row_pass(
@@ -817,11 +979,41 @@ fn row_pass(
             });
         }
         if let Some((a, b)) = sel {
-            row = row.child(
-                el().absolute(a as f32 * cw, 0.)
-                    .size((b + 1 - a) as f32 * cw, ch)
-                    .fill(rgb(colors.selection_bg)),
-            );
+            // One shape per run of cells that fill alike: the whole span with the theme's
+            // colour, shorter runs when the fill is each cell's own.
+            let b = b.min(cells.len().saturating_sub(1));
+            let fill_at = |col: usize| {
+                let style = RunStyle::of(&cells[col], frame_bg, body);
+                selected_colors(colors, style.fg, ground_of(&cells[col], frame_bg, body)).0
+            };
+            let radius = if colors.selection.rounded {
+                SELECTION_RADIUS.min(ch / 2.)
+            } else {
+                0.
+            };
+            let round = |on: bool| if on { radius } else { 0. };
+            let mut start = a;
+            while start <= b && start < cells.len() {
+                let fill = fill_at(start);
+                let mut end = start + 1;
+                while end <= b && fill_at(end) == fill {
+                    end += 1;
+                }
+                let (first, last) = (start == a, end > b);
+                let [tl, tr, br, bl] = marks.corners;
+                row = row.child(
+                    el().absolute(start as f32 * cw, 0.)
+                        .size((end - start) as f32 * cw, ch)
+                        .corners([
+                            round(first && tl),
+                            round(last && tr),
+                            round(last && br),
+                            round(first && bl),
+                        ])
+                        .fill(rgb(fill)),
+                );
+                start = end;
+            }
         }
     }
     if pass == RowPass::Background {
@@ -832,10 +1024,11 @@ fn row_pass(
     // mark is too light for the terminal's own.
     let style_at = |col: usize| {
         let mut style = RunStyle::of(&cells[col], frame_bg, body);
+        style.bold &= m.bold;
+        style.italic &= m.italic;
         if sel.is_some_and(|(a, b)| (a..=b).contains(&col)) {
-            if let Some(fg) = colors.selection_fg {
-                style.fg = fg;
-            }
+            let ground = ground_of(&cells[col], frame_bg, body);
+            style.fg = selected_colors(colors, style.fg, ground).1;
         } else if marks
             .search
             .iter()
@@ -896,18 +1089,25 @@ fn row_pass(
         }
         if !cells[start].text.starts_with('\u{10eeee}') {
             let width = (end - start) as f32 * cw;
-            let shape = decoration_shape(&style, width, ch, m.px);
+            // In the text's own line box, so a taller or shorter row keeps them at the text.
+            let line = ch - 2. * m.leading;
+            let shape = decoration_shape(&style, width, line, m.px);
             if !shape.is_empty() {
                 row = row.child(
                     canvas(shape)
-                        .absolute(start as f32 * cw, 0.)
-                        .size(width, ch),
+                        .absolute(start as f32 * cw, m.leading)
+                        .size(width, line),
                 );
             }
         }
         start = end;
     }
     row
+}
+
+/// A cell's background as it draws: the server's default background as the pane's own.
+fn ground_of(cell: &Cell, default_bg: u32, body: u32) -> u32 {
+    if cell.bg == default_bg { body } else { cell.bg }
 }
 
 fn same_decoration(a: &RunStyle, b: &RunStyle) -> bool {
@@ -1019,6 +1219,9 @@ fn image_el(
 
 pub struct GridLook {
     pub cursor: Option<CursorLook>,
+    /// The shape the pane with the keyboard draws whatever its program asked for (Force
+    /// style); none draws the frame's own.
+    pub cursor_force: Option<CursorShape>,
     pub ime: bool,
     pub colors: TermColors,
 }
@@ -1032,6 +1235,8 @@ pub struct TermColors {
     pub background: u32,
     pub selection_bg: u32,
     pub selection_fg: Option<u32>,
+    /// Where the selection's two colours come from, and its corners.
+    pub selection: SelectionLook,
     pub cursor_text: Option<u32>,
     /// Search matches' highlight: the chrome's accent.
     pub search_match: u32,
@@ -1053,10 +1258,17 @@ impl TermColors {
                 .selection_background
                 .unwrap_or(palette.terminal_selection),
             selection_fg: theme.selection_foreground,
+            selection: SelectionLook::default(),
             cursor_text: theme.cursor_text,
             search_match: palette.accent,
             search_text: palette.on_accent,
         }
+    }
+
+    /// With the selection drawn as `look` says.
+    pub fn with_selection(mut self, look: SelectionLook) -> Self {
+        self.selection = look;
+        self
     }
 
     /// What the server's default background `frame_bg` draws as: `background` when both are
@@ -1094,20 +1306,30 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
     let colors = &look.colors;
     let body = colors.body(frame.bg);
     let selection = term.selection.map(|(a, b)| (a.min(b), a.max(b)));
+    let selected_on = |y: usize| {
+        if y >= frame.cells.len() {
+            None
+        } else if term.selection.is_some() && frame.selection_revision == term.selection_revision {
+            frame.selection_rows.get(y).copied().flatten()
+        } else {
+            selection.and_then(|(a, b)| {
+                let (row0, row1) = (y * cols, y * cols + cols - 1);
+                (a <= row1 && b >= row0).then(|| (a.max(row0) - row0, b.min(row1) - row0))
+            })
+        }
+    };
     let rows = |mut grid: El, pass: RowPass| {
         for (y, cells) in frame.cells.iter().enumerate().skip(start).take(visible) {
-            let selected = if term.selection.is_some()
-                && frame.selection_revision == term.selection_revision
-            {
-                frame.selection_rows.get(y).copied().flatten()
-            } else {
-                selection.and_then(|(a, b)| {
-                    let (row0, row1) = (y * cols, y * cols + cols - 1);
-                    (a <= row1 && b >= row0).then(|| (a.max(row0) - row0, b.min(row1) - row0))
-                })
-            };
+            let selected = selected_on(y);
             let marks = Marks {
                 selection: selected,
+                corners: selected.map_or([false; 4], |on| {
+                    selection_corners(
+                        on,
+                        y.checked_sub(1).and_then(selected_on),
+                        selected_on(y + 1),
+                    )
+                }),
                 search: frame
                     .search
                     .as_ref()
@@ -1125,6 +1347,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                 ch.to_bits(),
                 m.px.to_bits(),
                 m.style,
+                (m.bold, m.italic, m.inset.to_bits(), m.leading.to_bits()),
                 pass,
                 colors,
             )
@@ -1177,16 +1400,10 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
         let color = rgb(frame.cursor_color);
         // A pane without the keyboard always shows a hollow block, whatever the program asked.
         let shape = match cursor_look {
-            CursorLook::Block => frame.cursor_shape,
+            CursorLook::Block => look.cursor_force.unwrap_or(frame.cursor_shape),
             CursorLook::Hollow => CursorShape::Hollow,
         };
-        let cursor = el().key(format!("{key}/cursor"));
-        let mut cursor = match shape {
-            CursorShape::Block => cursor.absolute(px, py).size(cw, ch).fill(color),
-            CursorShape::Bar => cursor.absolute(px, py).size(2., ch).fill(color),
-            CursorShape::Underline => cursor.absolute(px, py + ch - 2.).size(cw, 2.).fill(color),
-            CursorShape::Hollow => cursor.absolute(px, py).size(cw, ch).border(1., color),
-        };
+        let mut cursor = cursor_el(shape, (px, py), m.cell, color).key(format!("{key}/cursor"));
         if look.ime {
             cursor = cursor.ime_cursor();
         }
@@ -1220,6 +1437,17 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
         }
     }
     grid
+}
+
+/// The cursor, `shape` on the cell at `at`.
+fn cursor_el(shape: CursorShape, at: (f32, f32), cell: (f32, f32), color: rune::Color) -> El {
+    let ((x, y), (cw, ch)) = (at, cell);
+    match shape {
+        CursorShape::Block => el().absolute(x, y).size(cw, ch).fill(color),
+        CursorShape::Bar => el().absolute(x, y).size(2., ch).fill(color),
+        CursorShape::Underline => el().absolute(x, y + ch - 2.).size(cw, 2.).fill(color),
+        CursorShape::Hollow => el().absolute(x, y).size(cw, ch).border(1., color),
+    }
 }
 
 /// The link Ctrl+click would open, underlined in its own colour, row by row, over the
@@ -1259,7 +1487,11 @@ fn link_marks(
                 .absolute(c0 as f32 * cw, (y - rows.start) as f32 * ch)
                 .size(width, ch)
                 .help(help.clone())
-                .child(el().absolute(0., ch - 2.).size(width, 1.).fill(rgb(color)))
+                .child(
+                    el().absolute(0., ch - 2. - m.leading)
+                        .size(width, 1.)
+                        .fill(rgb(color)),
+                )
         })
         .collect()
 }
@@ -1430,6 +1662,7 @@ mod tests {
     fn clipped_view(s: &ClippedState, _: &mut Cx<ClippedState>) -> El {
         let look = GridLook {
             cursor: None,
+            cursor_force: None,
             ime: false,
             colors: TermColors::default(),
         };
@@ -1687,6 +1920,7 @@ mod tests {
         let view = |term: &Term, _: &mut Cx<Term>| {
             let look = GridLook {
                 cursor: None,
+                cursor_force: None,
                 ime: false,
                 colors: TermColors::default(),
             };

@@ -9,15 +9,19 @@ mod dialogs;
 mod discover;
 mod find;
 mod fold;
+mod font_page;
+mod font_picker;
 mod font_size;
 mod fonts;
 mod help;
 mod input;
 mod integrations;
+mod interface_page;
 mod keycaps;
 mod keys;
 mod navigation;
 mod notify;
+mod pane_cues;
 mod pane_header;
 mod pane_moves;
 mod pane_verbs;
@@ -26,6 +30,7 @@ mod panes;
 mod popups;
 mod recorder;
 mod remote;
+mod select_copy;
 mod session_numbers;
 mod settings_kit;
 mod settings_nav;
@@ -42,20 +47,30 @@ mod tab_icons;
 mod tab_settings;
 mod tabs;
 mod term;
+mod terminal_page;
 mod theme;
 mod theme_list;
 mod theme_pair;
 mod themes_view;
+mod titles;
 mod toolbar;
+mod toolbar_reveal;
 mod updates;
 mod upload;
 mod widgets;
 mod workspace;
 
-use rex_linux::{connection::Options, settings::Settings};
+use rex_linux::{
+    connection::Options,
+    settings::{
+        Settings,
+        interface::{AnimationStyle, ToolbarBehavior},
+    },
+};
 use rune::{AppSpec, Cursor, Cx, El, Tx, WindowEdge, col, el, row};
 use std::time::Duration;
 use theme::*;
+use toolbar_reveal::Placement;
 use workspace::Workspace;
 
 const APP_ICON: &[u8] = include_bytes!("../../resources/icons/256x256/apps/dev.shuv.rex-linux.png");
@@ -81,12 +96,20 @@ fn resize_band(e: WindowEdge) -> El {
 
 pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     set_palette(palette_of(s.settings.chrome_theme));
+    let animation = s.settings.interface.animation;
+    // Off is the desktop's reduce-motion preference, asked for here: Rune stops travel and
+    // scale and keeps a brief fade. Left alone, the commit follows the desktop.
+    if animation == AnimationStyle::Off {
+        cx.reduced_motion(true);
+    }
+    set_animation(animation, cx.is_reduced_motion());
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
+    let bar = toolbar_reveal::placement(s);
     let mut body = row().key("body").grow(1.).w_full().min_h(0.);
     if s.sidebar.is_open() {
         body = body
-            .child(sidebar::sidebar(s, cx))
+            .child(sidebar::sidebar(s, cx).pt(toolbar_reveal::top_margin(s)))
             .child(sidebar::sidebar_edge(s));
     }
     // Device pixels per point, so terminal box drawing lands on whole pixels.
@@ -103,14 +126,27 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             col()
                 .absolute(0., 0.)
                 .size(viewport[0], viewport[1])
-                .pt(TOOLBAR)
+                .pt(toolbar_reveal::row_height(s))
                 .child(body),
-        )
-        .child(toolbar::toolbar(s).absolute(0., 0.));
+        );
+    root = match bar {
+        Placement::Row => root.child(toolbar::toolbar(s).absolute(0., 0.)),
+        Placement::Floating => root.child(toolbar_reveal::floating(toolbar::toolbar(s))),
+        // A key sequence waiting for its next key still says so.
+        Placement::None => {
+            root.children(toolbar::sequence_chip(s).map(toolbar_reveal::sequence_float))
+        }
+    };
+    if s.settings.interface.toolbar == ToolbarBehavior::OnHover {
+        root = root.child(toolbar_reveal::band(s));
+    }
     if let Some(toasts) = dialogs::toasts(s) {
         root = root.child(toasts);
     }
     let open = match &s.panel {
+        Some(panel) if matches!(panel.kind, panel::PanelKind::Fonts(_)) => {
+            Some(font_picker::popup(s, viewport))
+        }
         Some(panel) if panel.is_list() => Some(popups::list_popup(s, viewport)),
         Some(_) => dialogs::dialog(s, viewport),
         None => None,
@@ -242,6 +278,10 @@ pub fn run(mut options: Options) -> anyhow::Result<()> {
     let fonts = fonts::load(family, fallbacks);
     rune::text::set_app_font_paths(fonts.paths)
         .map_err(|_| anyhow::anyhow!("terminal fonts were already initialized"))?;
+    // The font pickers' families, read from fontconfig off the UI thread before one opens.
+    std::thread::spawn(|| {
+        fonts::installed();
+    });
     rune::set_app_id("dev.shuv.rex-linux");
     if let Err(error) = rune::set_app_icon(APP_ICON) {
         eprintln!("Could not load the Rex window icon: {error}");
@@ -261,6 +301,10 @@ pub fn run(mut options: Options) -> anyhow::Result<()> {
         ..AppSpec::new("Rex", size, placeholder, view)
     });
     let handle = app.handle();
+    // Show window on launch, off: the window opens minimized, in the taskbar or dock.
+    if !settings.interface.show_window_on_launch {
+        handle.minimize();
+    }
     let terminal = fonts.terminal;
     let mut app = app
         .init(move || Workspace::new(options, settings, path, handle, terminal))

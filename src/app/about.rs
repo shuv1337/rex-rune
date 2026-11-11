@@ -403,6 +403,16 @@ pub fn section(s: &Workspace) -> El {
         header(s),
         settings_kit::section("", [card(build)]),
         settings_kit::section("Project", [card(links)]),
+        // Where this app keeps what Settings sets: a path to copy, in small print.
+        settings_kit::section(
+            "",
+            [
+                settings_kit::footnote("Settings are saved in"),
+                settings_kit::mono_footnote(s.settings_path.display().to_string())
+                    .key("about-settings-path")
+                    .mt(-6.),
+            ],
+        ),
     ])
 }
 

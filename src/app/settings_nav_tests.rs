@@ -224,13 +224,23 @@ fn typing_sound_lists_notifications_and_enter_opens_it() {
 }
 
 #[test]
-fn typing_padding_lists_pane_padding_and_enter_marks_its_row() {
+fn typing_padding_lists_the_padding_rows_and_enter_marks_the_first() {
     let mut rt = settings(1, (1440., 1000.));
     click(&mut rt, "settings-search");
     type_text(&mut rt, "padding");
     assert_eq!(
         hits(&rt)[0],
-        ("Pane padding".to_owned(), "Interface › Panes".to_owned())
+        (
+            "Horizontal padding".to_owned(),
+            "Interface › Panes".to_owned()
+        )
+    );
+    assert_eq!(
+        hits(&rt)[1],
+        (
+            "Vertical padding".to_owned(),
+            "Interface › Panes".to_owned()
+        )
     );
     // The arrows walk the hits, around the ends.
     let count = hits(&rt).len();
@@ -253,7 +263,7 @@ fn typing_padding_lists_pane_padding_and_enter_marks_its_row() {
         .expect("the found row's mark");
     let (fill, _) = crate::app::theme::selection(false);
     assert_eq!(mark.fill, fill);
-    let stepper = rect(&rt, "pane-padding-larger");
+    let stepper = rect(&rt, "pane-padding-x-larger");
     assert!(
         mark.rect[1] < stepper[1] && mark.rect[1] + mark.rect[3] > stepper[1] + stepper[3],
         "{:?} is around the row of {stepper:?}",

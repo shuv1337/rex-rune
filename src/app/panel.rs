@@ -35,7 +35,12 @@ pub enum Intent {
     Zoom,
     Sidebar,
     Settings,
+    /// The terminal font picker, from Settings.
     Fonts,
+    /// The font picker, to add a fallback font.
+    AddFallback,
+    /// Take this family from the open font picker, then return to Settings.
+    Font(String),
     ClientLabel,
     RemoteControl(usize),
     /// The Add host list: the tailnet's machines, or an endpoint by hand.
@@ -143,6 +148,7 @@ impl Intent {
                 | Intent::Updates
                 | Intent::About
                 | Intent::Fonts
+                | Intent::AddFallback
                 | Intent::ClientLabel
                 | Intent::ChooseTheme
                 | Intent::ChooseChrome
@@ -215,7 +221,6 @@ pub enum PaneAction {
 
 #[derive(Clone, Debug)]
 pub enum Form {
-    Fonts,
     ClientLabel,
     /// A host's default shell for new terminals.
     HostShell(usize),
@@ -314,6 +319,8 @@ pub enum PanelKind {
     Chromes,
     /// The values of one setting, from a Settings `select_row`.
     Choice(Choice),
+    /// The installed font families, filtered by the search field (`font_picker`).
+    Fonts(super::font_picker::FontPick),
     /// The Add host list of the tailnet's machines, filtered by the search field.
     Discover,
     /// Confirm forgetting a saved host; its server and programs are untouched.
@@ -402,6 +409,7 @@ impl Panel {
                 | PanelKind::Themes
                 | PanelKind::Chromes
                 | PanelKind::Choice(_)
+                | PanelKind::Fonts(_)
                 | PanelKind::Discover
                 | PanelKind::ShortcutMenu
         )
@@ -606,6 +614,9 @@ impl Workspace {
         if matches!(panel.kind, PanelKind::Discover) {
             return self.discovery_entries(&lower);
         }
+        if let PanelKind::Fonts(pick) = panel.kind {
+            return self.font_entries(pick);
+        }
         if matches!(panel.kind, PanelKind::Chromes) {
             return ChromeTheme::ALL
                 .into_iter()
@@ -800,7 +811,7 @@ impl Workspace {
                         view.label.as_deref().unwrap_or("Session")
                     );
                     let mut e = Entry::new(
-                        super::activity::tab_name(model, tab),
+                        super::activity::tab_name(model, tab, self.generated_titles()),
                         "Tab",
                         format!("Tabs · {place}"),
                         Intent::Tab(id.clone()),

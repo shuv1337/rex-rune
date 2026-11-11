@@ -173,7 +173,7 @@ pub fn highlight(id: &str, radius: f32, destructive: bool) -> El {
         .border(1., outline)
         .matched(id.to_owned())
         .transition(no_presence())
-        .motion(SNAPPY)
+        .motion(snappy())
 }
 
 /// The letters of a name a search matched: in `ACCENT` and heavier, so the match is told

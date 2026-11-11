@@ -246,6 +246,10 @@ fn a_picker_opens_over_settings_against_its_control_and_gives_focus_back() {
 #[test]
 fn a_select_row_lists_its_values_and_applies_the_chosen_one() {
     let mut rt = settings_at(SettingsSection::Interface, 1., (1440., 1000.));
+    // Notices is under the fold of the page.
+    rt.pointer_move(900., 500.);
+    rt.wheel(900., 500., -4000.);
+    settle(&mut rt);
     click(&mut rt, "notice-position");
     settle(&mut rt);
     let Some(PanelKind::Choice(choice)) = kind(&rt) else {
@@ -366,10 +370,10 @@ fn a_choice_without_settings_behind_it_closes_and_ignores_a_stale_index() {
 fn disclosure_rows_and_segments_work_from_the_keyboard() {
     let mut rt = settings_at(SettingsSection::Terminal, 1., (1440., 1000.));
     press(&mut rt, Key::Tab); // Close
-    press(&mut rt, Key::Tab); // Font family
-    assert!(focused(&rt).unwrap().ends_with("font-change"));
+    press(&mut rt, Key::Tab); // Terminal font's Choose…
+    assert!(focused(&rt).unwrap().ends_with("font-choose"));
     press(&mut rt, Key::Enter);
-    assert!(matches!(kind(&rt), Some(PanelKind::Form(Form::Fonts))));
+    assert!(matches!(kind(&rt), Some(PanelKind::Fonts(_))));
     press(&mut rt, Key::Escape);
     assert!(matches!(kind(&rt), Some(PanelKind::Settings)));
 
@@ -379,6 +383,11 @@ fn disclosure_rows_and_segments_work_from_the_keyboard() {
         "{:?}",
         element_text(&rt, "host-shell:0")
     );
+    // The shells are at the foot of the page.
+    let page = rect(&rt, "settings-scroll:terminal");
+    rt.pointer_move(page[0] + 40., page[1] + 40.);
+    rt.wheel(page[0] + 40., page[1] + 40., -4000.);
+    settle(&mut rt);
     click(&mut rt, "host-shell:1");
     assert!(matches!(
         kind(&rt),

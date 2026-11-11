@@ -5,12 +5,14 @@
 //! - A [`card`] holds rows and draws the divider between each pair itself: a page never
 //!   places a divider.
 //! - Rows: [`setting`] (a label, at most one sentence of help, and a control in the trailing
-//!   slot), [`select_row`] (a setting whose control is a [`value_popup`]), [`disclosure`]
+//!   slot), [`select_row`] (a setting whose control is a [`select`]), [`disclosure`]
 //!   (the whole row is a button that opens a form or a sub-page) and [`row_frame`] for a row
 //!   with its own content. Search Settings finds a row by the label and helper it was built
 //!   with ([`found`]), so a new row needs no entry anywhere else.
-//! - Controls: [`segmented`] and [`segmented_fixed`], [`value_popup`], [`stepper`],
+//! - Controls: [`segmented`] and [`segmented_fixed`], [`value_popup`], [`select`], [`stepper`],
 //!   [`button`], and the [`value`], [`mono_value`] and [`state_chip`] read-outs.
+//! - [`preview_well`]: a card's first row when its settings change how something is drawn, a
+//!   sample of it drawn that way.
 //!
 //! A popup opened from a [`value_popup`] is a list panel drawn over Settings and placed
 //! against the control (`Panel::anchor_to`, read by `popups::list_popup`).
@@ -102,6 +104,34 @@ pub fn mono_footnote(words: impl Into<String>) -> El {
         .wrap()
         .selectable(true)
         .px(INSET)
+}
+
+/// A preview well's inset from its card's edges, and its content's from the well's.
+pub const WELL_INSET: f32 = 6.;
+const WELL_PADDING: (f32, f32) = (10., 6.);
+
+/// A card row that previews the settings under it: `content`, `height` tall, on `ground`
+/// (the surface it is drawn on where it is used) inside a hairline, 6 pt in from the card.
+/// Content wider than the well is cut at its edge. `label` says what the preview shows; the
+/// well is one image to assistive technology, never a control.
+pub fn preview_well(key: &str, label: &str, ground: u32, height: f32, content: El) -> El {
+    const RADIUS: f32 = CARD_RADIUS - WELL_INSET + 2.;
+    row().w_full().padding(WELL_INSET).child(
+        row()
+            .key(key.to_owned())
+            .role("img")
+            .label(label.to_owned())
+            .w_full()
+            .h(height + 2. * WELL_PADDING.1)
+            .px(WELL_PADDING.0)
+            .center_y()
+            .radius(RADIUS)
+            .continuous_corners()
+            .clip_rounded(RADIUS)
+            .fill(rgb(ground))
+            .border(1., white(0.09))
+            .child(content),
+    )
 }
 
 /// The frame every card row shares: full width, the card's inset, content centred on the
@@ -210,7 +240,7 @@ pub fn state_chip(key: &str, label: &str, tone: ChipTone, why: &str) -> El {
 }
 
 /// Return presses a focused control as Space does: Settings has no default button to take it.
-fn on_return(e: El, action: impl Fn(&mut Workspace, &mut Tx) + 'static) -> El {
+pub fn on_return(e: El, action: impl Fn(&mut Workspace, &mut Tx) + 'static) -> El {
     e.on_key(move |s: &mut Workspace, event: &KeyEvent, tx: &mut Tx| {
         (event.key == Key::Enter).then(|| action(s, tx)).is_some()
     })
@@ -445,9 +475,7 @@ pub fn popup_button(
     )
 }
 
-/// A setting chosen from a short list of named values: [`setting`] with a [`value_popup`]
-/// that lists `options` with `current` checked. `apply` gets the chosen index once the popup
-/// has closed; it is a plain function, so the popup's state stays `Clone` and `Debug`.
+/// A setting chosen from a short list of named values: [`setting`] with a [`select`].
 pub fn select_row(
     key: &str,
     label: &str,
@@ -456,7 +484,21 @@ pub fn select_row(
     current: usize,
     apply: fn(&mut Workspace, usize, &mut Tx),
 ) -> El {
-    let (control, title) = (key.to_owned(), label.to_owned());
+    setting(label, detail, select(key, label, options, current, apply))
+}
+
+/// A popup button that lists `options` with `current` checked, for a row's trailing slot:
+/// alone, or beside the control it qualifies (a number's unit). `title` names the list.
+/// `apply` gets the chosen index once the popup has closed; it is a plain function, so the
+/// popup's state stays `Clone` and `Debug`.
+pub fn select(
+    key: &str,
+    title: &str,
+    options: &[&str],
+    current: usize,
+    apply: fn(&mut Workspace, usize, &mut Tx),
+) -> El {
+    let (control, title) = (key.to_owned(), title.to_owned());
     let list: Vec<String> = options.iter().map(|o| (*o).to_owned()).collect();
     let press = move |s: &mut Workspace, _: &mut Tx| {
         s.open_choice(
@@ -469,14 +511,10 @@ pub fn select_row(
             },
         )
     };
-    setting(
-        label,
-        detail,
-        popup_button(
-            key,
-            options.get(current).copied().unwrap_or_default(),
-            press,
-        ),
+    popup_button(
+        key,
+        options.get(current).copied().unwrap_or_default(),
+        press,
     )
 }
 

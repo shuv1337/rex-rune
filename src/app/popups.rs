@@ -124,7 +124,7 @@ fn dismiss(s: &mut Workspace, tx: &mut Tx) {
 }
 
 /// How far a list opened from a control sits from it.
-const CONTROL_GAP: f32 = 4.;
+pub(super) const CONTROL_GAP: f32 = 4.;
 
 /// The captured pane's outline, in window points, above any scrim and below the panel.
 pub fn target_outline(s: &Workspace) -> Option<El> {
@@ -199,9 +199,13 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     // The theme switcher: a searched list that checks the theme in use at the end of its row.
     let themes = matches!(panel.kind, PanelKind::Themes);
     let [vw, vh] = viewport;
-    // The control a Settings popup button opened this list from, `[x, y, w, h]` where layout
-    // put it: the list goes right under it, or right above when there is more room there.
-    let control = panel.anchor_to.as_deref().and_then(rune::memo::layout);
+    // The control a Settings popup button opened this list from, `[x, y, w, h]` where the
+    // window shows it now, however far its page has scrolled: the list goes right under it,
+    // or right above when there is more room there.
+    let control = panel
+        .anchor_to
+        .as_deref()
+        .and_then(rune::memo::window_layout);
     let room = control.map(|[_, y, _, h]| {
         let below = vh - (y + h + CONTROL_GAP) - 8.;
         let above = y - CONTROL_GAP - 8.;

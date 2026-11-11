@@ -505,7 +505,8 @@ fn unknown_states_kinds_and_events_stay_quiet() {
             "b".into(),
             BlockEvent::Process {
                 name: None,
-                pids: Vec::new()
+                pids: Vec::new(),
+                place: Default::default(),
             }
         ))
     );
@@ -568,6 +569,7 @@ fn progress_reports_set_and_clear_a_blocks_progress() {
     let process = |name: Option<&str>| activity::BlockEvent::Process {
         name: name.map(str::to_owned),
         pids: name.map(|_| vec![7]).unwrap_or_default(),
+        place: Default::default(),
     };
     model.apply_block_event("s", "b".into(), process(Some("cargo")));
     model.apply_block_event(
@@ -605,6 +607,7 @@ fn progress_goes_when_another_process_of_the_same_name_takes_the_foreground() {
     let python = |pids: Vec<u64>| activity::BlockEvent::Process {
         name: Some("python".into()),
         pids,
+        place: Default::default(),
     };
     let progress = activity::BlockEvent::Progress(Some(Set(Some(42))));
     model.apply_block_event("s", "b".into(), python(vec![11, 1]));
@@ -629,6 +632,7 @@ fn progress_goes_with_the_process_not_just_its_name() {
     let python = |pids: &[u64]| BlockEvent::Process {
         name: Some("python".into()),
         pids: pids.to_vec(),
+        place: Default::default(),
     };
     let report = BlockEvent::Progress(Some(Set(Some(42))));
     model.apply_block_event("s", "b".into(), python(&[11, 1]));
@@ -727,7 +731,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
             &mut ws,
             &process,
             4,
-            json!({"foreground":{"name":"node","argv0":"codex"}}),
+            json!({"home":"/home/u","foreground":{"name":"node","argv0":"codex","cwd":"/home/u/rex"}}),
         )
         .await;
         // attach_all replaces the scope, so after session_created it must still ask for all.
@@ -780,6 +784,15 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
         assert_eq!(m.title("block:a"), Some("Codex · fix tests"));
         assert_eq!(a.app.as_deref(), Some("codex"));
         assert_eq!(m.programs["block:a"], "codex");
+        // The reply places the program too; the title Codex set for itself still shows.
+        assert_eq!(
+            m.generated_title("block:a").as_deref(),
+            Some("codex - ~/rex")
+        );
+        assert_eq!(
+            m.shown_title("block:a", true).as_deref(),
+            Some("Codex · fix tests")
+        );
         assert_eq!(m.sessions.len(), 2);
     }
     // Let the second report land before closing.
@@ -1803,4 +1816,46 @@ async fn a_worker_gets_its_search_whatever_the_control_connection_is_doing() {
         Ok(DataCommand::SearchStep(false))
     ));
     assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn the_cursor_this_client_draws_reaches_the_pane_worker_even_while_the_host_reconnects() {
+    use crate::terminal::CursorShape;
+    // To the pane's worker whatever the control connection is doing.
+    let (commands, received) = flume::unbounded();
+    let workers = HashMap::from([(
+        "b".to_owned(),
+        PaneWorker {
+            session: "s".into(),
+            commands,
+            task: tokio::spawn(async {}),
+            size: None,
+        },
+    )]);
+    assert!(forward_search(
+        &workers,
+        "b",
+        &Command::CursorStyle(CursorShape::Bar)
+    ));
+    assert!(matches!(
+        received.try_recv(),
+        Ok(DataCommand::CursorStyle(CursorShape::Bar))
+    ));
+
+    // And while the host is between attempts it is no input that failed to send.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let host = HostConnection::spawn(endpoint, None, None, None, true, None);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    host.commands
+        .send(HostCommand::Terminal {
+            session: "s".into(),
+            block: "b".into(),
+            command: Command::CursorStyle(CursorShape::Underline),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(host.model.lock().unwrap().notice, None);
+    drop(host);
 }

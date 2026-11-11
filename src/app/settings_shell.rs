@@ -4,7 +4,7 @@
 use super::{
     keycaps::{keycap, spell},
     panel::SettingsSection,
-    settings_kit::INSET,
+    settings_kit::{INSET, on_return},
     settings_nav::{HEADER, PAGE_INSET, Page},
     theme::*,
     widgets::{glyph, highlight},
@@ -356,16 +356,21 @@ fn history_button(s: &Workspace, direction: isize) -> El {
     if !s.settings_can_go(direction) {
         return button.opacity(0.32).disabled(true).focusable(false);
     }
-    button
-        .cursor(Cursor::Pointer)
-        .hover(white(0.08))
-        .press(white(0.12))
-        .focusable(true)
-        .focus_ring(2., 0., rgb(accent()))
-        .help(format!("{label} · {keys}"))
-        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+    on_return(
+        button
+            .cursor(Cursor::Pointer)
+            .hover(white(0.08))
+            .press(white(0.12))
+            .focusable(true)
+            .focus_ring(2., 0., rgb(accent()))
+            .help(format!("{label} · {keys}"))
+            .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                s.settings_history(direction, tx);
+            }),
+        move |s, tx| {
             s.settings_history(direction, tx);
-        })
+        },
+    )
 }
 
 /// The page's title; a sub-page's follows the section it belongs to, which goes back there.
@@ -386,7 +391,7 @@ fn title(page: Page) -> El {
         .min_w(0.)
         .gap(2.)
         .center_y()
-        .child(
+        .child(on_return(
             row()
                 .key("settings-crumb")
                 .role("button")
@@ -403,7 +408,8 @@ fn title(page: Page) -> El {
                 .focus_ring(2., 0., rgb(accent()))
                 .on_press(move |s: &mut Workspace| s.navigate(Page::Section(section)))
                 .child(text(section.title()).font(medium(17.)).color(rgb(muted()))),
-        )
+            move |s, _| s.navigate(Page::Section(section)),
+        ))
         .child(glyph(&RIGHT, 16., rgb(muted())))
         .child(name.ml(4.))
 }

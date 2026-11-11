@@ -15,7 +15,7 @@
 use super::{
     input::search_key,
     pane_header::{self, BUTTON, Placement, UNAVAILABLE},
-    term::{self, Term},
+    term::Term,
     theme::*,
     widgets::glyph,
     workspace::{HostId, Workspace},
@@ -235,7 +235,7 @@ impl Workspace {
         if self.terminals.get(key).is_none_or(|t| t.search.is_none()) {
             return;
         }
-        let cell = term::metrics(self.settings.font_size).cell;
+        let cell = self.metrics().cell;
         // Only a pane of the tab on screen has a strip to stay under.
         let lowered = *key == self.term_key(&key.1)
             && self.model().window().is_some_and(|window| {
@@ -370,7 +370,7 @@ pub fn bar(
         .box_shadow(shadow(0., 4., 16., black(0.45)))
         .pin(left, above, right, below)
         // The bar is chrome: it springs to another corner. It comes and goes at once.
-        .motion(SNAPPY)
+        .motion(snappy())
         .transition(no_presence())
         // A press on the bar is the bar's: it neither reaches the terminal under it nor
         // takes the keyboard from the field.
