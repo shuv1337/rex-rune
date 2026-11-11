@@ -1,5 +1,6 @@
-//! Settings: a section list on the left and the chosen section's page on the right. Pages are
-//! built from `settings_kit` (sections, cards, rows and their controls).
+//! Settings: the sidebar on the left and the chosen page on the right, under its header
+//! (`settings_nav` draws both and keeps the history between pages). Pages are built from
+//! `settings_kit` (sections, cards, rows and their controls).
 use super::{
     dialogs::modal_layer,
     keycaps::{Chords, keycaps, spell},
@@ -7,22 +8,19 @@ use super::{
     settings_kit::{
         NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote,
         mono_footnote, page, row_frame, section, segmented, select_row, setting, stepper,
-        unavailable, value, value_popup, words,
+        unavailable, value, words,
     },
+    settings_nav::{HEADER, PAGE_INSET, Page, Status, SubPage},
     theme::*,
     widgets::{Pill, glyph},
     workspace::Workspace,
 };
 use rex_linux::settings::{NoticePosition, NotificationsConfig, PaneDensity, PaneHeader};
-use rune::{Cursor, El, ScrollPos, ScrollSpec, Tx, col, el, row, text};
-use rune_kit::{IconButton, Switch};
+use rune::{El, KeyEvent, PointerButton, ScrollPos, ScrollSpec, Tx, col, el, row, text};
+use rune_kit::Switch;
 
-/// The page's header row, above its scroll region.
-const HEADER: f32 = 56.;
 /// The least space between the dialog and the toolbar above it, and the window's bottom edge.
 const CLEARANCE: f32 = 12.;
-/// The page's inset from the section list and from the dialog's trailing edge.
-const PAGE_INSET: f32 = 20.;
 
 /// The Pane headers choices, in the order the control lists them.
 const PANE_HEADERS: [PaneHeader; 4] = [
@@ -42,33 +40,22 @@ fn interface(s: &Workspace) -> El {
     page([
         section(
             "Appearance",
-            [card([
-                setting(
-                    "Theme",
-                    "Terminals take the matching theme until you choose one.",
-                    value_popup(
-                        "chrome-theme",
-                        s.settings.chrome_theme.name(),
-                        Intent::ChooseChrome,
-                    ),
-                ),
-                setting(
-                    "Interface zoom",
-                    "Chrome and terminals together, from 70% to 150%.",
-                    row()
-                        .gap(8.)
-                        .center_y()
-                        .child(stepper(
-                            "zoom",
-                            format!("{percent}%"),
-                            |s, tx| s.change_ui_scale(-1, tx),
-                            |s, tx| s.change_ui_scale(1, tx),
-                        ))
-                        .child(button("zoom-reset", "Reset", Pill::Neutral, |s, tx| {
-                            s.change_ui_scale(0, tx)
-                        })),
-                ),
-            ])],
+            [card([setting(
+                "Interface zoom",
+                "Chrome and terminals together, from 70% to 150%.",
+                row()
+                    .gap(8.)
+                    .center_y()
+                    .child(stepper(
+                        "zoom",
+                        format!("{percent}%"),
+                        |s, tx| s.change_ui_scale(-1, tx),
+                        |s, tx| s.change_ui_scale(1, tx),
+                    ))
+                    .child(button("zoom-reset", "Reset", Pill::Neutral, |s, tx| {
+                        s.change_ui_scale(0, tx)
+                    })),
+            )])],
         ),
         section(
             "Panes",
@@ -112,6 +99,13 @@ fn interface(s: &Workspace) -> El {
                         s.save();
                         tx.instant();
                     },
+                ),
+                disclosure(
+                    "customize-panes",
+                    "Customize panes",
+                    "The space around each terminal's content.",
+                    "",
+                    |s, _| s.navigate(Page::Sub(SubPage::Panes)),
                 ),
             ])],
         ),
@@ -169,7 +163,7 @@ fn interface(s: &Workspace) -> El {
 type Field = fn(&mut NotificationsConfig) -> &mut bool;
 
 /// A switch for one notification preference, saved as soon as it flips.
-fn notify_switch(key: &str, label: &str, on: bool, disabled: bool, field: Field) -> El {
+pub(super) fn notify_switch(key: &str, label: &str, on: bool, disabled: bool, field: Field) -> El {
     Switch::new(on)
         .label(label.to_owned())
         .hide_label()
@@ -186,28 +180,6 @@ fn notify_switch(key: &str, label: &str, on: bool, disabled: bool, field: Field)
 fn notifications(s: &Workspace) -> El {
     let n = &s.settings.notifications;
     let off = !n.system_notifications;
-    let states: [(&str, &str, &str, bool, Field); 4] = [
-        (
-            "notify-blocked",
-            "Needs you",
-            "Waiting for approval, an answer or a sign-in.",
-            n.blocked,
-            |n| &mut n.blocked,
-        ),
-        ("notify-error", "Fails", "Reports an error.", n.error, |n| {
-            &mut n.error
-        }),
-        (
-            "notify-done",
-            "Finishes",
-            "Stops working, or reports that it's done.",
-            n.done,
-            |n| &mut n.done,
-        ),
-        ("notify-working", "Starts working", "", n.working, |n| {
-            &mut n.working
-        }),
-    ];
     page([
         section(
             "",
@@ -236,13 +208,18 @@ fn notifications(s: &Workspace) -> El {
                 ),
             ])],
         ),
+        // Each state has a page of its own: how it shows in tabs and whether it notifies.
         section(
-            "Notify when a program",
-            [card(states.into_iter().map(
-                |(key, label, detail, on, field)| {
-                    setting(label, detail, notify_switch(key, label, on, off, field))
-                },
-            ))],
+            "When a program",
+            [card(Status::ALL.map(|status| {
+                disclosure(
+                    &format!("notify-status:{}", status.key()),
+                    status.title(),
+                    status.detail(),
+                    &status.summary(n),
+                    move |s, _| s.navigate(Page::Sub(SubPage::Status(status))),
+                )
+            }))],
         ),
         section(
             "Programs",
@@ -320,42 +297,6 @@ fn terminal(s: &Workspace) -> El {
                 ),
             ]))
             .chain(drawn.map(|words| footnote(words).key("font-drawn"))),
-        ),
-        section(
-            "Layout",
-            [card([setting(
-                "Pane padding",
-                "Space around each terminal's content, from 0 to 32 pt.",
-                stepper(
-                    "pane-padding",
-                    format!("{} pt", s.settings.pane_padding),
-                    |s, _| {
-                        s.settings.pane_padding = (s.settings.pane_padding - 1.).max(0.);
-                        s.save();
-                    },
-                    |s, _| {
-                        s.settings.pane_padding = (s.settings.pane_padding + 1.).min(32.);
-                        s.save();
-                    },
-                ),
-            )])],
-        ),
-        section(
-            "Colours",
-            [
-                card([setting(
-                    "Theme",
-                    "",
-                    value_popup(
-                        "terminal-theme",
-                        Workspace::theme_label(&s.settings.terminal_theme),
-                        Intent::ChooseTheme,
-                    ),
-                )]),
-                footnote(
-                    "Declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection.",
-                ),
-            ],
         ),
         section(
             "Default shell",
@@ -721,86 +662,41 @@ fn shortcuts(s: &Workspace) -> El {
     page(sections)
 }
 
-/// The section list, in gapped groups: the window, what runs in it, and the app itself.
-fn nav(s: &Workspace, width: f32) -> El {
-    let mut list = col()
-        .key("settings-sections")
-        .role("tablist")
-        .focus_group()
-        .gap(2.);
-    for section in SettingsSection::ALL {
-        let selected = s.settings_section == section;
-        let mut item = row()
-            .key(format!("settings-section:{}", section.key()))
-            .role("tab")
-            .label(section.title())
-            .w_full()
-            .h(32.)
-            .px(10.)
-            .center_y()
-            .radius(8.)
-            .continuous_corners()
-            .cursor(Cursor::Pointer)
-            .focusable(true)
-            .focus_selected(selected)
-            .focus_ring(2., 0., rgb(accent()))
-            .on_press(move |s: &mut Workspace| s.open_section(section))
-            .child(
-                text(section.title())
-                    .font(if selected { medium(13.) } else { ui(13.) })
-                    .color(rgb(if selected { ink() } else { muted() })),
-            );
-        if matches!(
-            section,
-            SettingsSection::Terminal | SettingsSection::Updates
-        ) {
-            item = item.mt(12.);
-        }
-        item = if selected {
-            item.fill(white(0.09))
-        } else {
-            item.hover(white(0.05))
-        };
-        list = list.child(item);
+/// A page's rows. `settings_nav` builds it to draw it, and to read its rows for Search
+/// Settings.
+pub(super) fn body(s: &Workspace, page: Page) -> El {
+    match page {
+        Page::Section(section) => match section {
+            SettingsSection::Interface => interface(s),
+            SettingsSection::Themes => super::settings_pages::themes(s),
+            SettingsSection::Terminal => terminal(s),
+            SettingsSection::Notifications => notifications(s),
+            SettingsSection::Integrations => super::integrations::section(s),
+            SettingsSection::Hosts => hosts(s),
+            SettingsSection::Shortcuts => shortcuts(s),
+            SettingsSection::Updates => super::updates::section(s),
+            SettingsSection::About => super::about::section(s),
+        },
+        Page::Sub(SubPage::Panes) => super::settings_pages::panes(s),
+        Page::Sub(SubPage::Status(status)) => super::settings_pages::status(s, status),
     }
-    col()
-        .w(width)
-        .h_full()
-        .padding(14.)
-        .gap(12.)
-        .child(
-            text("Settings")
-                .font(strong(15.))
-                .color(rgb(ink()))
-                .px(10.)
-                .pt(6.),
-        )
-        .child(list)
 }
 
-/// The dialog's surface: the section list, and the page under its header. The page scrolls
-/// with a fade at whichever edge hides content and a thumb while there is more than fits.
+/// The dialog's surface: the sidebar, and the page under its header. The page scrolls with a
+/// fade at whichever edge hides content and a thumb while there is more than fits.
 fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
-    let k = kit();
-    let section = s.settings_section;
-    let body = match section {
-        SettingsSection::Interface => interface(s),
-        SettingsSection::Terminal => terminal(s),
-        SettingsSection::Notifications => notifications(s),
-        SettingsSection::Integrations => super::integrations::section(s),
-        SettingsSection::Hosts => hosts(s),
-        SettingsSection::Shortcuts => shortcuts(s),
-        SettingsSection::Updates => super::updates::section(s),
-        SettingsSection::About => super::about::section(s),
-    };
+    let page = s.settings_page();
+    let body = super::settings_nav::draw(s, page);
     let width = PANEL_WIDTH.min(viewport[0] * 0.92);
     // Under the toolbar, which stays whole above it, with a margin at both ends.
     let height = PANEL_HEIGHT.min((viewport[1] - TOOLBAR - 2. * CLEARANCE).max(0.));
     let nav_width = NAV_WIDTH.min(width * 0.3);
     let (page_width, page_height) = (width - nav_width - 1., height - HEADER);
     let thumb = s.settings_fx.thumb.clone();
+    // Where the page is scrolled to, for Back to return to it there.
+    let offset = s.settings_nav.offset();
     let scroller = col()
-        .key(format!("settings-scroll:{}", section.key()))
+        .key(format!("settings-scroll:{}", page.key()))
         .grow(1.)
         .min_h(0.)
         .w_full()
@@ -809,6 +705,7 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
         })
         .scroll_edge_fade(16.)
         .on_scroll_offset(move |at: ScrollPos| {
+            offset.set(at.offset[1]);
             let hidden = at.max[1];
             if hidden < 1. {
                 thumb.set([0.; 4]);
@@ -823,22 +720,7 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
         .grow(1.)
         .min_w(0.)
         .h_full()
-        .child(
-            row()
-                .h(HEADER)
-                .pl(PAGE_INSET + super::settings_kit::INSET)
-                .pr(PAGE_INSET)
-                .center_y()
-                .justify_between()
-                .child(text(section.title()).font(strong(17.)).color(rgb(ink())))
-                .child(
-                    IconButton::new(&CLOSE)
-                        .label("Close")
-                        .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.close_panel(tx))
-                        .build(k)
-                        .key("close-settings"),
-                ),
-        )
+        .child(super::settings_shell::header(s, page))
         .child(
             col()
                 .grow(1.)
@@ -847,12 +729,32 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
                 .child(scroller)
                 .child(s.settings_fx.thumb_el()),
         );
+    // The pointer's Back and Forward buttons, anywhere over the dialog. The window's own
+    // handler for them is behind the modal, so the dialog takes them itself; the primary
+    // button's press ends here as it does on the dialog, leaving focus where it was.
+    let frame = row()
+        .key("settings-frame")
+        .w_full()
+        .h_full()
+        .pointer_buttons([PointerButton::Back, PointerButton::Forward])
+        .preserve_focus_on_press(true)
+        .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
+            let direction = match tx.button() {
+                PointerButton::Back => -1,
+                PointerButton::Forward => 1,
+                _ => return,
+            };
+            s.settings_history(direction, tx);
+        })
+        .child(super::settings_shell::sidebar(s, nav_width))
+        .child(el().w(1.).h_full().fill(white(0.06)))
+        .child(content);
     row()
         .w(width)
         .h(height)
-        .child(nav(s, nav_width))
-        .child(el().w(1.).h_full().fill(white(0.06)))
-        .child(content)
+        // Alt Left and Alt Right, whichever of its controls has the keyboard.
+        .on_key(|s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| s.settings_key(ev, tx))
+        .child(frame)
 }
 
 pub fn settings(s: &Workspace, viewport: [f32; 2]) -> El {

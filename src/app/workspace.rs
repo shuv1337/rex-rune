@@ -116,6 +116,8 @@ pub struct Workspace {
     scratch: TextEdit,
     next_host: u64,
     pub settings_section: SettingsSection,
+    /// The page pushed over that section, the pages visited and the search (`settings_nav`).
+    pub settings_nav: super::settings_nav::Nav,
     /// Each tab's folded activity state when last synced.
     pub tab_states: TabStates,
     /// Tabs whose programs finished while the user wasn't looking; they show "Done".
@@ -254,6 +256,7 @@ impl Workspace {
             scratch: TextEdit::new(""),
             next_host: 0,
             settings_section: SettingsSection::default(),
+            settings_nav: Default::default(),
             tab_states: HashMap::new(),
             unseen_done: HashSet::new(),
             unseen_bells: HashSet::new(),
@@ -1323,6 +1326,7 @@ impl Workspace {
             Intent::Settings => {
                 self.bindings.sequence.clear();
                 self.reload_shortcuts();
+                self.settings_nav.opened();
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
@@ -1754,9 +1758,11 @@ impl Workspace {
         None
     }
 
-    /// Show a Settings section; Integrations reads the agents' state when first shown.
+    /// Show a Settings section's own page; Integrations reads the agents' state when first
+    /// shown. A visit the user makes goes through `navigate`, which keeps the history.
     pub fn open_section(&mut self, section: SettingsSection) {
         self.settings_section = section;
+        self.settings_nav.show_section();
         if section == SettingsSection::Shortcuts {
             self.reload_shortcuts();
         }

@@ -209,7 +209,7 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if panel.is_list() && tx.focused().is_none() {
             return list_key(s, ev, tx);
         }
-        if global_key(s, ev, tx) {
+        if global_key(s, ev, tx) || s.settings_key(ev, tx) {
             return true;
         }
         if ev.key == Key::Escape && tx.focused().is_none() {

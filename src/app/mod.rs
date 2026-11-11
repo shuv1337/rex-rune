@@ -23,6 +23,9 @@ mod panes;
 mod popups;
 mod remote;
 mod settings_kit;
+mod settings_nav;
+mod settings_pages;
+mod settings_shell;
 mod settings_view;
 mod sidebar;
 mod splits;
@@ -147,7 +150,9 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     let now = std::time::Instant::now();
     let remote_changed = s.poll_remote_navigation(now);
     let updates_changed = s.poll_updates(now, tx);
-    let mut changed = s.poll_navigation(now, tx) || remote_changed || updates_changed;
+    let settings_changed = s.poll_settings(now, tx);
+    let mut changed =
+        s.poll_navigation(now, tx) || remote_changed || updates_changed || settings_changed;
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {

@@ -256,10 +256,10 @@ try:
     desk.key("ctrl+comma")
     perform(active, "client.sidebar.toggle", error="dialog or popup")
     # Settings is 816x680, centered under the 52 pt toolbar of the 1440x900 window (its corner
-    # is at 312, 136); the fifth navigation row is Remote Hosts, 102 pt in and 215 pt down from
-    # that corner. `the_acceptance_scripts_settings_click_lands_on_remote_hosts` in
+    # is at 312, 136); the seventh row of its sidebar is Remote Hosts, 102 pt in and 288 pt down
+    # from that corner. `the_acceptance_scripts_settings_click_lands_on_remote_hosts` in
     # src/app/settings_tests.rs holds this point to that row.
-    desk.x("mousemove", "--window", window, 414, 351)
+    desk.x("mousemove", "--window", window, 414, 424)
     desk.x("click", 1)
     time.sleep(.4)
     desk.capture(window, "settings-remote-hosts")

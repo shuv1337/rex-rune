@@ -238,28 +238,31 @@ pub struct Choice {
 pub enum SettingsSection {
     #[default]
     Interface,
+    Themes,
     Terminal,
-    Notifications,
-    Integrations,
-    Hosts,
     Shortcuts,
+    Integrations,
+    Notifications,
+    Hosts,
     Updates,
     About,
 }
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 8] = [
+    pub const ALL: [SettingsSection; 9] = [
         SettingsSection::Interface,
+        SettingsSection::Themes,
         SettingsSection::Terminal,
-        SettingsSection::Notifications,
-        SettingsSection::Integrations,
-        SettingsSection::Hosts,
         SettingsSection::Shortcuts,
+        SettingsSection::Integrations,
+        SettingsSection::Notifications,
+        SettingsSection::Hosts,
         SettingsSection::Updates,
         SettingsSection::About,
     ];
     pub fn title(self) -> &'static str {
         match self {
             SettingsSection::Interface => "Interface",
+            SettingsSection::Themes => "Themes",
             SettingsSection::Terminal => "Terminal",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Integrations => "Integrations",
@@ -272,6 +275,7 @@ impl SettingsSection {
     pub fn key(self) -> &'static str {
         match self {
             SettingsSection::Interface => "interface",
+            SettingsSection::Themes => "themes",
             SettingsSection::Terminal => "terminal",
             SettingsSection::Notifications => "notifications",
             SettingsSection::Integrations => "integrations",

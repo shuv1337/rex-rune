@@ -81,7 +81,9 @@ fn inside(elements: &[rune::ElementInfo], index: usize, role: &str) -> usize {
 
 #[test]
 fn every_page_is_cards_with_a_rule_between_each_pair_of_rows_and_one_trailing_edge() {
-    for section in SettingsSection::ALL {
+    // Every section's page, and the pages pushed over them.
+    for page in crate::app::settings_nav::Page::all() {
+        let section = page.section();
         for scale in [1., 1.3] {
             let mut rt = settings_at(section, scale, (1440., 1000.));
             if section == SettingsSection::Integrations {
@@ -90,8 +92,13 @@ fn every_page_is_cards_with_a_rule_between_each_pair_of_rows_and_one_trailing_ed
                 });
                 settle(&mut rt);
             }
+            if page != crate::app::settings_nav::Page::Section(section) {
+                rt.update(|s, _| s.navigate(page));
+                settle(&mut rt);
+            }
             let elements = rt.elements();
-            let name = section.key();
+            let name = page.key();
+            let name = name.as_str();
             let scroll = rect(&rt, &format!("settings-scroll:{name}"));
             let headings = elements.iter().filter(|e| e.role == "heading").count();
             let rules = elements.iter().filter(|e| e.role == "separator").count();
@@ -180,13 +187,13 @@ fn every_page_is_cards_with_a_rule_between_each_pair_of_rows_and_one_trailing_ed
 #[test]
 fn a_picker_opens_over_settings_against_its_control_and_gives_focus_back() {
     for scale in [1., 1.3] {
-        let mut rt = settings_at(SettingsSection::Terminal, scale, (1440., 1000.));
-        let scroll_before = rect(&rt, "settings-scroll:terminal");
+        let mut rt = settings_at(SettingsSection::Themes, scale, (1440., 1000.));
+        let scroll_before = rect(&rt, "settings-scroll:themes");
         click(&mut rt, "terminal-theme");
         settle(&mut rt);
         assert!(matches!(kind(&rt), Some(PanelKind::Themes)));
         // Settings stays where it was under the list, and takes no input.
-        assert_eq!(rect(&rt, "settings-scroll:terminal"), scroll_before);
+        assert_eq!(rect(&rt, "settings-scroll:themes"), scroll_before);
         let dialog = rt
             .elements()
             .into_iter()

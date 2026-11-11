@@ -22,6 +22,8 @@ mod polish_tests;
 mod remote_session_tests;
 #[path = "remote_tests.rs"]
 mod remote_tests;
+#[path = "settings_nav_tests.rs"]
+mod settings_nav_tests;
 #[path = "settings_tests.rs"]
 mod settings_tests;
 #[path = "tab_tests.rs"]
@@ -1308,7 +1310,7 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
     // The existing Settings section list exposes About without another shortcut.
-    for _ in 0..7 {
+    for _ in 0..8 {
         press(&mut rt, Key::Down);
     }
     press(&mut rt, Key::Enter);
@@ -1331,6 +1333,7 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     // The header's two copies come first, then the project links.
     let clipboard = rune::clipboard::memory();
     rt.use_clipboard(&clipboard);
+    press(&mut rt, Key::Tab); // Back, now that About was a visit
     press(&mut rt, Key::Tab); // Close
     press(&mut rt, Key::Tab);
     assert!(focused(&rt).unwrap().ends_with("about-copy"));
@@ -1439,7 +1442,9 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
         path.ends_with("settings-section:interface"),
         "settings focus {path}"
     );
-    // The keyboard path scripts/x11-smoke.py takes to the font stepper.
+    // The keyboard path scripts/x11-smoke.py takes to the font stepper: past Themes to
+    // Terminal, then Back, Close, the font family and the stepper's two buttons.
+    press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);
     assert_eq!(
@@ -1447,7 +1452,7 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
         super::panel::SettingsSection::Terminal
     );
     let font = rt.state.settings.font_size;
-    for _ in 0..4 {
+    for _ in 0..5 {
         press(&mut rt, Key::Tab);
     }
     let path = focused(&rt).expect("a focused control");
@@ -1528,6 +1533,7 @@ fn a_disabled_notification_switch_leaves_settings_open() {
     ws.perform(Intent::Settings, &mut tx);
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:notifications");
+    click(&mut rt, "notify-status:blocked");
     click(&mut rt, "notify-blocked");
     assert!(
         matches!(
@@ -1658,7 +1664,7 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
     let hosts = [capture_host(&mut ws, 0), capture_host(&mut ws, 1)];
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
+    click(&mut rt, "settings-section:themes");
     click(&mut rt, "terminal-theme");
     assert!(matches!(
         rt.state.panel.as_ref().map(|p| &p.kind),
@@ -3174,7 +3180,7 @@ fn pane_padding_controls_reach_zero_and_save() {
     let mut ws = workspace();
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
+    click(&mut rt, "customize-panes");
     for _ in 0..9 {
         click(&mut rt, "pane-padding-smaller");
     }
@@ -3515,6 +3521,7 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
     for _ in 0..60 {
         rt.frame(1. / 60.);
     }
+    click(&mut rt, "settings-section:themes");
     click(&mut rt, "chrome-theme");
     assert!(matches!(
         rt.state.panel.as_ref().map(|p| &p.kind),

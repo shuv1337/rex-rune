@@ -374,6 +374,7 @@ impl Workspace {
         self.bindings.sequence.clear();
         self.reload_shortcuts();
         let back = self.panel.take();
+        self.settings_nav.opened();
         self.settings_section = SettingsSection::Updates;
         self.panel = Some(super::panel::Panel::new(
             PanelKind::Settings,
