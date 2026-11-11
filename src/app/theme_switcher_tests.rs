@@ -109,11 +109,11 @@ fn the_switcher_finds_names_without_their_accents_and_marks_what_matched() {
     assert_eq!(
         found(&ws),
         [
-            hit("Rosé Pine", "Built in", &["Rosé"]),
-            hit("Rosé Pine Moon", "Built in", &["Rosé"]),
-            hit("Rosé Pine Dawn", "Built in", &["Rosé"]),
-            hit("Rose Pine", "Dark", &["Rose"]),
-            hit("Rose Pine Dawn", "Light", &["Rose"]),
+            hit("Rosé Pine", "Built-in dark", &["Rosé"]),
+            hit("Rosé Pine Moon", "Built-in dark", &["Rosé"]),
+            hit("Rosé Pine Dawn", "Built-in light", &["Rosé"]),
+            hit("Rose Pine", "Ghostty dark", &["Rose"]),
+            hit("Rose Pine Dawn", "Ghostty light", &["Rose"]),
         ]
     );
     assert_eq!(ws.panel.as_ref().unwrap().selected, 0);
@@ -122,22 +122,22 @@ fn the_switcher_finds_names_without_their_accents_and_marks_what_matched() {
     assert_eq!(
         found(&ws),
         [
-            hit("Rosé Pine Dawn", "Built in", &["Rosé", "Pine", "D"]),
-            hit("Rose Pine Dawn", "Light", &["Rose", "Pine", "D"]),
+            hit("Rosé Pine Dawn", "Built-in light", &["Rosé", "Pine", "D"]),
+            hit("Rose Pine Dawn", "Ghostty light", &["Rose", "Pine", "D"]),
         ]
     );
     // Words in any order, each marked where it is; every word must be there.
     query(&mut ws, "moon rose");
     assert_eq!(
         found(&ws),
-        [hit("Rosé Pine Moon", "Built in", &["Rosé", "Moon"])]
+        [hit("Rosé Pine Moon", "Built-in dark", &["Rosé", "Moon"])]
     );
     query(&mut ws, "moon");
     assert_eq!(
         found(&ws),
         [
-            hit("Rosé Pine Moon", "Built in", &["Moon"]),
-            hit("Tokyo Night Moon", "Dark", &["Moon"]),
+            hit("Rosé Pine Moon", "Built-in dark", &["Moon"]),
+            hit("Tokyo Night Moon", "Ghostty dark", &["Moon"]),
         ]
     );
     // The switcher finds the middle of a word, and the choices that are not theme names.
@@ -145,16 +145,16 @@ fn the_switcher_finds_names_without_their_accents_and_marks_what_matched() {
     assert_eq!(
         found(&ws),
         [
-            hit("Catppuccin Mocha", "Built in", &["ccin", "Mo"]),
-            hit("Catppuccin Mocha", "Dark", &["ccin", "Mo"]),
+            hit("Catppuccin Mocha", "Built-in dark", &["ccin", "Mo"]),
+            hit("Catppuccin Mocha", "Ghostty dark", &["ccin", "Mo"]),
         ]
     );
     query(&mut ws, "follow");
     assert_eq!(
         found(&ws),
         [
-            hit("Follow server", "Server", &["Follow"]),
-            hit("Follow chrome", "Built in", &["Follow"]),
+            hit("Follow server", "Default", &["Follow"]),
+            hit("Follow chrome", "Default", &["Follow"]),
         ]
     );
     query(&mut ws, "rose zebra");
@@ -274,7 +274,7 @@ fn the_switcher_under_its_settings_row_keeps_the_same_size() {
     type_text(&mut rt, "theme 07");
     assert_eq!(
         found(&rt.state),
-        [hit("Theme 07", "Dark", &["Theme", "07"])]
+        [hit("Theme 07", "Ghostty dark", &["Theme", "07"])]
     );
     press(&mut rt, Key::Enter);
     settle(&mut rt);

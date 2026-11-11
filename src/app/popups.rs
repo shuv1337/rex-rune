@@ -480,6 +480,16 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     }
     let content = y;
     let overflow = content > list_max + 1.;
+    if overflow {
+        // A list longer than its room ends on a whole row where it opens: the last row that
+        // fits is all there above the hint, and none is cut in half.
+        list_max = spans
+            .iter()
+            .map(|(_, bottom, _)| *bottom)
+            .take_while(|bottom| *bottom <= list_max + 0.5)
+            .last()
+            .unwrap_or(list_max);
+    }
     let view_h = content.min(list_max);
     let fx = &s.switcher_fx;
     let mut scroller = col()

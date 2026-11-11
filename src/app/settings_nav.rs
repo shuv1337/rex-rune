@@ -9,7 +9,8 @@
 //!   Settings on About does, and leaves no stop of its own.
 //! - Search Settings has no list of its own to keep in step with the pages: it builds every
 //!   page and reads the rows `settings_kit` makes ([`row`], [`heading`]). A hit that is a row
-//!   opens its page and marks that row for a moment.
+//!   opens its page and marks that row for a moment. The actions of the Shortcuts page are
+//!   found by name too, after the settings, so a search for a key binding ends on its row.
 use super::{
     panel::{PanelKind, SettingsSection},
     theme::*,
@@ -217,6 +218,8 @@ struct Indexed {
     heading: String,
     label: String,
     helper: String,
+    /// An action's row on Shortcuts, listed after every setting found.
+    action: bool,
 }
 
 /// One result of a search: a page, or a row on one.
@@ -404,6 +407,18 @@ pub fn row(label: &str, helper: &str, frame: El) -> El {
     })
 }
 
+/// A row Search Settings lists from somewhere other than the page's build (an action's row
+/// on Shortcuts): marked when a search landed on it, and never read.
+pub fn marked(label: &str, frame: El) -> El {
+    PASS.with_borrow_mut(|pass| match pass {
+        Pass::Draw(Some((found, marked))) if !*marked && found.as_str() == label => {
+            *marked = true;
+            frame.child(mark())
+        }
+        _ => frame,
+    })
+}
+
 /// A section's heading, told once its rows are built: the rows since the last one are under it.
 pub fn heading(title: &str) {
     PASS.with_borrow_mut(|pass| {
@@ -446,6 +461,23 @@ fn read(s: &Workspace, page: Page) -> Vec<Indexed> {
             heading,
             label,
             helper,
+            action: false,
+        })
+        .collect()
+}
+
+/// Every action of the Shortcuts page, by the name its row has, whatever its filter holds.
+fn actions(s: &Workspace) -> Vec<Indexed> {
+    let mut seen = std::collections::HashSet::new();
+    s.shortcut_rows()
+        .into_iter()
+        .filter(|row| seen.insert(row.title.clone()))
+        .map(|row| Indexed {
+            page: Page::Section(SettingsSection::Shortcuts),
+            heading: String::new(),
+            label: row.title,
+            helper: String::new(),
+            action: true,
         })
         .collect()
 }
@@ -468,13 +500,20 @@ pub fn draw(s: &Workspace, page: Page) -> El {
 /// also carries `more`: lower is better, None is no match.
 fn rank(query: &str, words: &[&str], label: &str, more: &str) -> Option<u8> {
     let label = label.to_lowercase();
-    if label.starts_with(query) {
+    let named: Vec<&str> = label
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    // The label begins with the query, or holds its words whole and in order: `font` finds
+    // `Terminal font` as well as it finds `Font size`.
+    if label.starts_with(query)
+        || named
+            .windows(words.len())
+            .any(|run| run.iter().zip(words).all(|(word, typed)| word == typed))
+    {
         return Some(0);
     }
-    if label
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|word| word.starts_with(query))
-    {
+    if named.iter().any(|word| word.starts_with(query)) {
         return Some(1);
     }
     if label.contains(query) {
@@ -491,22 +530,25 @@ fn rank(query: &str, words: &[&str], label: &str, more: &str) -> Option<u8> {
 }
 
 /// What `query` finds: pages by their title and keywords, rows by their label, helper and
-/// heading. Best match first, then in the sidebar's order and each page's own.
+/// heading, then the actions of Shortcuts by their name. Best match first, then in the
+/// sidebar's order and each page's own. A page that a row of its section opens under the
+/// page's own name is one hit, where the row is, that opens the page.
 fn search(index: &[Indexed], query: &str) -> Vec<Hit> {
     let query = query.trim().to_lowercase();
     let words: Vec<&str> = query.split_whitespace().collect();
     if words.is_empty() {
         return Vec::new();
     }
-    let mut ranked: Vec<(u8, Hit)> = Vec::new();
+    // Settings before actions, then by rank.
+    let mut pages: Vec<((bool, u8), Hit)> = Vec::new();
     for page in Page::all() {
         if let Some(rank) = rank(&query, &words, page.title(), page.keywords()) {
             let place = match page {
                 Page::Section(_) => String::new(),
                 Page::Sub(sub) => sub.section().title().to_owned(),
             };
-            ranked.push((
-                rank,
+            pages.push((
+                (false, rank),
                 Hit {
                     page,
                     label: page.title().to_owned(),
@@ -516,23 +558,34 @@ fn search(index: &[Indexed], query: &str) -> Vec<Hit> {
             ));
         }
     }
+    let mut rows: Vec<((bool, u8), Hit)> = Vec::new();
     for found in index {
         let more = format!("{} {}", found.helper, found.heading);
-        if let Some(rank) = rank(&query, &words, &found.label, &more) {
-            ranked.push((
-                rank,
-                Hit {
-                    page: found.page,
-                    label: found.label.clone(),
-                    place: found.page.place(),
-                    row: true,
-                },
-            ));
-        }
+        let Some(rank) = rank(&query, &words, &found.label, &more) else {
+            continue;
+        };
+        let row = Hit {
+            page: found.page,
+            label: found.label.clone(),
+            place: found.page.place(),
+            row: true,
+        };
+        // The row that opens a page of its own name: the page's hit, in the row's place.
+        let opened = pages.iter().position(|(_, page)| {
+            page.page.sub().is_some() && page.label == row.label && page.place == row.place
+        });
+        rows.push(match opened {
+            Some(at) => {
+                let ((_, of_page), page) = pages.remove(at);
+                ((found.action, rank.min(of_page)), page)
+            }
+            None => ((found.action, rank), row),
+        });
     }
     // Stable: equal ranks keep pages before rows and the pages' order.
-    ranked.sort_by_key(|(rank, _)| *rank);
-    ranked.into_iter().map(|(_, hit)| hit).take(HITS).collect()
+    pages.extend(rows);
+    pages.sort_by_key(|(key, _)| *key);
+    pages.into_iter().map(|(_, hit)| hit).take(HITS).collect()
 }
 
 impl Workspace {
@@ -628,7 +681,8 @@ impl Workspace {
             return;
         }
         if self.settings_nav.index.is_none() {
-            let index = Page::all().flat_map(|page| read(self, page)).collect();
+            let mut index: Vec<Indexed> = Page::all().flat_map(|page| read(self, page)).collect();
+            index.extend(actions(self));
             self.settings_nav.index = Some(index);
         }
         let nav = &mut self.settings_nav;
@@ -653,6 +707,10 @@ impl Workspace {
             return;
         };
         self.settings_nav.selected = index;
+        // An action's row is on the page only while the Shortcuts filter leaves it there.
+        if hit.row && hit.page == Page::Section(SettingsSection::Shortcuts) {
+            self.shortcut_filter.clear();
+        }
         self.navigate(hit.page);
         self.settings_nav.found = hit.row.then(|| Found {
             page: hit.page,
@@ -791,6 +849,7 @@ mod tests {
             heading: heading.into(),
             label: label.into(),
             helper: helper.into(),
+            action: false,
         }
     }
 
@@ -845,5 +904,64 @@ mod tests {
         let hit = &search(&index, "font size")[0];
         assert!(hit.row && hit.page == TERMINAL);
         assert!(!search(&index, "sound")[0].row);
+    }
+
+    #[test]
+    fn a_whole_word_ranks_with_a_prefix_and_a_page_and_the_row_that_opens_it_are_one_hit() {
+        const ADVANCED: Page = Page::Sub(SubPage::AdvancedFont);
+        let mut split = indexed(
+            Page::Section(SettingsSection::Shortcuts),
+            "",
+            "Split right",
+            "",
+        );
+        split.action = true;
+        let index = [
+            indexed(TERMINAL, "Typography", "Terminal font", ""),
+            indexed(TERMINAL, "Typography", "Font style", ""),
+            indexed(TERMINAL, "Typography", "Font size", ""),
+            indexed(TERMINAL, "Typography", "Advanced font settings", ""),
+            indexed(ADVANCED, "Metrics", "Line height", ""),
+            split,
+            indexed(INTERFACE, "Panes", "Pane density", "Splits side by side."),
+        ];
+        let found = search(&index, "font");
+        assert_eq!(
+            found
+                .iter()
+                .map(|hit| hit.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Terminal font",
+                "Font style",
+                "Font size",
+                "Advanced font settings",
+                // The section, by a keyword of its own.
+                "Terminal"
+            ],
+            "in the page's order, the sub-page once"
+        );
+        // The one hit opens the page itself, and says where it is as the row would.
+        let advanced = &found[3];
+        assert_eq!(
+            (advanced.page, advanced.place.as_str(), advanced.row),
+            (ADVANCED, "Terminal", false)
+        );
+        // A keyword of the page alone still finds the page.
+        assert_eq!(search(&index, "kerning")[0].page, ADVANCED);
+        // An action is found by name, after every setting, however well it matches.
+        let found = search(&index, "split");
+        assert_eq!(
+            found
+                .iter()
+                .map(|hit| (hit.label.as_str(), hit.place.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("Panes", "Interface"),
+                ("Pane density", "Interface"),
+                ("Split right", "Shortcuts")
+            ]
+        );
+        assert!(found[2].row);
     }
 }

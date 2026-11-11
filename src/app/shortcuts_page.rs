@@ -16,7 +16,10 @@ use super::{
     keycaps::{Chords, spell},
     panel::Intent,
     recorder::{self, Recorder},
-    settings_kit::{INSET, card, footnote, page as stack, row_frame, section, words},
+    settings_kit::{
+        ChipTone, INSET, card, footnote, found, page as stack, row_frame, search_box, section,
+        state_chip, words,
+    },
     settings_view::SHORTCUT_CATEGORIES,
     theme::*,
     workspace::Workspace,
@@ -37,7 +40,10 @@ const SERVER: &str = "Server";
 /// Where a shortcut recorded on this page is from, in a row's helper line.
 const HERE: &str = "Recorded here";
 
-const HELP: &str = "Every action is listed. Press a row's keys to record others, or Record shortcut to give it some; in Commands, Ctrl Enter opens the highlighted command here. A shortcut recorded here wins over your shortcuts.json, which wins over the host's Rex configuration and the Linux defaults. Filter by a key, such as ctrl+k, to see everything bound to it; the first result is the one the key performs.";
+const HELP: &str = "Press a row's keys to record others, or Record shortcut to give it some. Filter by a name or by a key, such as ctrl+k.";
+/// Under Files: which of the layers a key is read from wins, and the other way to this page.
+const LAYERS: &str = "A shortcut recorded here wins over shortcuts.json, which wins over the host's Rex configuration and the Linux defaults. In Commands, Ctrl Enter opens the highlighted command here.";
+const FILES: &str = "Edit shortcuts.json, then return to Rex to reload it. Recorded shortcuts are saved in the app's settings file, never in shortcuts.json.";
 
 /// One action on the page.
 #[derive(Clone, Debug, PartialEq)]
@@ -737,6 +743,7 @@ pub fn filter_field(s: &Workspace, inset: f32) -> El {
         .leading_icon_size(14.)
         .text_style(ui(13.))
         .height(FIELD)
+        .plain()
         .on_edit(|s: &mut Workspace| &mut s.shortcut_filter)
         // The results start at the top of the page, wherever it was scrolled to.
         .on_change(|_: &mut Workspace, tx: &mut Tx| tx.scroll_to_y(SCROLL, 0.))
@@ -752,7 +759,16 @@ pub fn filter_field(s: &Workspace, inset: f32) -> El {
         .h(FILTER)
         .px(inset)
         .gap(8.)
-        .child(field.build(kit()).key("shortcut-filter").grow(1.).min_w(0.))
+        .child(
+            // The surface Search Settings and the theme search are drawn on.
+            search_box(
+                "shortcut-filter-box",
+                FIELD,
+                field.build(kit()).key("shortcut-filter"),
+            )
+            .grow(1.)
+            .min_w(0.),
+        )
         .child(recorder::menu_button())
 }
 
@@ -822,7 +838,8 @@ fn row_el(found: &Row, recording: Option<&(Recorder, recorder::Verdict)>) -> El 
             .color(rgb(muted()))
             .label("Not set")
     };
-    row_frame(!detail.is_empty())
+    // Search Settings lists every action by this name (`settings_nav::actions`).
+    super::settings_nav::marked(&found.title, row_frame(!detail.is_empty()))
         .key(format!("shortcut:{id}"))
         .child(words(&found.title, &detail))
         .child(keys.key(format!("shortcut-keys:{id}")))
@@ -858,46 +875,60 @@ fn problems_and_files(s: &Workspace, sections: &mut Vec<El>) {
         }
         sections.push(section("Problems", [card(rows)]));
     }
-    let path = |key: &str, words: String| {
-        row_frame(false).child(
-            text(words)
+    // A file: what it is on the left, and its path in the trailing slot, to select and copy.
+    // A path too long for the row is cut in its middle, whole in its tooltip, and never
+    // wraps; a file that is not there says so in a chip before it.
+    let file = |label: &str, key: &str, path: String, missing: Option<&str>| {
+        let mut line = found(label, "", row_frame(false)).child(
+            text(label.to_owned())
+                .font(ui(13.))
+                .color(rgb(ink()))
+                .grow(1.),
+        );
+        if let Some(chip) = missing {
+            line = line.child(state_chip(
+                chip,
+                "Not created",
+                ChipTone::Off,
+                "The file does not exist yet.",
+            ));
+        }
+        line.child(
+            text(path.clone())
                 .key(key.to_owned())
                 .font(mono(11.))
                 .color(rgb(muted()))
                 .selectable(true)
-                .wrap()
-                .grow(1.)
-                .shrink(),
+                .truncate_middle()
+                .help_when_truncated(path)
+                .shrink()
+                .min_w(0.),
         )
     };
     let mut files = Vec::new();
     if let Some(snapshot) = s.keymap_snapshot() {
-        files.push(path(
+        let config = &snapshot.reply.config;
+        files.push(file(
+            "Server configuration",
             "server-shortcuts-path",
-            format!(
-                "Server: {}{}",
-                snapshot.reply.config.path,
-                if snapshot.reply.config.exists {
-                    ""
-                } else {
-                    " (not created)"
-                }
-            ),
+            config.path.clone(),
+            (!config.exists).then_some("server-shortcuts-missing"),
         ));
     }
-    files.push(path(
+    files.push(file(
+        "shortcuts.json",
         "shortcuts-path",
         rex_linux::settings::shortcuts::Shortcuts::path(&s.settings_path)
             .display()
             .to_string(),
+        None,
     ));
     sections.push(section(
         "Files",
         [
             card(files),
-            footnote(
-                "Edit shortcuts.json, then return to Rex to reload it. Shortcuts recorded on this page are saved in the app's settings file, never in shortcuts.json. Escape cancels a sequence; unbound keys reach the terminal.",
-            ),
+            footnote(LAYERS).key("shortcuts-layers"),
+            footnote(FILES),
         ],
     ));
 }

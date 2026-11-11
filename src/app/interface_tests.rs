@@ -371,6 +371,8 @@ fn a_waiting_key_sequence_still_shows_with_no_toolbar_to_hold_it() {
 #[test]
 fn the_toolbar_setting_saves_each_choice_and_a_relaunch_keeps_it() {
     let mut rt = interface_settings();
+    // The window's settings are the page's last group.
+    to_the_foot(&mut rt);
     let label = |rt: &Runtime<Workspace>| {
         rt.elements()
             .into_iter()
@@ -439,7 +441,6 @@ fn animation_style_sets_the_springs_and_off_reduces_motion() {
     let mut rt = interface_settings();
     assert!(!rt.reduced_motion);
     assert_eq!(theme::snappy().duration, theme::SNAPPY.duration);
-    to_the_foot(&mut rt);
     let segment = |rt: &Runtime<Workspace>, label: &str| {
         let group = rt
             .elements()
@@ -961,12 +962,12 @@ fn interface_switches_draw() {
     to_the_foot(&mut rt);
     settle(&mut rt);
     camera.snap(&mut rt, "interface-page-foot");
-    rt.pointer_move(900., 400.);
-    rt.wheel(900., 400., 4000.);
-    settle(&mut rt);
     tap(&mut rt, "toolbar-behavior");
     camera.snap(&mut rt, "interface-toolbar-list");
     press(&mut rt, Key::Escape);
+    rt.pointer_move(900., 400.);
+    rt.wheel(900., 400., 4000.);
+    settle(&mut rt);
     tap(&mut rt, "customize-panes");
     camera.snap(&mut rt, "interface-panes-page");
     std::fs::remove_file(&rt.state.settings_path).ok();

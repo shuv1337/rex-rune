@@ -431,7 +431,7 @@ fn in_the_library_a_card_becomes_the_theme_its_background_makes_it() {
     hosts.iter().for_each(|host| drop(declared(host)));
     assert_eq!(
         headings(&rt)[0],
-        "Built in dark",
+        "Built-in dark",
         "one theme for both appearances is not offered beside the pair"
     );
     assert!(find(&rt, "theme-card:follow_server").is_none());

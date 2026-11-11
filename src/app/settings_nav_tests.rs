@@ -620,6 +620,18 @@ fn the_settings_shell_draws_its_sidebar_header_and_search() {
     settle(&mut rt);
     snap(&mut rt, "settings-no-hits");
     assert!(has(&rt, "settings-no-hits"));
+    // A page and the row that opens it as one result, and an action of Shortcuts.
+    press(&mut rt, Key::Escape);
+    type_text(&mut rt, "font");
+    settle(&mut rt);
+    snap(&mut rt, "settings-search-font");
+    press(&mut rt, Key::Escape);
+    type_text(&mut rt, "split right");
+    settle(&mut rt);
+    snap(&mut rt, "settings-search-action");
+    press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    snap(&mut rt, "settings-found-action");
     std::fs::remove_file(&rt.state.settings_path).ok();
 
     // Where room is shortest: a zoomed window, and the smallest one. The sidebar is at its
@@ -636,6 +648,10 @@ fn the_settings_shell_draws_its_sidebar_header_and_search() {
         settle(&mut rt);
         rt.update(|s, _| s.navigate(Page::Sub(SubPage::Status(Status::Working))));
         click(&mut rt, "settings-search");
+        type_text(&mut rt, "font");
+        settle(&mut rt);
+        snap(&mut rt, &format!("{name}-font"));
+        press(&mut rt, Key::Escape);
         type_text(&mut rt, "desktop");
         settle(&mut rt);
         snap(&mut rt, name);
@@ -661,4 +677,143 @@ fn the_settings_shell_draws_its_sidebar_header_and_search() {
         );
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
+}
+
+#[test]
+fn a_page_and_the_row_that_opens_it_are_one_result_that_opens_the_page() {
+    let mut rt = settings(1, (1440., 1000.));
+    click(&mut rt, "settings-search");
+    type_text(&mut rt, "font");
+    let found = hits(&rt);
+    let labels: Vec<&str> = found.iter().map(|(label, _)| label.as_str()).collect();
+    assert_eq!(
+        labels[..4],
+        [
+            "Terminal font",
+            "Font style",
+            "Font size",
+            "Advanced font settings"
+        ],
+        "the label that is the query's word leads, in the page's order"
+    );
+    assert_eq!(
+        labels
+            .iter()
+            .filter(|label| **label == "Advanced font settings")
+            .count(),
+        1,
+        "{found:?}"
+    );
+    assert_eq!(found[3].1, "Terminal");
+    // The one result goes to the page itself.
+    click(&mut rt, "settings-hit:3");
+    settle(&mut rt);
+    assert_eq!(rt.state.settings_page(), Page::Sub(SubPage::AdvancedFont));
+    assert!(!has(&rt, "settings-found"), "a page has no row to mark");
+    // The same holds for a program state's page and its row on Notifications.
+    press(&mut rt, Key::Escape);
+    type_text(&mut rt, "needs you");
+    let found = hits(&rt);
+    assert_eq!(
+        found
+            .iter()
+            .filter(|(label, _)| label == "Needs you")
+            .count(),
+        1,
+        "{found:?}"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_result_too_long_for_the_sidebar_wraps_and_is_never_cut_to_the_same_ellipsis() {
+    // The narrowest sidebar: a zoomed window.
+    let mut ws = workspace_hosts(1);
+    ws.settings.ui_scale = 1.3;
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    let mut rt = runtime_at(ws, (1440., 1000.));
+    settle(&mut rt);
+    click(&mut rt, "settings-search");
+    type_text(&mut rt, "advanced font");
+    settle(&mut rt);
+    assert_eq!(hits(&rt)[0].0, "Advanced font settings");
+    let hit = rect(&rt, "settings-hit:0");
+    let sidebar = rect(&rt, "settings-sidebar");
+    assert!(
+        hit[0] >= sidebar[0] && hit[0] + hit[2] <= sidebar[0] + sidebar[2] + 0.5,
+        "{hit:?} stays in the sidebar {sidebar:?}"
+    );
+    // Its words are all there: on two lines where one is too short for them.
+    let words = element_text(&rt, "settings-hit:0").join(" ");
+    assert!(
+        words.contains("Advanced font settings") && !words.contains('…'),
+        "{words:?}"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn search_finds_an_action_of_shortcuts_and_lands_on_its_row() {
+    let mut rt = settings(1, (1440., 1000.));
+    // A filter left on Shortcuts would hide the row the search is about to land on.
+    rt.update(|s, _| s.shortcut_filter = rune::TextEdit::new("zoom"));
+    click(&mut rt, "settings-search");
+    type_text(&mut rt, "split right");
+    assert_eq!(
+        hits(&rt),
+        [("Split right".to_owned(), "Shortcuts".to_owned())],
+        "an action is found by the name its row has"
+    );
+    assert!(!has(&rt, "settings-no-hits"));
+    press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.settings_page(),
+        Page::Section(SettingsSection::Shortcuts)
+    );
+    assert_eq!(rt.state.shortcut_filter.text, "", "the filter is emptied");
+    // The row is in view and marked, as a setting's is.
+    let mark = rect(&rt, "settings-found");
+    let page = rect(&rt, "settings-scroll:shortcuts");
+    assert!(
+        mark[1] >= page[1] && mark[1] + mark[3] <= page[1] + page[3],
+        "{mark:?} is in view in {page:?}"
+    );
+    let row = rt
+        .elements()
+        .into_iter()
+        .find(|e| {
+            !e.exiting
+                && e.key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("shortcut:"))
+                && e.rect[1] <= mark[1]
+                && e.rect[1] + e.rect[3] >= mark[1] + mark[3]
+        })
+        .expect("the marked row");
+    assert!(
+        element_text(&rt, row.key.as_deref().unwrap())
+            .iter()
+            .any(|words| words == "Split right"),
+        "the mark is on Split right"
+    );
+    // Settings come before actions, whatever is typed.
+    press(&mut rt, Key::Escape);
+    type_text(&mut rt, "zoom");
+    let found = hits(&rt);
+    let first_action = found
+        .iter()
+        .position(|(_, place)| place == "Shortcuts")
+        .expect("the zoom actions are found");
+    assert_eq!(
+        found[0],
+        ("Interface zoom".to_owned(), "Interface".to_owned())
+    );
+    assert!(
+        found[first_action..]
+            .iter()
+            .all(|(_, place)| place == "Shortcuts"),
+        "{found:?}"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
 }

@@ -48,9 +48,9 @@ fn pickers(s: &Workspace) -> El {
                 Intent::ChooseTheme,
             ),
         ));
-        "A terminal theme is declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection."
+        "A terminal theme is declared to Rex for the panes this client owns or nobody owns."
     };
-    section("", [card(rows), footnote(note)])
+    section("Colours", [card(rows), footnote(note)])
 }
 
 impl Status {

@@ -4,7 +4,7 @@
 use super::{
     keycaps::{keycap, spell},
     panel::SettingsSection,
-    settings_kit::{INSET, on_return},
+    settings_kit::{INSET, on_return, search_box},
     settings_nav::{HEADER, PAGE_INSET, Page},
     theme::*,
     widgets::{glyph, highlight},
@@ -179,16 +179,11 @@ fn search_field(s: &Workspace) -> El {
             .active_descendant(Some(format!("settings-hit:{}", nav.selected())))
             .trailing(keycap("Esc", false));
     }
-    row()
-        .key("settings-search-box")
-        .w_full()
-        .h(30.)
-        .center_y()
-        .radius(8.)
-        .continuous_corners()
-        .fill(white(0.055))
-        .focus_within_ring(1.5, 0., rgb(accent()).alpha(0.7))
-        .child(input.build(kit()).key("settings-search").w_full())
+    search_box(
+        "settings-search-box",
+        30.,
+        input.build(kit()).key("settings-search"),
+    )
 }
 
 /// The section list, in gapped groups, each section behind its tile.
@@ -259,11 +254,12 @@ fn results(s: &Workspace) -> El {
         .gap(2.);
     for (index, hit) in nav.hits().iter().enumerate() {
         let selected = index == nav.selected();
+        // A name too long for the sidebar goes on to a second line before it is cut.
         let mut words = col().grow(1.).shrink().min_w(0.).child(
             text(hit.label.clone())
                 .font(if selected { medium(13.) } else { ui(13.) })
                 .color(rgb(ink()))
-                .truncate(),
+                .max_lines(2),
         );
         if !hit.place.is_empty() {
             words = words.child(
@@ -288,8 +284,9 @@ fn results(s: &Workspace) -> El {
             .label(full.clone())
             .help_when_truncated(full)
             .w_full()
-            .h(if hit.place.is_empty() { 32. } else { 42. })
+            .min_h(if hit.place.is_empty() { 32. } else { 42. })
             .px(6.)
+            .py(4.)
             .gap(9.)
             .center_y()
             .radius(8.)

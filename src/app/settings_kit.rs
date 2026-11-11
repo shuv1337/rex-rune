@@ -11,6 +11,7 @@
 //!   with ([`found`]), so a new row needs no entry anywhere else.
 //! - Controls: [`switch`], [`segmented`] and [`segmented_fixed`], [`value_popup`], [`select`],
 //!   [`stepper`], [`button`], and the [`value`], [`mono_value`] and [`state_chip`] read-outs.
+//! - [`search_box`]: the one surface every search field in Settings is drawn on.
 //! - [`preview_well`]: a card's first row when its settings change how something is drawn, a
 //!   sample of it drawn that way.
 //!
@@ -94,6 +95,22 @@ pub fn footnote(words: impl Into<String>) -> El {
         .color(rgb(muted()))
         .wrap()
         .px(INSET)
+}
+
+/// The surface of a search field in Settings (Search Settings, the theme library's search
+/// and the Shortcuts filter): a raised fill with the accent ring while the field inside has
+/// the keyboard. `input` is the kit's field, plain, filling it.
+pub fn search_box(key: &str, height: f32, input: El) -> El {
+    row()
+        .key(key.to_owned())
+        .w_full()
+        .h(height)
+        .center_y()
+        .radius(8.)
+        .continuous_corners()
+        .fill(white(0.055))
+        .focus_within_ring(1.5, 0., rgb(accent()).alpha(0.7))
+        .child(input.w_full())
 }
 
 /// [`footnote`] for a path, a command or another value to copy.

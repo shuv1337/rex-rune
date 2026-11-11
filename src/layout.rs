@@ -298,7 +298,9 @@ pub fn resized(window: &Window, block: &str, side: Side) -> Option<Divider> {
     // Whole steps, so a ratio does not gather rounding noise as it is stepped.
     let ratio = ((divider.ratio + step) * 1e4).round() / 1e4;
     let ratio = ratio.clamp(RATIO_RANGE.0, RATIO_RANGE.1);
-    if (ratio - divider.ratio).abs() < SAME {
+    // A ratio the server holds outside that range (any client may set one between 0 and 1)
+    // is left alone rather than pulled back in, which would move the border the other way.
+    if (ratio - divider.ratio) * step.signum() < SAME {
         return None;
     }
     divider.ratio = ratio;
@@ -427,6 +429,11 @@ mod tests {
         assert_eq!(resized(&at(0.1), "a", Side::Right).unwrap().ratio, 0.15);
         assert_eq!(resized(&at(0.88), "b", Side::Right).unwrap().ratio, 0.9);
         assert!(resized(&at(0.9), "b", Side::Right).is_none());
+        // A ratio another client set past those stops never moves back against the key.
+        assert!(resized(&at(0.95), "a", Side::Right).is_none());
+        assert!(resized(&at(0.05), "a", Side::Left).is_none());
+        assert_eq!(resized(&at(0.95), "a", Side::Left).unwrap().ratio, 0.9);
+        assert_eq!(resized(&at(0.05), "a", Side::Right).unwrap().ratio, 0.1);
         // Stepping there and back leaves no rounding noise in the ratio.
         assert_eq!(resized(&at(0.3), "a", Side::Right).unwrap().ratio, 0.35);
         assert_eq!(resized(&at(0.35), "a", Side::Left).unwrap().ratio, 0.3);

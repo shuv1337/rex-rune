@@ -1,5 +1,6 @@
-//! Settings → Interface's rows for the toolbar, the animation style and the window, and its
-//! Customize panes page: padding, the active pane's cues and Focus follows mouse.
+//! Settings → Interface's rows for the toolbar, the animation style and the launch, each
+//! with the note that goes under its card, and its Customize panes page: padding, the active
+//! pane's cues and Focus follows mouse.
 use super::{
     settings_kit::{
         SEGMENT, Segment, card, footnote, page, section, segmented_fixed, select_row, setting,
@@ -35,84 +36,78 @@ fn toggle(key: &str, label: &str, on: bool, field: fn(&mut InterfaceConfig) -> &
     })
 }
 
-/// When the toolbar shows, and how to bring it out where it has no row.
-pub fn toolbar(s: &Workspace) -> El {
+/// When the toolbar shows.
+pub fn toolbar_row(s: &Workspace) -> El {
+    select_row(
+        "toolbar-behavior",
+        "Toolbar",
+        "On hover and Hidden give its row to the terminals.",
+        &["Always show", "On hover", "Hidden"],
+        TOOLBARS
+            .iter()
+            .position(|t| *t == s.settings.interface.toolbar)
+            .unwrap_or_default(),
+        |s, i, tx| s.set_toolbar(TOOLBARS[i.min(TOOLBARS.len() - 1)], tx),
+    )
+}
+
+/// How to bring the toolbar out where it has no row.
+pub fn toolbar_note(s: &Workspace) -> El {
     let keys = s.shortcut_detail(toolbar_reveal::TOGGLE, &Value::Null);
     let reveal = if keys.is_empty() {
         "Reveal toolbar, in Commands,".to_owned()
     } else {
         format!("Reveal toolbar ({keys}, and in Commands)")
     };
-    let note = format!(
+    footnote(format!(
         "Without its row, {reveal} floats the toolbar over the terminals until it is run again, so the window can still be moved and closed."
-    );
-    section(
-        "Toolbar",
-        [
-            card([select_row(
-                "toolbar-behavior",
-                "Toolbar",
-                "On hover and Hidden give its row to the terminals.",
-                &["Always show", "On hover", "Hidden"],
-                TOOLBARS
-                    .iter()
-                    .position(|t| *t == s.settings.interface.toolbar)
-                    .unwrap_or_default(),
-                |s, i, tx| s.set_toolbar(TOOLBARS[i.min(TOOLBARS.len() - 1)], tx),
-            )]),
-            footnote(note).key("toolbar-reveal-note"),
-        ],
-    )
+    ))
+    .key("toolbar-reveal-note")
 }
 
 /// How the chrome moves.
-pub fn animation(s: &Workspace) -> El {
-    section(
-        "Animation",
-        [
-            card([setting(
-                "Animation style",
-                "How the chrome moves. Terminals never animate.",
-                // Three segments in the width of the page's two-segment controls, so the
-                // rows' controls still line up on both edges.
-                segmented_fixed(
-                    "animation-style",
-                    2. * SEGMENT,
-                    &[
-                        Segment::new("Snappy"),
-                        Segment::new("Natural"),
-                        Segment::new("Off"),
-                    ],
-                    ANIMATIONS
-                        .iter()
-                        .position(|a| *a == s.settings.interface.animation),
-                    |s, i, _| {
-                        s.settings.interface.animation = ANIMATIONS[i.min(ANIMATIONS.len() - 1)];
-                        s.save();
-                    },
-                ),
-            )]),
-            footnote(
-                "Natural moves more slowly and settles softly. Off stops movement and keeps a brief fade, as your desktop's reduce-motion setting does whatever is chosen here.",
-            ),
-        ],
+pub fn animation_row(s: &Workspace) -> El {
+    setting(
+        "Animation style",
+        "How the chrome moves. Terminals never animate.",
+        // Three segments in the width of the page's two-segment controls, so the rows'
+        // controls still line up on both edges.
+        segmented_fixed(
+            "animation-style",
+            2. * SEGMENT,
+            &[
+                Segment::new("Snappy"),
+                Segment::new("Natural"),
+                Segment::new("Off"),
+            ],
+            ANIMATIONS
+                .iter()
+                .position(|a| *a == s.settings.interface.animation),
+            |s, i, _| {
+                s.settings.interface.animation = ANIMATIONS[i.min(ANIMATIONS.len() - 1)];
+                s.save();
+            },
+        ),
+    )
+}
+
+pub fn animation_note() -> El {
+    footnote(
+        "Natural moves more slowly and settles softly. Off stops movement and keeps a brief fade, as your desktop's reduce-motion setting does whatever is chosen here.",
     )
 }
 
 /// What a launch does with the window.
-pub fn window(s: &Workspace) -> El {
-    section(
-        "Window",
-        [card([setting(
+pub fn launch_row(s: &Workspace) -> El {
+    setting(
+        "Show window on launch",
+        "Off starts Rex minimized, for a client that starts with your desktop.",
+        toggle(
+            "show-window-on-launch",
             "Show window on launch",
-            "Off starts Rex minimized, for a client that starts with your desktop.",
-            toggle(
-                "show-window-on-launch",
-                "Show window on launch",
-                s.settings.interface.show_window_on_launch,
-                |i| &mut i.show_window_on_launch,
-            ),
-        )])],
+            s.settings.interface.show_window_on_launch,
+            |i| &mut i.show_window_on_launch,
+        ),
     )
 }
 

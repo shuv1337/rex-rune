@@ -395,19 +395,30 @@ pub fn popup(s: &Workspace, viewport: [f32; 2]) -> El {
         .as_deref()
         .and_then(rune::memo::window_layout);
     let head = FIELD + 3. + SCOPE + 4. + 12.;
+    // Over Settings the picker stays under the dialog's header, so the page's title and
+    // Close are never behind it.
+    let ceiling = settings_kit::under(panel)
+        .and_then(|_| rune::memo::window_layout("settings-header"))
+        .map_or(8., |[_, y, _, h]| y + h);
     let room = control.map(|[_, y, _, h]| {
         (
             vh - (y + h + popups::CONTROL_GAP) - 8.,
-            y - popups::CONTROL_GAP - 8.,
+            y - popups::CONTROL_GAP - ceiling,
         )
     });
+    let count = s.fonts.shown.len();
+    let content = count as f32 * ROW;
+    // Under its control wherever the whole list or six rows of it fit there, as every other
+    // list opens; over it only where that side has more room. The list scrolls, so it is
+    // as tall as the side it is on allows and no taller.
+    let wanted = content.clamp(48., ROWS * ROW).min(6. * ROW);
+    let over = room.is_some_and(|(below, above)| below - head < wanted && above > below);
     let list_max = match room {
-        Some((below, above)) => below.max(above) - head,
+        Some((_, above)) if over => above - head,
+        Some((below, _)) => below - head,
         None => vh - 76. - head - 16.,
     }
     .clamp(3. * ROW, ROWS * ROW);
-    let count = s.fonts.shown.len();
-    let content = count as f32 * ROW;
     let view_h = content.min(list_max);
     let overflow = content > list_max + 1.;
 
@@ -522,14 +533,14 @@ pub fn popup(s: &Workspace, viewport: [f32; 2]) -> El {
         );
     }
     let estimated = head + view_h.max(48.);
-    let Some(([cx, cy, cw, ch], (below, above))) = control.zip(room) else {
+    let Some([cx, cy, cw, ch]) = control else {
         let x = ((vw - width) / 2.).max(8.);
         return layer.child(surface.absolute(x, 76_f32.min((vh - estimated - 8.).max(8.))));
     };
     // Its trailing edge on the control's; pinned by the edge that touches the control, so
     // the gap holds whatever the list's height turns out to be.
     let x = (cx + cw - width).clamp(8., (vw - width - 8.).max(8.));
-    layer.child(if estimated > below && above > below {
+    layer.child(if over {
         surface.pin(Some(x), None, None, Some(vh - (cy - popups::CONTROL_GAP)))
     } else {
         surface.absolute(x, cy + ch + popups::CONTROL_GAP)

@@ -153,7 +153,7 @@ fn search_finds_the_rows_of_every_lanes_pages() {
         ),
         (
             "fallback",
-            "Fallback fonts",
+            "Add a fallback font",
             "Terminal › Advanced font settings",
         ),
         ("toolbar", "Toolbar", "Interface"),
@@ -333,5 +333,38 @@ fn a_recording_takes_alt_left_before_settings_history_does() {
         rt.state.settings_page(),
         Page::Section(SettingsSection::Shortcuts)
     );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// The headings of the page on screen, top to bottom.
+fn headings(rt: &Runtime<Workspace>) -> Vec<String> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.role == "heading" && e.path.contains("settings-scroll"))
+        .filter_map(|e| e.text)
+        .collect()
+}
+
+#[test]
+fn every_card_has_a_heading_and_none_repeats_the_one_row_under_it() {
+    let mut rt = settings((1440., 1000.));
+    // Interface: the toolbar, the notices' corner and the launch are the window's; the
+    // animation style is with the zoom.
+    assert_eq!(
+        headings(&rt),
+        ["Appearance", "Panes", "Sidebar and tabs", "Window"]
+    );
+    for label in ["Toolbar", "Animation", "Notices"] {
+        assert!(
+            !headings(&rt).iter().any(|heading| heading == label),
+            "{label} is a row, not a section of one row"
+        );
+    }
+    rt.update(|s, _| s.navigate(Page::Section(SettingsSection::Themes)));
+    settle(&mut rt);
+    assert_eq!(headings(&rt).first().map(String::as_str), Some("Colours"));
+    rt.update(|s, tx| s.open_advanced_fonts(tx));
+    settle(&mut rt);
+    assert_eq!(headings(&rt), ["Metrics", "Fallback fonts"]);
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

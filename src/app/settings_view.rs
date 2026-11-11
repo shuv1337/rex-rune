@@ -35,27 +35,34 @@ fn interface(s: &Workspace) -> El {
         NoticePosition::TopRight => 0,
         NoticePosition::BottomRight => 1,
     };
+    // Every heading is over a group of rows: a setting that would be alone under a heading
+    // of its own name is with the others of its kind instead.
     page([
         section(
             "Appearance",
-            [card([setting(
-                "Interface zoom",
-                "Chrome and terminals together, from 70% to 150%.",
-                row()
-                    .gap(8.)
-                    .center_y()
-                    .child(stepper(
-                        "zoom",
-                        format!("{percent}%"),
-                        |s, tx| s.change_ui_scale(-1, tx),
-                        |s, tx| s.change_ui_scale(1, tx),
-                    ))
-                    .child(button("zoom-reset", "Reset", Pill::Neutral, |s, tx| {
-                        s.change_ui_scale(0, tx)
-                    })),
-            )])],
+            [
+                card([
+                    setting(
+                        "Interface zoom",
+                        "Chrome and terminals together, from 70% to 150%.",
+                        row()
+                            .gap(8.)
+                            .center_y()
+                            .child(stepper(
+                                "zoom",
+                                format!("{percent}%"),
+                                |s, tx| s.change_ui_scale(-1, tx),
+                                |s, tx| s.change_ui_scale(1, tx),
+                            ))
+                            .child(button("zoom-reset", "Reset", Pill::Neutral, |s, tx| {
+                                s.change_ui_scale(0, tx)
+                            })),
+                    ),
+                    super::interface_page::animation_row(s),
+                ]),
+                super::interface_page::animation_note(),
+            ],
         ),
-        super::interface_page::toolbar(s),
         section(
             "Panes",
             [card([
@@ -146,24 +153,29 @@ fn interface(s: &Workspace) -> El {
             ])],
         ),
         section(
-            "Notices",
-            [card([select_row(
-                "notice-position",
-                "Position",
-                "Where in-app notices appear.",
-                &["Top right", "Bottom right"],
-                corner,
-                |s, i, _| {
-                    s.set_notice_position(if i == 0 {
-                        NoticePosition::TopRight
-                    } else {
-                        NoticePosition::BottomRight
-                    })
-                },
-            )])],
+            "Window",
+            [
+                card([
+                    super::interface_page::toolbar_row(s),
+                    select_row(
+                        "notice-position",
+                        "Notice position",
+                        "The corner in-app notices appear in.",
+                        &["Top right", "Bottom right"],
+                        corner,
+                        |s, i, _| {
+                            s.set_notice_position(if i == 0 {
+                                NoticePosition::TopRight
+                            } else {
+                                NoticePosition::BottomRight
+                            })
+                        },
+                    ),
+                    super::interface_page::launch_row(s),
+                ]),
+                super::interface_page::toolbar_note(s),
+            ],
         ),
-        super::interface_page::animation(s),
-        super::interface_page::window(s),
     ])
 }
 

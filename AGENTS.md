@@ -16,6 +16,11 @@ cargo run --locked --no-default-features --bin rex-workspace-probe
 
 # Vendored SDK tests:
 cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features
+
+# Draw the headless UI tests' pictures (the tests named `…draw…`) as PNGs, to look at.
+# One test at a time: text is measured process-wide, so a test that loads the app's own
+# fonts changes what the tests running beside it measure, and they fail.
+REX_TEST_SNAP_DIR=/tmp/rex-snaps cargo test --locked --all-features --bin rex-linux -- draw --test-threads=1
 ```
 
 Requirements are listed in the README (Rust 1.96+, Zig 0.17.x for `ghostty-vt`, Linux graphics and input libraries). `Cargo.lock` is committed; keep `--locked` working.

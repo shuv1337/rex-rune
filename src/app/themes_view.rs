@@ -5,7 +5,7 @@
 //!   [`swatch_strip`] is the same theme in the width of a word, for a row of the switcher,
 //!   and a chrome palette the same way, for a row of the Window colours list.
 //! - [`library`] lists every theme this client can declare as a grid of those cards under
-//!   Default, Built in, Custom and Ghostty headings, dark themes apart from light ones, with
+//!   Default, Built-in, Custom and Ghostty headings, dark themes apart from light ones, with
 //!   a search field over it. With a light and a dark theme (`theme_pair`) both cards are
 //!   marked, and choosing a card sets the one its background makes it. Only the
 //!   rows near the viewport are built (`El::virtual_rows`), so a Ghostty install's six
@@ -17,9 +17,10 @@
 use super::{
     fold::{Name, fold},
     keycaps::keycap,
-    settings_kit::{INSET, section},
+    settings_kit::{INSET, search_box, section},
     settings_nav::PAGE_INSET,
     theme::*,
+    theme_list::{BUILTIN_DARK, BUILTIN_LIGHT, CUSTOM, DEFAULT, GHOSTTY_DARK, GHOSTTY_LIGHT},
     widgets::{glyph, matched},
     workspace::Workspace,
 };
@@ -32,6 +33,7 @@ use rune::{
 };
 use rune_kit::TextInput;
 use std::{
+    cell::Cell,
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     rc::Rc,
@@ -205,10 +207,17 @@ pub fn swatch_strip(picture: &Picture) -> El {
         .children(dots.map(|color| el().size(6., 6.).radius(3.).fill(rgb(color))))
 }
 
-/// The library's own state: what its search field holds.
+/// The library's own state: what its search field holds, and where its grid is.
 #[derive(Default)]
 pub struct Library {
     pub search: TextEdit,
+    /// How far down the page's content the grid starts, and how tall the page's viewport
+    /// is, as the last layout had them: with the page's scroll offset they say which rows
+    /// are in view, for Tab to enter the grid at one of them.
+    placed: Cell<Option<(f32, f32)>>,
+    /// A card the keyboard is on its way to, too far off to be built when it was asked
+    /// for (Home or End in a long grid), and the frames left to give it the keyboard in.
+    going: Option<(String, u8)>,
 }
 
 /// One card of the library.
@@ -272,6 +281,26 @@ impl Shelf {
                 Line::Cards(cards) if cards.contains(&index) => Some((line, index - cards.start)),
                 _ => None,
             })
+    }
+
+    /// The first row whose cards are whole in a viewport `height` tall that shows the page
+    /// from `offset` down, the grid starting `top` down the page: its line and its first
+    /// card. None while no row is (the grid is under the fold).
+    fn first_in_view(&self, top: f32, height: f32, offset: f32) -> Option<(usize, usize)> {
+        let mut y = top;
+        for (index, line) in self.lines.iter().enumerate() {
+            match line {
+                Line::Heading(..) => y += if index == 0 { FIRST_HEADING } else { HEADING },
+                Line::Cards(cards) => {
+                    let card = y + HALO;
+                    if card >= offset - 0.5 && card + CARD_HEIGHT <= offset + height + 0.5 {
+                        return Some((index, cards.start));
+                    }
+                    y += ROW;
+                }
+            }
+        }
+        None
     }
 
     /// The nearest row of cards before (-1) or after (1) line `from`.
@@ -453,9 +482,9 @@ impl Workspace {
         };
         let mut total = 0;
         let mut groups: Vec<(&'static str, Vec<Item>)> =
-            ["Default", "Built in dark", "Built in light", "Custom"]
+            [DEFAULT, BUILTIN_DARK, BUILTIN_LIGHT, CUSTOM]
                 .into_iter()
-                .chain(["Ghostty dark", "Ghostty light"])
+                .chain([GHOSTTY_DARK, GHOSTTY_LIGHT])
                 .map(|title| (title, Vec::new()))
                 .collect();
         let mut add =
@@ -584,6 +613,9 @@ impl Workspace {
         let target = match &ev.key {
             Key::Left => index.checked_sub(1),
             Key::Right => Some(index + 1).filter(|next| *next < shelf.items.len()),
+            // The ends of the grid, as in any group of radios.
+            Key::Home => Some(0),
+            Key::End => shelf.items.len().checked_sub(1),
             Key::Up | Key::Down => {
                 let direction = if ev.key == Key::Up { -1 } else { 1 };
                 match shelf.cards_from(line, direction) {
@@ -596,6 +628,13 @@ impl Workspace {
                     }
                     None => None,
                 }
+            }
+            // Back to the search field in one step, from any card: the grid's one Tab stop
+            // is its first card, which would otherwise be a second stop on the way out.
+            Key::Tab if ev.mods.shift => {
+                tx.scroll_into_view("theme-search-box");
+                tx.focus("theme-search", true);
+                return true;
             }
             Key::Enter => {
                 self.pick_theme(shelf.items[index].choice());
@@ -615,9 +654,29 @@ impl Workspace {
             && let Some((line, _)) = shelf.place(target)
         {
             tx.scroll_into_view(shelf.line_key(line));
-            tx.focus(card_key(&shelf.items[target].id), true);
+            let card = card_key(&shelf.items[target].id);
+            if matches!(ev.key, Key::Home | Key::End) {
+                // An end of the grid may be far from the rows that are built: the page goes
+                // there at once, and the card takes the keyboard once its row is there.
+                tx.instant();
+                self.theme_library.going = Some((card.clone(), 3));
+            }
+            tx.focus(card, true);
         }
         // An arrow at an end of the grid stays put, and never scrolls the page instead.
+        true
+    }
+
+    /// Give the keyboard to the card it is on its way to, now that its row has been built.
+    /// Returns whether there was one, so the frames it needs are drawn.
+    pub(super) fn poll_theme_library(&mut self, tx: &mut Tx) -> bool {
+        let Some((card, frames)) = self.theme_library.going.take() else {
+            return false;
+        };
+        tx.focus(card.clone(), true);
+        if frames > 1 {
+            self.theme_library.going = Some((card, frames - 1));
+        }
         true
     }
 
@@ -631,7 +690,9 @@ impl Workspace {
 }
 
 /// Keys in the library's search field: Escape empties it (and closes Settings only when it
-/// is empty already), Down and Return go to the first card found.
+/// is empty already), Down and Return go to the first card found. Tab goes into the grid
+/// too, at the first card in view: only the rows near the viewport are built, so on a page
+/// scrolled far down the grid's first card is not there for the Tab order to find.
 fn search_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if s.settings_key(ev, tx) || super::input::global_key(s, ev, tx) {
         return true;
@@ -641,6 +702,22 @@ fn search_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.theme_library.search = TextEdit::default();
             s.theme_library.search.focused = true;
             tx.instant();
+        }
+        Key::Tab if !(ev.mods.shift || ev.mods.ctrl || ev.mods.alt || ev.mods.cmd) => {
+            let shelf = s.shelf();
+            if shelf.items.is_empty() {
+                return false;
+            }
+            let offset = s.settings_nav.offset().get();
+            let (line, card) = s
+                .theme_library
+                .placed
+                .get()
+                .and_then(|(top, height)| shelf.first_in_view(top, height, offset))
+                // The grid is under the fold: its first row of cards.
+                .unwrap_or((usize::from(shelf.lines.len() > 1), 0));
+            tx.scroll_into_view(shelf.line_key(line));
+            tx.focus(card_key(&shelf.items[card].id), true);
         }
         Key::Down | Key::Enter => {
             let shelf = s.shelf();
@@ -686,16 +763,11 @@ fn search_field(s: &Workspace, shelf: &Shelf) -> El {
         .on_key(search_key)
         .trailing(trailing)
         .width(None);
-    row()
-        .key("theme-search-box")
-        .w_full()
-        .h(30.)
-        .center_y()
-        .radius(8.)
-        .continuous_corners()
-        .fill(white(0.055))
-        .focus_within_ring(1.5, 0., rgb(accent()).alpha(0.7))
-        .child(input.build(kit()).key("theme-search").w_full())
+    search_box(
+        "theme-search-box",
+        30.,
+        input.build(kit()).key("theme-search"),
+    )
 }
 
 /// The theme library: a search field over every theme this client can declare, as cards in
@@ -717,6 +789,13 @@ pub fn library(s: &Workspace) -> El {
                     .py(18.),
             ],
         );
+    }
+    // Where the grid is on the page, for Tab from the search field (`search_key`). Neither
+    // read follows the page's scrolling, so the view does not run again as it scrolls.
+    let top = memo::layout_with("theme-grid", |grid| grid[1]);
+    let page = memo::layout_with("settings-scroll:themes", |page| (page[1], page[3]));
+    if let Some((top, (page, height))) = top.zip(page) {
+        s.theme_library.placed.set(Some((top - page, height)));
     }
     let (keys, rows) = (shelf.clone(), shelf.clone());
     let grid = col()

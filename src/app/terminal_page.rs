@@ -5,8 +5,8 @@
 use super::{
     panel::{Intent, SettingsSection},
     settings_kit::{
-        button, card, disclosure, footnote, found, page, preview_well, row_frame, section,
-        select_row, setting, stepper, switch, words,
+        ChipTone, button, card, disclosure, footnote, found, page, preview_well, row_frame,
+        section, select_row, setting, state_chip, stepper, switch, words,
     },
     settings_nav::Page,
     term::{
@@ -21,7 +21,7 @@ use rex_linux::settings::{
     terminal::{CursorStyle, SelectionColor, TerminalConfig},
     typography::FontStyle,
 };
-use rune::{El, TextStyle, row, text};
+use rune::{El, TextStyle, col, row, text};
 
 /// What the previews draw in: the colours panes draw in now, and the terminal's default
 /// text, cursor and a few of its palette's colours.
@@ -118,29 +118,58 @@ pub(super) fn typography_sample(inks: &Inks) -> Sample<'static> {
 fn terminal_font(s: &Workspace) -> El {
     let saved = &s.settings.font_family;
     let (label, helper) = ("Terminal font", "Applies when you reopen the client.");
-    found(label, helper, row_frame(true))
-        .child(words(label, helper))
-        .child(
-            row()
-                .gap(12.)
-                .center_y()
-                .min_w(0.)
-                .child(
-                    text(saved.clone())
-                        .key("font-name")
-                        .font(TextStyle::new(13., 400.).family(super::fonts::named(saved)))
-                        .color(rgb(ink()))
-                        .truncate()
-                        .max_w(240.)
-                        .help_when_truncated(saved.clone()),
-                )
-                .child(button(
-                    "font-choose",
-                    "Choose…",
-                    Pill::Neutral,
-                    |s, tx| s.open_anchored("font-choose", Intent::Fonts, tx),
-                )),
-        )
+    // The saved family is not installed: this launch asked for it and got the bundled font
+    // instead, or the families fontconfig knows, once read, have none of that name.
+    let missing = if s.terminal_family.is_none() && saved.eq_ignore_ascii_case(&s.launch_font) {
+        true
+    } else {
+        s.fonts.installed(saved) == Some(false)
+    };
+    let title = if missing {
+        // Said on the row it is about, in a word beside its label, as a fallback font's
+        // row says it; the trailing slot keeps its width, so the helper stays on one line.
+        col()
+            .grow(1.)
+            .shrink()
+            .min_w(0.)
+            .gap(1.)
+            .child(
+                row()
+                    .gap(8.)
+                    .center_y()
+                    .child(text(label).font(ui(13.)).color(rgb(ink())))
+                    .child(state_chip(
+                        "font-missing",
+                        "Not installed",
+                        ChipTone::Attention,
+                        "fontconfig has no family of this name, so terminals use the bundled IBM Plex Mono.",
+                    )),
+            )
+            .child(text(helper).font(ui(11.5)).color(rgb(muted())).wrap())
+    } else {
+        words(label, helper)
+    };
+    found(label, helper, row_frame(true)).child(title).child(
+        row()
+            .gap(12.)
+            .center_y()
+            .min_w(0.)
+            .child(
+                text(saved.clone())
+                    .key("font-name")
+                    .font(TextStyle::new(13., 400.).family(super::fonts::named(saved)))
+                    .color(rgb(ink()))
+                    .truncate()
+                    .max_w(240.)
+                    .help_when_truncated(saved.clone()),
+            )
+            .child(button(
+                "font-choose",
+                "Choose…",
+                Pill::Neutral,
+                |s, tx| s.open_anchored("font-choose", Intent::Fonts, tx),
+            )),
+    )
 }
 
 fn typography(s: &Workspace, inks: &Inks) -> El {
@@ -163,52 +192,51 @@ fn typography(s: &Workspace, inks: &Inks) -> El {
     let style = s.settings.terminal.font.style;
     section(
         "Typography",
-        [
-            card([
-                preview(
-                    s,
-                    "typography-preview",
-                    "Typography preview: regular, bold and italic text as terminals set it.",
-                    inks,
-                    &typography_sample(inks),
+        [card([
+            preview(
+                s,
+                "typography-preview",
+                "Typography preview: regular, bold and italic text as terminals set it.",
+                inks,
+                &typography_sample(inks),
+            ),
+            terminal_font(s),
+            select_row(
+                "font-style",
+                "Font style",
+                "The face ordinary text is drawn in.",
+                &FontStyle::ALL.map(FontStyle::name),
+                FontStyle::ALL
+                    .iter()
+                    .position(|choice| *choice == style)
+                    .unwrap_or_default(),
+                |s, i, _| {
+                    s.edit_typography(|font| {
+                        font.style = FontStyle::ALL[i.min(FontStyle::ALL.len() - 1)]
+                    })
+                },
+            ),
+            setting(
+                "Font size",
+                "From 8 to 48 pt, for every terminal.",
+                stepper(
+                    "font",
+                    format!("{} pt", s.settings.font_size),
+                    |s, _| s.change_font(-1.),
+                    |s, _| s.change_font(1.),
                 ),
-                terminal_font(s),
-                select_row(
-                    "font-style",
-                    "Font style",
-                    "The face ordinary text is drawn in.",
-                    &FontStyle::ALL.map(FontStyle::name),
-                    FontStyle::ALL
-                        .iter()
-                        .position(|choice| *choice == style)
-                        .unwrap_or_default(),
-                    |s, i, _| {
-                        s.edit_typography(|font| {
-                            font.style = FontStyle::ALL[i.min(FontStyle::ALL.len() - 1)]
-                        })
-                    },
-                ),
-                setting(
-                    "Font size",
-                    "From 8 to 48 pt, for every terminal.",
-                    stepper(
-                        "font",
-                        format!("{} pt", s.settings.font_size),
-                        |s, _| s.change_font(-1.),
-                        |s, _| s.change_font(1.),
-                    ),
-                ),
-            ]),
-            card([disclosure(
-                "open-advanced-font",
-                "Advanced font settings",
-                "",
-                &super::font_page::summary(s),
-                |s, tx| s.open_advanced_fonts(tx),
-            )]),
-        ]
+            ),
+        ])]
         .into_iter()
-        .chain(drawn.map(|words| footnote(words).key("font-drawn"))),
+        // What terminals are drawn in now goes right under the card whose row it explains.
+        .chain(drawn.map(|words| footnote(words).key("font-drawn")))
+        .chain([card([disclosure(
+            "open-advanced-font",
+            "Advanced font settings",
+            "",
+            &super::font_page::summary(s),
+            |s, tx| s.open_advanced_fonts(tx),
+        )])]),
     )
 }
 
@@ -376,11 +404,9 @@ fn selection(s: &Workspace, inks: &Inks) -> El {
                 ),
             ]),
             footnote(
-                "Theme takes the terminal theme's selection colours; a theme without them fills in the chrome's selection colour and leaves the text its own. Cell foreground and Cell background take each selected cell's colours: Cell foreground as the background inverts the selection.",
+                "Theme uses the terminal theme's selection colours; Cell foreground and Cell background use each selected cell's own.",
             ),
-            footnote(
-                "A middle-click goes to a program that tracks the mouse instead. Programs that copy for themselves (OSC 52) always use the clipboard.",
-            ),
+            footnote("A middle-click goes to a program that tracks the mouse instead of pasting."),
         ],
     )
 }

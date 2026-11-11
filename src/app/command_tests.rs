@@ -875,10 +875,23 @@ fn the_list_shows_about_twenty_rows_and_scrolls_to_the_rest() {
         rt.elements().into_iter().filter_map(|e| e.text).collect()
     };
     let viewport = rect(&rt, "results-scroll");
-    assert_eq!(
-        viewport[3].round(),
-        620.,
-        "twenty 31 pt rows, with room to spare"
+    // Twenty 31 pt rows of room, less what a row cut in half would have taken: the list
+    // ends on a whole row above its hint.
+    assert!(
+        (560. ..=620.).contains(&viewport[3]),
+        "about twenty 31 pt rows: {viewport:?}"
+    );
+    let cut = rt.elements().into_iter().find(|e| {
+        !e.exiting
+            && e.role == "menuitem"
+            && e.path.contains("results")
+            && e.rect[1] < viewport[1] + viewport[3] - 0.5
+            && e.rect[1] + e.rect[3] > viewport[1] + viewport[3] + 1.5
+    });
+    assert!(
+        cut.is_none(),
+        "no row is cut by the list's foot: {:?}",
+        cut.map(|e| (e.label, e.rect))
     );
     let content = rect(&rt, "results");
     assert!(

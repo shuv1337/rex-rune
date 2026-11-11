@@ -105,12 +105,30 @@ fn listed(rt: &Runtime<Workspace>) -> Vec<String> {
 
 /// Press the picker's row for `family`.
 fn choose_family(rt: &mut Runtime<Workspace>, family: &str) {
-    let row = rt
-        .elements()
-        .into_iter()
-        .find(|e| !e.exiting && e.role == "menuitem" && e.label.as_deref() == Some(family))
-        .unwrap_or_else(|| panic!("{family} is not listed"))
-        .rect;
+    let find = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.role == "menuitem" && e.label.as_deref() == Some(family))
+            .unwrap_or_else(|| panic!("{family} is not listed"))
+    };
+    // The list is as tall as its side of the control allows: scroll to a row further down.
+    let list = element(rt, "results-scroll").rect;
+    for _ in 0..40 {
+        let row = find(rt);
+        if row.visible[3] >= row.rect[3] - 0.5 {
+            break;
+        }
+        let below = row.rect[1] + row.rect[3] > list[1] + list[3];
+        rt.wheel(
+            list[0] + list[2] / 2.,
+            list[1] + list[3] / 2.,
+            if below { -40. } else { 40. },
+        );
+        for _ in 0..12 {
+            rt.frame(1. / 60.);
+        }
+    }
+    let row = find(rt).rect;
     rt.pointer_down(row[0] + row[2] / 2., row[1] + row[3] / 2.);
     rt.pointer_up(row[0] + row[2] / 2., row[1] + row[3] / 2.);
     settle(rt);
@@ -539,15 +557,37 @@ fn the_style_spacing_unit_and_bold_italic_choices_save_and_apply_at_once() {
     assert!(on_settings(&rt));
 
     tap(&mut rt, "open-advanced-font");
-    assert!(shown(
-        &rt,
-        "Added to the width of every character, in points."
-    ));
+    // The value says its unit, one name for it everywhere: points are "pt".
+    let spacing = |rt: &Runtime<Workspace>| {
+        let stepper = element(rt, "char-spacing-smaller").rect;
+        rt.elements()
+            .into_iter()
+            .filter(|e| {
+                !e.exiting && e.rect[0] > stepper[0] && (e.rect[1] - stepper[1]).abs() < 12.
+            })
+            .find_map(|e| e.text.filter(|t| t.ends_with("pt") || t.ends_with('%')))
+            .expect("the spacing's value")
+    };
+    assert_eq!(spacing(&rt), "0 pt");
+    assert!(shown(&rt, "Points, from \u{2212}3 to +12."));
+    assert!(!shown(&rt, "px"));
     tap(&mut rt, "char-spacing-larger");
-    choose(&mut rt, "char-spacing-unit", "%");
+    assert_eq!(spacing(&rt), "+1 pt");
+    // The two steppers are alone in their rows' trailing slots, so they share both edges.
+    let edges = |rt: &Runtime<Workspace>, key: &str| {
+        let (less, more) = (
+            element(rt, &format!("{key}-smaller")).rect,
+            element(rt, &format!("{key}-larger")).rect,
+        );
+        (less[0], more[0] + more[2])
+    };
+    assert_eq!(edges(&rt, "line-height"), edges(&rt, "char-spacing"));
+    choose(&mut rt, "char-spacing-unit", "Percent");
     let font = rt.state.settings.terminal.font.clone();
     assert_eq!((font.spacing, font.spacing_unit), (1, SpacingUnit::Percent));
-    assert!(shown(&rt, "as a share of that width"));
+    assert_eq!(spacing(&rt), "+1%");
+    assert!(shown(&rt, "A share of the character's width"));
+    assert_eq!(edges(&rt, "line-height"), edges(&rt, "char-spacing"));
     tap(&mut rt, "char-spacing-larger");
     assert_eq!(rt.state.settings.terminal.font.spacing, 6, "5% a step");
     tap(&mut rt, "char-spacing-smaller");
@@ -920,5 +960,114 @@ fn the_font_settings_draw_their_picker_and_pages() {
     settle(&mut rt);
     assert!(rt.state.panel.is_none());
     snap(&mut camera, &mut rt, "font-pane-changed");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_picker_over_settings_stays_under_the_header_and_opens_below_where_six_rows_fit() {
+    // A window where the fallback list's Add… button has little room under it.
+    let (mut ws, _host) = tabbed_workspace("single");
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    ws.open_advanced_fonts(&mut rune::Tx::default());
+    let mut rt = Runtime::new(ws, view, (1024., 700.), Env::new(true, 2.));
+    rt.on_key = Some(crate::app::input::on_key);
+    rt.poll = Some(crate::app::poll);
+    settle(&mut rt);
+    tap(&mut rt, "fallback-add");
+    let (list, header, add) = (
+        element(&rt, "menu-surface").rect,
+        element(&rt, "settings-header").rect,
+        element(&rt, "fallback-add").rect,
+    );
+    assert!(
+        list[1] >= header[1] + header[3] - 0.5,
+        "the picker {list:?} leaves the header {header:?}, its title and Close, in view"
+    );
+    let close_button = element(&rt, "close-settings").rect;
+    assert!(
+        list[1] >= close_button[1] + close_button[3]
+            || list[0] >= close_button[0] + close_button[2]
+            || list[0] + list[2] <= close_button[0],
+        "Close {close_button:?} is not under the picker {list:?}"
+    );
+    assert!(
+        list[1] + list[3] <= add[1] || list[1] >= add[1] + add[3],
+        "it is against its button, over or under: {list:?} and {add:?}"
+    );
+    assert!(list[1] + list[3] <= 1400., "and on screen");
+    press(&mut rt, Key::Escape);
+    settle(&mut rt);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
+    // With room for six rows under the button the picker opens there, as every list does,
+    // although there is more room over it.
+    let mut rt = settings_on(TERMINAL, |_| {});
+    rt.update(|_, tx| tx.scroll_into_view("font-choose"));
+    settle(&mut rt);
+    tap(&mut rt, "font-choose");
+    let (list, button) = (
+        element(&rt, "menu-surface").rect,
+        element(&rt, "font-choose").rect,
+    );
+    assert!(
+        list[1] >= button[1] + button[3],
+        "under its button: {list:?} and {button:?}"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_terminal_font_that_is_not_installed_says_so_on_its_own_row() {
+    // The saved family, which this launch asked for, isn't installed: terminals are drawn
+    // in the bundled font.
+    let mut rt = settings_on(TERMINAL, |_| {});
+    assert!(rt.state.terminal_family.is_none());
+    let (chip, name, row) = (
+        element(&rt, "font-missing"),
+        element(&rt, "font-name").rect,
+        element(&rt, "font-choose").rect,
+    );
+    assert_eq!(chip.label.as_deref(), Some("Not installed"));
+    let label = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.text.as_deref() == Some("Terminal font"))
+        .expect("the row's label")
+        .rect;
+    assert!(
+        chip.rect[0] >= label[0] + label[2]
+            && chip.rect[0] + chip.rect[2] <= name[0]
+            && (chip.rect[1] + chip.rect[3] / 2. - label[1] - label[3] / 2.).abs() < 3.,
+        "in the Terminal font row, beside its label: {:?} and {label:?}",
+        chip.rect
+    );
+    // The row's helper keeps its one line beside the font's name and Choose….
+    let helper = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.text.as_deref() == Some("Applies when you reopen the client."))
+        .expect("the row's helper")
+        .rect;
+    assert!(helper[3] < 20., "one line: {helper:?}");
+    // What terminals use instead is right under the card of that row, before the next card.
+    let (note, advanced) = (
+        element(&rt, "font-drawn").rect,
+        element(&rt, "open-advanced-font").rect,
+    );
+    assert!(
+        note[1] > row[1] && note[1] + note[3] <= advanced[1],
+        "{note:?} is between the Typography card and Advanced font settings {advanced:?}"
+    );
+    // A family that is installed, chosen for the next launch, has no warning.
+    tap(&mut rt, "font-choose");
+    type_text(&mut rt, "hack");
+    press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert_eq!(rt.state.settings.font_family, "Hack Nerd Font Mono");
+    assert!(!has(&rt, "font-missing"));
+    // One fontconfig has no family for, saved in the file, does.
+    rt.update(|s, _| s.settings.font_family = "Gone Mono".into());
+    settle(&mut rt);
+    assert!(has(&rt, "font-missing"));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

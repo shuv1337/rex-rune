@@ -49,6 +49,13 @@ terms without a fresh look at its licence file when the table was made (November
 without the mark were checked against the licence file of the same author's project. Check the
 marked rows against the linked repositories before a release that relies on them.
 
+`scripts/package-release.py` enforces that: it refuses to build a package while any row of this
+table carries the mark, and names the rows. To clear a row, read the LICENSE file of the linked
+project, correct the row's copyright and licence if they differ, and remove the mark; a theme
+whose terms turn out not to be permissive comes out of `src/terminal_theme/builtin.rs` and moves
+to Left out. `--allow-unchecked-theme-licences` packages anyway, for a local or test package
+that is not released.
+
 The MIT permission notice that applies to the rows above:
 
 > Permission is hereby granted, free of charge, to any person obtaining a copy of this software

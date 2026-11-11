@@ -5,8 +5,8 @@
 use super::{
     panel::Intent,
     settings_kit::{
-        ChipTone, button, card, footnote, on_return, page, row_frame, section, select, select_row,
-        setting, state_chip, stepper, words,
+        ChipTone, button, card, footnote, on_return, page, row_frame, section, select_row, setting,
+        state_chip, stepper, words,
     },
     settings_nav::SubPage,
     term::{self, Metrics},
@@ -41,10 +41,7 @@ pub fn summary(s: &Workspace) -> String {
         parts.push(format!(
             "Spacing {}{}",
             signed(font.spacing()),
-            match font.spacing_unit {
-                SpacingUnit::Px => " px",
-                SpacingUnit::Percent => "%",
-            }
+            font.spacing_unit.suffix()
         ));
     }
     if font.bold_italic != BoldItalic::Both {
@@ -83,39 +80,37 @@ fn metrics_card(s: &Workspace, inks: &Inks) -> El {
                 |s, _| s.edit_typography(|font| font.step_line_height(1)),
             ),
         ),
+        // The value carries its unit, as Line height's does, and the unit has a row of its
+        // own: the two steppers are alone in their slots, so they line up on both edges.
         setting(
             "Character spacing",
+            "Added to the width of every character.",
+            stepper(
+                "char-spacing",
+                format!("{}{}", signed(font.spacing()), unit.suffix()),
+                |s, _| s.edit_typography(|font| font.step_spacing(-1)),
+                |s, _| s.edit_typography(|font| font.step_spacing(1)),
+            ),
+        ),
+        select_row(
+            "char-spacing-unit",
+            "Spacing unit",
             match unit {
-                SpacingUnit::Px => "Added to the width of every character, in points.",
+                SpacingUnit::Px => "Points, from \u{2212}3 to +12.",
                 SpacingUnit::Percent => {
-                    "Added to the width of every character, as a share of that width."
+                    "A share of the character's width, from \u{2212}30% to +100%."
                 }
             },
-            row()
-                .gap(8.)
-                .center_y()
-                .child(stepper(
-                    "char-spacing",
-                    signed(font.spacing()),
-                    |s, _| s.edit_typography(|font| font.step_spacing(-1)),
-                    |s, _| s.edit_typography(|font| font.step_spacing(1)),
-                ))
-                .child(select(
-                    "char-spacing-unit",
-                    "Character spacing unit",
-                    &SpacingUnit::ALL.map(SpacingUnit::name),
-                    SpacingUnit::ALL
-                        .iter()
-                        .position(|choice| *choice == unit)
-                        .unwrap_or_default(),
-                    |s, i, _| {
-                        s.edit_typography(|font| {
-                            font.set_spacing_unit(
-                                SpacingUnit::ALL[i.min(SpacingUnit::ALL.len() - 1)],
-                            )
-                        })
-                    },
-                )),
+            &SpacingUnit::ALL.map(SpacingUnit::name),
+            SpacingUnit::ALL
+                .iter()
+                .position(|choice| *choice == unit)
+                .unwrap_or_default(),
+            |s, i, _| {
+                s.edit_typography(|font| {
+                    font.set_spacing_unit(SpacingUnit::ALL[i.min(SpacingUnit::ALL.len() - 1)])
+                })
+            },
         ),
         select_row(
             "bold-italic",
@@ -201,8 +196,9 @@ fn fallback_row(s: &Workspace, index: usize, family: &str, count: usize) -> El {
 
 fn fallbacks(s: &Workspace) -> El {
     let list = &s.settings.font_fallbacks;
+    // The heading names the list; its first row is the way to add to it.
     let rows = std::iter::once(setting(
-        "Fallback fonts",
+        "Add a fallback font",
         "Used in order for characters the terminal font doesn't have.",
         button("fallback-add", "Add…", Pill::Neutral, |s, tx| {
             s.open_anchored("fallback-add", Intent::AddFallback, tx)
@@ -233,7 +229,7 @@ fn fallbacks(s: &Workspace) -> El {
             .key("fallback-override"),
         );
     }
-    section("", std::iter::once(card(rows)).chain(notes))
+    section("Fallback fonts", std::iter::once(card(rows)).chain(notes))
 }
 
 /// The Advanced font settings page.
@@ -241,7 +237,7 @@ pub fn advanced(s: &Workspace) -> El {
     let inks = Inks::of(s);
     page([
         section(
-            "",
+            "Metrics",
             [
                 metrics_card(s, &inks),
                 footnote(

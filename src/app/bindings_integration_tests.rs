@@ -384,13 +384,13 @@ fn server_config_path_marks_only_missing_files() {
             .iter()
             .find(|e| e.key.as_deref() == Some("server-shortcuts-path"))
             .unwrap();
+        // The path alone, to select and copy; a file that is not there says so in a chip.
+        assert_eq!(path.text.as_deref(), Some("/server/init.lua"));
         assert_eq!(
-            path.text.as_deref(),
-            Some(if exists {
-                "Server: /server/init.lua"
-            } else {
-                "Server: /server/init.lua (not created)"
-            })
+            elements
+                .iter()
+                .any(|e| e.key.as_deref() == Some("server-shortcuts-missing")),
+            !exists
         );
     }
 }

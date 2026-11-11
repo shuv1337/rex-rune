@@ -1164,6 +1164,7 @@ Product rules are decisions, not laws of nature. Each item below unlocks the row
 | D11 | Diagnostics gated behind Developer Mode | M5.2 | Reachable from Commands always; Developer Mode hides only the experimental switches |
 | D12 | Keep the name "RexSync" for the Hosts pane | M5.3 | Only if the server docs use it |
 | D13 | Take control strip: implement or remove from DESIGN.md | d1 N04 | Either; README must stay honest |
+| D14 | Prefer generated titles on by default, as in the beta (one line: `generated_titles` in `src/settings/terminal.rs`) | M2.10, d3 T80 | Keep off until a reported directory (OSC 7) is read, so a title over `ssh` is not the local directory; then on for new settings files only |
 
 README honesty (AGENTS.md): do not document the Server page, sounds, onboarding, Diagnostics or any M-item until it is implemented and checked. README line 233 about `https://user@host` login servers is not backed by client code (c04 section 7); do not extend it in onboarding copy.
 
@@ -1258,6 +1259,8 @@ The first milestone. Everything is client-side, uses API calls the vendored SDK 
 **M2.9 Theme thumbnails and a library page (M).** Scope: `theme_swatch` (112 x 88, `Aa`, `~/` chip, cursor pill, eight dots), a Themes section with Default, Built-in, Custom and Ghostty groups as a searchable wrapped grid (not a 600-item strip), selection ring, a four-dot strip in switcher rows. Files: new `themes_view.rs`, `terminal_theme.rs`, `settings_view.rs`. Depends on: M2.4. Acceptance: each card shows Aa, chip, pill and eight dots; scrolling 600 themes stays smooth. Closes: d2 TH01 (partly), TH05, TH06, d5 d5-68.
 
 **M2.10 Generated titles (M).** Scope: `generated_titles` setting; tab and pane title from program plus directory (`terminal.process`, `pwd`) when the shell title is the default; names the user gave and program-set titles still win. Files: `connection/activity.rs:232`, `toolbar.rs`, `panes.rs`, `settings.rs`. Acceptance: a tab running `vim` in `~/rex` reads `vim - ~/rex`; a renamed tab keeps its name. Closes: d3 T80.
+
+*M2.10 as built (W2 review).* The directory comes from the `terminal.process` reply and `process_changed` events alone: `terminal.pwd` (a directory a shell reports with OSC 7) is not consulted, so under `ssh` the title shows the directory `ssh` was started in, not the remote shell's. Preferring a reported directory is open work: it needs the report kept current (the reply carries no change event, and a report left behind by a program that has exited, such as a remote shell after `ssh` ends, must not outlive it, which is what the reply's `owner` is for), and a rule for a directory on another machine, whose home is not the terminal's. The setting ships off (`generated_titles: false`), so the acceptance case holds once it is turned on, while the beta ships it on; see decision D14.
 
 ### M3. New surfaces on existing server API (L, no blocker)
 

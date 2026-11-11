@@ -164,7 +164,8 @@ os.execv("/usr/bin/curl", ["curl", *args])
             dest = build / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.symlink_to(ROOT / name, target_is_directory=True)
-        for name in ("LICENSE", "README.md", "CHANGELOG.md", "vendor/rune/LICENSE", "vendor/ghostty-vt/LICENSE-GHOSTTY"):
+        for name in ("LICENSE", "README.md", "CHANGELOG.md", "vendor/rune/LICENSE", "vendor/ghostty-vt/LICENSE-GHOSTTY",
+                     "docs/terminal-themes.md"):
             dest = build / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, dest)
@@ -174,7 +175,9 @@ os.execv("/usr/bin/curl", ["curl", *args])
         for version in ("0.5.1", "0.5.2"):
             (build / "Cargo.toml").write_text(f'[package]\nversion = "{version}"\n')
             executable(build / "target/release/rex-linux", f"#!/bin/sh\necho 'rex-linux {version}'\n")
-            checked(["python3", str(build / "scripts/package-release.py")], env={**env, "PATH": f"{stubs}:{tools}"})
+            # A fixture package, never released: the theme licence gate is for real ones.
+            checked(["python3", str(build / "scripts/package-release.py"), "--allow-unchecked-theme-licences"],
+                    env={**env, "PATH": f"{stubs}:{tools}"})
             release = site / "releases/download" / f"v{version}"
             release.mkdir(parents=True)
             for package in (build / "dist").glob(f"rex-linux-{version}-*.tar.gz"):

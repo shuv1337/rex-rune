@@ -246,7 +246,7 @@ fn a_picker_opens_over_settings_against_its_control_and_gives_focus_back() {
 #[test]
 fn a_select_row_lists_its_values_and_applies_the_chosen_one() {
     let mut rt = settings_at(SettingsSection::Interface, 1., (1440., 1000.));
-    // Notices is under the fold of the page.
+    // The window's settings are under the fold of the page.
     rt.pointer_move(900., 500.);
     rt.wheel(900., 500., -4000.);
     settle(&mut rt);

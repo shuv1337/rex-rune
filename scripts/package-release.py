@@ -3,6 +3,10 @@
 
 Run from any directory: python3 scripts/package-release.py [--deb]
 No server connections or changes to the user's installation.
+
+Refuses to package while docs/terminal-themes.md marks a built-in theme's licence as
+unchecked. --allow-unchecked-theme-licences packages anyway, for a local or test package
+that is not released.
 """
 
 import argparse
@@ -22,11 +26,43 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
+# The mark docs/terminal-themes.md puts on a licence that was written down without a look at
+# the project's licence file.
+UNCHECKED = "\u2020"
+
+
+def unchecked_theme_licences(text):
+    """The Themes cells of the table rows whose licence is marked as unchecked."""
+    rows = []
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if line.lstrip().startswith("|") and len(cells) >= 5 and UNCHECKED in cells[-1]:
+            rows.append(cells[0])
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deb", action="store_true")
+    parser.add_argument(
+        "--allow-unchecked-theme-licences",
+        action="store_true",
+        help="package although a built-in theme's licence is unchecked; never for a release",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
+    # Every package carries the built-in themes' licences: none goes out on one nobody read.
+    unchecked = unchecked_theme_licences((root / "docs/terminal-themes.md").read_text())
+    if unchecked and not args.allow_unchecked_theme_licences:
+        raise SystemExit(
+            "docs/terminal-themes.md marks these built-in themes' licences as unchecked "
+            f"({UNCHECKED}):\n  "
+            + "\n  ".join(unchecked)
+            + "\nCheck each against the LICENSE file of its linked project, correct the row "
+            "and remove the mark (or take the theme out of src/terminal_theme/builtin.rs), "
+            "then package again. For a package that will not be released, pass "
+            "--allow-unchecked-theme-licences."
+        )
     version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["version"]
     arch, deb_arch = {"x86_64": ("x86_64", "amd64"), "aarch64": ("aarch64", "arm64")}[platform.machine()]
     binary = root / "target/release/rex-linux"

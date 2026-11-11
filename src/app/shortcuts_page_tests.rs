@@ -839,26 +839,105 @@ fn the_shortcuts_page_draws() {
 }
 
 #[test]
-fn the_helper_names_the_layers_and_the_filter() {
+fn the_helper_names_recording_and_the_filter_and_the_layers_are_under_files() {
     let rt = shortcuts_open(workspace_hosts(2));
-    let help = rt
-        .elements()
-        .into_iter()
-        .find(|e| e.key.as_deref() == Some("shortcuts-help"))
-        .and_then(|e| e.text)
-        .expect("the helper");
-    for words in [
-        "Record shortcut",
-        "recorded here wins",
-        "shortcuts.json",
-        "ctrl+k",
-        "first result",
-    ] {
+    let words_of = |key: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .and_then(|e| e.text)
+            .unwrap_or_else(|| panic!("{key}"))
+    };
+    // Two short sentences open the page: what a row's keys do, and what the filter takes.
+    let help = words_of("shortcuts-help");
+    for words in ["Record shortcut", "ctrl+k"] {
         assert!(help.contains(words), "{words}: {help}");
     }
+    assert!(
+        help.matches(". ").count() < 2 && help.len() < 140,
+        "the opening stays short: {help}"
+    );
+    // Which layer wins, and the way here from Commands, are with the files they are about.
+    let layers = words_of("shortcuts-layers");
+    for words in ["recorded here wins", "shortcuts.json", "Ctrl Enter"] {
+        assert!(layers.contains(words), "{words}: {layers}");
+    }
+    assert!(rect(&rt, "shortcuts-layers")[1] > rect(&rt, "shortcuts-path")[1]);
     // It is the first thing on the page, above the first heading.
     let top = rect(&rt, "shortcuts-help");
     let heading = text_rects(&rt, SHORTCUT_CATEGORIES[0])[0];
     assert!(top[1] + top[3] < heading[1]);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_filter_is_drawn_as_the_other_search_fields_of_settings_are() {
+    let rt = shortcuts_open(workspace_hosts(2));
+    let fill = |key: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("missing {key}"))
+            .fill
+    };
+    // One raised surface for Search Settings and the filter beside it, not a sunken field.
+    assert_eq!(fill("shortcut-filter-box"), fill("settings-search-box"));
+    assert!(fill("shortcut-filter-box").a > 0.);
+    let (surface, field) = (
+        rect(&rt, "shortcut-filter-box"),
+        rect(&rt, "shortcut-filter"),
+    );
+    assert!(
+        close(surface[0], field[0]) && close(surface[2], field[2]) && close(surface[3], field[3]),
+        "the field fills its surface: {field:?} in {surface:?}"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_files_card_names_each_file_and_keeps_its_path_on_one_line() {
+    let (mut ws, _host) = tabbed_workspace("split");
+    server_map(&mut ws, vec![], vec![]);
+    let snapshot = std::sync::Arc::make_mut(ws.hosts[0].model.keymap.as_mut().unwrap());
+    snapshot.reply.config.path =
+        "/home/someone-with-a-long-name/.config/rex/profiles/workstation/init.lua".into();
+    snapshot.reply.config.exists = false;
+    let mut rt = shortcuts_open(ws);
+    let scroll = rect(&rt, "settings-scroll:shortcuts");
+    rt.pointer_move(scroll[0] + 40., scroll[1] + 40.);
+    rt.wheel(scroll[0] + 40., scroll[1] + 40., -20000.);
+    settle(&mut rt);
+    // Both rows are a label and a path: neither is a bare path, and nothing is in brackets.
+    let (server, own) = (
+        rect(&rt, "server-shortcuts-path"),
+        rect(&rt, "shortcuts-path"),
+    );
+    let labels = (
+        text_rects(&rt, "Server configuration"),
+        text_rects(&rt, "shortcuts.json"),
+    );
+    assert_eq!((labels.0.len(), labels.1.len()), (1, 1));
+    assert!(
+        close(labels.0[0][0], labels.1[0][0]),
+        "the labels share an edge"
+    );
+    assert!(
+        close(server[0] + server[2], own[0] + own[2]),
+        "and the paths end on one: {server:?} {own:?}"
+    );
+    assert!(
+        !rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref().is_some_and(|t| t.contains("(not"))),
+        "a file that is not there says so in a chip"
+    );
+    let chip = rect(&rt, "server-shortcuts-missing");
+    assert!(chip[0] + chip[2] <= server[0], "before the path: {chip:?}");
+    // A long path is one line, cut in its middle inside the card, never wrapped.
+    assert!(
+        server[3] < 20. && labels.0[0][0] + labels.0[0][2] <= chip[0],
+        "one line that leaves the label whole: {server:?}"
+    );
+    assert!(server[0] + server[2] <= scroll[0] + scroll[2] - 20.);
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

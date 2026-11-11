@@ -18,12 +18,20 @@ pub const APPEARANCE: &str = "Appearance";
 /// What a theme's row says it is, in Commands, where it is listed beside window colours.
 pub const TERMINAL_THEME: &str = "Terminal theme";
 pub const WINDOW_COLOURS: &str = "Window colours";
+/// The headings themes are grouped under, in the switcher and in the library alike.
+pub const DEFAULT: &str = "Default";
+pub const BUILTIN_DARK: &str = "Built-in dark";
+pub const BUILTIN_LIGHT: &str = "Built-in light";
+pub const CUSTOM: &str = "Custom";
+pub const GHOSTTY_DARK: &str = "Ghostty dark";
+pub const GHOSTTY_LIGHT: &str = "Ghostty light";
 /// A Commands search lists themes from this many letters on: one letter is in most names.
 const COMMANDS_MIN_QUERY: usize = 2;
 
 impl Workspace {
-    /// The server's own colours, the built-in themes, then the dark and the light Ghostty
-    /// themes, each kept when its name holds every word of `query`. `word_starts` leaves out
+    /// The choices that are not a theme by name, the built-in themes and then Ghostty's, dark
+    /// before light, under the headings the library on Settings → Themes groups them by, each
+    /// kept when its name holds every word of `query`. `word_starts` leaves out
     /// the choices that are not a theme by name (Follow server, Rex default colours, Follow
     /// chrome) and has a word of the query count only where a word of the name begins. With
     /// a light and a dark theme, the list is the themes of one appearance
@@ -66,14 +74,14 @@ impl Workspace {
             } else {
                 "Declares nothing"
             },
-            "Server",
+            DEFAULT,
             TerminalThemeChoice::FollowServer,
             None,
         );
         add(
             "Rex default colours",
             "",
-            "Server",
+            DEFAULT,
             TerminalThemeChoice::RexDefault,
             Some(&TerminalTheme::default()),
         );
@@ -81,21 +89,26 @@ impl Workspace {
         add(
             "Follow chrome",
             chrome.name,
-            "Built in",
+            DEFAULT,
             TerminalThemeChoice::FollowChrome,
             Some(&chrome.theme()),
         );
         let listed = |light: bool| pair.is_none_or(|of| of == light);
-        for builtin in BUILTINS.iter().filter(|b| listed(b.light())) {
-            add(
-                builtin.name,
-                "",
-                "Built in",
-                TerminalThemeChoice::Named(builtin.choice_id()),
-                Some(&builtin.theme()),
-            );
+        for (group, light) in [(BUILTIN_DARK, false), (BUILTIN_LIGHT, true)] {
+            for builtin in BUILTINS
+                .iter()
+                .filter(|b| b.light() == light && listed(light))
+            {
+                add(
+                    builtin.name,
+                    "",
+                    group,
+                    TerminalThemeChoice::Named(builtin.choice_id()),
+                    Some(&builtin.theme()),
+                );
+            }
         }
-        for (group, light) in [("Dark", false), ("Light", true)] {
+        for (group, light) in [(GHOSTTY_DARK, false), (GHOSTTY_LIGHT, true)] {
             for theme in self
                 .themes
                 .iter()

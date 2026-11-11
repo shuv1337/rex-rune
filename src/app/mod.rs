@@ -199,7 +199,7 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     let now = std::time::Instant::now();
     let remote_changed = s.poll_remote_navigation(now);
     let updates_changed = s.poll_updates(now, tx);
-    let settings_changed = s.poll_settings(now, tx);
+    let settings_changed = s.poll_settings(now, tx) | s.poll_theme_library(tx);
     let mut changed =
         s.poll_navigation(now, tx) || remote_changed || updates_changed || settings_changed;
     if let Some(panel) = &mut s.panel

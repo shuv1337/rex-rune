@@ -91,9 +91,18 @@ pub enum SpacingUnit {
 impl SpacingUnit {
     /// In the order the control lists them.
     pub const ALL: [SpacingUnit; 2] = [SpacingUnit::Px, SpacingUnit::Percent];
+    /// As the Spacing unit list names it. Points are saved as `"px"`, the name the value
+    /// had before it was called what it is.
     pub fn name(self) -> &'static str {
         match self {
-            SpacingUnit::Px => "px",
+            SpacingUnit::Px => "Points",
+            SpacingUnit::Percent => "Percent",
+        }
+    }
+    /// What follows a spacing counted in it: `+2 pt`, `+10%`.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            SpacingUnit::Px => " pt",
             SpacingUnit::Percent => "%",
         }
     }

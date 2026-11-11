@@ -256,8 +256,8 @@ fn the_library_groups_every_theme_and_marks_the_one_in_use() {
         headings(&rt),
         [
             "Default 3",
-            "Built in dark 17",
-            "Built in light 10",
+            "Built-in dark 17",
+            "Built-in light 10",
             "Custom 1",
             "Ghostty dark 2",
             "Ghostty light 1"
@@ -438,8 +438,8 @@ fn the_library_search_folds_accents_marks_matches_and_says_when_nothing_is_found
     assert_eq!(
         headings(&rt),
         [
-            "Built in dark 2",
-            "Built in light 1",
+            "Built-in dark 2",
+            "Built-in light 1",
             "Ghostty dark 1",
             "Ghostty light 1"
         ],
@@ -766,6 +766,102 @@ fn switcher_rows_end_with_their_colours_as_a_strip() {
     let gruvbox = strip(&rt, 3);
     assert_eq!(gruvbox[0].fill, rgb(0x282828));
     assert_eq!(gruvbox.len(), 5);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn tab_enters_the_grid_at_a_card_in_view_however_far_the_page_has_scrolled() {
+    let (root, dirs) = dirs("library-tab");
+    for index in 0..600 {
+        write(
+            &dirs,
+            false,
+            &format!("Theme {index:03}"),
+            "background = #101828\nforeground = #e0e0e0\n",
+        );
+    }
+    let mut rt = library(dirs, 1, (1440., 1000.));
+    // The app's own frame hook: it hands the keyboard to a card whose row was just built.
+    rt.poll = Some(crate::app::poll);
+    let at = |rt: &Runtime<Workspace>| {
+        focused_key(rt)
+            .and_then(|key| key.strip_prefix("theme-card:").map(str::to_owned))
+            .unwrap_or_default()
+    };
+    // The keyboard is in the search field, and the pointer scrolls the page far down: the
+    // grid's first row, which holds its one Tab stop, is no longer built.
+    click(&mut rt, "theme-search");
+    let page = rect(&rt, "settings-scroll:themes");
+    let (x, y) = (page[0] + page[2] / 2., page[1] + page[3] / 2.);
+    for _ in 0..200 {
+        rt.wheel(x, y, -60.);
+        rt.frame(1. / 60.);
+    }
+    settle(&mut rt);
+    assert!(searching(&rt), "scrolling leaves the keyboard where it was");
+    assert!(find(&rt, "theme-card:follow_server").is_none());
+    let before = rt.state.settings_nav.offset().get();
+    assert!(before > 2000., "the page is far down: {before}");
+
+    // Tab still goes into the grid: at the first card of the first row that is in view.
+    press(&mut rt, Key::Tab);
+    settle(&mut rt);
+    let card = at(&rt);
+    assert!(
+        card.starts_with("named:Theme "),
+        "Tab lands on a card: {card:?}"
+    );
+    let landed = find(&rt, &format!("theme-card:{card}")).unwrap();
+    assert!(
+        landed.visible[3] > 80.,
+        "and the card is on screen: {:?}",
+        landed.visible
+    );
+    let after = rt.state.settings_nav.offset().get();
+    assert!(
+        (after - before).abs() < 160.,
+        "the page stays about where it was: {before} to {after}"
+    );
+    let row = landed.rect[1];
+    assert!(
+        cards(&rt)
+            .iter()
+            .filter_map(|id| find(&rt, &format!("theme-card:{id}")))
+            .filter(|e| (e.rect[1] - row).abs() < 1.)
+            .all(|e| e.rect[0] >= landed.rect[0] - 0.5),
+        "the first card of its row"
+    );
+    // Shift Tab is back in the search field in one step, not on the grid's first card.
+    rt.key(KeyEvent {
+        key: Key::Tab,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    settle(&mut rt);
+    assert!(searching(&rt));
+
+    // Home and End are the ends of the grid, from any card.
+    press(&mut rt, Key::Tab);
+    settle(&mut rt);
+    press(&mut rt, Key::End);
+    settle(&mut rt);
+    assert_eq!(at(&rt), "named:Theme 599");
+    assert!(
+        find(&rt, "theme-card:named:Theme 599").unwrap().visible[3] > 80.,
+        "the last card is brought into view"
+    );
+    press(&mut rt, Key::Home);
+    settle(&mut rt);
+    assert_eq!(at(&rt), "follow_server");
+    assert!(find(&rt, "theme-card:follow_server").unwrap().visible[3] > 80.);
+    assert_eq!(
+        rt.state.settings.terminal_theme,
+        TerminalThemeChoice::FollowServer,
+        "moving chooses nothing"
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
     std::fs::remove_dir_all(root).ok();
 }
