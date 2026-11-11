@@ -37,11 +37,15 @@ pub const REPORT_ISSUE: &str = "client.issue.report";
 /// Registered actions with no row: each needs an argument Commands cannot ask for, or is
 /// the list itself.
 #[cfg(test)]
-pub const NOT_LISTED: [(&str, &str); 6] = [
+pub const NOT_LISTED: [(&str, &str); 7] = [
     ("client.palette.toggle", "opens this list"),
     (
         actions::SELECT_SESSION,
         "needs a session; a search lists them",
+    ),
+    (
+        super::session_numbers::GOTO,
+        "needs a session's number; a search lists sessions",
     ),
     ("client.tab.goto", "needs a tab number; a search lists tabs"),
     ("pane.scroll", "needs a line count"),
@@ -488,23 +492,37 @@ impl Workspace {
             .zip(self.focus_commands())
             .map(|(id, entry)| Command::row(id, G, entry).section(3)),
         );
+        // Where the pane is in the tab, then how much of it the pane has.
+        rows.extend(
+            self.layout_commands()
+                .into_iter()
+                .map(|(id, entry, resize)| {
+                    Command::row(id, G, entry)
+                        .keywords(if resize {
+                            "border divider size grow shrink"
+                        } else {
+                            "swap trade place"
+                        })
+                        .section(if resize { 5 } else { 4 })
+                }),
+        );
         rows.extend([
-            pane("pane.rename", "Rename pane…", PaneAction::Rename).section(4),
+            pane("pane.rename", "Rename pane…", PaneAction::Rename).section(6),
             pane("pane.copy_id", "Copy pane ID", PaneAction::CopyId)
                 .keywords("block clipboard")
-                .section(4),
+                .section(6),
             pane("pane.clear", "Clear terminal", PaneAction::Clear)
                 .keywords("screen scrollback")
-                .section(5),
+                .section(7),
             pane("pane.reset", "Reset terminal", PaneAction::Reset)
                 .keywords("screen scrollback")
-                .section(5),
+                .section(7),
             pane(
                 "pane.reconnect",
                 "Reconnect terminal",
                 PaneAction::Reconnect,
             )
-            .section(5),
+            .section(7),
             Command::action(
                 "pane.close_focused",
                 G,
@@ -512,6 +530,12 @@ impl Workspace {
                 "client.close",
             )
             .keywords("focused")
+            .destructive(),
+            pane(
+                "pane.close_others",
+                "Close other panes…",
+                PaneAction::CloseOthers,
+            )
             .destructive(),
             pane("pane.close", "Close pane…", PaneAction::Close).destructive(),
         ]);
@@ -698,6 +722,13 @@ impl Workspace {
         let mut rows = vec![
             Command::action("app.settings", G, "Settings…", "client.settings")
                 .keywords("preferences options"),
+            Command::action(
+                "app.shortcuts",
+                G,
+                "Change shortcuts…",
+                super::recorder::EDIT,
+            )
+            .keywords("keys keyboard bindings keymap rebind record"),
             Command::new(
                 "app.check_updates",
                 G,

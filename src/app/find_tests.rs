@@ -211,10 +211,10 @@ fn the_bar_counts_matches_and_its_buttons_step_and_close() {
     type_text(&mut rt, "alpha");
     pane.work(&mut rt);
     assert_eq!(count(&rt), Some(("1/2".into(), rgb(muted()))));
-    assert_eq!(help(&rt, "find-next:block:a"), "Find next · Enter");
+    assert_eq!(help(&rt, "find-next:block:a"), "Find next · Enter · F3");
     assert_eq!(
         help(&rt, "find-previous:block:a"),
-        "Find previous · Shift Enter"
+        "Find previous · Shift Enter · Shift F3"
     );
     click(&mut rt, "find-next:block:a");
     assert_eq!(pane.work(&mut rt), ["step older=true"]);
@@ -333,12 +333,21 @@ fn the_find_actions_are_bindable_local_only_and_in_commands() {
         actions::find(find::PREVIOUS).unwrap().title(),
         "Find previous"
     );
-    // Neither takes a key from terminal programs by default.
-    assert!(
-        rex_linux::keymap::defaults()
-            .bindings
-            .iter()
-            .all(|b| b.action != find::NEXT && b.action != find::PREVIOUS)
+    // By default neither takes a key from terminal programs: F3 and Shift F3 are theirs
+    // only while the find bar is open.
+    let defaults = rex_linux::keymap::defaults().bindings;
+    let waiting: Vec<_> = defaults
+        .iter()
+        .filter(|b| b.action == find::NEXT || b.action == find::PREVIOUS)
+        .map(|b| (b.keys.join(" "), b.args.clone()))
+        .collect();
+    let searching = Some(serde_json::json!({"when": "searching"}));
+    assert_eq!(
+        waiting,
+        [
+            ("f3".to_owned(), searching.clone()),
+            ("shift+f3".to_owned(), searching)
+        ]
     );
 
     // Commands lists both, without a hint while they are unbound.
@@ -411,6 +420,58 @@ fn the_find_actions_are_bindable_local_only_and_in_commands() {
             .collect::<Vec<_>>(),
         [false, false]
     );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn f3_steps_only_while_the_find_bar_is_open_and_is_the_programs_otherwise() {
+    let (mut rt, mut pane) = single(two_alphas);
+    // No bar: both keys go to the program, as any unbound key does, and nothing is searched.
+    press(&mut rt, Key::Function(3));
+    shift_press(&mut rt, Key::Function(3));
+    let work = pane.work(&mut rt);
+    assert!(!work.is_empty() && work.iter().all(|word| word == "key"));
+    assert!(rt.state.terminals[&pane.key].search.is_none());
+    // So Commands shows no key for them yet.
+    let hints = |rt: &mut Runtime<Workspace>| {
+        rt.update(|s, _| s.picker(false));
+        rt.frame(1. / 60.);
+        let hints: Vec<_> = rt
+            .state
+            .entries()
+            .into_iter()
+            .filter(|e| e.label.starts_with("Find "))
+            .map(|e| e.detail)
+            .collect();
+        press(rt, Key::Escape);
+        hints
+    };
+    assert_eq!(hints(&mut rt), ["", ""]);
+
+    // With the bar open they step, from the field and from the terminal, and the program
+    // gets neither.
+    ctrl_shift(&mut rt, 'f');
+    type_text(&mut rt, "alpha");
+    pane.work(&mut rt);
+    press(&mut rt, Key::Function(3));
+    shift_press(&mut rt, Key::Function(3));
+    assert_eq!(
+        pane.work(&mut rt),
+        ["step older=true", "step older=false"],
+        "from the field"
+    );
+    click(&mut rt, "grid:block:a");
+    pane.work(&mut rt);
+    press(&mut rt, Key::Function(3));
+    assert_eq!(pane.work(&mut rt), ["step older=true"], "from the terminal");
+    assert_eq!(hints(&mut rt), ["F3", "Shift F3"]);
+
+    // Closed again, the keys are the program's again, though there is text to find.
+    click(&mut rt, "find-close:block:a");
+    pane.work(&mut rt);
+    press(&mut rt, Key::Function(3));
+    assert_eq!(pane.work(&mut rt), ["key"]);
+    assert!(rt.state.terminals[&pane.key].search.is_none());
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 

@@ -53,12 +53,21 @@ const IDS: &[&str] = &[
     "pane.focus.right",
     "pane.focus.up",
     "pane.focus.down",
+    "pane.move.left",
+    "pane.move.right",
+    "pane.move.up",
+    "pane.move.down",
+    "pane.resize.left",
+    "pane.resize.right",
+    "pane.resize.up",
+    "pane.resize.down",
     "pane.rename",
     "pane.copy_id",
     "pane.clear",
     "pane.reset",
     "pane.reconnect",
     "pane.close_focused",
+    "pane.close_others",
     "pane.close",
     "host.add",
     "host.edit",
@@ -80,6 +89,7 @@ const IDS: &[&str] = &[
     "view.font.decrease",
     "view.font.reset",
     "app.settings",
+    "app.shortcuts",
     "app.check_updates",
     "app.about",
     "app.help",
@@ -312,6 +322,7 @@ fn a_search_is_one_list_with_the_best_match_first() {
             "Close other tabs…",
             "Close tab…",
             "Close pane or tab…",
+            "Close other panes…",
             "Close pane…",
             "Close app"
         ]
@@ -326,7 +337,10 @@ fn a_search_is_one_list_with_the_best_match_first() {
     );
     // The command named exactly comes before a longer one that starts the same way.
     search(&mut ws, "close pane");
-    assert_eq!(labels(&ws), ["Close pane…", "Close pane or tab…"]);
+    assert_eq!(
+        labels(&ws),
+        ["Close pane…", "Close pane or tab…", "Close other panes…"]
+    );
     // Words in any order; each must be found.
     search(&mut ws, "size font");
     assert_eq!(
@@ -393,7 +407,7 @@ fn hints_are_the_effective_bindings() {
         ("pane.close_focused", "Ctrl Shift W"),
         ("view.sidebar", "Ctrl Shift B"),
         // The main block's keys, not the numpad's.
-        ("view.zoom.in", "Ctrl +"),
+        ("view.zoom.in", "Ctrl Plus"),
         ("view.zoom.out", "Ctrl -"),
         ("view.zoom.reset", "Ctrl 0"),
         ("app.settings", "Ctrl ,"),

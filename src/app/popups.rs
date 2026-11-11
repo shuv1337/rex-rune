@@ -137,30 +137,44 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     }
     let target = panel.target.as_ref()?;
     let current = s.model().window()?;
-    let placement = rex_linux::layout::placements(current, None)
-        .0
-        .into_iter()
-        .find(|p| p.block == target.block)?;
+    let placements = rex_linux::layout::placements(current, None).0;
     let [ax, ay, aw, ah] = s.area;
     let bleed = super::pane_header::full_bleed(s, current);
-    let ([x, y, w, h], radius) = if bleed {
-        ([0., 0., aw, ah], 0.)
-    } else {
-        let radius = if s.settings.pane_density == rex_linux::settings::PaneDensity::Compact {
-            0.
+    let outline = |block: &str| {
+        let placement = placements.iter().find(|p| p.block == block)?;
+        let ([x, y, w, h], radius) = if bleed {
+            ([0., 0., aw, ah], 0.)
         } else {
-            CARD_RADIUS
+            let radius = if s.settings.pane_density == rex_linux::settings::PaneDensity::Compact {
+                0.
+            } else {
+                CARD_RADIUS
+            };
+            (super::panes::card_rect(s, placement.rect), radius)
         };
-        (super::panes::card_rect(s, placement.rect), radius)
+        Some(
+            el().absolute(ax + x, ay + y)
+                .size(w, h)
+                .radius(radius)
+                .continuous_corners()
+                .border(1.5, rgb(accent())),
+        )
     };
-    Some(
-        el().key("target-outline")
-            .absolute(ax + x, ay + y)
-            .size(w, h)
-            .radius(radius)
-            .continuous_corners()
-            .border(1.5, rgb(accent())),
-    )
+    // Close other panes ends the panes it names, not the one it was asked from: those are
+    // the ones outlined.
+    if let Some(others) = super::pane_moves::closing_others(panel) {
+        let outlines: Vec<El> = others
+            .into_iter()
+            .filter_map(|id| Some(outline(id)?.key(format!("target-outline:{id}"))))
+            .collect();
+        return (!outlines.is_empty()).then(|| {
+            el().key("target-outlines")
+                .absolute(0., 0.)
+                .size(0., 0.)
+                .children(outlines)
+        });
+    }
+    Some(outline(&target.block)?.key("target-outline"))
 }
 
 pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
@@ -190,7 +204,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let discover = matches!(panel.kind, PanelKind::Discover);
     let width = (if values {
         220.
-    } else if pane {
+    } else if pane || matches!(panel.kind, PanelKind::ShortcutMenu) {
         280.
     } else if sessions {
         340.
@@ -256,6 +270,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         PanelKind::Session => "session-menu",
         PanelKind::Host(_) => "host-menu",
         PanelKind::Window => "tab-menu",
+        PanelKind::ShortcutMenu => "shortcut-menu",
         _ => "pane-menu",
     };
     let mut spans: Vec<(f32, f32, Hidden)> = Vec::new();

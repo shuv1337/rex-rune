@@ -16,7 +16,10 @@ use serde_json::{Value, json};
 fn sample_args(name: &str) -> Value {
     match name {
         "session.select" => json!({"session_id": "s"}),
-        "pane.split" | "client.tab.move" => json!({"direction": "right"}),
+        "pane.split" | "client.tab.move" | "pane.move" | "pane.resize" => {
+            json!({"direction": "right"})
+        }
+        "session.goto" => json!({"index": 2}),
         "pane.focus" => json!({"direction": "up"}),
         "pane.scroll" => json!({"lines": 3}),
         "client.tab.goto" => json!({"index": 2}),
@@ -88,14 +91,50 @@ fn every_action_has_a_title_a_shortcuts_heading_and_a_reason_when_it_is_refused_
 #[test]
 fn a_bound_action_is_listed_on_settings_shortcuts_by_its_title() {
     let mut ws = all_bound();
+    // Opening Settings reads shortcuts.json again, and this workspace has no file: the
+    // bindings are put back after.
+    let overrides = ws.settings.shortcut_file.overrides.clone();
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     ws.open_section(SettingsSection::Shortcuts);
+    ws.settings.shortcut_file.overrides = overrides;
+    ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
+    ws.keymap_generation += 1;
     let mut rt = runtime_at(ws, (1440., 1000.));
     for _ in 0..30 {
         rt.frame(1. / 60.);
     }
     let words: std::collections::HashSet<String> =
         rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert_eq!(
+        rt.state
+            .settings
+            .shortcut_file
+            .overrides
+            .layer
+            .bindings
+            .len(),
+        actions::SPECS.len()
+    );
+    // Every binding is the keys of its action's row.
+    let rows = rt.state.shortcut_rows();
+    for binding in &rt.state.settings.shortcut_file.overrides.layer.bindings {
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.action == binding.action
+                    && row.args.clone().unwrap_or(Value::Null)
+                        == binding.args.clone().unwrap_or(Value::Null)
+            })
+            .unwrap_or_else(|| panic!("{}: no row", binding.action));
+        let keys = rex_linux::keymap::parse_keys(&binding.keys).unwrap();
+        let caps: keycaps::Chords = keys.iter().map(|chord| chord.keycaps()).collect();
+        assert!(
+            row.keys.contains(&caps),
+            "{}: {:?}",
+            binding.action,
+            row.keys
+        );
+    }
     for heading in SHORTCUT_CATEGORIES {
         // "Server" lists the host's own actions; this workspace has no keymap from a server.
         assert_eq!(

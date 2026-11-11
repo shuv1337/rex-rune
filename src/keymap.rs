@@ -324,6 +324,8 @@ impl Chord {
             }
         }
         caps.push(match self.key {
+            // Spelled out: `Ctrl +` reads as a chord left unfinished.
+            Key::Character('+') => "Plus".into(),
             Key::Character(c) => c.to_uppercase().to_string(),
             Key::Physical(code) => code.into(),
             Key::Named("pageup") => "PageUp".into(),
@@ -387,6 +389,8 @@ pub fn defaults() -> KeymapDefault {
         ("ctrl+shift+v", "pane.paste"),
         ("ctrl+shift+f", "client.search"),
         ("ctrl+shift+r", "pane.reconnect"),
+        ("ctrl+alt+[", "pane.focus_previous"),
+        ("ctrl+alt+]", "pane.focus_next"),
         // Of an action's bindings the last is the one Commands and menus show: the main
         // block's key, not the numpad's.
         ("ctrl+[NumpadAdd]", "client.zoom.in"),
@@ -418,6 +422,36 @@ pub fn defaults() -> KeymapDefault {
     }
     for (keys, lines) in [("shift+pageup", -20), ("shift+pagedown", 20)] {
         bindings.push(Binding::new([keys], "pane.scroll").args(json!({"lines": lines})));
+    }
+    for direction in ["left", "right", "up", "down"] {
+        bindings.push(
+            Binding::new([format!("ctrl+alt+shift+{direction}")], "pane.move")
+                .args(json!({"direction": direction})),
+        );
+    }
+    // Tabs by number, the ninth key the last tab, as browsers have it. With Alt alone these
+    // would be taken from readline and from programs that number their own windows.
+    for number in 1..=9 {
+        let index = if number == 9 { -1 } else { number };
+        bindings.push(
+            Binding::new([format!("ctrl+alt+{number}")], "client.tab.goto")
+                .args(json!({"index": index})),
+        );
+    }
+    // A `when` keeps a key with the terminal program except while its condition holds: F3
+    // steps through matches only while the find bar is open, and Ctrl with a number picks a
+    // session only in the switcher.
+    for (keys, action) in [
+        ("f3", "client.search.next"),
+        ("shift+f3", "client.search.previous"),
+    ] {
+        bindings.push(Binding::new([keys], action).args(json!({"when": "searching"})));
+    }
+    for number in 1..=9 {
+        bindings.push(
+            Binding::new([format!("ctrl+{number}")], "session.goto")
+                .args(json!({"index": number, "when": "switching"})),
+        );
     }
     KeymapDefault::new("linux").bindings(bindings)
 }
@@ -568,6 +602,9 @@ impl Resolved {
     }
 }
 
+/// The name of the layer of shortcuts recorded in Settings, which sits above the user's file.
+pub const RECORDED: &str = "recorded";
+
 /// Local fallback until the active host answers (or while it is offline).
 /// Action-specific argument checks belong to the UI's action registry.
 pub fn resolve(
@@ -575,12 +612,24 @@ pub fn resolve(
     overrides: &Overrides,
     actions: &[InspectResponseAction],
 ) -> Resolved {
+    resolve_all(defaults, &[overrides], actions)
+}
+
+/// [`resolve`] with every override layer, lowest first: the user's file, then what was
+/// recorded in Settings.
+pub fn resolve_all(
+    defaults: &[KeymapDefault],
+    overrides: &[&Overrides],
+    actions: &[InspectResponseAction],
+) -> Resolved {
     let mut layers = defaults.to_vec();
-    layers.push(overrides.layer.clone());
+    layers.extend(overrides.iter().map(|layer| layer.layer.clone()));
     let mut resolved = resolve_layers(&layers, defaults.len(), actions);
-    resolved
-        .diagnostics
-        .splice(0..0, overrides.diagnostics.clone());
+    let diagnostics: Vec<Diagnostic> = overrides
+        .iter()
+        .flat_map(|layer| layer.diagnostics.iter().cloned())
+        .collect();
+    resolved.diagnostics.splice(0..0, diagnostics);
     resolved
 }
 
@@ -777,7 +826,7 @@ mod tests {
             (vec!["ctrl+b".into(), "c".into()], "Ctrl B, C"),
             (vec!["ctrl+[KeyT]".into()], "Ctrl KeyT"),
             (vec!["shift+pageup".into()], "Shift PageUp"),
-            (vec!["ctrl++".into()], "Ctrl +"),
+            (vec!["ctrl++".into()], "Ctrl Plus"),
             (vec!["meta+k".into()], "Super K"),
         ] {
             assert_eq!(display(&keys), expected);
@@ -804,7 +853,7 @@ mod tests {
         let layer = defaults();
         assert_eq!(layer.name, "linux");
         assert!(layer.removals.is_empty());
-        assert_eq!(layer.bindings.len(), 35);
+        assert_eq!(layer.bindings.len(), 61);
         // The terminal font size actions have no default: Ctrl Alt + / - / 0 belong to the
         // program in the terminal until the user binds them.
         assert!(
@@ -813,6 +862,28 @@ mod tests {
                 .iter()
                 .any(|b| b.action.starts_with("client.font."))
         );
+        // The ninth tab key is the last tab; the keys that wait say what for.
+        let args = |key: &str| {
+            let binding = layer.bindings.iter().find(|b| b.keys == [key]).unwrap();
+            binding.args.clone().unwrap_or_default()
+        };
+        assert_eq!(args("ctrl+alt+8"), json!({"index": 8}));
+        assert_eq!(args("ctrl+alt+9"), json!({"index": -1}));
+        assert_eq!(args("ctrl+9"), json!({"index": 9, "when": "switching"}));
+        assert_eq!(args("shift+f3"), json!({"when": "searching"}));
+        // Only those two kinds of binding wait: every other default always runs.
+        for binding in &layer.bindings {
+            let waits = binding
+                .args
+                .as_ref()
+                .is_some_and(|a| a.get("when").is_some());
+            assert_eq!(
+                waits,
+                binding.action == "session.goto" || binding.action.starts_with("client.search."),
+                "{}",
+                binding.action
+            );
+        }
         for binding in &layer.bindings {
             assert_eq!(normalize(&binding.keys.join(">")).unwrap(), binding.keys);
             assert!(binding.source.is_none() && binding.mode.is_none());
@@ -826,6 +897,14 @@ mod tests {
             ("ctrl+0", "client.zoom.reset"),
             ("ctrl+shift+pageup", "client.tab.move"),
             ("ctrl+shift+pagedown", "client.tab.move"),
+            ("ctrl+alt+[", "pane.focus_previous"),
+            ("ctrl+alt+]", "pane.focus_next"),
+            ("ctrl+alt+shift+left", "pane.move"),
+            ("ctrl+alt+1", "client.tab.goto"),
+            ("ctrl+alt+9", "client.tab.goto"),
+            ("f3", "client.search.next"),
+            ("shift+f3", "client.search.previous"),
+            ("ctrl+9", "session.goto"),
         ] {
             assert!(
                 layer

@@ -18,7 +18,7 @@ impl Workspace {
     }
 
     /// The tab `target` is in, as its session's view has it.
-    fn pane_window(&self, target: &PaneTarget) -> Option<&Window> {
+    pub(super) fn pane_window(&self, target: &PaneTarget) -> Option<&Window> {
         let view = self
             .hosts
             .get(target.host)?
@@ -47,6 +47,7 @@ impl Workspace {
                 term.is_some_and(|t| t.status().live)
             }
             PaneAction::Zoom => self.pane_window(target).is_some_and(pane_header::can_zoom),
+            PaneAction::CloseOthers => !self.other_panes(target).is_empty(),
             _ => true,
         }
     }

@@ -18,7 +18,7 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 - Multiple saved hosts, each with its sessions; session windows are tabs and splits follow the server's layout.
 - Unix-socket, HTTPS/WSS and SSH endpoints. Add host lists the machines on your tailnet: a server that answers shows its reachable endpoint and, on API 12, a review of its listener addresses and access rules before connecting. Other machines take an SSH user name and are reached by forwarding their Rex socket over SSH (Tailscale SSH needs no keys).
 - A single toolbar with session identity, tabs, commands and the window's own controls. A tab with one pane draws it edge to edge; splits are rounded pane cards. Tabs close from their right-click menu, a middle-click or `Ctrl Shift W`, always behind a confirmation; the same menu renames a tab, mutes it, moves it left or right in its session's order and closes the other tabs. Host-grouped session navigation opens on demand, with an optional sidebar (Ctrl Shift B) that opens at launch as it was left. Tabs can sit in the toolbar or, while the sidebar is open, under each session in the sidebar.
-- Searchable session switcher (`Ctrl K`) and command palette (`Ctrl Shift P`). Commands lists every command under Session, Tab, Pane, Host, View and App headings that name what is on screen, about twenty rows at a time, each with its current shortcut; typing searches commands, sessions and the current session's tabs as one list. Among them: Next and Previous session, Refresh sessions, Close session…, the pane menu's rows for the focused pane (Copy selection, Paste, Select all, the splits, Copy pane ID, Clear terminal, Reset terminal), Find next and Find previous, Collapse other hosts, Change terminal theme… and Change interface theme…, compact or comfortable panes, Reveal pane headers, tabs in the sidebar or toolbar, interface zoom and terminal font size, About Rex Linux, Copy version info, Copy debug info, **Report an issue** and **Rex help**, which opens this guide for the installed version in your browser. The rows that end something (Close…, Remove…) come last in their group, in red. A host's own actions (those its Rex configuration defines with `rex.action`, and its block types' titled actions) are listed under Server actions when they need no arguments.
+- Searchable session switcher (`Ctrl K`) and command palette (`Ctrl Shift P`). Commands lists every command under Session, Tab, Pane, Host, View and App headings that name what is on screen, about twenty rows at a time, each with its current shortcut; typing searches commands, sessions and the current session's tabs as one list. Among them: Next and Previous session, Refresh sessions, Close session…, the pane menu's rows for the focused pane (Copy selection, Paste, Select all, the splits, Copy pane ID, Clear terminal, Reset terminal), Find next and Find previous, Move pane and Resize pane toward each side, Close other panes…, Collapse other hosts, Change terminal theme… and Change interface theme…, compact or comfortable panes, Reveal pane headers, tabs in the sidebar or toolbar, interface zoom and terminal font size, About Rex Linux, Copy version info, Copy debug info, **Report an issue** and **Rex help**, which opens this guide for the installed version in your browser. The rows that end something (Close…, Remove…) come last in their group, in red. A host's own actions (those its Rex configuration defines with `rex.action`, and its block types' titled actions) are listed under Server actions when they need no arguments.
 - Splits on any side of a pane (right, left, down, up) or along its longer side (best fit), and focus that moves by direction or cycles through a tab's panes.
 - A window title of `<tab> - <session> · <host>`, so a task switcher can tell windows apart.
 - Snapshot restore, live output, physical-layout key press and release forwarding with dead-key composition, bracketed paste, text selection and copy, local scrollback, and mouse/wheel reporting for terminal programs. Right-click always opens the pane menu, which starts with Copy (when text is selected), Paste and Select all for the pane under the pointer; Shift+right-click sends the click to a program that tracks the mouse, and Shift with the left button selects text locally.
@@ -261,8 +261,12 @@ Global tab navigation uses cached tab order without enabling extra prefetch: a s
 | Ctrl Tab / Ctrl Shift Tab | Next / previous tab across connected hosts and sessions, in sidebar order (wraps) | `client.tab.next_global` / `client.tab.previous_global` |
 | Ctrl PageUp / PageDown | Previous / next tab within the current session (server-controlled, no wrap) | `client.tab.previous` / `client.tab.next` |
 | Ctrl Shift PageUp / PageDown | Move the current tab left / right in its session's tab order (the server's order, so every client sees it) | `client.tab.move`, `{"direction":"left"}` / `{"direction":"right"}` |
+| Ctrl Alt 1 … 8 / Ctrl Alt 9 | Go to that tab of the current session / to its last tab (Alt with a number stays with terminal programs) | `client.tab.goto`, `{"index":1}` … `{"index":8}` / `{"index":-1}` |
+| Ctrl 1 … 9, in the session switcher only | Show the session on that row of the switcher, counting the rows a filter leaves; each row shows its key. Elsewhere these keys reach terminal programs | `session.goto`, `{"index":1,"when":"switching"}` … |
 | Mouse Back / Forward | Revisit tabs, sessions and hosts in navigation history | `client.history.back` / `client.history.forward` |
 | Ctrl Alt arrows | Focus an adjacent pane (Alt arrows reach terminal programs) | `pane.focus`, `{"direction":"left"}` (or `right`, `up`, `down`) |
+| Ctrl Alt [ / Ctrl Alt ] | Focus the previous / next pane of the current tab, in the server's layout order (wraps) | `pane.focus_previous` / `pane.focus_next` |
+| Ctrl Alt Shift arrows | Move the focused pane: it trades places with the pane on that side, and every split keeps its size (nothing happens at the tab's edge or while a pane is zoomed). It sends Rex's `session.swap_blocks` once; this client has not yet been checked against a live server for it | `pane.move`, `{"direction":"left"}` (or `right`, `up`, `down`) |
 | Ctrl Shift Enter | Zoom / restore the focused pane | `pane.zoom` |
 | Ctrl Shift Space | Focused-pane actions | `pane.actions` |
 | Ctrl Shift W | Close the focused pane, or the tab when it has one pane (asks first) | `client.close` |
@@ -270,6 +274,7 @@ Global tab navigation uses cached tab order without enabling extra prefetch: a s
 | Ctrl Shift B | Collapse / restore the sidebar | `client.sidebar.toggle` |
 | Ctrl Shift C / V | Copy selection / paste text (bracketed-paste aware), or upload copied files or an image | `pane.copy` / `pane.paste` |
 | Ctrl Shift F | Search the focused terminal's screen and scrollback | `client.search` |
+| F3 / Shift F3, while the find bar is open only | Find next (the next older match) / Find previous. With the bar closed F3 reaches terminal programs | `client.search.next` / `client.search.previous`, `{"when":"searching"}` |
 | Ctrl Shift R | Resume the focused terminal's data stream | `pane.reconnect` |
 | Shift PageUp / PageDown, wheel | Scroll local history | `pane.scroll`, `{"lines":-20}` / `{"lines":20}` (wheel is pointer input) |
 | Ctrl + / Ctrl − / Ctrl 0 | Enlarge / shrink / reset the whole interface | `client.zoom.in` / `client.zoom.out` / `client.zoom.reset` |
@@ -280,28 +285,29 @@ The following actions have no default key binding:
 
 | Action | Args schema | Behavior |
 | --- | --- | --- |
-| `client.tab.goto` | `{"index": integer >= 1}` | Focus the 1-based tab in the current session |
 | `client.tab.close` | None | Confirm closing the current tab |
 | `client.tab.rename` | None | Open the current tab's rename dialog |
 | `client.tab.mute` | None | Mute the current tab on this client, or unmute it |
 | `client.tab.close_others` | None | Confirm closing every other tab of the current session |
 | `session.rename` | None | Open the current session's rename dialog |
 | `session.next` / `session.previous` | None | Show the next / previous session, in sidebar order across connected hosts (wraps) |
+| `session.goto` | `{"index": integer >= 1, or -1}` | Show a session by its number, counted as the switcher lists them (host after host, in sidebar order; -1 is the last). Bound without `when`, it runs anywhere; the defaults above run only in the switcher |
 | `session.refresh` | None | Read every connected host's session list again, and the layout of the session each shows (read-only; sessions normally follow the server's events without it) |
 | `session.close` | None | Confirm closing the current session |
 | `client.sidebar.collapse_others` | None | Collapse every host in the sidebar except the current one |
 | `client.theme.choose` | None | Open the terminal theme list |
 | `client.font.increase` / `client.font.decrease` / `client.font.reset` | None | Step the terminal font size one point within 8–48 pt, or return it to 15 pt. It applies to every terminal and is saved as `font_size`; interface zoom is untouched. `Ctrl Alt =`, `Ctrl Alt -` and `Ctrl Alt 0` are free to bind, but then stop reaching terminal programs |
 | `client.about` | None | Open Settings → About |
+| `client.shortcuts` | None | Open Settings → Shortcuts |
 | `client.version.copy` | None | Copy the version info, as Settings → About does |
 | `client.debug.copy` | None | Copy the debug info, as Settings → About does |
 | `client.issue.report` | None | Open the issue form in the browser |
 | `pane.close` | None | Confirm closing the focused pane |
-| `pane.focus_next` | None | Focus the next pane of the current tab, in the server's layout order (wraps) |
-| `pane.focus_previous` | None | Focus the previous pane of the current tab (wraps) |
+| `pane.resize` | `{"direction": "left"}` (or `right`, `up`, `down`) | Move a border of the focused pane 5% of its split that way: the border on the pane's right (or under it), else the one on its left (or above it). It asks the server for the new ratio, as dragging a divider does, within the same 0.1–0.9; holding the key repeats |
+| `pane.close_others` | None | Confirm closing every other pane of the current tab. Only the panes the question named are closed |
 | `client.help` | None | Open this guide for the installed version in the browser |
-| `client.search.next` | None | Find next: select the next older match in the focused terminal. With its search closed, search again for the last text searched there, or open the field when there is none |
-| `client.search.previous` | None | Find previous: select the next newer match, or reopen the search as Find next does |
+| `client.search.next` | None | Find next, bound without `when` (the default F3 has one): select the next older match in the focused terminal. With its search closed, search again for the last text searched there, or open the field when there is none |
+| `client.search.previous` | None | Find previous, bound without `when`: select the next newer match, or reopen the search as Find next does |
 | `pane.select_all` | None | Select the focused terminal's screen and scrollback |
 | `pane.copy_id` | None | Copy the focused pane's block ID to the clipboard |
 | `pane.clear` | None | Send Rex's `terminal.clear` for the focused terminal, once. What it clears is the server's doing; this client has not yet been checked against a live server for it |
@@ -315,14 +321,26 @@ accepts `direction` = `right`, `left`, `down`, `up` or `best_fit` (right of a
 pane wider than it is tall, otherwise below it); `pane.focus` accepts `left`,
 `right`, `up` and `down`; `pane.scroll` takes a signed 32-bit integer `lines` (negative scrolls up).
 `pane.send_key` takes a single supported chord, not a sequence; for example
-`{"key":"ctrl+b"}`.
+`{"key":"ctrl+b"}`. `pane.move` and `pane.resize` accept `left`, `right`, `up` and
+`down`; `client.tab.goto` and `session.goto` take a 1-based `index`, or -1 for the last.
+
+Three actions also take an optional `when`, which keeps the key with terminal programs
+except at certain times: `client.search.next` and `client.search.previous` accept
+`"when":"searching"` (the focused terminal's find bar is open) and `session.goto` accepts
+`"when":"switching"` (the session switcher is open, where a key that would type into its
+filter is never taken). A binding with a `when` is not tried at any other time, so its key
+is sent to the focused pane like an unbound one. Settings → Shortcuts lists such a key on
+its action's row and says when it runs; hints in Commands, the find bar and the switcher
+show it only while it would run.
 
 ### Configuring shortcuts
 
 For the default workspace, edit `$XDG_CONFIG_HOME/rex-linux/shortcuts.json` (normally
 `~/.config/rex-linux/shortcuts.json`). With a custom `--config /path/demo.json`,
 edit `/path/demo.shortcuts.json`. The app never writes this file, except for the
-one-time import of custom bindings from nivox's legacy `keybindings` field.
+one-time import of custom bindings from nivox's legacy `keybindings` field. Shortcuts
+recorded in Settings → Shortcuts are kept apart from it, in the app's own settings file
+(see [Recording shortcuts](#recording-shortcuts)).
 
 The preferred format is an object; a bare array also works. A missing, empty or
 whitespace-only file means no overrides. Bad entries are skipped; invalid JSON
@@ -338,14 +356,55 @@ uses defaults and appears in Settings → Shortcuts → Problems.
 }
 ```
 
-Layers run lowest to highest: **Linux defaults → each server’s Rex config → client overrides**.
-The app sends its defaults, override layer and action registry to `client.keymap`;
+Layers run lowest to highest: **Linux defaults → each server’s Rex config → `shortcuts.json` →
+shortcuts recorded in Settings**. The app sends its defaults, its override layers (the file's,
+then the recorded one when anything is recorded) and its action registry to `client.keymap`;
 `rex.bind`, `rex.unbind`, Lua-function sequences and config-file actions participate
 in the same resolution. The active host’s map is used—not a union of hosts.
 When that host is offline, has not answered, or rejects the keymap request, local
 defaults plus overrides work instead. A keymap error never disconnects the host;
 Settings → Shortcuts retains its explanation. Config changes refresh by hash and
 server instance, and every reconnect registers again.
+
+### Recording shortcuts
+
+In Settings → Shortcuts every binding of an action is a button, and an action with no key
+has **Record shortcut**. Pressing one turns the row into a recorder: type the keys, and
+**Enter** or **Save** gives them to the action in place of the binding you pressed.
+**Esc**, the × button or a press anywhere else cancels; the bin button, or **Backspace**
+with nothing typed, removes the binding you pressed and leaves the action without it.
+A shortcut starts with Ctrl, Alt or Super, with a function key, or with Shift and a named
+key such as Page Up; keys typed after the first make a sequence of up to four (`Ctrl B`,
+then `C`), and those may be plain. While the recorder is open every key is its own: a
+workspace shortcut pressed there is recorded, not run, and keys an input method is
+composing with are ignored.
+
+Before anything is saved the row says what the keys would do: **Also bound to** names the
+action that has them now and would lose them, and a sequence that overlaps another
+binding names that. A saved shortcut works at once, on every host, and is in effect again
+at the next launch. The row then reads **Recorded here**, and names a key it took off the
+action (`Ctrl Shift D removed here`). Typing a removed default again brings it back as it
+was. An action that needs an argument no key could give (Send key, Show session) has no
+recorder; bind it in `shortcuts.json`.
+
+Recordings are a fourth keymap layer, above `shortcuts.json`, saved as
+`recorded_shortcuts` in the app's settings file (`workspace.json`, or the `--config`
+file). `shortcuts.json` is never written. The **⋯** button beside the filter says how
+much is recorded, copies the path of `shortcuts.json`, copies the recordings as a
+`shortcuts.json` file to paste there (a key taken off an action is written as an
+unbinding of that key, `"action": null`, which is all that file can say), and has
+**Reset all…**, which asks and then forgets every recording so each action goes back to
+its key from the layers below.
+
+In Commands, **Ctrl Enter** opens the highlighted command's row in Settings → Shortcuts,
+recording; a row that is not an action (a session or a tab a search found, Check for
+updates) says it has no action a shortcut could run. **Change shortcuts…** in Commands
+(`client.shortcuts`) opens the page.
+
+Not checked against a live Rex server: that a server keeps the recorded layer above the
+file's and reports `recorded` as a binding's source, and that it honours a removal that
+names its action. Both follow Rex's `client.keymap` documentation and are covered here
+by headless tests and the local resolver only.
 
 ### Remote control
 
@@ -414,9 +473,15 @@ No cross-server `servers` list is advertised. A returned action whose original
 host, session, pane or local keymap generation is no longer current is skipped
 with an informational notice rather than applied to a different target.
 
-Settings → Shortcuts lists each effective binding by the name Commands gives its
-action, with its keys as keycaps (“then” between sequence steps), its source,
-persistent Problems and both config paths. Commands shows the highest
+Settings → Shortcuts lists every action, bound or not, by the name Commands gives
+it: its keys as keycaps (“then” between sequence steps, every binding of the
+action on one row), or **Record shortcut**. A row says where a key comes from when it is
+not a default, which other action shares or took one of its keys, and which
+key `shortcuts.json` or a recording removed. The **Filter shortcuts…** field above the list
+takes a name or a key: `ctrl+k` lists everything bound to that key, the action it
+performs first, and a key nothing is bound to says so. Keys are changed on the page
+(see [Recording shortcuts](#recording-shortcuts)) or in `shortcuts.json`. Persistent
+Problems and both config paths follow the list. Commands shows the highest
 binding for each action and argument set, or no shortcut when unbound. Only
 settings-source diagnostic sets toast, once per distinct set per host; file and
 default-layer diagnostics stay in Problems. A pending sequence shows `Ctrl B …`
@@ -448,7 +513,7 @@ server’s original prefix spellings. Action arguments are checked before dispat
 Keys accept modifier aliases, named keys, F1–F12, W3C physical codes and `>` sequences.
 Letters follow the keyboard layout, with physical US-position fallbacks on
 non-Latin layouts; Shift stays a modifier instead of being folded into the key.
-Key modes, a recording editor and pane-resize bindings are not implemented. Commands
+Key modes are not implemented. Commands
 runs a server action with `client.action` (origin `palette`) for the session and pane
 on screen, once: a failure is a notice and is never retried. Server actions that
 require arguments are not listed. Cross-server `client_call_requested` relaying is also not
@@ -466,7 +531,7 @@ Terminal-initiated clipboard writes (OSC 52) are described under [Clipboard (OSC
 
 **Uploading files.** Drop files on a pane, or paste with Ctrl Shift V when the clipboard holds copied files or only an image, and Rex stores them on the machine that terminal runs on and types their shell-quoted paths into it, as a paste, without pressing Enter. This works the same for local and remote hosts and needs no SSH access: the bytes go over the Rex connection with `upload_begin` (API revision 11). The server keeps each file in a private directory under its state directory; files dropped together are typed together, and nothing is typed unless every file arrived. Folders can't be uploaded. A pasted image is uploaded as `clipboard.png`; when the clipboard holds text as well, the text is pasted instead. A failed upload shows a notice and is never retried. An older server shows a notice asking you to update Rex on that host.
 
-Other interactions: click the session/host identity for grouped navigation, or right-click it for the current session's actions; in the switcher, rename a session in place (right-click its row, F2 or the pencil; Enter saves, Esc cancels) or close it with its ×; click the buttons at the end of a pane's header to split, zoom or close that pane; right-click a pane for actions targeting that pane, in groups: Copy, Paste and Select all; Split right, left, down or up and Zoom; Rename pane… and Copy pane ID (its block ID, as `rex` commands name it); Clear terminal, Reset terminal and Reconnect terminal; Close pane…. Paste and Select all give that pane the keyboard; Clear terminal and Reset terminal send Rex's `terminal.clear` and `terminal.reset` for that pane's terminal, once, and need it to be live; the effect is the server's, and has been checked against a scripted server only, not yet a live one. Commands lists the same rows for the focused pane; drag dividers to resize splits and the sidebar's edge to resize it (double-click resets); double-click a tab to rename it, or right-click it, in the toolbar or on its sidebar row, for its menu: Rename tab…, Mute tab, Move left and right (up and down in the sidebar; disabled at the ends), New tab, Close other tabs… and Close tab…. A sidebar row's menu acts on that row's tab, whichever session it belongs to. A tab you named offers **Use default title** in its rename dialog, which shows the title its program sets again. Closing a pane or tab asks for confirmation, with **Keep running** as the default; Close other tabs asks once, names how many tabs end and closes only those. The active window takes size ownership of a terminal automatically. On the borderless window, the toolbar's empty space moves it (double-click maximizes; right-click requests the window manager's menu on Wayland).
+Other interactions: click the session/host identity for grouped navigation, or right-click it for the current session's actions; in the switcher, press the key a session's row shows (Ctrl 1 to Ctrl 9, counting the rows listed) to show that session, rename a session in place (right-click its row, F2 or the pencil; Enter saves, Esc cancels) or close it with its ×; click the buttons at the end of a pane's header to split, zoom or close that pane; right-click a pane for actions targeting that pane, in groups: Copy, Paste and Select all; Split right, left, down or up and Zoom; Rename pane… and Copy pane ID (its block ID, as `rex` commands name it); Clear terminal, Reset terminal and Reconnect terminal; Close pane…. Paste and Select all give that pane the keyboard; Clear terminal and Reset terminal send Rex's `terminal.clear` and `terminal.reset` for that pane's terminal, once, and need it to be live; the effect is the server's, and has been checked against a scripted server only, not yet a live one. Commands lists the same rows for the focused pane; drag dividers to resize splits and the sidebar's edge to resize it (double-click resets); double-click a tab to rename it, or right-click it, in the toolbar or on its sidebar row, for its menu: Rename tab…, Mute tab, Move left and right (up and down in the sidebar; disabled at the ends), New tab, Close other tabs… and Close tab…. A sidebar row's menu acts on that row's tab, whichever session it belongs to. A tab you named offers **Use default title** in its rename dialog, which shows the title its program sets again. Closing a pane or tab asks for confirmation, with **Keep running** as the default; Close other tabs asks once, names how many tabs end and closes only those. The active window takes size ownership of a terminal automatically. On the borderless window, the toolbar's empty space moves it (double-click maximizes; right-click requests the window manager's menu on Wayland).
 
 ## Clipboard (OSC 52)
 

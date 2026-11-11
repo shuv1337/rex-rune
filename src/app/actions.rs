@@ -1,7 +1,7 @@
 //! Named workspace actions shared by keyboard, pointer and Commands dispatch.
 //! The registry structure follows Andrea Zito (nivox), commit 8037d78.
 use super::{panel::Intent, splits::SplitWay, workspace::Workspace};
-use rex_linux::connection::Command;
+use rex_linux::{connection::Command, layout::Side};
 use rune::Tx;
 use serde_json::{Value, json};
 
@@ -72,6 +72,11 @@ enum Handler {
     ReportIssue,
     About,
     CopyDebug,
+    MovePane,
+    ResizePane,
+    CloseOtherPanes,
+    GotoSession,
+    Shortcuts,
 }
 
 pub struct Spec {
@@ -144,10 +149,67 @@ specs! {
     super::commands::REPORT_ISSUE => ReportIssue,
     super::about::ABOUT => About,
     super::about::COPY_DEBUG => CopyDebug,
+    super::pane_moves::MOVE => MovePane,
+    super::pane_moves::RESIZE => ResizePane,
+    super::pane_moves::CLOSE_OTHERS => CloseOtherPanes,
+    super::session_numbers::GOTO => GotoSession,
+    super::recorder::EDIT => Shortcuts,
 }
 
 pub fn find(name: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|spec| spec.name == name)
+}
+
+/// What a binding's optional `when` argument waits for. A binding that has one runs only
+/// while that is so; at any other time its key is not taken, and goes to the terminal
+/// program as an unbound key does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    /// The focused terminal's find bar is open.
+    Searching,
+    /// The session switcher is open.
+    Switching,
+}
+
+impl When {
+    /// The `when` argument's word.
+    pub fn arg(self) -> &'static str {
+        match self {
+            When::Searching => "searching",
+            When::Switching => "switching",
+        }
+    }
+}
+
+/// What a binding's arguments say it waits for, if anything.
+pub fn when(args: &Value) -> Option<When> {
+    [When::Searching, When::Switching]
+        .into_iter()
+        .find(|when| args["when"].as_str() == Some(when.arg()))
+}
+
+/// A binding's arguments without `when`: what it runs, whenever it runs. None when `when`
+/// was all it had.
+pub fn without_when(args: &Value) -> Value {
+    let mut args = args.clone();
+    if let Some(object) = args.as_object_mut()
+        && object.remove("when").is_some()
+        && object.is_empty()
+    {
+        return Value::Null;
+    }
+    args
+}
+
+/// Where a key is pressed, which bounds what it can run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// The workspace with nothing over it: every action.
+    Workspace,
+    /// A dialog, a popup or a field: only the actions that work everywhere.
+    Elsewhere,
+    /// The session switcher: those, and Go to session.
+    Switcher,
 }
 
 /// Exhaustive by handler: new actions require an explicit remote decision.
@@ -183,7 +245,7 @@ impl Spec {
             ),
             RenameTab => Remote::Never("Use rex window rename instead."),
             RenameSession => Remote::Never("Use rex session rename instead."),
-            Palette | Settings | Search | SwitchSession | PaneActions => {
+            Palette | Settings | Search | SwitchSession | PaneActions | Shortcuts => {
                 Remote::Never("Only the person at this computer can open dialogs and popups.")
             }
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
@@ -230,6 +292,20 @@ impl Spec {
                 Remote::Never("Remote actions cannot change this computer's clipboard.")
             }
             About => Remote::Never("Only the person at this computer can open dialogs and popups."),
+            MovePane | ResizePane => {
+                Remote::Never("Only the person at this computer can rearrange panes from here.")
+            }
+            CloseOtherPanes => Remote::Never("Use rex block close instead."),
+            GotoSession => Remote::Never("Use session.select with a session ID instead."),
+        }
+    }
+
+    /// Whether a key pressed in `place` may run this action.
+    pub fn runs_in(&self, place: Place) -> bool {
+        match place {
+            Place::Workspace => true,
+            Place::Elsewhere => self.global(),
+            Place::Switcher => self.global() || matches!(self.handler, Handler::GotoSession),
         }
     }
     pub fn global(&self) -> bool {
@@ -254,6 +330,7 @@ impl Spec {
                     | Handler::FocusPreviousPane
                     | Handler::FontIncrease
                     | Handler::FontDecrease
+                    | Handler::ResizePane
             )
     }
 
@@ -317,6 +394,11 @@ impl Spec {
             Handler::ReportIssue => "Report an issue",
             Handler::About => "About Rex Linux",
             Handler::CopyDebug => "Copy debug info",
+            Handler::MovePane => "Move pane",
+            Handler::ResizePane => "Resize pane",
+            Handler::CloseOtherPanes => "Close other panes",
+            Handler::GotoSession => "Go to session",
+            Handler::Shortcuts => "Change shortcuts",
         }
     }
     pub fn category(&self) -> &'static str {
@@ -334,7 +416,8 @@ impl Spec {
             | Handler::CopyVersion
             | Handler::ReportIssue
             | Handler::About
-            | Handler::CopyDebug => "Interface",
+            | Handler::CopyDebug
+            | Handler::Shortcuts => "Interface",
             Handler::NextTab
             | Handler::PreviousTab
             | Handler::NextGlobal
@@ -346,7 +429,8 @@ impl Spec {
             | Handler::GotoTab
             | Handler::NextSession
             | Handler::PreviousSession
-            | Handler::RefreshSessions => "Navigate",
+            | Handler::RefreshSessions
+            | Handler::GotoSession => "Navigate",
             Handler::NewTab
             | Handler::NewSession
             | Handler::Close
@@ -357,7 +441,8 @@ impl Spec {
             | Handler::MoveTab
             | Handler::MuteTab
             | Handler::CloseOtherTabs
-            | Handler::CloseSession => "Create and close",
+            | Handler::CloseSession
+            | Handler::CloseOtherPanes => "Create and close",
             Handler::Split
             | Handler::ZoomPane
             | Handler::FocusPane
@@ -367,7 +452,9 @@ impl Spec {
             | Handler::ClearTerminal
             | Handler::ResetTerminal
             | Handler::FocusNextPane
-            | Handler::FocusPreviousPane => "Panes",
+            | Handler::FocusPreviousPane
+            | Handler::MovePane
+            | Handler::ResizePane => "Panes",
             Handler::Copy
             | Handler::Paste
             | Handler::SelectAll
@@ -382,10 +469,25 @@ impl Spec {
         }
     }
     fn schema(&self) -> Option<Value> {
-        if matches!(self.handler, Handler::SelectSession) {
-            return Some(
-                json!({"type":"object","properties":{"session_id":{"type":"string","minLength":1},"window_id":{"type":"string","minLength":1}},"required":["session_id"],"additionalProperties":false}),
-            );
+        // An optional `when`, beside the argument the action needs or alone.
+        let waits = |when: When| json!({"type":"string","enum":[when.arg()]});
+        match self.handler {
+            Handler::SelectSession => {
+                return Some(
+                    json!({"type":"object","properties":{"session_id":{"type":"string","minLength":1},"window_id":{"type":"string","minLength":1}},"required":["session_id"],"additionalProperties":false}),
+                );
+            }
+            Handler::GotoSession => {
+                return Some(
+                    json!({"type":"object","properties":{"index":{"type":"integer","minimum":-1},"when":waits(When::Switching)},"required":["index"],"additionalProperties":false}),
+                );
+            }
+            Handler::FindNext | Handler::FindPrevious => {
+                return Some(
+                    json!({"type":"object","properties":{"when":waits(When::Searching)},"additionalProperties":false}),
+                );
+            }
+            _ => {}
         }
         let (key, schema) = match self.handler {
             Handler::Split => (
@@ -406,11 +508,33 @@ impl Spec {
                 "direction",
                 json!({"type":"string","enum":["left","right"]}),
             ),
+            Handler::MovePane | Handler::ResizePane => (
+                "direction",
+                json!({"type":"string","enum":Side::ALL.map(Side::arg)}),
+            ),
             _ => return None,
         };
         Some(
             json!({"type":"object","properties":{key:schema},"required":[key],"additionalProperties":false}),
         )
+    }
+
+    /// The argument a binding of this action must give, and the words it may be when it is
+    /// one of a few (`direction`: `left`, `right`, …). Nothing for an action that runs as it
+    /// is; no words for an argument that is a number, a key or an id.
+    pub fn argument(&self) -> Option<(String, Vec<String>)> {
+        let schema = self.schema()?;
+        let name = schema["required"][0].as_str()?.to_owned();
+        let choices = schema["properties"][&name]["enum"]
+            .as_array()
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(|word| word.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((name, choices))
     }
 
     /// Validate before dispatch: invalid arguments must not partially perform an action.
@@ -426,7 +550,15 @@ impl Spec {
                         | Handler::GotoTab
                         | Handler::SendKey
                         | Handler::MoveTab
+                        | Handler::MovePane
+                        | Handler::ResizePane
+                        | Handler::GotoSession
                 );
+        };
+        let numbered = || {
+            args["index"]
+                .as_i64()
+                .is_some_and(|n| n == -1 || n > 0 && usize::try_from(n).is_ok())
         };
         match self.handler {
             Handler::SelectSession => {
@@ -450,11 +582,17 @@ impl Spec {
                         .as_i64()
                         .is_some_and(|n| i32::try_from(n).is_ok())
             }
-            Handler::GotoTab => {
-                object.len() == 1
-                    && args["index"]
-                        .as_i64()
-                        .is_some_and(|n| n == -1 || n > 0 && usize::try_from(n).is_ok())
+            Handler::GotoTab => object.len() == 1 && numbered(),
+            Handler::GotoSession => {
+                numbered()
+                    && (object.len() == 1
+                        || object.len() == 2 && when(args) == Some(When::Switching))
+            }
+            Handler::FindNext | Handler::FindPrevious => {
+                object.is_empty() || object.len() == 1 && when(args) == Some(When::Searching)
+            }
+            Handler::MovePane | Handler::ResizePane => {
+                object.len() == 1 && super::pane_moves::side(args).is_some()
             }
             Handler::MoveTab => {
                 object.len() == 1 && matches!(args["direction"].as_str(), Some("left" | "right"))
@@ -587,6 +725,25 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
                 s.perform(Intent::Window(target, action), tx);
             }
         }
+        Handler::MovePane | Handler::ResizePane => {
+            if let Some(side) = super::pane_moves::side(args) {
+                if matches!(spec.handler, Handler::MovePane) {
+                    s.move_pane(side);
+                } else {
+                    s.resize_pane(side);
+                }
+            }
+        }
+        Handler::CloseOtherPanes => {
+            if let Some(target) = s.focused_block().and_then(|b| s.target(&b)) {
+                s.perform(
+                    Intent::Pane(target, super::panel::PaneAction::CloseOthers),
+                    tx,
+                );
+            }
+        }
+        Handler::GotoSession => s.goto_session(args["index"].as_i64().unwrap_or_default(), tx),
+        Handler::Shortcuts => s.open_shortcuts(tx),
         Handler::FocusNextPane => s.cycle_pane(true),
         Handler::FocusPreviousPane => s.cycle_pane(false),
         Handler::FontIncrease => s.step_font_size(1),
@@ -704,16 +861,24 @@ pub fn binding_title(binding: &rexrs::api::client::Binding) -> String {
             .unwrap_or_default()
             .replace('_', " ")
     };
+    // A place in a list: a number from 1, or -1 for the last.
+    let place = |what: &str| match args["index"].as_i64() {
+        Some(-1) => format!("Go to last {what}"),
+        _ => format!("Go to {what} {}", args["index"]),
+    };
     match binding.action.as_str() {
         "pane.split" => format!("Split {}", direction()),
         "pane.focus" => format!("Focus pane {}", direction()),
         "client.tab.move" => format!("Move tab {}", direction()),
+        super::pane_moves::MOVE => format!("Move pane {}", direction()),
+        super::pane_moves::RESIZE => format!("Resize pane {}", direction()),
+        super::session_numbers::GOTO => place("session"),
         "pane.scroll" => {
             let lines = args["lines"].as_i64().unwrap_or_default();
             let direction = if lines < 0 { "up" } else { "down" };
             format!("Scroll {direction} · {} lines", lines.unsigned_abs())
         }
-        "client.tab.goto" => format!("Go to tab {}", args["index"]),
+        "client.tab.goto" => place("tab"),
         "pane.send_key" => format!("{title} · {}", args["key"].as_str().unwrap_or_default()),
         _ => title.into(),
     }
@@ -740,9 +905,17 @@ pub fn declarations() -> Vec<rexrs::api::client::InspectResponseAction> {
 
 /// Resolve once per file generation, including argument diagnostics. Invalid bindings
 /// are skipped at match time, so a lower valid action can still be selected.
+#[cfg(test)]
 pub fn resolve(overrides: &rex_linux::keymap::Overrides) -> rex_linux::keymap::Resolved {
+    resolve_all(&[overrides])
+}
+
+/// [`resolve`] with every override layer, lowest first: the user's file, then what was
+/// recorded in Settings.
+pub fn resolve_all(overrides: &[&rex_linux::keymap::Overrides]) -> rex_linux::keymap::Resolved {
     let actions = declarations();
-    let mut map = rex_linux::keymap::resolve(&[rex_linux::keymap::defaults()], overrides, &actions);
+    let mut map =
+        rex_linux::keymap::resolve_all(&[rex_linux::keymap::defaults()], overrides, &actions);
     for binding in &map.bindings {
         let binding = &binding.binding;
         if find(&binding.action)

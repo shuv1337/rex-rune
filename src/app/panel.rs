@@ -70,6 +70,8 @@ pub enum Intent {
     Choose(usize),
     /// A Commands row that is not a named action.
     Command(super::commands::Run),
+    /// A row of Settings → Shortcuts' Configuration menu.
+    Shortcuts(super::recorder::Menu),
 }
 impl Intent {
     pub(super) fn shortcut(&self) -> Option<(&'static str, Value)> {
@@ -105,6 +107,7 @@ impl Intent {
                 PaneAction::CopyId => ("pane.copy_id", Value::Null),
                 PaneAction::Clear => ("pane.clear", Value::Null),
                 PaneAction::Reset => ("pane.reset", Value::Null),
+                PaneAction::CloseOthers => (super::pane_moves::CLOSE_OTHERS, Value::Null),
                 _ => return None,
             },
             _ => return None,
@@ -118,9 +121,10 @@ impl Intent {
             self,
             Intent::Switcher
                 | Intent::ClientAction(
-                    "client.settings" | "session.switch" | super::about::ABOUT,
+                    "client.settings" | "session.switch" | super::about::ABOUT | super::recorder::EDIT,
                     _
                 )
+                | Intent::Shortcuts(super::recorder::Menu::ResetAll)
                 // Each asks or lists before anything happens.
                 | Intent::ClientAction(
                     "client.close" | super::commands::CLOSE_SESSION | super::commands::CHOOSE_THEME,
@@ -149,7 +153,10 @@ impl Intent {
                 | Intent::AddHostManually
                 | Intent::EditHost(_)
                 | Intent::RemoveHost(_)
-                | Intent::Pane(_, PaneAction::Rename | PaneAction::Close)
+                | Intent::Pane(
+                    _,
+                    PaneAction::Rename | PaneAction::Close | PaneAction::CloseOthers
+                )
                 | Intent::Session(_, SessionAction::Rename | SessionAction::Close)
         )
     }
@@ -203,6 +210,8 @@ pub enum PaneAction {
     Clear,
     /// `terminal.reset`: the terminal's starting state; the program keeps running.
     Reset,
+    /// Close every other pane of the pane's tab, after asking.
+    CloseOthers,
 }
 
 #[derive(Clone, Debug)]
@@ -320,6 +329,10 @@ pub enum PanelKind {
         change: super::integrations::AgentChange,
         steps: Vec<super::integrations::Step>,
     },
+    /// Settings → Shortcuts' Configuration menu, against its button.
+    ShortcutMenu,
+    /// Confirm forgetting every shortcut recorded in Settings.
+    ResetShortcuts,
 }
 
 pub struct Panel {
@@ -387,6 +400,7 @@ impl Panel {
                 | PanelKind::Chromes
                 | PanelKind::Choice(_)
                 | PanelKind::Discover
+                | PanelKind::ShortcutMenu
         )
     }
 }
@@ -655,6 +669,9 @@ impl Workspace {
                 })
                 .collect();
         }
+        if matches!(panel.kind, PanelKind::ShortcutMenu) {
+            return self.shortcut_menu_entries();
+        }
         if let PanelKind::Hosts(name) = &panel.kind {
             return self
                 .hosts
@@ -873,6 +890,7 @@ impl Workspace {
                 }
                 entries.push(e);
             }
+            self.number_sessions(&mut entries);
         }
         self.shortcut_details(&mut entries);
         entries
