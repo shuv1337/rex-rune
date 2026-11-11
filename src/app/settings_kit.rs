@@ -5,10 +5,10 @@
 //! - A [`card`] holds rows and draws the divider between each pair itself: a page never
 //!   places a divider.
 //! - Rows: [`setting`] (a label, at most one sentence of help, and a control in the trailing
-//!   slot), [`select_row`] (a setting whose control is a [`value_popup`]), [`disclosure`]
+//!   slot), [`select_row`] (a setting whose control is a [`select`]), [`disclosure`]
 //!   (the whole row is a button that opens a form or a sub-page) and [`row_frame`] for a row
 //!   with its own content.
-//! - Controls: [`segmented`] and [`segmented_fixed`], [`value_popup`], [`stepper`],
+//! - Controls: [`segmented`] and [`segmented_fixed`], [`value_popup`], [`select`], [`stepper`],
 //!   [`button`], and the [`value`], [`mono_value`] and [`state_chip`] read-outs.
 //! - [`preview_well`]: a card's first row when its settings change how something is drawn, a
 //!   sample of it drawn that way.
@@ -229,7 +229,7 @@ pub fn state_chip(key: &str, label: &str, tone: ChipTone, why: &str) -> El {
 }
 
 /// Return presses a focused control as Space does: Settings has no default button to take it.
-fn on_return(e: El, action: impl Fn(&mut Workspace, &mut Tx) + 'static) -> El {
+pub fn on_return(e: El, action: impl Fn(&mut Workspace, &mut Tx) + 'static) -> El {
     e.on_key(move |s: &mut Workspace, event: &KeyEvent, tx: &mut Tx| {
         (event.key == Key::Enter).then(|| action(s, tx)).is_some()
     })
@@ -463,9 +463,7 @@ fn popup_button(
     )
 }
 
-/// A setting chosen from a short list of named values: [`setting`] with a [`value_popup`]
-/// that lists `options` with `current` checked. `apply` gets the chosen index once the popup
-/// has closed; it is a plain function, so the popup's state stays `Clone` and `Debug`.
+/// A setting chosen from a short list of named values: [`setting`] with a [`select`].
 pub fn select_row(
     key: &str,
     label: &str,
@@ -474,7 +472,21 @@ pub fn select_row(
     current: usize,
     apply: fn(&mut Workspace, usize, &mut Tx),
 ) -> El {
-    let (control, title) = (key.to_owned(), label.to_owned());
+    setting(label, detail, select(key, label, options, current, apply))
+}
+
+/// A popup button that lists `options` with `current` checked, for a row's trailing slot:
+/// alone, or beside the control it qualifies (a number's unit). `title` names the list.
+/// `apply` gets the chosen index once the popup has closed; it is a plain function, so the
+/// popup's state stays `Clone` and `Debug`.
+pub fn select(
+    key: &str,
+    title: &str,
+    options: &[&str],
+    current: usize,
+    apply: fn(&mut Workspace, usize, &mut Tx),
+) -> El {
+    let (control, title) = (key.to_owned(), title.to_owned());
     let list: Vec<String> = options.iter().map(|o| (*o).to_owned()).collect();
     let press = move |s: &mut Workspace, _: &mut Tx| {
         s.open_choice(
@@ -487,14 +499,10 @@ pub fn select_row(
             },
         )
     };
-    setting(
-        label,
-        detail,
-        popup_button(
-            key,
-            options.get(current).copied().unwrap_or_default(),
-            press,
-        ),
+    popup_button(
+        key,
+        options.get(current).copied().unwrap_or_default(),
+        press,
     )
 }
 

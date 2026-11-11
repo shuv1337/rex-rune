@@ -5,9 +5,9 @@ use super::{
     keycaps::{Chords, keycaps, spell},
     panel::{Intent, SettingsSection},
     settings_kit::{
-        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote, page,
-        row_frame, section, segmented, select_row, setting, stepper, unavailable, value,
-        value_popup, words,
+        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote,
+        on_return, page, row_frame, section, segmented, select_row, setting, stepper, unavailable,
+        value, value_popup, words,
     },
     theme::*,
     widgets::{Pill, glyph},
@@ -614,7 +614,9 @@ fn nav(s: &Workspace, width: f32) -> El {
         .focus_group()
         .gap(2.);
     for section in SettingsSection::ALL {
-        let selected = s.settings_section == section;
+        // A page opened from one of a section's rows keeps that section selected.
+        let selected =
+            s.settings_section == section || s.settings_section.parent() == Some(section);
         let mut item = row()
             .key(format!("settings-section:{}", section.key()))
             .role("tab")
@@ -663,6 +665,32 @@ fn nav(s: &Workspace, width: f32) -> El {
         .child(list)
 }
 
+/// The page's title. A page opened from one of a section's rows has Back before it, which
+/// Escape presses too.
+fn page_title(section: SettingsSection) -> El {
+    let title = text(section.title()).font(strong(17.)).color(rgb(ink()));
+    let Some(parent) = section.parent() else {
+        return title;
+    };
+    row()
+        .gap(6.)
+        .center_y()
+        .ml(-8.)
+        .child(on_return(
+            IconButton::new(&LEFT)
+                .label(format!("Back to {}", parent.title()))
+                .on_press_tx(|s: &mut Workspace, _: &mut Tx| {
+                    s.leave_settings_page();
+                })
+                .build(kit())
+                .key("settings-back"),
+            |s, _| {
+                s.leave_settings_page();
+            },
+        ))
+        .child(title)
+}
+
 /// The dialog's surface: the section list, and the page under its header. The page scrolls
 /// with a fade at whichever edge hides content and a thumb while there is more than fits.
 fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
@@ -677,6 +705,7 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
         SettingsSection::Shortcuts => shortcuts(s),
         SettingsSection::Updates => super::updates::section(s),
         SettingsSection::About => super::about::section(s),
+        SettingsSection::AdvancedFont => super::font_page::advanced(s),
     };
     let width = PANEL_WIDTH.min(viewport[0] * 0.92);
     // Under the toolbar, which stays whole above it, with a margin at both ends.
@@ -715,7 +744,7 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
                 .pr(PAGE_INSET)
                 .center_y()
                 .justify_between()
-                .child(text(section.title()).font(strong(17.)).color(rgb(ink())))
+                .child(page_title(section))
                 .child(
                     IconButton::new(&CLOSE)
                         .label("Close")
@@ -732,12 +761,23 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
                 .child(scroller)
                 .child(s.settings_fx.thumb_el()),
         );
-    row()
+    let mut dialog = row()
         .w(width)
         .h(height)
         .child(nav(s, nav_width))
         .child(el().w(1.).h_full().fill(white(0.06)))
-        .child(content)
+        .child(content);
+    // Leaving a page opened from a section's row hands the keyboard back to that row: this
+    // empty marker goes with the page, and Rune returns focus that was in the dialog.
+    if section.parent().is_some() {
+        dialog = dialog.child(
+            el().key("page-focus-return")
+                .absolute(0., 0.)
+                .size(0., 0.)
+                .focus_return(format!("open-{}", section.key())),
+        );
+    }
+    dialog
 }
 
 pub fn settings(s: &Workspace, viewport: [f32; 2]) -> El {

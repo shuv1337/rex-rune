@@ -359,10 +359,10 @@ fn a_choice_without_settings_behind_it_closes_and_ignores_a_stale_index() {
 fn disclosure_rows_and_segments_work_from_the_keyboard() {
     let mut rt = settings_at(SettingsSection::Terminal, 1., (1440., 1000.));
     press(&mut rt, Key::Tab); // Close
-    press(&mut rt, Key::Tab); // Font family
-    assert!(focused(&rt).unwrap().ends_with("font-change"));
+    press(&mut rt, Key::Tab); // Terminal font's Choose…
+    assert!(focused(&rt).unwrap().ends_with("font-choose"));
     press(&mut rt, Key::Enter);
-    assert!(matches!(kind(&rt), Some(PanelKind::Form(Form::Fonts))));
+    assert!(matches!(kind(&rt), Some(PanelKind::Fonts(_))));
     press(&mut rt, Key::Escape);
     assert!(matches!(kind(&rt), Some(PanelKind::Settings)));
 

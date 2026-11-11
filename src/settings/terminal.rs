@@ -83,6 +83,8 @@ pub struct TerminalConfig {
     pub selection_foreground: SelectionColor,
     pub selection_background: SelectionColor,
     pub selection_rounded: bool,
+    /// The face, row height and character spacing of terminal text.
+    pub font: super::typography::Typography,
 }
 impl Default for TerminalConfig {
     fn default() -> Self {
@@ -95,6 +97,7 @@ impl Default for TerminalConfig {
             selection_foreground: SelectionColor::default(),
             selection_background: SelectionColor::default(),
             selection_rounded: true,
+            font: Default::default(),
         }
     }
 }
@@ -153,6 +156,7 @@ mod tests {
                     selection_foreground: color,
                     selection_background: color,
                     selection_rounded: false,
+                    font: Default::default(),
                 };
                 Settings {
                     terminal: terminal.clone(),

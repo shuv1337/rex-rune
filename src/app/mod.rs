@@ -7,6 +7,8 @@ mod commands;
 mod dialogs;
 mod discover;
 mod find;
+mod font_page;
+mod font_picker;
 mod font_size;
 mod fonts;
 mod help;
@@ -99,6 +101,9 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         root = root.child(toasts);
     }
     let open = match &s.panel {
+        Some(panel) if matches!(panel.kind, panel::PanelKind::Fonts(_)) => {
+            Some(font_picker::popup(s, viewport))
+        }
         Some(panel) if panel.is_list() => Some(popups::list_popup(s, viewport)),
         Some(_) => dialogs::dialog(s, viewport),
         None => None,
@@ -226,6 +231,10 @@ pub fn run(mut options: Options) -> anyhow::Result<()> {
     let fonts = fonts::load(family, fallbacks);
     rune::text::set_app_font_paths(fonts.paths)
         .map_err(|_| anyhow::anyhow!("terminal fonts were already initialized"))?;
+    // The font pickers' families, read from fontconfig off the UI thread before one opens.
+    std::thread::spawn(|| {
+        fonts::installed();
+    });
     rune::set_app_id("dev.shuv.rex-linux");
     if let Err(error) = rune::set_app_icon(APP_ICON) {
         eprintln!("Could not load the Rex window icon: {error}");

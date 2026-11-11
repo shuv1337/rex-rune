@@ -152,6 +152,8 @@ fn the_cursor_preview_draws_the_chosen_shape_and_the_choice_is_saved() {
     let mut rt = terminal_settings(|_| {});
     let cell = term::metrics(rt.state.settings.font_size).cell;
     let cursor = |rt: &Runtime<Workspace>| element(rt, "cursor-preview-sample/cursor");
+    // Where the page stays while the styles are chosen.
+    reveal(&mut rt, "cursor-style");
     let block = cursor(&rt);
     assert!(
         (block.rect[2] - cell.0).abs() < 0.5 && (block.rect[3] - cell.1).abs() < 0.5,

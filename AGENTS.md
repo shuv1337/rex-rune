@@ -40,6 +40,7 @@ Some probes connect to the configured Rex server and create sessions there. Of t
   - `splits.rs`: which side a new split goes on (right, left, down, up or best fit) and focus through a tab's panes. `font_size.rs`: terminal font size actions. `help.rs`: Rex help.
   - `input.rs`, `keys.rs`: workspace shortcuts first, then every other key to the focused pane's PTY; Rune key events to Rex `client.key` payloads; IME.
   - `terminal_page.rs`: Settings → Terminal, with previews drawn by `term/preview.rs`. `select_copy.rs`: Copy on selection and the primary selection. Their settings are `settings/terminal.rs` in the library.
+  - `font_picker.rs`: the font picker (the families `fonts.rs` reads from fontconfig, searched, Monospaced or All fonts, rows built only where the list shows). `font_page.rs`: the Advanced font settings page (line height, character spacing, bold and italic, the ordered fallback fonts) and `Workspace::metrics`, the cell every terminal is drawn and sized with. Their settings are `settings/typography.rs`.
   - `term.rs`: one pane's view state and cell grid. Rows are text segments placed at `column × cell width`; a character joins a segment only if it advances exactly one cell; ligatures and kerning are off; rows are memoized by content.
   - `sprites.rs`: box-drawing and block element characters drawn as shapes on whole device pixels, as Ghostty does, instead of font glyphs.
   - `toolbar.rs`, `sidebar.rs`, `panes.rs`, `popups.rs`, `dialogs.rs`, `widgets.rs`: views on rune-kit, with design tokens pinned onto the kit in `theme.rs`.

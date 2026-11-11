@@ -144,7 +144,8 @@ def run():
             key("Tab")
             key("Tab")
             key("Tab")
-            key("Tab")  # Close, change family, font smaller, font larger
+            key("Tab")
+            key("Tab")  # Close, Choose font, font style, font smaller, font larger
             key("Return")
             assert json.loads(config.read_text())["font_size"] == original_size + 1
             key("shift+Tab")
