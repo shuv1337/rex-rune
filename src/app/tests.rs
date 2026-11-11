@@ -32,6 +32,8 @@ mod settings_tests;
 mod tab_tests;
 #[path = "terminal_settings_tests.rs"]
 mod terminal_settings_tests;
+#[path = "title_tests.rs"]
+mod title_tests;
 #[path = "wiring_tests.rs"]
 mod wiring_tests;
 #[path = "workspace_fixes_tests.rs"]

@@ -83,6 +83,10 @@ pub struct TerminalConfig {
     pub selection_foreground: SelectionColor,
     pub selection_background: SelectionColor,
     pub selection_rounded: bool,
+    /// Call a tab or pane that has no name of its own by its foreground program and that
+    /// program's directory (`vim - ~/rex`) instead of a title its shell set. Off shows the
+    /// terminal's title whoever set it, as before the switch existed.
+    pub generated_titles: bool,
     /// The face, row height and character spacing of terminal text.
     pub font: super::typography::Typography,
 }
@@ -97,6 +101,7 @@ impl Default for TerminalConfig {
             selection_foreground: SelectionColor::default(),
             selection_background: SelectionColor::default(),
             selection_rounded: true,
+            generated_titles: false,
             font: Default::default(),
         }
     }
@@ -114,6 +119,7 @@ mod tests {
         let t = old.terminal;
         assert_eq!(t.cursor_style, CursorStyle::Block);
         assert!(!t.cursor_force && !t.copy_on_selection && !t.primary_selection);
+        assert!(!t.generated_titles, "titles stay as they were");
         assert!(t.key_sequence_hints && t.selection_rounded);
         assert_eq!(
             (t.selection_foreground, t.selection_background),
@@ -156,6 +162,7 @@ mod tests {
                     selection_foreground: color,
                     selection_background: color,
                     selection_rounded: false,
+                    generated_titles: true,
                     font: Default::default(),
                 };
                 Settings {

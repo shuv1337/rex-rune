@@ -38,6 +38,7 @@ mod tabs;
 mod term;
 mod terminal_page;
 mod theme;
+mod titles;
 mod toolbar;
 mod toolbar_reveal;
 mod updates;

@@ -26,7 +26,7 @@ Some probes connect to the configured Rex server and create sessions there. Of t
 
 - Protocol and model library (`src/lib.rs`, no UI dependency):
   - `transport.rs`, `wire.rs`: Unix/HTTPS WebSockets, data tickets, snapshot framing.
-  - `connection.rs` (and `connection/`): one control connection per host, block-keyed terminal streams, the `Options` CLI definition. `connection/server_info.rs`: the server's version and status on `HostModel::server_info`, read-only and once per connection.
+  - `connection.rs` (and `connection/`): one control connection per host, block-keyed terminal streams, the `Options` CLI definition. `connection/server_info.rs`: the server's version and status on `HostModel::server_info`, read-only and once per connection. `connection/titles.rs`: generated titles, a terminal named by its foreground program and directory in place of a title its own shell set.
   - `terminal.rs`: Ghostty decoding and render frames. `terminal/search.rs`: searching the screen and scrollback with Ghostty's search. `links.rs`: OSC 8 hyperlinks and text URLs in a frame.
   - `layout.rs`: split placement. `settings.rs`: local configuration.
   - `download.rs` and `download/`: the file download core for API 13 (`name.rs` sanitizes hostile names, `store.rs` the destination folder, partial files and crash records, `stream.rs` the data stream, `open.rs` the "never Open" list); driven by `HostCommand::Download` in `connection/downloads.rs`. No UI yet.
@@ -39,7 +39,7 @@ Some probes connect to the configured Rex server and create sessions there. Of t
   - `tabs.rs`: the tab menu on toolbar pills and sidebar rows, moving a tab in its session's order, muting it on this client, closing the other tabs and its default title.
   - `splits.rs`: which side a new split goes on (right, left, down, up or best fit) and focus through a tab's panes. `font_size.rs`: terminal font size actions. `help.rs`: Rex help.
   - `input.rs`, `keys.rs`: workspace shortcuts first, then every other key to the focused pane's PTY; Rune key events to Rex `client.key` payloads; IME.
-  - `terminal_page.rs`: Settings → Terminal, with previews drawn by `term/preview.rs`. `select_copy.rs`: Copy on selection and the primary selection. Their settings are `settings/terminal.rs` in the library.
+  - `terminal_page.rs`: Settings → Terminal, with previews drawn by `term/preview.rs`. `select_copy.rs`: Copy on selection and the primary selection. `titles.rs`: the Titles section and the Prefer generated titles preference, which every caller of `activity::tab_name` and `activity::pane_name` passes. Their settings are `settings/terminal.rs` in the library.
   - `font_picker.rs`: the font picker (the families `fonts.rs` reads from fontconfig, searched, Monospaced or All fonts, rows built only where the list shows). `font_page.rs`: the Advanced font settings page (line height, character spacing, bold and italic, the ordered fallback fonts) and `Workspace::metrics`, the cell every terminal is drawn and sized with. Their settings are `settings/typography.rs`.
   - `term.rs`: one pane's view state and cell grid. Rows are text segments placed at `column × cell width`; a character joins a segment only if it advances exactly one cell; ligatures and kerning are off; rows are memoized by content.
   - `sprites.rs`: box-drawing and block element characters drawn as shapes on whole device pixels, as Ghostty does, instead of font glyphs.

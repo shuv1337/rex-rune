@@ -745,7 +745,7 @@ impl Workspace {
         let title = window_title(
             model
                 .window()
-                .map(|tab| super::activity::tab_name(model, tab))
+                .map(|tab| super::activity::tab_name(model, tab, self.generated_titles()))
                 .as_deref(),
             model.view().and_then(|v| v.label.as_deref()),
             &self.settings.hosts[self.active].label,
@@ -1642,7 +1642,7 @@ impl Workspace {
             .find(|b| b.block_id.as_deref() == Some(id))
             .map_or_else(
                 || "Terminal".into(),
-                |b| super::activity::pane_name(model, b),
+                |b| super::activity::pane_name(model, b, self.generated_titles()),
             )
     }
 

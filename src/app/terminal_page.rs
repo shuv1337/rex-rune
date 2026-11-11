@@ -1,5 +1,5 @@
-//! Settings → Terminal: typography, colours, the cursor, the keyboard, the selection, layout
-//! and each host's default shell. Advanced font settings is a page of its own (`font_page`). The typography, cursor and selection cards open with a
+//! Settings → Terminal: typography, colours, the cursor, the keyboard, the selection, titles
+//! (`titles`) and each host's default shell. Advanced font settings is a page of its own (`font_page`). The typography, cursor and selection cards open with a
 //! preview drawn by the terminal's own code (`term::preview`), so a control's effect shows
 //! as it is changed. Previews are steady, as terminals are: the cursor never blinks.
 use super::{
@@ -425,6 +425,7 @@ pub fn terminal(s: &Workspace) -> El {
         cursor(s, &inks),
         keyboard(s),
         selection(s, &inks),
+        super::titles::titles(s),
         shells(s),
     ])
 }
