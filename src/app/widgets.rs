@@ -130,6 +130,9 @@ pub struct Row<'a> {
     pub check_end: bool,
     /// The parts of the label a search matched, as byte ranges of it.
     pub marks: &'a [std::ops::Range<usize>],
+    /// The colours of a terminal theme or a chrome palette, drawn as a strip of dots after
+    /// the detail.
+    pub picture: Option<super::themes_view::Picture>,
     pub followup: bool,
     pub enabled: bool,
     /// A destructive row: its label is in `DANGER`, and its selection tints in `DANGER`.
@@ -286,6 +289,7 @@ pub fn list_row(
                         .opacity(if r.enabled { 1. } else { 0.5 })
                 }
             })
+            .children(r.picture.as_ref().map(super::themes_view::swatch_strip))
             .child(el().w(CHEVRON_COLUMN).child(if r.check_end {
                 glyph(&CHECK, 14., rgb(accent())).key("check")
             } else if r.followup {

@@ -43,6 +43,7 @@ Some probes connect to the configured Rex server and create sessions there. Of t
   - `sprites.rs`: box-drawing and block element characters drawn as shapes on whole device pixels, as Ghostty does, instead of font glyphs.
   - `toolbar.rs`, `sidebar.rs`, `panes.rs`, `popups.rs`, `dialogs.rs`, `widgets.rs`: views on rune-kit, with design tokens pinned onto the kit in `theme.rs`.
   - `settings_view.rs`: the Settings dialog and its pages. `settings_kit.rs`: what every Settings page is built from (`page`, `section`, `card`, `footnote`, `setting`, `select_row`, `disclosure`, `segmented`, `value_popup`, `stepper`, `button`). A card draws the dividers between its rows; pages never place one. A popup button's list opens over Settings against its control (`Panel::anchor_to`).
+  - `themes_view.rs`: pictures of terminal themes drawn from their own colours (`theme_swatch`, the card; `swatch_strip`, the dots at the end of a switcher row) and the theme library on Settings → Themes, a searched grid that builds only the rows near the viewport (`El::virtual_rows`). `terminal_theme.rs` gives a theme's colours for a picture (`TerminalTheme::swatch`).
   - `tests.rs`: headless UI tests.
 - `src/bin/`: `rex-probe` and `rex-workspace-probe`, live protocol probes.
 - `examples/`: `chrome_spike` (borderless window chrome).

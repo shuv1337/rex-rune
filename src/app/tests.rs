@@ -28,6 +28,8 @@ mod settings_nav_tests;
 mod settings_tests;
 #[path = "tab_tests.rs"]
 mod tab_tests;
+#[path = "theme_library_tests.rs"]
+mod theme_library_tests;
 #[path = "theme_switcher_tests.rs"]
 mod theme_switcher_tests;
 #[path = "wiring_tests.rs"]

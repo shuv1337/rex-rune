@@ -5,11 +5,12 @@
 use super::{
     fold::{Name, fold},
     panel::{Entry, Intent},
+    themes_view::Picture,
     workspace::Workspace,
 };
 use rex_linux::{
     settings::{ChromeTheme, TerminalThemeChoice},
-    terminal_theme::{BUILTIN_PREFIX, BUILTINS, paired},
+    terminal_theme::{BUILTIN_PREFIX, BUILTINS, TerminalTheme, paired},
 };
 
 /// The heading themes and window colours are under in a Commands search.
@@ -29,7 +30,13 @@ impl Workspace {
         let query = fold(query);
         let current = &self.settings.terminal_theme;
         let mut entries = Vec::new();
-        let mut add = |label: &str, detail: &str, group: &str, choice: TerminalThemeChoice| {
+        // Each row ends with its theme's colours as a strip of dots; Follow server, whose
+        // colours are the server's, has none to show.
+        let mut add = |label: &str,
+                       detail: &str,
+                       group: &str,
+                       choice: TerminalThemeChoice,
+                       theme: Option<&TerminalTheme>| {
             if named_only && !matches!(choice, TerminalThemeChoice::Named(_)) {
                 return;
             }
@@ -37,6 +44,10 @@ impl Workspace {
                 let mut e = Entry::new(label, detail, group, Intent::Theme(choice.clone()));
                 e.current = *current == choice;
                 e.marks = marks;
+                e.picture = Some(match theme {
+                    Some(theme) => Picture::Theme(self.swatch(theme)),
+                    None => Picture::Server,
+                });
                 entries.push(e);
             }
         };
@@ -49,22 +60,32 @@ impl Workspace {
             },
             "Server",
             TerminalThemeChoice::FollowServer,
+            None,
         );
         add(
             "Rex default colours",
             "",
             "Server",
             TerminalThemeChoice::RexDefault,
+            Some(&TerminalTheme::default()),
         );
+        let chrome = paired(self.settings.chrome_theme);
         add(
             "Follow chrome",
-            paired(self.settings.chrome_theme).name,
+            chrome.name,
             "Built in",
             TerminalThemeChoice::FollowChrome,
+            Some(&(chrome.theme)()),
         );
         for builtin in BUILTINS {
             let id = format!("{BUILTIN_PREFIX}{}", builtin.id);
-            add(builtin.name, "", "Built in", TerminalThemeChoice::Named(id));
+            add(
+                builtin.name,
+                "",
+                "Built in",
+                TerminalThemeChoice::Named(id),
+                Some(&(builtin.theme)()),
+            );
         }
         for (group, light) in [("Dark", false), ("Light", true)] {
             for theme in self.themes.iter().filter(|t| t.light == light) {
@@ -73,6 +94,7 @@ impl Workspace {
                     if theme.custom { "Custom" } else { "" },
                     group,
                     TerminalThemeChoice::Named(theme.name.clone()),
+                    Some(&theme.theme),
                 );
             }
         }
@@ -106,6 +128,7 @@ impl Workspace {
                 );
                 e.current = chrome == self.settings.chrome_theme;
                 e.marks = marks;
+                e.picture = Some(Picture::Chrome(chrome));
                 Some(e)
             })
             .collect();

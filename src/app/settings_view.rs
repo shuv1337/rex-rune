@@ -682,6 +682,12 @@ pub(super) fn body(s: &Workspace, page: Page) -> El {
     }
 }
 
+/// How wide the page beside the sidebar is, its insets included, in a window `viewport` wide.
+pub(super) fn page_width(viewport: f32) -> f32 {
+    let width = PANEL_WIDTH.min(viewport * 0.92);
+    width - NAV_WIDTH.min(width * 0.3) - 1.
+}
+
 /// The dialog's surface: the sidebar, and the page under its header. The page scrolls with a
 /// fade at whichever edge hides content and a thumb while there is more than fits.
 fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
@@ -691,7 +697,7 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
     // Under the toolbar, which stays whole above it, with a margin at both ends.
     let height = PANEL_HEIGHT.min((viewport[1] - TOOLBAR - 2. * CLEARANCE).max(0.));
     let nav_width = NAV_WIDTH.min(width * 0.3);
-    let (page_width, page_height) = (width - nav_width - 1., height - HEADER);
+    let (page_width, page_height) = (page_width(viewport[0]), height - HEADER);
     let thumb = s.settings_fx.thumb.clone();
     // Where the page is scrolled to, for Back to return to it there.
     let offset = s.settings_nav.offset();

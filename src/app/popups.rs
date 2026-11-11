@@ -18,6 +18,8 @@ const COMMAND_ROWS: f32 = 20.;
 /// its field and its hint line included: it scrolls to the rest.
 const THEMES_WIDTH: f32 = 340.;
 const THEMES_MAX_HEIGHT: f32 = 420.;
+/// The Window colours list: wider than other value lists, for the strip in each row.
+const CHROMES_WIDTH: f32 = 252.;
 
 #[derive(Clone)]
 enum Hidden {
@@ -193,7 +195,10 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     });
     // Add host: machines in columns, each name whole.
     let discover = matches!(panel.kind, PanelKind::Discover);
-    let width = (if values {
+    let width = (if matches!(panel.kind, PanelKind::Chromes) {
+        // A palette's name, whole, beside its strip of colours.
+        CHROMES_WIDTH
+    } else if values {
         220.
     } else if pane {
         280.
@@ -388,6 +393,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                         .then_some(entry.current),
                     check_end,
                     marks: &entry.marks,
+                    picture: entry.picture,
                     followup: entry.followup,
                     enabled,
                     danger: entry.danger,

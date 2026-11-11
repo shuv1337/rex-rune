@@ -419,6 +419,9 @@ pub struct Entry {
     pub group_create: Option<(Intent, String)>,
     /// The parts of `label` a search matched, as byte ranges in order: the list marks them.
     pub marks: Vec<std::ops::Range<usize>>,
+    /// The colours of a terminal theme or a chrome palette, drawn as a strip of dots at the
+    /// end of its row.
+    pub picture: Option<super::themes_view::Picture>,
 }
 impl Entry {
     pub fn new(
@@ -443,6 +446,7 @@ impl Entry {
             group_icon: None,
             group_create: None,
             marks: Vec::new(),
+            picture: None,
         }
     }
 
@@ -594,6 +598,7 @@ impl Workspace {
                 .map(|chrome| {
                     let mut e = Entry::new(chrome.name(), "", "", Intent::Chrome(chrome));
                     e.current = chrome == self.settings.chrome_theme;
+                    e.picture = Some(super::themes_view::Picture::Chrome(chrome));
                     e
                 })
                 .collect();

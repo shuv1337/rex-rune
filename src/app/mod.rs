@@ -38,6 +38,7 @@ mod tabs;
 mod term;
 mod theme;
 mod theme_list;
+mod themes_view;
 mod toolbar;
 mod updates;
 mod upload;

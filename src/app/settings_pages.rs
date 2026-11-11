@@ -13,9 +13,14 @@ use super::{
 use rex_linux::settings::NotificationsConfig;
 use rune::{El, row, text};
 
-/// The colours of the window and of its terminals. The theme library joins them here.
+/// The colours of the window and of its terminals, over the library of terminal themes.
 pub fn themes(s: &Workspace) -> El {
-    page([section(
+    page([pickers(s), super::themes_view::library(s)])
+}
+
+/// What the window and its terminals are drawn in now, each with its list.
+fn pickers(s: &Workspace) -> El {
+    section(
         "",
         [
             card([
@@ -42,7 +47,7 @@ pub fn themes(s: &Workspace) -> El {
                 "A terminal theme is declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection.",
             ),
         ],
-    )])
+    )
 }
 
 /// Interface → Customize panes.
