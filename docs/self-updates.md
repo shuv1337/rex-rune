@@ -7,7 +7,9 @@ workspace, closes the window, and waits for host shutdown (up to two seconds) so
 in-flight downloads can remove partial files before re-exec. Original launch
 arguments, including `--config`, `--font`, `--font-size` and `--window-size`, are
 preserved, except `--new`: session creation is never replayed. Rex server sessions
-keep running.
+keep running. If re-exec fails after the window closes, Rex sends a critical desktop
+notification through the session notification service (and logs any delivery failure
+to stderr); reopen Rex or repair with install.sh.
 
 ## Eligibility and trust
 
@@ -58,29 +60,36 @@ All files are prepared before replacement. A lock prevents simultaneous in-app
 updates. A journal and hard-linked backups are synced before replacing files via
 same-filesystem atomic renames; the old binary stays backed up until the whole
 installation, including its receipt, commits. The journal records each prepared
-file's device/inode identity. Recovery restores only destinations still belonging
+file's device/inode identity, size and nanosecond modification time. Recovery
+requires all of these to match, so inode reuse alone cannot identify a later repair
+as this transaction's file. Recovery restores only destinations still belonging
 to this transaction, skipping files already restored or not yet replaced. If any
 destination belongs to a later installer/repair, the entire journal is discarded
-without changing any destination. Files absent before are removed only if they
-still have this transaction's new inode. Preferences and the Rex server are never
+without changing any destination, and Rex shows an informational notice that the
+obsolete journal and backups were discarded. Files absent before are removed only
+if they still have this transaction's full file identity. Preferences and the Rex server are never
 touched.
 
 Individual files are atomically replaced, not the entire multi-directory tree in
 one filesystem operation. An interrupted transaction is recovered before the UI
 starts on the next launch, using the journal's original install paths even if the
 launch's XDG environment changed. Recovery re-execs the restored binary before
-any workspace actions run. Recovery waits up to two seconds for the install lock.
-If recovery fails or the lock remains busy, Rex logs the error to stderr and
+any workspace actions run. Only when a transaction journal exists does recovery
+wait up to two seconds for the install lock. Without a journal, housekeeping tries
+the lock once and silently skips a busy lock, an unwritable directory or a root
+launch. If journal recovery fails or the lock remains busy, Rex logs the error to stderr and
 **continues opening**, with a persistent (dismissible) UI notice. A failed recovery
 retains `.rex-update-transaction` next to the binary for another attempt. Committed
 journals and abandoned `.rex-update-*` / `.rex-update-cleanup-*` directories are
-swept under the same lock, including when no transaction was started.
+swept best-effort under the same lock, after recovery, including when no transaction
+was started. Sweep or post-rollback cleanup failures never suppress a successful
+rollback's required re-exec.
 
 ### Manual recovery
 
 First close Rex windows and allow any updater to finish; do not run recovery as
 root. A transient lock/storage failure can be retried by reopening Rex. Persistent
-errors (a legacy journal without inode records, mismatched binary paths, or data
+errors (a legacy journal without full file identity records, mismatched binary paths, or data
 folders symlinked outside `~/.local`) require manual repair. There is no rollback
 button or `--rollback` command.
 
@@ -117,7 +126,11 @@ or manual check can install an eligible release in the background and offer
 restart. It never restarts without a click. Automatic checks must also be on;
 `REX_LINUX_NO_UPDATE_CHECK=1` disables automatic installation too. The daily check
 cadence is unchanged. An installation error stays visible for manual retry; it
-does not create a rapid background retry loop.
+does not create a rapid background retry loop. Checks and installation cannot run
+concurrently in one workspace. Across processes, the update-state lock covers only
+load/apply/save, not network requests; each fetch reloads the latest state before
+applying its manifest. Dismissal and announcement saves change only their notice
+fields under that same lock, preserving the verified-version high-water mark.
 
 ## Validation
 

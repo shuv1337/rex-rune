@@ -4627,6 +4627,7 @@ fn update_notice_toast_opens_whats_new_dismisses_for_version_and_resurfaces_on_n
         dismissed_version: None,
         announced_version: None,
     };
+    state.save(&state_path).unwrap(); // The worker saves before delivering its result.
     ws.finish_update_check(
         false,
         Ok((
@@ -4700,6 +4701,7 @@ fn update_notice_toast_opens_whats_new_dismisses_for_version_and_resurfaces_on_n
         newer.highest_verified = Some("0.6.1".into());
         newer.latest_version = Some("0.6.1".into());
         newer.notes_url = Some("https://github.com/shuv1337/rex-rune/releases/tag/v0.6.1".into());
+        newer.save(&state_path).unwrap();
         s.finish_update_check(
             false,
             Ok((

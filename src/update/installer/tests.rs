@@ -306,7 +306,7 @@ fn manual_install_repair_supersedes_interrupted_update() {
             .success()
     );
     let repaired = contents(&layout);
-    assert!(!recover(&layout).unwrap());
+    assert_eq!(recover(&layout).unwrap(), Recovery::Superseded);
     assert_eq!(contents(&layout), repaired);
     layout.validate_receipt("99.0.0").unwrap();
     assert!(!layout.transaction().exists());
@@ -323,7 +323,7 @@ fn later_file_at_previously_absent_destination_supersedes_whole_transaction() {
     fs::write(&later, b"belongs to later installer").unwrap();
     fs::rename(later, dest).unwrap();
     let before = contents(&layout);
-    assert!(!recover(&layout).unwrap());
+    assert_eq!(recover(&layout).unwrap(), Recovery::Superseded);
     assert_eq!(contents(&layout), before);
     assert!(!layout.transaction().exists());
 }
@@ -349,9 +349,115 @@ fn partial_rollback_failure_retains_journal_and_retries_remaining_files() {
     assert_eq!(&contents(&layout)[..4], &before[..4]);
     assert_eq!(fs::read(&layout.binary).unwrap(), b"new");
     fs::remove_dir(layout.transaction().join("restore-4")).unwrap();
-    assert!(recover(&layout).unwrap());
+    assert_eq!(
+        recover(&layout).unwrap(),
+        Recovery::Restored(layout.binary.clone())
+    );
     assert_eq!(contents(&layout), before);
     assert!(!layout.transaction().exists());
+}
+
+#[test]
+fn ordinary_launch_skips_busy_lock_and_root_housekeeping_without_notice() {
+    let temp = tempfile::tempdir().unwrap();
+    let layout = layout(temp.path());
+    let stage = layout.binary.parent().unwrap().join(".rex-update-stale");
+    fs::create_dir(&stage).unwrap();
+    let lock = layout.lock().unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        recover_install_at(&layout, RECOVERY_WAIT, false).unwrap(),
+        Recovery::Unchanged
+    );
+    assert!(start.elapsed() < Duration::from_millis(500));
+    assert!(stage.exists());
+    drop(lock);
+    // Inject effective-root status without requiring privileged tests or changing uid.
+    assert_eq!(
+        recover_install_at(&layout, RECOVERY_WAIT, true).unwrap(),
+        Recovery::Unchanged
+    );
+    assert!(stage.exists());
+    fs::create_dir(layout.transaction()).unwrap();
+    assert!(recover_install_at(&layout, RECOVERY_WAIT, true).is_err());
+}
+
+#[test]
+fn rollback_cleanup_failure_preserves_restored_binary_result() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let layout = layout(temp.path());
+    let before = contents(&layout);
+    interrupt(&layout, 5, false);
+    let result = recover_with_cleanup(&layout, |_| bail!("injected cleanup failure"));
+    assert_eq!(result.unwrap(), Recovery::Restored(layout.binary.clone()));
+    assert_eq!(contents(&layout), before);
+    assert!(layout.transaction().join("committed").exists());
+    assert_eq!(recover(&layout).unwrap(), Recovery::Unchanged);
+    assert!(!layout.transaction().exists());
+}
+
+#[test]
+fn sweep_failure_does_not_prevent_rollback_or_reexec() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let layout = layout(temp.path());
+    let before = contents(&layout);
+    interrupt(&layout, 5, false);
+    let stage = layout
+        .binary
+        .parent()
+        .unwrap()
+        .join(".rex-update-unreadable");
+    fs::create_dir(&stage).unwrap();
+    fs::write(stage.join("partial"), b"partial").unwrap();
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(sweep_staging(&layout).is_err());
+    let result = recover_install_at(&layout, RECOVERY_WAIT, false);
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(result.unwrap(), Recovery::Restored(layout.binary.clone()));
+    assert_eq!(contents(&layout), before);
+}
+
+#[test]
+fn reused_inode_with_different_size_or_nanosecond_mtime_supersedes_transaction() {
+    for size_changed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = layout(temp.path());
+        interrupt(&layout, 5, false);
+        let recorded = identity(&layout.binary).unwrap();
+        // Deterministically simulate reuse: retain dev/ino while changing either
+        // size or only mtime's nanoseconds (not its seconds or file length).
+        fs::write(
+            &layout.binary,
+            if size_changed {
+                b"repair".as_slice()
+            } else {
+                b"NEW"
+            },
+        )
+        .unwrap();
+        let nanos = if size_changed {
+            recorded.mtime_nsec
+        } else {
+            (recorded.mtime_nsec + 1) % 1_000_000_000
+        };
+        File::open(&layout.binary)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::new(recorded.mtime as u64, nanos as u32))
+            .unwrap();
+        let foreign = identity(&layout.binary).unwrap();
+        assert_eq!((foreign.dev, foreign.ino), (recorded.dev, recorded.ino));
+        assert_ne!(foreign, recorded);
+        let before = contents(&layout);
+        assert_eq!(recover(&layout).unwrap(), Recovery::Superseded);
+        assert_eq!(contents(&layout), before);
+        assert!(!layout.transaction().exists());
+    }
 }
 
 #[test]
@@ -370,7 +476,7 @@ fn recovery_waits_for_lock_times_out_and_sweeps_only_retired_stages() {
     fs::create_dir(&cleanup).unwrap();
     fs::write(stage.join("archive"), b"partial").unwrap();
     let lock = layout.lock().unwrap();
-    let error = recover_install_at(&layout, Duration::from_millis(40)).unwrap_err();
+    let error = recover_install_at(&layout, Duration::from_millis(40), false).unwrap_err();
     assert!(format!("{error:#}").contains("timed out"));
     assert!(stage.exists());
     assert!(layout.transaction().exists());
@@ -379,18 +485,17 @@ fn recovery_waits_for_lock_times_out_and_sweeps_only_retired_stages() {
         drop(lock);
     });
     assert_eq!(
-        recover_install_at(&layout, Duration::from_secs(2)).unwrap(),
-        Some(layout.binary.clone())
+        recover_install_at(&layout, Duration::from_secs(2), false).unwrap(),
+        Recovery::Restored(layout.binary.clone())
     );
     release.join().unwrap();
     assert_eq!(contents(&layout), before);
     assert!(!stage.exists() && !cleanup.exists());
     // Also sweep if a crash left a stage but never wrote a journal.
     fs::create_dir(&stage).unwrap();
-    assert!(
-        recover_install_at(&layout, RECOVERY_WAIT)
-            .unwrap()
-            .is_none()
+    assert_eq!(
+        recover_install_at(&layout, RECOVERY_WAIT, false).unwrap(),
+        Recovery::Unchanged
     );
     assert!(!stage.exists());
 }
@@ -433,7 +538,10 @@ fn recovery_subprocess() {
         return;
     }
     let binary = std::env::current_exe().unwrap();
-    assert_eq!(recover_current_install().unwrap(), Some(binary));
+    assert_eq!(
+        recover_current_install().unwrap(),
+        Recovery::Restored(binary)
+    );
     println!("restored running binary");
 }
 

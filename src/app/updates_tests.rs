@@ -3,6 +3,66 @@ use crate::app::updates::Installation;
 use rex_linux::update::{InstallChannel, UpdateState};
 
 #[test]
+fn updater_check_and_install_are_mutually_exclusive() {
+    let mut ws = workspace();
+    ws.updates.channel = InstallChannel::Tarball;
+    ws.updates.state.latest_version = Some("99.0.0".into());
+    ws.updates.checking = true;
+    ws.install_update_now();
+    assert!(matches!(ws.updates.installation, Installation::Idle));
+    ws.updates.checking = false;
+    ws.updates.installation = Installation::Working("Downloading…".into());
+    ws.check_updates_now();
+    assert!(!ws.updates.checking);
+    ws.updates.installation = Installation::Ready("/nonexistent/rex-linux".into());
+    ws.check_updates_now();
+    assert!(!ws.updates.checking);
+    let _ = std::fs::remove_file(&ws.settings_path);
+}
+
+#[test]
+fn updater_stale_workspace_notice_actions_never_lower_verified_version() {
+    use rex_linux::update::CheckOutcome;
+    let mut ws = workspace();
+    let temp = tempfile::tempdir().unwrap();
+    ws.updates.config.state_path = temp.path().join("state.json");
+    let old = UpdateState {
+        highest_verified: Some("0.8.0".into()),
+        latest_version: Some("0.8.0".into()),
+        ..UpdateState::default()
+    };
+    let newer = UpdateState {
+        highest_verified: Some("99.0.0".into()),
+        latest_version: Some("99.0.0".into()),
+        ..UpdateState::default()
+    };
+    newer.save(&ws.updates.config.state_path).unwrap();
+    ws.updates.state = old.clone();
+    ws.dismiss_update_version("0.8.0");
+    assert_eq!(
+        UpdateState::load(&ws.updates.config.state_path).highest_verified,
+        newer.highest_verified
+    );
+    ws.finish_update_check(
+        true,
+        Ok((
+            CheckOutcome::UpdateAvailable {
+                version: "0.8.0".into(),
+                notes_url: String::new(),
+                published: String::new(),
+            },
+            old,
+        )),
+    );
+    let saved = UpdateState::load(&ws.updates.config.state_path);
+    assert_eq!(saved.highest_verified, newer.highest_verified);
+    assert_eq!(saved.latest_version, newer.latest_version);
+    assert_eq!(saved.dismissed_version, None);
+    assert_eq!(ws.updates.state, saved);
+    let _ = std::fs::remove_file(&ws.settings_path);
+}
+
+#[test]
 fn updater_restart_requests_normal_shutdown_instead_of_exec_in_callback() {
     let mut ws = workspace();
     ws.updates.channel = InstallChannel::Tarball;

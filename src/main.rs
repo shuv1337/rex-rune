@@ -8,20 +8,37 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(code);
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    use rex_linux::update::installer::Recovery;
     let recovery_notice = match rex_linux::update::installer::recover_current_install() {
-        Ok(Some(binary)) => {
+        Ok(Recovery::Restored(binary)) => {
             // No workspace actions have run yet; preserve all launch arguments.
-            Some(recovery_error(reexec(binary, &args)))
+            Some(app::StartupNotice::Error(recovery_error(reexec(binary, &args))))
         }
-        Ok(None) => None,
-        Err(error) => Some(recovery_error(error)),
+        Ok(Recovery::Unchanged) => None,
+        Ok(Recovery::Superseded) => Some(app::StartupNotice::Info(
+            "A later installation superseded the interrupted update; its obsolete journal and backups were discarded.".into(),
+        )),
+        Err(error) => Some(app::StartupNotice::Error(recovery_error(error))),
     };
     if let Some(binary) = app::run(options, recovery_notice)? {
         // The workspace is gone and host shutdown has completed before replacing
         // the process. Preserve per-launch font/window/connection overrides.
-        return Err(reexec(binary, &restart_args(args)));
+        let error = reexec(binary, &restart_args(args));
+        notify_restart_failure(&error);
+        return Err(error);
     }
     Ok(())
+}
+
+fn notify_restart_failure(error: &anyhow::Error) {
+    let message = format!(
+        "Rex could not restart: {error:#}. Open Rex again; if it still fails, repair with install.sh. Server sessions are still running."
+    );
+    // The Rune event loop and fonts cannot be initialized twice in this process.
+    // Use our existing desktop notification transport, without an external utility.
+    if let Err(error) = app::notify_restart_failure(&message) {
+        eprintln!("Could not show restart notification ({error:#}): {message}");
+    }
 }
 
 fn recovery_error(error: impl std::fmt::Display) -> String {

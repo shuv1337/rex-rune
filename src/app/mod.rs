@@ -21,6 +21,7 @@ mod keycaps;
 mod keys;
 mod navigation;
 mod notify;
+pub use notify::notify_restart_failure;
 mod pane_header;
 mod pane_moves;
 mod pane_verbs;
@@ -253,9 +254,14 @@ pub(crate) fn placeholder() -> Workspace {
     unreachable!("App::init builds the workspace")
 }
 
+pub enum StartupNotice {
+    Error(String),
+    Info(String),
+}
+
 pub fn run(
     mut options: Options,
-    recovery_notice: Option<String>,
+    recovery_notice: Option<StartupNotice>,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
     let (settings, path) = match &options.config {
         Some(path) => (Settings::load(path)?, path.clone()),
@@ -293,8 +299,10 @@ pub fn run(
         .init(move || {
             let mut workspace = Workspace::new(options, settings, path, handle, terminal);
             workspace.restart = restart_request;
-            if let Some(notice) = recovery_notice {
-                workspace.notify(notice);
+            match recovery_notice {
+                Some(StartupNotice::Error(notice)) => workspace.notify(notice),
+                Some(StartupNotice::Info(notice)) => workspace.inform(notice),
+                None => {}
             }
             workspace
         })

@@ -29,6 +29,9 @@ const INSTALL_FILES: [(&str, u32); 6] = [
 struct Identity {
     dev: u64,
     ino: u64,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
 }
 
 fn identity(path: &Path) -> io::Result<Identity> {
@@ -36,6 +39,9 @@ fn identity(path: &Path) -> io::Result<Identity> {
     Ok(Identity {
         dev: meta.dev(),
         ino: meta.ino(),
+        size: meta.size(),
+        mtime: meta.mtime(),
+        mtime_nsec: meta.mtime_nsec(),
     })
 }
 
@@ -151,40 +157,57 @@ impl InstallLayout {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recovery {
+    Unchanged,
+    Restored(PathBuf),
+    Superseded,
+}
+
 /// Recover only this user's running install, never package-managed or source builds.
 /// Returns the restored binary when rollback requires re-exec before UI startup.
-pub fn recover_current_install() -> Result<Option<PathBuf>> {
+pub fn recover_current_install() -> Result<Recovery> {
     let Ok(mut layout) = InstallLayout::current() else {
-        return Ok(None);
+        return Ok(Recovery::Unchanged);
     };
     // Desktop launches and terminal launches can have different XDG settings.
     // Find the journal beside the actual executable, and restore its saved data path.
     layout.binary = std::env::current_exe()?;
-    recover_install_at(&layout, RECOVERY_WAIT)
+    recover_install_at(&layout, RECOVERY_WAIT, unsafe { libc::geteuid() } == 0)
 }
 
-fn recover_install_at(layout: &InstallLayout, timeout: Duration) -> Result<Option<PathBuf>> {
+fn recover_install_at(
+    layout: &InstallLayout,
+    timeout: Duration,
+    is_root: bool,
+) -> Result<Recovery> {
     // Source/package builds have nothing to recover or sweep.
     let under_local =
         fs::canonicalize(&layout.local).is_ok_and(|local| layout.binary.starts_with(local));
-    if !layout.transaction().exists() && !under_local {
-        return Ok(None);
+    let journal_exists = layout.transaction().exists();
+    let lock_path = layout.binary.with_file_name(".rex-update.lock");
+    if !journal_exists {
+        // Housekeeping must never delay or warn on an ordinary launch. An active
+        // updater owns its staging directories; root must not sweep user files.
+        if under_local
+            && !is_root
+            && let Some(_lock) = FileLock::try_acquire(&lock_path)
+        {
+            let _ = sweep_staging(layout);
+        }
+        return Ok(Recovery::Unchanged);
     }
-    ensure!(
-        unsafe { libc::geteuid() } != 0,
-        "update recovery never runs as root"
-    );
+    ensure!(!is_root, "update recovery never runs as root");
     ensure!(
         under_local,
         "update recovery requires a user installation under ~/.local"
     );
-    let _lock = FileLock::acquire_timeout(
-        &layout.binary.with_file_name(".rex-update.lock"), timeout,
-    ).context("update recovery timed out waiting for another update, or install directory is not writable")?;
+    let _lock = FileLock::acquire_timeout(&lock_path, timeout)
+        .context("update recovery timed out waiting for another update, or install directory is not writable")?;
     // Recheck the journal under the lock: another process may have completed it.
-    sweep_staging(layout)?;
-    let rolled_back = recover(layout)?;
-    Ok(rolled_back.then(|| layout.binary.clone()))
+    let recovery = recover(layout)?;
+    let _ = sweep_staging(layout);
+    Ok(recovery)
 }
 
 /// Download and install a freshly re-verified manifest, never trusting cached UI metadata.
@@ -655,11 +678,18 @@ fn sweep_staging(layout: &InstallLayout) -> Result<()> {
     Ok(())
 }
 
-/// True only when an interrupted transaction actually replaced the binary back.
-fn recover(layout: &InstallLayout) -> Result<bool> {
+/// Report whether rollback restored the binary or a later install superseded it.
+fn recover(layout: &InstallLayout) -> Result<Recovery> {
+    recover_with_cleanup(layout, cleanup_transaction)
+}
+
+fn recover_with_cleanup(
+    layout: &InstallLayout,
+    cleanup: impl FnOnce(&InstallLayout) -> Result<()>,
+) -> Result<Recovery> {
     let tx = layout.transaction();
     if !tx.exists() {
-        return Ok(false);
+        return Ok(Recovery::Unchanged);
     }
     let mut restored_binary = false;
     if !tx.join("committed").exists() {
@@ -697,8 +727,8 @@ fn recover(layout: &InstallLayout) -> Result<bool> {
             } else if current == Some(journal.new_inodes[i]) {
                 replaced.push(true);
             } else {
-                cleanup_transaction(layout)?;
-                return Ok(false);
+                cleanup(layout)?;
+                return Ok(Recovery::Superseded);
             }
         }
         original.validate_paths()?;
@@ -737,8 +767,14 @@ fn recover(layout: &InstallLayout) -> Result<bool> {
         File::create(tx.join("committed"))?.sync_all()?;
         sync_dir(&tx)?;
     }
-    cleanup_transaction(layout)?;
-    Ok(restored_binary)
+    // A completed rollback still requires re-exec even if retiring the journal
+    // fails. Its durable marker makes a later cleanup safe.
+    let _ = cleanup(layout);
+    Ok(if restored_binary {
+        Recovery::Restored(layout.binary.clone())
+    } else {
+        Recovery::Unchanged
+    })
 }
 
 fn refresh_caches(layout: &InstallLayout) {

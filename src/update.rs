@@ -780,6 +780,32 @@ impl UpdateState {
         Ok(())
     }
 
+    /// Change only notice preferences against the latest persisted state. A stale
+    /// workspace must never overwrite verified release metadata or its high-water mark.
+    pub fn dismiss(path: &Path, version: &str) -> Result<Self> {
+        Self::modify_notices(path, |state| {
+            state.dismissed_version = Some(version.to_owned());
+            state.announced_version = Some(version.to_owned());
+        })
+    }
+
+    pub fn announce(path: &Path, version: &str, manual: bool) -> Result<Self> {
+        Self::modify_notices(path, |state| {
+            if manual && state.dismissed_version.as_deref() == Some(version) {
+                state.dismissed_version = None;
+            }
+            state.announced_version = Some(version.to_owned());
+        })
+    }
+
+    fn modify_notices(path: &Path, modify: impl FnOnce(&mut Self)) -> Result<Self> {
+        let _lock = lock_update_state(path)?;
+        let mut state = Self::load(path);
+        modify(&mut state);
+        state.save(path)?;
+        Ok(state)
+    }
+
     /// Whether a background check is due at `now_epoch_secs`.
     pub fn is_due(&self, now_epoch_secs: u64) -> bool {
         match self.last_checked {
@@ -886,9 +912,9 @@ pub fn now_epoch_secs() -> u64 {
 
 /// Perform a verified release metadata check and update the persistent state file under an advisory lock.
 pub fn check_for_updates(config: &CheckConfig, force: bool) -> Result<(CheckOutcome, UpdateState)> {
-    let _lock = lock_update_state(&config.state_path)?;
+    let lock = lock_update_state(&config.state_path)?;
 
-    let mut state = UpdateState::load(&config.state_path);
+    let state = UpdateState::load(&config.state_path);
     let now = now_epoch_secs();
     if !force && !state.is_due(now) {
         if let Some(avail) = state.available_update(&config.current_version) {
@@ -919,12 +945,21 @@ pub fn check_for_updates(config: &CheckConfig, force: bool) -> Result<(CheckOutc
         ));
     }
 
+    drop(lock);
     let manifest = fetch_verified_manifest(config)?;
 
-    apply_verified_manifest(&mut state, &config.current_version, &manifest, now).map(|outcome| {
-        let _ = state.save(&config.state_path);
-        (outcome, state)
-    })
+    // Network requests can take tens of seconds. Merge into the state written by
+    // other checks, installers or notice actions while this fetch was in flight.
+    let _lock = lock_update_state(&config.state_path)?;
+    let mut state = UpdateState::load(&config.state_path);
+    let outcome = apply_verified_manifest(
+        &mut state,
+        &config.current_version,
+        &manifest,
+        now_epoch_secs(),
+    )?;
+    state.save(&config.state_path)?;
+    Ok((outcome, state))
 }
 
 fn fetch_verified_manifest(config: &CheckConfig) -> Result<ReleaseManifest> {
@@ -1182,6 +1217,98 @@ mod tests {
         let guidance = InstallChannel::Tarball.cli_guidance("99.0.0");
         assert!(guidance.contains(INSTALL_SCRIPT_COMMAND));
         assert!(!guidance.contains("Update now") && !guidance.contains("Copy command"));
+    }
+
+    #[test]
+    fn notice_saves_preserve_newer_verified_state_and_other_notice_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.json");
+        let original = UpdateState {
+            highest_verified: Some("99.0.0".into()),
+            latest_version: Some("99.0.0".into()),
+            last_checked: Some(123),
+            dismissed_version: Some("99.0.0".into()),
+            ..UpdateState::default()
+        };
+        original.save(&path).unwrap();
+        let announced = UpdateState::announce(&path, "0.8.0", true).unwrap();
+        assert_eq!(announced.highest_verified, original.highest_verified);
+        assert_eq!(announced.latest_version, original.latest_version);
+        assert_eq!(announced.dismissed_version, original.dismissed_version);
+        let dismissed = UpdateState::dismiss(&path, "0.8.0").unwrap();
+        assert_eq!(dismissed.highest_verified, original.highest_verified);
+        assert_eq!(dismissed.last_checked, original.last_checked);
+        assert_eq!(dismissed.dismissed_version.as_deref(), Some("0.8.0"));
+        let resurfaced = UpdateState::announce(&path, "0.8.0", true).unwrap();
+        assert_eq!(resurfaced.dismissed_version, None);
+        assert_eq!(resurfaced.highest_verified, original.highest_verified);
+        assert_eq!(UpdateState::load(&path), resurfaced);
+    }
+
+    #[test]
+    fn network_check_releases_state_lock_and_merges_concurrent_writes() {
+        for highest in ["0.8.0", "0.9.0"] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("state.json");
+            let (key_id, pair, key) = test_keypair();
+            let bytes = sample_manifest_json("0.8.0", "0.7.0");
+            let signature =
+                sign_minisig(&key_id, &pair, &bytes, "rex-linux v0.8.0 latest.json", true);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let state_path = path.clone();
+            let server = std::thread::spawn(move || {
+                for body in [bytes, signature.into_bytes()] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = [0; 4096];
+                    assert!(stream.read(&mut request).unwrap() > 0);
+                    // A real fetch is now waiting for this response. Installers
+                    // and UI preference saves must be able to acquire the lock.
+                    let lock = lock_update_state(&state_path).unwrap();
+                    UpdateState {
+                        highest_verified: Some(highest.into()),
+                        dismissed_version: Some("0.8.0".into()),
+                        announced_version: Some("0.8.0".into()),
+                        ..UpdateState::default()
+                    }
+                    .save(&state_path)
+                    .unwrap();
+                    drop(lock);
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&body).unwrap();
+                }
+            });
+            let config = CheckConfig {
+                current_version: "0.7.3".into(),
+                manifest_url: format!("{base}/latest.json"),
+                signature_url: format!("{base}/latest.json.minisig"),
+                public_keys: vec![key],
+                state_path: path.clone(),
+                allow_loopback_http: true,
+            };
+            let result = check_for_updates(&config, true);
+            server.join().unwrap();
+            if highest == "0.8.0" {
+                let (_, state) = result.unwrap();
+                assert_eq!(state.latest_version.as_deref(), Some("0.8.0"));
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("refusing rollback")
+                );
+            }
+            let state = UpdateState::load(&path);
+            assert_eq!(state.highest_verified.as_deref(), Some(highest));
+            assert_eq!(state.dismissed_version.as_deref(), Some("0.8.0"));
+            assert_eq!(state.announced_version.as_deref(), Some("0.8.0"));
+        }
     }
 
     // Deterministic test keypair generated exclusively for unit tests.

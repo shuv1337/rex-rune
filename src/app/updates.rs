@@ -180,7 +180,13 @@ pub fn section(s: &Workspace) -> El {
         "Not checked yet.".into()
     };
 
-    let check_button = if u.checking {
+    let check_button = if u.installation.busy() {
+        unavailable(
+            "updates-check-now",
+            "Check now",
+            "Restart after the update to check again",
+        )
+    } else if u.checking {
         unavailable("updates-checking", "Checking…", "")
     } else {
         button("updates-check-now", "Check now", Pill::Neutral, |s, _| {
@@ -252,7 +258,7 @@ pub fn section(s: &Workspace) -> El {
         let version_for_dismiss = avail.version.clone();
         let can_install = u.channel == InstallChannel::Tarball && avail.unsupported_floor.is_none();
         let mut actions = col().gap(8.);
-        if can_install && !u.installation.busy() {
+        if can_install && !u.installation.busy() && !u.checking {
             actions = actions.child(button(
                 "updates-install-now",
                 "Update now",
@@ -439,7 +445,10 @@ impl Workspace {
     // Settings-only actions: intentionally absent from Commands and remote client.perform.
     // Installing and re-exec must remain local, deliberate actions (or explicit saved opt-in).
     pub fn install_update_now(&mut self) {
-        if self.updates.channel != InstallChannel::Tarball || self.updates.installation.busy() {
+        if self.updates.channel != InstallChannel::Tarball
+            || self.updates.installation.busy()
+            || self.updates.checking
+        {
             return;
         }
         let Some(available) = self
@@ -509,9 +518,10 @@ impl Workspace {
     }
 
     pub fn dismiss_update_version(&mut self, version: &str) {
-        self.updates.state.dismissed_version = Some(version.to_owned());
-        self.updates.state.announced_version = Some(version.to_owned());
-        let _ = self.updates.state.save(&self.updates.config.state_path);
+        match UpdateState::dismiss(&self.updates.config.state_path, version) {
+            Ok(state) => self.updates.state = state,
+            Err(error) => self.notify(format!("Could not save update dismissal: {error:#}")),
+        }
     }
 
     pub fn open_updates_settings(&mut self) {
@@ -553,7 +563,7 @@ impl Workspace {
     }
 
     fn spawn_update_check(&mut self, manual: bool) {
-        if self.updates.checking {
+        if self.updates.checking || self.updates.installation.busy() {
             return;
         }
         self.updates.checking = true;
@@ -582,24 +592,23 @@ impl Workspace {
         match result {
             Ok((outcome, mut state)) => {
                 self.updates.last_error = None;
-                if state.dismissed_version.is_none()
-                    && let Some(dismissed) = &self.updates.state.dismissed_version
-                {
-                    state.dismissed_version = Some(dismissed.clone());
-                }
                 match &outcome {
                     CheckOutcome::UpdateAvailable { version, .. }
                     | CheckOutcome::UnsupportedFloor {
                         latest: version, ..
                     } => {
-                        if manual && state.dismissed_version.as_deref() == Some(version.as_str()) {
-                            // An explicit Check now resurfaces a previously dismissed notice.
-                            state.dismissed_version = None;
+                        match UpdateState::announce(
+                            &self.updates.config.state_path,
+                            version,
+                            manual,
+                        ) {
+                            Ok(latest) => state = latest,
+                            Err(error) => {
+                                if manual {
+                                    self.notify(format!("Could not save update notice: {error:#}"));
+                                }
+                            }
                         }
-                        if state.announced_version.as_deref() != Some(version.as_str()) {
-                            state.announced_version = Some(version.clone());
-                        }
-                        let _ = state.save(&self.updates.config.state_path);
                     }
                     CheckOutcome::UpToDate { version } => {
                         if manual {
