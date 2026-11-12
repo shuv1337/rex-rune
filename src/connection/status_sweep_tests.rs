@@ -204,3 +204,115 @@ async fn sweep_new_panes_and_sessions_join_once_and_reconnect_restarts_one_pass(
     drop(host);
     server.await.unwrap();
 }
+
+fn block_event(seq: u64, session: &str, block: &str, name: &str, payload: Value) -> Value {
+    json!({"type":"event","seq":seq,"payload":{"type":"session_event","payload":{
+        "session_id":session,"event":{"type":"block_event","payload":{"block_id":block,
+            "creator_name":activity::TERMINAL,"name":name,"payload":payload}}}}})
+}
+
+#[tokio::test]
+async fn a_record_removed_while_its_read_was_out_is_not_brought_back() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 13).await;
+        let request = recv(&mut ws).await;
+        reply(&mut ws, &request, 1, boot_with(&[OTHER])).await;
+        let request = prefetched(&mut ws, OTHER).await;
+        reply(&mut ws, &request, 2, terminal_view(OTHER, &["b"])).await;
+        // The answer says Blocked; the program's record is removed right behind it. A
+        // detached reply is handled after the event that follows it on the wire.
+        let request = status(&mut ws, OTHER, "b").await;
+        // Both frames in one flush, so the client reads the event right behind the reply.
+        for frame in [
+            json!({"type":"response","id":request["id"],"seq":3,
+                "payload":{"records":[{"id":"","state":"blocked"}]}}),
+            block_event(4, OTHER, "b", "program_status_removed", json!({"ids":[""]})),
+        ] {
+            ws.feed(Message::Text(frame.to_string().into()))
+                .await
+                .unwrap();
+        }
+        ws.flush().await.unwrap();
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    until(&host, |m| {
+        m.views.contains_key(OTHER) && !m.activity_reading
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let m = host.model.lock().unwrap();
+        assert!(
+            !m.activity.contains_key("b"),
+            "the removed record came back: {:?}",
+            m.activity.get("b")
+        );
+        assert!(!m.activity_incomplete);
+    }
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_live_report_for_an_unreached_session_reads_its_layout_next_and_stays_live() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 13).await;
+        let request = recv(&mut ws).await;
+        reply(&mut ws, &request, 1, boot_with(&[OTHER, THIRD])).await;
+        // The pass starts on the first other session. While that read is out, a program
+        // in the last session reports that it needs the person.
+        let first = prefetched(&mut ws, OTHER).await;
+        send(
+            &mut ws,
+            block_event(
+                2,
+                THIRD,
+                "z",
+                "program_status_changed",
+                json!({"id":"","record":{"state":"blocked"}}),
+            ),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        reply(&mut ws, &first, 3, terminal_view(OTHER, &["b"])).await;
+        // Its layout is read next, ahead of the first session's pane.
+        let urgent = prefetched(&mut ws, THIRD).await;
+        reply(&mut ws, &urgent, 4, terminal_view(THIRD, &["z"])).await;
+        let request = status(&mut ws, OTHER, "b").await;
+        reply(&mut ws, &request, 5, json!({"records":[]})).await;
+        // The read of the reporting pane answers with something older than the report.
+        let request = status(&mut ws, THIRD, "z").await;
+        reply(
+            &mut ws,
+            &request,
+            6,
+            json!({"records":[{"id":"","state":"working"}]}),
+        )
+        .await;
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    until(&host, |m| {
+        m.views.contains_key(OTHER) && m.views.contains_key(THIRD) && !m.activity_reading
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    {
+        let m = host.model.lock().unwrap();
+        let record = &m.activity["z"][""];
+        assert_eq!(record.state, activity::ProgramState::Blocked);
+        assert!(record.live, "still news, so the app can notify");
+        // Both layouts are held for activity only: neither session was opened.
+        assert!(m.background_views.contains(OTHER) && m.background_views.contains(THIRD));
+        assert!(!m.background_views.contains(SESSION));
+    }
+    drop(host);
+    server.await.unwrap();
+}

@@ -230,6 +230,10 @@ pub struct HostModel {
     /// Most recent read-only directory reply; only its browser/request may consume it.
     pub directory: Option<Arc<directory::Reply>>,
     pub views: HashMap<String, session::ViewResponse>,
+    /// Sessions whose layout is held only for activity: read in the background and never
+    /// selected on this connection. The app lists and steps through their tabs only where
+    /// it lists them, so knowing a layout is not the same as having opened the session.
+    pub background_views: HashSet<String>,
     pub terminals: HashMap<String, Connection>,
     /// Each terminal block's OSC 7501 records, by record id (empty for the root record).
     pub activity: HashMap<String, BTreeMap<String, StatusRecord>>,
@@ -507,8 +511,20 @@ struct ControlState {
     queried: HashSet<String>,
     status_queried: HashSet<String>,
     status_failed: HashSet<String>,
+    /// The block whose background status read is out, and the record ids removed live
+    /// meanwhile: a detached reply is handled after events that arrived behind it, so
+    /// the read must not bring those records back.
+    status_reading: Option<String>,
+    status_removed: HashSet<String>,
     /// Sessions whose initial background session.view was attempted (including failures).
     viewed: HashSet<String>,
+    /// Unplaced sessions a live report arrived for: their layout is read next, ahead of
+    /// the rest of the pass, so the report's tab (and its notification) does not wait.
+    urgent_views: Vec<String>,
+    /// The session whose background layout read is out, and whether its layout changed
+    /// meanwhile: that change was ignored for want of a layout, so it is read once more.
+    view_reading: Option<String>,
+    view_stale: bool,
     /// The theme last declared to each block on this connection.
     themed: HashMap<String, SetTheme>,
     // This pool is scoped to the terminal data ref and subprotocol; other sources
@@ -1067,7 +1083,8 @@ async fn query_activity(control: &mut Client, shared: &Shared, state: &mut Contr
         let method = format!("{}.program_status", activity::TERMINAL);
         if state.status_queried.insert(block.clone()) {
             let reply = request(control, &method, target.clone()).await.ok();
-            status_sweep::record(shared, state, &session, &block, reply);
+            // Awaited: events that arrive meanwhile are applied after this, in order.
+            status_sweep::record(shared, state, &session, &block, reply, &HashSet::new());
         }
         let method = format!("{}.title", activity::TERMINAL);
         if let Ok(reply) = request(control, &method, target.clone()).await {
@@ -1260,6 +1277,9 @@ async fn handle_event(
                         .is_some_and(|new| new > revision)
                 }) {
                     refresh(control, shared, state, id).await?;
+                } else if revision.is_none() && state.view_reading.as_deref() == Some(id) {
+                    // The reply on its way may predate this change.
+                    state.view_stale = true;
                 }
             }
         }
@@ -1316,8 +1336,23 @@ async fn handle_event(
             ) else {
                 return Ok(());
             };
+            if let BlockEvent::StatusRemoved { ids } = &change
+                && state.status_reading.as_deref() == Some(block.as_str())
+            {
+                state.status_removed.extend(ids.iter().cloned());
+            }
+            let unplaced = {
+                let m = shared.model.lock().expect("host model");
+                !m.views.contains_key(id) && m.sessions.iter().any(|s| s.session_id == id)
+            };
             shared.update(|m| m.apply_block_event(id, block, change));
-            // The paced sweep places unviewed sessions without holding up this event.
+            // Read-only, and allowed for any session once attach_all is active. The layout
+            // read is left to the paced background reader, so it never holds this event up,
+            // but it goes to the front: a live report should not wait for the whole pass.
+            if unplaced && !state.viewed.contains(id) && !state.urgent_views.iter().any(|s| s == id)
+            {
+                state.urgent_views.push(id.to_owned());
+            }
         }
         // Becoming the owner, even without a resize, makes the block themable.
         "block_owner_changed" => {
@@ -1387,6 +1422,7 @@ async fn run_host(
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
                 m.views.clear();
+                m.background_views.clear();
                 // Reports made while disconnected were missed; the per-connection pass refills them.
                 m.activity.clear();
                 m.programs.clear();
@@ -1433,7 +1469,12 @@ async fn run_host(
                 select_session(&model.sessions, wanted.as_deref())
             };
             if selected.is_some() { preferred = None; }
-            shared.update(|m| m.selected = selected.clone());
+            shared.update(|m| {
+                if let Some(id) = &selected {
+                    m.background_views.remove(id);
+                }
+                m.selected = selected.clone();
+            });
             let session_ids: HashSet<_> = shared.model.lock().expect("host model").sessions.iter().map(|s| s.session_id.clone()).collect();
             let stale: HashSet<_> = workers.values().filter(|w| !session_ids.contains(&w.session)).map(|w| w.session.clone()).collect();
             for id in stale { remove_session(shared, &mut workers, &id); }
@@ -1508,6 +1549,8 @@ async fn run_host(
                         match next {
                             Some(status_sweep::Work::Status(session, block)) => {
                                 state.status_queried.insert(block.clone());
+                                state.status_reading = Some(block.clone());
+                                state.status_removed.clear();
                                 sweep.start(&mut control, session, block).await?;
                             }
                             work => {
@@ -1517,12 +1560,17 @@ async fn run_host(
                                 };
                                 if let Some(id) = id {
                                     state.viewed.insert(id.clone());
+                                    state.urgent_views.retain(|s| *s != id);
+                                    state.view_reading = Some(id.clone());
+                                    state.view_stale = false;
                                     prefetch.start(&mut control, id).await?;
                                 }
                             }
                         }
                     }
                     (id, text) = prefetch.finished(), if prefetch.in_flight() => {
+                        state.view_reading = None;
+                        let stale = std::mem::take(&mut state.view_stale);
                         if let Some((seq, view)) = prefetch.result(&id, text, Instant::now()) {
                             let placed = {
                                 let m = shared.model.lock().expect("host model");
@@ -1531,11 +1579,23 @@ async fn run_host(
                             if !placed {
                                 state.view_seq.insert(id.clone(), seq);
                                 apply_view(shared, &id, view);
+                                shared.update(|m| {
+                                    if m.selected.as_deref() != Some(id.as_str()) {
+                                        m.background_views.insert(id.clone());
+                                    }
+                                });
+                                // Its layout changed while this read was out, and that
+                                // event had no layout to compare with: read it once more.
+                                if stale {
+                                    let _ = refresh(&mut control, shared, &mut state, &id).await;
+                                }
                             }
                         }
                     }
                     (session, block, reply) = sweep.finished(), if sweep.in_flight() => {
-                        status_sweep::record(shared, &mut state, &session, &block, reply);
+                        state.status_reading = None;
+                        let removed = std::mem::take(&mut state.status_removed);
+                        status_sweep::record(shared, &mut state, &session, &block, reply, &removed);
                     }
                     reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
                     _ = directory_reads.finished(shared), if directory_reads.in_flight() => {}
@@ -1871,6 +1931,7 @@ async fn handle_command(
                 refresh(control, shared, state, &session).await?;
             }
             shared.update(|m| {
+                m.background_views.remove(&session);
                 m.selected = Some(session);
                 m.notice = None;
             });
@@ -1878,6 +1939,7 @@ async fn handle_command(
         HostCommand::Select(id) => {
             attach(control, shared, state, &id).await?;
             shared.update(|m| {
+                m.background_views.remove(&id);
                 m.selected = Some(id);
                 m.notice = None;
             });
@@ -1903,6 +1965,7 @@ async fn handle_command(
             list(control, shared, state).await?;
             attach(control, shared, state, id).await?;
             shared.update(|m| {
+                m.background_views.remove(id);
                 m.selected = Some(id.into());
                 m.notice = None;
             });

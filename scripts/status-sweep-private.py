@@ -31,6 +31,8 @@ BASE.mkdir(parents=True, exist_ok=True)
 parser = argparse.ArgumentParser()
 parser.add_argument("--bench", type=int)
 parser.add_argument("--native", action="store_true")
+parser.add_argument("--delay-ms", type=float, default=0,
+                    help="bench only: hold every server-to-client frame this long, as a slow link would")
 args = parser.parse_args()
 assert bool(args.bench) != args.native
 binary = os.environ.get("REX_BIN", str(BASE / "target/release/rex-linux"))
@@ -166,6 +168,9 @@ class Proxy:
                         gated = direction == "sent" and message and message.get("method") == "session.view" and str(message.get("id")).startswith("detached:") and not self.gate.is_set()
                         if gated:
                             held.append(asyncio.create_task(release(frame)))
+                        elif args.delay_ms and direction == "received":
+                            # Same delay for every frame, so their order is kept.
+                            self.loop.call_later(args.delay_ms / 1000, dest.write, frame)
                         else:
                             dest.write(frame)
                     await dest.drain()
@@ -255,14 +260,18 @@ try:
         (work / "before.json").write_text(json.dumps(before, indent=2))
         cpu_start = cpu(server.pid)
         started = time.monotonic()
+        # The comparison read takes two round trips; keep its period well above that so the
+        # probe itself does not saturate the host loop on a delayed link.
+        os.environ["REX_SWEEP_PROBE_PERIOD_MS"] = str(int(max(100, 8 * args.delay_ms)))
         p = spawn([probe, proxy.endpoint, sessions[0]], "probe")
-        assert p.wait(timeout=120) == 0
+        assert p.wait(timeout=300) == 0
         cpu_end = cpu(server.pid)
         after = snapshot(sessions)
         (work / "after.json").write_text(json.dumps(after, indent=2))
         assert before == after, "read-only worker changed views/sizes/owners"
         result = summary(proxy.records)
         result.update(sessions=len(sessions), tabs=len(sessions)*5, panes=len(before["sizes"]),
+                      injected_delay_ms=args.delay_ms,
                       probe=json.loads((work / "probe.log").read_text()),
                       server_cpu_seconds_over_sweep=proxy.cpu_end-proxy.cpu_start,
                       server_cpu_seconds_including_5s_rest=cpu_end-cpu_start,

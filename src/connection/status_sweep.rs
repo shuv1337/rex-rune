@@ -14,6 +14,14 @@ pub(super) enum Work {
 /// server order. Attempt sets live for the whole connection, even after a failure/removal.
 pub(super) fn next(shared: &Shared, state: &ControlState) -> Option<Work> {
     let model = shared.model.lock().expect("host model");
+    // A session a live report arrived for goes first: still one read, through the same slot.
+    if let Some(id) = state.urgent_views.iter().find(|id| {
+        !state.viewed.contains(*id)
+            && !model.views.contains_key(*id)
+            && model.sessions.iter().any(|s| &s.session_id == *id)
+    }) {
+        return Some(Work::View(id.clone()));
+    }
     for session in &model.sessions {
         let id = &session.session_id;
         if let Some(view) = model.views.get(id) {
@@ -53,12 +61,26 @@ pub(super) fn record(
     session: &str,
     block: &str,
     reply: Option<Value>,
+    removed: &std::collections::HashSet<String>,
 ) {
     let Some(reply) = reply else {
         state.status_failed.insert(block.into());
         return;
     };
-    let records = activity::parse_status(&reply);
+    let mut records = activity::parse_status(&reply);
+    // Removed live while this read was out: the reply is older than the removal.
+    records.retain(|(id, _)| !removed.contains(id));
+    // Most panes report nothing: don't wake the app to tell it so.
+    if records.is_empty()
+        && !shared
+            .model
+            .lock()
+            .expect("host model")
+            .activity
+            .contains_key(block)
+    {
+        return;
+    }
     shared.update(|m| {
         if !m
             .views

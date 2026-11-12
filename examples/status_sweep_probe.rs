@@ -21,12 +21,21 @@ fn main() -> anyhow::Result<()> {
         false,
         None,
     );
+    // How often to send the comparison read. It must be well above the link's round trip:
+    // each read is awaited on the host loop with its follow-up, and a loop kept
+    // continuously busy gives background reads no turn at all.
+    let period = Duration::from_millis(
+        std::env::var("REX_SWEEP_PROBE_PERIOD_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100),
+    );
     let start = Instant::now();
     let mut connected = None;
     let mut finished = None;
     let mut last = Instant::now();
     loop {
-        anyhow::ensure!(start.elapsed() < Duration::from_secs(120), "sweep timeout");
+        anyhow::ensure!(start.elapsed() < Duration::from_secs(280), "sweep timeout");
         {
             let m = host.model.lock().unwrap();
             if m.connected {
@@ -45,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         if finished.is_some_and(|at| at.elapsed() >= Duration::from_secs(5)) {
             break;
         }
-        if connected.is_some() && last.elapsed() >= Duration::from_millis(100) {
+        if connected.is_some() && last.elapsed() >= period {
             // A selected-session read on the SAME host command loop during and after the
             // sweep. The wire proxy measures both this call and its normal view refresh.
             host.commands.send(HostCommand::Request {
