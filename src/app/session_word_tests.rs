@@ -350,7 +350,7 @@ fn the_switcher_says_the_same_word_for_sessions_out_of_sight() {
     assert!(row.detail.ends_with("Session"), "{}", row.detail);
     // What silences the sidebar word silences this one.
     ws.picker(true);
-    ws.settings.muted_tabs.push(rex_linux::settings::MutedTab {
+    ws.settings.muted_tabs.push(rex_rune::settings::MutedTab {
         endpoint: ws.settings.hosts[0].endpoint.clone(),
         session: "other".into(),
         window: "agent".into(),
