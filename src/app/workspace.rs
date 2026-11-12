@@ -675,7 +675,10 @@ impl Workspace {
         if focused {
             self.claimed.clear();
             self.claim_visible();
+            // Seeing the tab on screen can take its row out of an open Activity list.
+            let selection = self.activity_selection();
             self.track_activity(self.active);
+            self.restore_activity_selection(selection);
         }
     }
 

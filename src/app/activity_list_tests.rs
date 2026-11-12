@@ -244,6 +244,37 @@ fn live_model_updates_keep_the_same_selected_tab() {
 }
 
 #[test]
+fn regaining_window_focus_keeps_the_same_selected_tab() {
+    let (mut ws, _rx) = fixture();
+    // The tab on screen finished while the window was away, so it is latched Done and
+    // listed above the rows that follow it.
+    ws.window_focused = false;
+    ws.hosts[0]
+        .model
+        .activity
+        .get_mut("front")
+        .unwrap()
+        .get_mut("")
+        .unwrap()
+        .state = ProgramState::Idle;
+    let front = (ws.hosts[0].id, "front".to_owned());
+    ws.unseen_done.insert(front.clone());
+    ws.show_activity();
+    let chosen = target(&ws, 1, "other", "build");
+    let before = ws
+        .entries()
+        .iter()
+        .position(|e| matches!(&e.action, Intent::ActivityTab(t) if *t == chosen))
+        .unwrap();
+    ws.panel.as_mut().unwrap().selected = before;
+    // Coming back sees that tab: its row leaves, and the rows below move up.
+    ws.window_focus(true);
+    assert!(!ws.unseen_done.contains(&front));
+    assert_eq!(ws.activity_selection(), Some(chosen));
+    assert_eq!(ws.panel.as_ref().unwrap().selected, before - 1);
+}
+
+#[test]
 fn choosing_uses_notification_navigation_and_only_acknowledged_view_clears_latches() {
     let (mut ws, rx) = fixture();
     let chosen = target(&ws, 1, "s", "done");
