@@ -17,6 +17,7 @@ use std::{
 
 pub mod activity;
 pub mod clipboard;
+pub mod directory;
 pub mod downloads;
 mod prefetch;
 pub mod server_info;
@@ -225,6 +226,8 @@ pub struct HostModel {
     pub selected: Option<String>,
     /// Completion of the latest client navigation request (id, success), not a notice.
     pub navigation_result: Option<(u64, bool)>,
+    /// Most recent read-only directory reply; only its browser/request may consume it.
+    pub directory: Option<Arc<directory::Reply>>,
     pub views: HashMap<String, session::ViewResponse>,
     pub terminals: HashMap<String, Connection>,
     /// Each terminal block's OSC 7501 records, by record id (empty for the root record).
@@ -461,6 +464,7 @@ pub enum HostCommand {
     /// Download a file from the block's machine into a folder here (API revision 13). The
     /// transfer appears in `HostModel::downloads` under the request's id.
     Download(Box<downloads::Request>),
+    ListDir(Box<directory::Request>),
     /// Start the stream of a download that is `AwaitingConfirmation`.
     DownloadConfirm(u64),
     /// Stop a download at any point; its partial file is deleted.
@@ -1547,6 +1551,10 @@ async fn run_host(
                             }
                             continue;
                         }
+                        if let HostCommand::ListDir(request) = command {
+                            directory::run(&mut control, shared, *request).await;
+                            continue;
+                        }
                         if let HostCommand::Download(request) = command {
                             downloads.start(&mut control, shared, &endpoint, *request, crate::download::new_ref).await?;
                             continue;
@@ -1616,6 +1624,7 @@ async fn run_host(
                     Ok(HostCommand::Identify) => server_reads.want(),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
                     Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
+                    Ok(HostCommand::ListDir(request)) => directory::finish(shared, &request, Err(directory::Failure::Disconnected)),
                     Ok(HostCommand::Download(request)) => downloads::refuse(shared, *request, crate::download::Failure::Disconnected),
                     Ok(HostCommand::DownloadConfirm(_) | HostCommand::DownloadCancel(_)) => {}
                     Ok(HostCommand::Terminal { block, command: Command::Selection(input), .. }) => {
@@ -1645,6 +1654,9 @@ async fn run_host(
                 }
                 HostCommand::Terminal { block, command, .. } => {
                     forward_search(&workers, &block, &command);
+                }
+                HostCommand::ListDir(request) => {
+                    directory::finish(shared, &request, Err(directory::Failure::Disconnected))
                 }
                 HostCommand::Download(request) => {
                     downloads::refuse(shared, *request, crate::download::Failure::Disconnected)
@@ -2068,7 +2080,8 @@ async fn handle_command(
                 }
             }
         }
-        HostCommand::Reconnect
+        HostCommand::ListDir(_)
+        | HostCommand::Reconnect
         | HostCommand::Shutdown
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)

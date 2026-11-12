@@ -9,6 +9,25 @@ use rune::Tx;
 use std::path::PathBuf;
 
 impl Workspace {
+    /// Shared text paste route for clipboard text and Insert path. No replay or extra key.
+    pub fn paste_text(&mut self, target: &super::panel::PaneTarget, text: String) {
+        if !self.target_exists(target) {
+            self.inform("That pane is no longer available.");
+            return;
+        }
+        let key = (self.hosts[target.host].id, target.block.clone());
+        if !self.hosts[target.host].model.connected
+            || !self.terminals.get(&key).is_some_and(|t| t.status().live)
+        {
+            self.inform("Input not sent: terminal is not live.");
+            return;
+        }
+        self.terminals
+            .get_mut(&key)
+            .unwrap()
+            .send(Command::Paste(text));
+    }
+
     /// Upload `files` to `block` of the active session. The block is fixed now; later focus
     /// changes don't move where the paths are typed.
     pub fn upload(&mut self, block: &str, files: Vec<File>) {
@@ -58,7 +77,8 @@ impl Workspace {
     /// as it is still a pane of that session. Either way nothing is pasted under a dialog.
     pub fn paste_into(&mut self, block: &str, while_focused: bool, tx: &mut Tx) {
         let asked = self.term_key(block);
-        if !self.terminals.get(&asked).is_some_and(|t| t.status().live) {
+        if !self.model().connected || !self.terminals.get(&asked).is_some_and(|t| t.status().live) {
+            self.inform("Input not sent: terminal is not live.");
             return;
         }
         let session = self.model().selected.clone();
@@ -77,8 +97,8 @@ impl Workspace {
                 let files = content.files().iter().cloned().map(File::path).collect();
                 s.upload(&asked.1, files);
             } else if !content.text().is_empty() {
-                if let Some(term) = s.terminals.get_mut(&asked) {
-                    term.send(Command::Paste(content.text().to_owned()));
+                if let Some(target) = s.target(&asked.1) {
+                    s.paste_text(&target, content.text().to_owned());
                 }
             } else if let Some(image) = content.image() {
                 s.upload(&asked.1, vec![File::bytes("clipboard.png", image.png())]);

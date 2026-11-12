@@ -1,0 +1,136 @@
+//! Actual control-wire checks: no terminal input, claim, layout request or replay.
+use super::*;
+use crate::connection::directory::{Failure, Request};
+use rexrs::api::terminal::ListDir;
+
+fn listing(id: u64, epoch: u64, open: &Arc<()>) -> Request {
+    Request {
+        id,
+        epoch,
+        session: SESSION.into(),
+        block: "block:test".into(),
+        args: ListDir::new().path("~/tree/").prefix("a").files(true),
+        deadline: Instant::now() + Duration::from_secs(8),
+        open: Arc::downgrade(open),
+    }
+}
+async fn answer(host: &HostConnection, id: u64) -> Arc<directory::Reply> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(reply) = host
+                .model
+                .lock()
+                .unwrap()
+                .directory
+                .clone()
+                .filter(|r| r.id == id)
+            {
+                return reply;
+            }
+            host.wake.recv_async().await.unwrap();
+        }
+    })
+    .await
+    .unwrap()
+}
+async fn start(listener: &TcpListener) -> WebSocketStream<TcpStream> {
+    let mut ws = accept(listener, "rex.control.v1").await;
+    welcome(&mut ws, 13).await;
+    let bootstrap = recv(&mut ws).await;
+    assert_eq!(bootstrap["method"], "session.bootstrap");
+    send(
+        &mut ws,
+        json!({"type":"response","id":bootstrap["id"],"seq":1,"payload":boot()}),
+    )
+    .await;
+    ws
+}
+
+#[tokio::test]
+async fn directory_reads_only_list_and_cancels_closed_old_epoch_and_expired_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = start(&listener).await;
+        for code in [None, Some("method_not_found"), Some("internal")] {
+            let request = recv(&mut ws).await;
+            assert_eq!(request["method"], "com.superlogical.terminal.list_dir");
+            assert_eq!(
+                request["payload"],
+                json!({"session_id":SESSION,"block_id":"block:test",
+                "args":{"path":"~/tree/","prefix":"a","files":true}})
+            );
+            let response = if let Some(code) = code {
+                json!({"type":"response","id":request["id"],"error":{"code":code,"message":"fixture refusal","status":404}})
+            } else {
+                json!({"type":"response","id":request["id"],"payload":{"path":"/home/dev/tree","home":"/home/dev","status":"ok","entries":[{"name":"a b","file":true}],"truncated":false}})
+            };
+            send(&mut ws, response).await;
+        }
+        assert!(
+            matches!(ws.next().await, Some(Ok(Message::Close(_)))),
+            "nothing follows a listing except shutdown"
+        );
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let open = Arc::new(());
+    let closed = listing(1, 1, &Arc::new(()));
+    host.commands
+        .send(HostCommand::ListDir(Box::new(closed)))
+        .unwrap();
+    host.commands
+        .send(HostCommand::ListDir(Box::new(listing(2, 0, &open))))
+        .unwrap();
+    assert_eq!(answer(&host, 2).await.result, Err(Failure::Disconnected));
+    let mut expired = listing(3, 1, &open);
+    expired.deadline = Instant::now();
+    host.commands
+        .send(HostCommand::ListDir(Box::new(expired)))
+        .unwrap();
+    assert_eq!(answer(&host, 3).await.result, Err(Failure::Timeout));
+    for (id, failure) in [
+        (4, None),
+        (5, Some(Failure::Unsupported)),
+        (6, Some(Failure::Request)),
+    ] {
+        host.commands
+            .send(HostCommand::ListDir(Box::new(listing(id, 1, &open))))
+            .unwrap();
+        let reply = answer(&host, id).await;
+        assert_eq!(reply.epoch, 1);
+        if let Some(failure) = failure {
+            assert_eq!(reply.result, Err(failure));
+        } else {
+            assert_eq!(reply.result.as_ref().unwrap().entries[0].name, "a b");
+        }
+    }
+    assert!(host.model.lock().unwrap().connected);
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_silent_directory_request_times_out_once_without_input_or_replay() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = start(&listener).await;
+        assert_eq!(
+            recv(&mut ws).await["method"],
+            "com.superlogical.terminal.list_dir"
+        );
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let open = Arc::new(());
+    let mut request = listing(1, 1, &open);
+    request.deadline = Instant::now() + Duration::from_millis(100);
+    host.commands
+        .send(HostCommand::ListDir(Box::new(request)))
+        .unwrap();
+    assert_eq!(answer(&host, 1).await.result, Err(Failure::Timeout));
+    drop(host);
+    server.await.unwrap();
+}
