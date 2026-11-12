@@ -1,10 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Toolbar visibility (focused M2.7):** Settings → Interface → Toolbar visibility offers Always show (unchanged default), Show on hover and Hidden. Hidden modes give the 52 pt row to the terminals; hovering the top edge or **Reveal toolbar** (`Ctrl Alt Shift T`, Commands and Shortcuts) floats it without resizing their content. The action is local-only and temporary. Downloads and pending key sequences still have visible chips; notices and window-manager Move/Close remain available. This recovers only the toolbar slice of preserved W2, not its other interface changes. See [scope and checks](docs/plans/m2.7-toolbar-visibility.md).
+
 ## 0.7.2 - 2026-11-11
 
 Searchable Shortcuts and a shortcut recorder, previous and next shell prompt navigation, Settings search and Back/Forward navigation, and opt-in generated pane and tab titles adapted from Matt Porter's work.
-
-- **Toolbar visibility (focused M2.7):** Settings → Interface → Toolbar visibility offers Always show (unchanged default), Show on hover and Hidden. Hidden modes give the 52 pt row to the terminals; hovering the top edge or **Reveal toolbar** (`Ctrl Alt Shift T`, Commands and Shortcuts) floats it without resizing their content. The action is local-only and temporary. Downloads and pending key sequences still have visible chips; notices and window-manager Move/Close remain available. This recovers only the toolbar slice of preserved W2, not its other interface changes. See [scope and checks](docs/plans/m2.7-toolbar-visibility.md).
 
 ### Added
 
