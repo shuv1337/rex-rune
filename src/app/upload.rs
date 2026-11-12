@@ -9,7 +9,8 @@ use rune::Tx;
 use std::path::PathBuf;
 
 impl Workspace {
-    /// Shared text paste route for clipboard text and Insert path. No replay or extra key.
+    /// Text into a captured pane as a paste, the event clipboard text is sent as: for Insert
+    /// path. Sent once, with no key after it; a pane that is gone or not live is told so.
     pub fn paste_text(&mut self, target: &super::panel::PaneTarget, text: String) {
         if !self.target_exists(target) {
             self.inform("That pane is no longer available.");
@@ -19,7 +20,7 @@ impl Workspace {
         if !self.hosts[target.host].model.connected
             || !self.terminals.get(&key).is_some_and(|t| t.status().live)
         {
-            self.inform("Input not sent: terminal is not live.");
+            self.inform("A path can be inserted only into a live terminal.");
             return;
         }
         self.terminals
@@ -77,8 +78,7 @@ impl Workspace {
     /// as it is still a pane of that session. Either way nothing is pasted under a dialog.
     pub fn paste_into(&mut self, block: &str, while_focused: bool, tx: &mut Tx) {
         let asked = self.term_key(block);
-        if !self.model().connected || !self.terminals.get(&asked).is_some_and(|t| t.status().live) {
-            self.inform("Input not sent: terminal is not live.");
+        if !self.terminals.get(&asked).is_some_and(|t| t.status().live) {
             return;
         }
         let session = self.model().selected.clone();
@@ -97,8 +97,8 @@ impl Workspace {
                 let files = content.files().iter().cloned().map(File::path).collect();
                 s.upload(&asked.1, files);
             } else if !content.text().is_empty() {
-                if let Some(target) = s.target(&asked.1) {
-                    s.paste_text(&target, content.text().to_owned());
+                if let Some(term) = s.terminals.get_mut(&asked) {
+                    term.send(Command::Paste(content.text().to_owned()));
                 }
             } else if let Some(image) = content.image() {
                 s.upload(&asked.1, vec![File::bytes("clipboard.png", image.png())]);

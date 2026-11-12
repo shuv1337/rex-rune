@@ -358,7 +358,10 @@ fn typed_directory_enter_and_paused_refusal() {
     ws.submit(&mut rune::Tx::default());
     assert!(rx.is_empty());
     assert!(ws.panel.is_none());
-    assert!(ws.notices.last().unwrap().text.contains("not live"));
+    assert_eq!(
+        ws.notices.last().unwrap().text,
+        "A path can be inserted only into a live terminal."
+    );
 }
 #[test]
 fn disappearing_target_dismisses_instead_of_retargeting() {
