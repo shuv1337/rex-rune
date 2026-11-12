@@ -8,7 +8,7 @@ use super::{
     theme::{palette_of, set_palette},
     widgets::ScrollFx,
 };
-use rex_linux::{
+use rex_rune::{
     connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
     layout::{Divider, shell_layout},
     settings::{ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice, validate_host},
@@ -70,7 +70,7 @@ pub struct Workspace {
     /// Keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<super::bindings::Identity>,
     pub bindings: super::bindings::State,
-    pub local_keymap: rex_linux::keymap::Resolved,
+    pub local_keymap: rex_rune::keymap::Resolved,
     pub keymap_generation: u64,
     pub navigation: super::navigation::History,
     pub last_keypress: Option<std::time::Instant>,
@@ -131,6 +131,8 @@ pub struct Workspace {
     pub unseen_bells: HashSet<(HostId, String)>,
     pub activity_epochs: HashMap<HostId, u64>,
     pub notifier: Option<Notifier>,
+    pub sounds: super::sounds::Sounds,
+    pub sound_health: super::sounds::Health,
     /// Notifications headless tests would have sent.
     pub outbox: Vec<Note>,
     pub notification_health: super::notify::Health,
@@ -178,14 +180,14 @@ impl Workspace {
         let fonts = super::font_picker::FontState::new(&options, &settings);
         let explicit = options.session.is_some()
             || options.new.is_some()
-            || options.endpoint != rex_linux::transport::local_endpoint();
+            || options.endpoint != rex_rune::transport::local_endpoint();
         if !settings
             .hosts
             .iter()
             .any(|h| h.endpoint == options.endpoint)
         {
             settings.hosts.push(Host {
-                label: rex_linux::settings::endpoint_label(&options.endpoint),
+                label: rex_rune::settings::endpoint_label(&options.endpoint),
                 endpoint: options.endpoint.clone(),
                 remote_control: false,
                 collapsed: false,
@@ -282,6 +284,8 @@ impl Workspace {
             unseen_bells: HashSet::new(),
             activity_epochs: HashMap::new(),
             notifier: None,
+            sounds: Default::default(),
+            sound_health: Default::default(),
             outbox: Vec::new(),
             notification_health: Default::default(),
             notified_tabs: Default::default(),
@@ -592,7 +596,7 @@ impl Workspace {
             && self.window_focused
             && self.panel.is_none()
             && index == self.active
-            && rex_linux::connection::clipboard::accepts(
+            && rex_rune::connection::clipboard::accepts(
                 &self.hosts[index].model,
                 &copy.session,
                 &copy.block,
@@ -687,20 +691,20 @@ impl Workspace {
         }
     }
 
-    pub(super) fn keymap_declaration(&self) -> rex_linux::connection::keymap::Declaration {
+    pub(super) fn keymap_declaration(&self) -> rex_rune::connection::keymap::Declaration {
         let overrides = self.settings.shortcut_file.overrides.clone();
-        rex_linux::connection::keymap::Declaration {
+        rex_rune::connection::keymap::Declaration {
             generation: self.keymap_generation,
             request: rexrs::api::client::Keymap::new()
                 .actions(super::actions::declarations())
                 .server_actions("all")
-                .defaults([rex_linux::keymap::defaults()])
+                .defaults([rex_rune::keymap::defaults()])
                 .overrides(super::recorder::layers(&self.settings)),
             overrides,
         }
     }
 
-    pub fn effective_keymap(&self) -> &rex_linux::keymap::Resolved {
+    pub fn effective_keymap(&self) -> &rex_rune::keymap::Resolved {
         self.hosts[self.active]
             .model
             .keymap
@@ -710,14 +714,14 @@ impl Workspace {
             .unwrap_or(&self.local_keymap)
     }
 
-    pub fn keymap_snapshot(&self) -> Option<&rex_linux::connection::keymap::Snapshot> {
+    pub fn keymap_snapshot(&self) -> Option<&rex_rune::connection::keymap::Snapshot> {
         self.model()
             .keymap
             .as_deref()
             .filter(|k| self.model().connected && k.generation == self.keymap_generation)
     }
 
-    pub fn effective_bindings(&self) -> Vec<&rex_linux::keymap::ResolvedBinding> {
+    pub fn effective_bindings(&self) -> Vec<&rex_rune::keymap::ResolvedBinding> {
         super::actions::effective(
             self.effective_keymap(),
             self.keymap_snapshot()
@@ -1180,7 +1184,7 @@ impl Workspace {
             TerminalThemeChoice::RexDefault => "Rex default colours",
             TerminalThemeChoice::FollowChrome => "Follow chrome",
             TerminalThemeChoice::Named(id) => {
-                rex_linux::terminal_theme::builtin(id).map_or(id, |b| b.name)
+                rex_rune::terminal_theme::builtin(id).map_or(id, |b| b.name)
             }
         }
     }
@@ -1418,6 +1422,7 @@ impl Workspace {
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
                 if self.settings_section == SettingsSection::Notifications {
                     self.notification_command(super::notify::Command::Check);
+                    self.sound_request(super::sounds::Request::Check);
                 }
             }
             Intent::Updates => self.open_updates_settings(),
@@ -1858,6 +1863,7 @@ impl Workspace {
         self.recorder = None;
         if section == SettingsSection::Notifications {
             self.notification_command(super::notify::Command::Check);
+            self.sound_request(super::sounds::Request::Check);
         }
         if section == SettingsSection::Shortcuts {
             self.reload_shortcuts();

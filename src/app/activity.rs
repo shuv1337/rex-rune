@@ -6,7 +6,7 @@ use super::{
     theme::*,
     workspace::{HostId, Workspace},
 };
-use rex_linux::connection::{
+use rex_rune::connection::{
     DEFAULT_TAB_LABEL, HostModel,
     activity::{
         BlockedKind, ProgramState, StatusRecord, TERMINAL as TERMINAL_CREATOR, TerminalProgress,
@@ -355,7 +355,20 @@ impl Workspace {
             ProgramState::Idle => false,
         };
         // A muted tab stays quiet whatever its programs do.
-        if !config.system_notifications || !wanted || self.tab_muted(index, &window) {
+        if !wanted || self.tab_muted(index, &window) {
+            return;
+        }
+        let desktop = config.system_notifications;
+        // The same news, visibility, mute and event-kind decision feeds both channels, so
+        // a sound is heard for exactly what a notification would be posted for. That
+        // includes the usual way a program finishes: its status record is removed, which
+        // leaves the tab with no record at all (and so nothing marked live).
+        if config.play_sounds
+            && let Some(sound) = super::sounds::Sound::for_state(state)
+        {
+            self.sound_request(super::sounds::Request::Event(sound));
+        }
+        if !desktop {
             return;
         }
         let word = match state {
@@ -390,7 +403,7 @@ impl Workspace {
     pub fn deliver_program_notices(
         &mut self,
         index: usize,
-        notices: Vec<rex_linux::connection::activity::DesktopNotice>,
+        notices: Vec<rex_rune::connection::activity::DesktopNotice>,
     ) {
         let config = &self.settings.notifications;
         if !config.system_notifications || !config.program_messages {
@@ -683,7 +696,7 @@ mod tests {
                 model.programs.insert("block".into(), "vim".into());
                 model.places.insert(
                     "block".into(),
-                    rex_linux::connection::titles::Place {
+                    rex_rune::connection::titles::Place {
                         cwd: Some("/home/u/rex".into()),
                         home: Some("/home/u".into()),
                         shell: Some(1),

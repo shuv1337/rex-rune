@@ -78,6 +78,9 @@ pub enum PaneHeader {
 pub struct NotificationsConfig {
     pub show_in_tabs: bool,
     pub system_notifications: bool,
+    /// Independent local sound channel; updates must never start making noise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub play_sounds: bool,
     /// Notify when a background tab's programs move into each state.
     pub working: bool,
     pub blocked: bool,
@@ -91,6 +94,7 @@ impl Default for NotificationsConfig {
         Self {
             show_in_tabs: true,
             system_notifications: true,
+            play_sounds: false,
             working: false,
             blocked: true,
             error: true,
@@ -304,7 +308,7 @@ impl Settings {
             .unwrap_or_else(hostname)
     }
 
-    fn config_dir() -> PathBuf {
+    pub(crate) fn config_dir() -> PathBuf {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -312,7 +316,7 @@ impl Settings {
             })
     }
     pub fn path() -> PathBuf {
-        Self::config_dir().join("rex-linux/workspace.json")
+        Self::config_dir().join("rex-rune/workspace.json")
     }
     pub fn load_default() -> Result<(Self, PathBuf)> {
         let path = Self::path();
@@ -374,7 +378,7 @@ pub fn hostname() -> String {
 fn hostname_label(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
-        "Rex Linux".into()
+        "Rex Rune".into()
     } else {
         name.to_owned()
     }
@@ -533,8 +537,8 @@ mod tests {
             hostname_label(&gethostname::gethostname().to_string_lossy())
         );
         assert_eq!(hostname_label("  workstation\n"), "workstation");
-        assert_eq!(hostname_label(""), "Rex Linux");
-        assert_eq!(hostname_label(" \n "), "Rex Linux");
+        assert_eq!(hostname_label(""), "Rex Rune");
+        assert_eq!(hostname_label(" \n "), "Rex Rune");
     }
 
     #[test]
