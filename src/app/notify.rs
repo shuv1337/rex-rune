@@ -319,18 +319,25 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
     let mut desktop = Desktop::default();
     let mut ledger = Ledger::default();
     let mut tokens = HashMap::new();
+    // Seeing a tab sends a command on every activity update; wake the UI only for news.
+    let mut shown = ledger.health.clone();
     loop {
         tokio::select! {
             command = notes.recv_async() => {
                 let Ok(command) = command else { return };
+                // A test always answers: the UI is showing "Sending test…".
+                let test = matches!(command, Command::Test);
                 let identity = desktop.bus.as_ref().map(|bus| bus.identity.clone());
                 ledger.execute(command, &mut desktop).await;
                 if desktop.bus.as_ref().map(|bus| &bus.identity) != identity.as_ref() {
                     tokens.clear();
                 }
                 tokens.retain(|id, _| ledger.target(*id).is_some());
-                let health = ledger.health.clone();
-                handle.update(move |s, _| s.notification_health = health);
+                if ledger.health != shown || test {
+                    shown = ledger.health.clone();
+                    let health = shown.clone();
+                    handle.update(move |s, _| s.notification_health = health);
+                }
             }
             signal = async {
                 match &mut desktop.bus {
@@ -342,7 +349,8 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                     desktop.bus = None;
                     tokens.clear();
                     ledger.health.service = Service::Unreachable("Session bus disconnected".into());
-                    let health = ledger.health.clone();
+                    shown = ledger.health.clone();
+                    let health = shown.clone();
                     handle.update(move |s, _| s.notification_health = health);
                     continue;
                 };
