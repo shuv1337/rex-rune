@@ -7,6 +7,11 @@
 //! so in its result instead of compiling to something that fails quietly. Nothing here
 //! depends on the UI, so the probes build without it. The app's own platform code (the
 //! primary selection, window chrome) is in `src/app/platform`.
+/// Whether releases are published for this platform: packages, an installer and signed
+/// updates. Elsewhere the client is always a source build. (`update::installer` itself is
+/// compiled only where this is true; a module cannot be chosen by a constant.)
+pub const HAS_RELEASES: bool = cfg!(target_os = "linux");
+
 pub mod dirs;
 pub mod fs;
 pub mod local;

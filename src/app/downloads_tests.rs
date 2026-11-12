@@ -1940,8 +1940,8 @@ fn xdg_open_gets_one_argument_the_absolute_path() {
         "/home/u/Downloads/\u{fc}n\u{ef} \u{30d5}",
         "/",
     ] {
-        let command = crate::app::downloads::xdg_open_command(Path::new(target)).unwrap();
-        assert_eq!(command.get_program(), "xdg-open");
+        let command = crate::app::platform::open::path_command(Path::new(target)).unwrap();
+        assert_eq!(command.get_program(), crate::app::platform::open::OPENER);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, [std::ffi::OsStr::new(target)], "{target}");
         assert_eq!(
@@ -1953,7 +1953,7 @@ fn xdg_open_gets_one_argument_the_absolute_path() {
     // A relative path could be read as an option or an URL.
     for target in ["notes", "-n", "--help", "./a", "file:///etc/passwd", ""] {
         assert!(
-            crate::app::downloads::xdg_open_command(Path::new(target)).is_none(),
+            crate::app::platform::open::path_command(Path::new(target)).is_none(),
             "{target}"
         );
     }

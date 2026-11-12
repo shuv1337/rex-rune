@@ -1379,3 +1379,26 @@ fn the_low_space_failure_rounds_like_the_question() {
     assert!(text.contains("105 MB free"), "{text}");
     assert!(!text.contains("104"), "{text}");
 }
+
+/// A record whose start time could not be read when it was made (`started` is 0, which is
+/// every record on a platform that cannot say) must not count as abandoned while a process
+/// has its id: deleting a download in progress is the worse mistake.
+#[test]
+fn a_record_without_a_start_time_is_kept_while_its_process_id_is_in_use() {
+    let temp = Temp::new("no-start-time");
+    let dir = temp.dir("out");
+    let records = temp.records();
+    let live = format!(".live.{UUID_A}.rex-part");
+    let dead = format!(".dead.{UUID_B}.rex-part");
+    for name in [&live, &dead] {
+        std::fs::write(dir.join(name), b"partial").unwrap();
+    }
+    let ours = leftover(&dir, &live, std::process::id(), 0);
+    write_records(&records, &[ours.clone(), leftover(&dir, &dead, DEAD, 0)]);
+    assert_eq!(
+        records.clean_up_leftovers_at(1_800_000_000),
+        [dir.join(&dead)]
+    );
+    assert_eq!(names(&dir), [live.as_str()]);
+    assert_eq!(records.list(), [ours]);
+}

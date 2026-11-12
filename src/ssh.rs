@@ -255,19 +255,14 @@ impl Tunnel {
         let remote = resolve(target).await?;
         let local = target.local_socket();
         if let Some(parent) = local.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("create {}", parent.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                for directory in [parent, parent.parent().unwrap_or(parent)] {
-                    let _ = tokio::fs::set_permissions(
-                        directory,
-                        std::fs::Permissions::from_mode(0o700),
+            // Every process's folder, then this one's: each ours alone, or no tunnel.
+            for directory in [parent.parent().unwrap_or(parent), parent] {
+                crate::platform::dirs::private(directory).with_context(|| {
+                    format!(
+                        "{} is not a private folder for the tunnel",
+                        directory.display()
                     )
-                    .await;
-                }
+                })?;
             }
             if let Some(all) = parent.parent() {
                 sweep_stale_tunnels(all);

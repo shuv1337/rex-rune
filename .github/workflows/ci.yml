@@ -39,6 +39,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Formatting
         run: cargo fmt --all -- --check
+      - name: Library and probes, without the UI
+        run: cargo check --locked --no-default-features
       - name: Lint every target and feature
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Unit, headless UI and signed updater tests
@@ -66,7 +68,7 @@ jobs:
         run: cargo build --locked --bin rex-rune
       - name: The app starts
         run: |
-          test "$(target/debug/rex-rune --version)" = "rex-rune $(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          test "$(target/debug/rex-rune --version)" = "rex-rune $(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           target/debug/rex-rune --help > /dev/null
       - name: Unit and headless UI tests
         run: cargo test --locked --all-features

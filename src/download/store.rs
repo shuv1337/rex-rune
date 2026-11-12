@@ -417,6 +417,20 @@ fn records_lock() -> std::sync::MutexGuard<'static, ()> {
     RECORDS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+impl Record {
+    /// Whether the client that made this partial file is still running, so the file is
+    /// left alone. A wrong "no" deletes a download in progress, so doubt counts as yes: a
+    /// record made where the start time could not be read is running for as long as any
+    /// process has its id.
+    fn running(&self) -> bool {
+        use crate::platform::process;
+        if self.started == 0 {
+            return process::exists(self.pid);
+        }
+        process::start_time(self.pid) == Some(self.started)
+    }
+}
+
 impl Records {
     pub fn at(path: PathBuf) -> Self {
         Self { path }
@@ -503,9 +517,7 @@ impl Records {
         let mut keep = Vec::new();
         let mut deleted = Vec::new();
         for mut record in file.partials {
-            let running = record.started != 0
-                && crate::platform::process::start_time(record.pid) == Some(record.started);
-            if running {
+            if record.running() {
                 keep.push(record);
                 continue;
             }

@@ -470,7 +470,7 @@ impl InstallChannel {
     /// Detect the install channel of the running process. Only Linux has releases, packages
     /// and receipts; anywhere else the client was built from source.
     pub fn detect() -> Self {
-        if !cfg!(target_os = "linux") {
+        if !crate::platform::HAS_RELEASES {
             return Self::Source;
         }
         let exe = std::env::current_exe().ok();

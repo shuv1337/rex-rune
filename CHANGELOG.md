@@ -6,6 +6,10 @@
 
 - **Default local endpoint without `XDG_RUNTIME_DIR`** is `/run/user/<your uid>/rex/server.sock`, not always `/run/user/1000`.
 
+- **SSH tunnel sockets need a private folder.** The folder that holds them is created closed to other users, and a forward is refused if that folder belongs to someone else. Before, a folder another local user had made first in a shared `/tmp` was used as found.
+
+- **A download whose owner cannot be identified is left alone.** A partial file recorded without its process's start time is kept while any process has that id, instead of being deleted at the next launch.
+
 - **Rex Linux is now Rex Rune.** The binary, crate, packages, launcher, icons, app id and settings folder are `rex-rune` (`dev.shuv.rex-rune`, `~/.config/rex-rune`). Existing installs move over when they update: **Update now** in 0.7.x installs this release and the next start renames the binary, launcher and icons; `sudo pacman -Syu` (`omarchy update` on Omarchy) replaces `rex-linux-bin` with `rex-rune-bin`; `sudo apt install ./rex-rune_*.deb` replaces `rex-linux`; `install.sh` and `scripts/install-desktop.sh` take over an install made under the old name. Each leaves one launcher. Settings and update state move once, at the first start, from `~/.config/rex-linux` and `~/.local/state/rex-linux`. `rex-linux` stays as a link to `rex-rune`, and `REX_LINUX_NO_UPDATE_CHECK` still works; both will go in a later release. The pacman repository section stays `[rex-linux]`. `install.sh` no longer installs releases published before the rename; use that release's own `install.sh`. See [Renamed from Rex Linux](README.md#renamed-from-rex-linux).
 
 - **Activity elapsed time:** Activity rows show whole-minute, hour or day ages without ticking. A state this client watched begin shows its age (`4m`), and a same-state report does not restart it. Anything else is labeled `reported 4m`: a row read back on connect, or a first report from a pane not yet read, because the server's timestamp advances on every report and not only on a state change. A timestamp more than a minute ahead of this clock, or absurdly old, shows no time. The open list redraws locally once a minute, with no status reads or read receipts. See [meaning and checks](docs/parity-2026-11/M3.2-elapsed-time.md).
@@ -16,7 +20,7 @@
 
 ### Added
 
-- **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, shortcuts are still the Control-key defaults, and notifications and opening links are not available there yet. See [Building on macOS](README.md#building-on-macos).
+- **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, shortcuts are still the Control-key defaults, and notifications and sounds are not available there yet. See [Building on macOS](README.md#building-on-macos).
 
 - **Pull-request CI on three platforms:** Linux runs formatting, Clippy and every test; macOS builds the app and runs the tests; Windows compiles the Ghostty VT library as a first probe.
 

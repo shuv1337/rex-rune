@@ -60,7 +60,13 @@ mod tests {
         std::fs::write(temp.path().join("a"), b"a").unwrap();
         std::fs::write(temp.path().join("b"), b"b").unwrap();
         match rename_no_replace(dir.as_raw_fd(), &name("a"), &name("b")) {
-            Err(error) if no_replace_unsupported(&error) => return,
+            Err(error) if no_replace_unsupported(&error) => {
+                // Linux and macOS have the call, on every filesystem tests run on.
+                if cfg!(any(target_os = "linux", target_os = "macos")) {
+                    panic!("{error}");
+                }
+                return;
+            }
             Err(error) => assert_eq!(error.raw_os_error(), Some(libc::EEXIST)),
             Ok(()) => panic!("replaced an existing file"),
         }
@@ -68,9 +74,5 @@ mod tests {
         rename_no_replace(dir.as_raw_fd(), &name("a"), &name("c")).unwrap();
         assert!(!temp.path().join("a").exists());
         assert_eq!(std::fs::read(temp.path().join("c")).unwrap(), b"a");
-        if cfg!(any(target_os = "linux", target_os = "macos")) {
-            // Both are expected to have it on the filesystems tests run on.
-            assert!(temp.path().join("c").exists());
-        }
     }
 }
