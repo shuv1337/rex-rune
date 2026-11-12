@@ -13,7 +13,9 @@ src/update/installer.rs at v0.7.5, it installs a release only when:
 - the 32, 128 and 256 pixel icons exist as resources/icons/<n>x<n>/apps/dev.shuv.rex-linux.png.
 
 It copies those six files and nothing else. This runs the same checks, and with --binary
-also that bin/rex-linux is byte for byte the release's rex-rune.
+also that bin/rex-linux is byte for byte the release's rex-rune. The archive's install.sh
+is for a kept copy of the 0.7.x installer script, which would run it: it must install
+nothing, fail, and name the current installer.
 
 Run: python3 scripts/test-bridge.py dist/rex-linux-X.Y.Z-<target>.tar.gz [--binary target/release/rex-rune]
 Requires desktop-file-utils and a machine that can run the binary. Changes nothing outside
@@ -65,8 +67,12 @@ def check(archive, binary=None):
         # Until the client's first start replaces it, this launcher starts the installed file
         # and shows the icon that updater installs.
         assert f"TryExec={installed}\n" in text and "Icon=dev.shuv.rex-linux\n" in text, text
-        assert not (package / "install.sh").exists() and not (package / "scripts").exists(), (
-            "the bridge is for the old updater alone and carries no installer")
+        assert not (package / "scripts").exists(), "the bridge carries no installer"
+        refusal = subprocess.run(["bash", str(package / "install.sh")], capture_output=True, text=True,
+                                 env={"HOME": str(Path(temp) / "home"), "PATH": "/usr/bin:/bin"})
+        assert refusal.returncode != 0 and "releases/latest/download/install.sh" in refusal.stderr, (
+            "install.sh in the bridge must refuse and point at the current installer")
+        assert not (Path(temp) / "home").exists(), "the bridge's install.sh wrote something"
         assert (package / "LICENSE").is_file() and (package / "licenses").is_dir() and (package / "BUILD-INFO").is_file()
         if binary:
             assert old.read_bytes() == binary.read_bytes(), "bin/rex-linux is not this release's binary"

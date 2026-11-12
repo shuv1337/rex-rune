@@ -916,3 +916,45 @@ fn only_a_verified_old_installation_is_moved() {
     assert!(data.join("rex-linux/install.json").is_file());
     assert!(!data.join("applications").join(DESKTOP).exists());
 }
+
+/// 0.7.5 journals the files it is replacing under their `rex-linux` names. If it is cut off
+/// after replacing the binary, the next start is this client's, under that name, and it has
+/// to undo the update by those names: the journal format itself did not change.
+#[test]
+fn an_update_from_the_old_client_cut_off_midway_is_rolled_back_by_its_old_names() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let layout = InstallLayout {
+        local: temp.path().join(".local"),
+        binary: temp.path().join(".local/bin/rex-linux"),
+        data: temp.path().join(".local/share"),
+    };
+    let destinations = layout.destinations();
+    assert_eq!(destinations.len(), 6);
+    for (path, (name, _)) in destinations.iter().zip(INSTALL_FILES) {
+        let name = name.replace("rex-rune", "rex-linux");
+        assert!(path.ends_with(if name.is_empty() {
+            "bin/rex-linux"
+        } else {
+            name.as_str()
+        }));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"old").unwrap();
+    }
+    let old = contents(&layout);
+    // Icons, launcher and binary replaced; the receipt not yet.
+    interrupt(&layout, 5, false);
+    assert_ne!(contents(&layout), old);
+    assert_eq!(
+        recover(&layout).unwrap(),
+        Recovery::Restored(layout.binary.clone()),
+        "the old client's binary is back, to be started again"
+    );
+    assert_eq!(contents(&layout), old);
+    assert!(!layout.transaction().exists());
+    // Nothing was looked for, or left, under the new names.
+    assert!(!layout.data.join("rex-rune").exists());
+    assert!(!layout.data.join("applications").join(DESKTOP).exists());
+}

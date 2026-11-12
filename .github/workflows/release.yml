@@ -351,6 +351,8 @@ jobs:
 
           ---
 
+          **Coming from Rex Linux?** The client was renamed Rex Rune in this line of releases. **Update now** in Rex Linux 0.7.x installs it, `sudo pacman -Syu` (or `omarchy update`) replaces `rex-linux-bin` with `rex-rune-bin`, and `install.sh` takes over an older install. A `.deb` install is told to download `rex-linux_*.deb`: download **`rex-rune_*.deb`** instead, which replaces `rex-linux`. See [Renamed from Rex Linux](https://github.com/shuv1337/rex-rune#renamed-from-rex-linux).
+
           **Downloads:** `x86_64` / `amd64` for Intel/AMD; `aarch64` / `arm64` for ARM64.
           - **Debian/Ubuntu:** `sudo apt install ./rex-rune_*.deb` (choose your architecture).
           - **User install/upgrade:** `curl --proto '=https' --tlsv1.2 -fsSL https://github.com/shuv1337/rex-rune/releases/latest/download/install.sh | sh`. Verifies the release before installing; needs `desktop-file-utils` and minisign or OpenSSL 3+.

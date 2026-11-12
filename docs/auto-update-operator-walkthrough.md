@@ -180,7 +180,7 @@ Configured by the agent on 2026-11-10 (PST):
   Subkey expiry: **2029-11-09 12:14 PST**.
 - Primary custody: shuvbot, `~/rex-signing-backup/openpgp/gnupg/`, encrypted,
   certify-only, as the working copy. Its separate passphrase is in the owner's
-  1Password Personal vault (item "Rex Rune pacman-repo OpenPGP primary
+  1Password Personal vault (item "Rex Linux pacman-repo OpenPGP primary
   (4BC4…0BAB)") since 2026-11-10; the login Keychain item
   `rex-linux-openpgp-primary` was deleted after a restore test. That item also
   holds an encrypted secret-key export (primary plus CI subkey) and the

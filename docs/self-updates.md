@@ -151,10 +151,13 @@ directory and matches this binary's SHA-256, while an update is in progress, or 
 root. If `desktop-file-install` fails, a notice says so and the next start tries again;
 until then the old launcher keeps working.
 
-Two limits. An update from 0.7.x that is cut off by a crash between replacing the
-binary and replacing its receipt is reported as superseded at the next start, and needs
-`install.sh` to repair it. And a start with a different `XDG_DATA_HOME` from the
-install's does not find the receipt, so the rename waits for a start that has it.
+An update from 0.7.x that is cut off part-way is undone as any other: 0.7.5 journals
+the files under their old names, the journal's format is unchanged, and a client
+started as `rex-linux` looks for those names. Recovery runs before settings move, so
+the restored 0.7.x client finds them where it left them.
+
+One limit: a start with a different `XDG_DATA_HOME` from the install's does not find
+the receipt, so the rename waits for a start that has it.
 
 Settings and update state are moved separately, for every install method: see
 [Renamed from Rex Linux](../README.md#renamed-from-rex-linux).
@@ -201,8 +204,9 @@ and more than 20,000 entries. Cases requiring non-root installation are skipped
 when running tests as root.
 
 The rename has its own checks. Unit tests move a `rex-linux` installation to the new
-names, finish a move cut short after the binary was renamed, and refuse an unverified
-one. `scripts/test-bridge.py` holds a bridge tarball to the 0.7.x updater's rules, and
+names, finish a move cut short after the binary was renamed, refuse an unverified
+one, and roll back an update from the old client that was cut off after it replaced
+the binary. `scripts/test-bridge.py` holds a bridge tarball to the 0.7.x updater's rules, and
 the release workflow runs it on the real build before taking over real 0.7.5 tarball
 and `.deb` installs. `scripts/bridge-e2e.sh` runs the whole path in a scratch home: the
 updater built from the v0.7.5 tag, with only its download pointed at a loopback

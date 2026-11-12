@@ -100,6 +100,9 @@ if $copy; then
     if [[ -f "$bin_dir/rex-linux" && ! -L "$bin_dir/rex-linux" ]]; then
         ln -sfn -- rex-rune "$bin_dir/rex-linux"
     fi
+elif [[ -f "$bin_dir/rex-linux" && ! -L "$bin_dir/rex-linux" ]]; then
+    # This launcher starts the build in place, and nothing here owns that file.
+    echo "An older copy remains at $bin_dir/rex-linux and still starts the old client; remove it, or install with --copy." >&2
 fi
 exec_value="$(desktop_exec_quote "$binary")"
 

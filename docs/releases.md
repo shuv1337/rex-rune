@@ -35,6 +35,8 @@ The client was `rex-linux` through 0.7.x. Four things keep that name so those in
 
 [Self-update behavior](self-updates.md#updating-from-rex-linux-07x) describes what the client does after the old updater has installed it.
 
+Two things in installed 0.7.x clients cannot be met and are answered in words. Its update notice for a `.deb` install names `rex-linux_<version>_<arch>.deb`, which does not exist: the release notes' first paragraph says to take `rex-rune_*.deb`. And a copy of its `install.sh` that someone kept picks the bridge tarball by name and runs the `install.sh` inside it: that script installs nothing and names the current installer.
+
 **Retiring the bridge.** Keep it for as long as 0.7.x installs should update in place. To end it, in one release: raise `--update-from` in `release.yml` to the first renamed version, so a 0.7.x client reports that a manual upgrade is required and does not download; stop building the bridge tarballs and point `tarball` at the `rex-rune` archive; and remove the `rex-linux` links, `src/legacy.rs` and `migrate_legacy_install`. The product id and the repository name cost nothing to keep, and changing either cuts off installed clients, so leave them unless a second manifest or repository is published beside them first.
 
 `latest.json` cannot gain targets other than the two Linux ones while 0.7.x clients read it: their updater rejects a manifest that names any other target. Releases for another platform need their own manifest.
@@ -75,9 +77,9 @@ Setup reference for a fresh repository or deliberate rotation (do not overwrite 
    ```sh
    umask 077
    # On the trusted signing machine, in a private directory outside the repo:
-   minisign -G -p release.pub -s rex-rune-release.key
+   minisign -G -p release.pub -s rex-linux-release.key
    # On the offline backup machine:
-   minisign -G -p release-backup.pub -s rex-rune-release-backup.key
+   minisign -G -p release-backup.pub -s rex-linux-release-backup.key
    ```
 
 2. **Commit only the two public files**, as `packaging/keys/release.pub` and `packaging/keys/release-backup.pub`, in a reviewed change. Record both public-key values, minisign key IDs and SHA-256 fingerprints of the decoded 42-byte minisign public-key records in the public-key README, replacing the pending-setup wording; keep the README and this document's key IDs and fingerprints in sync. Never commit a throwaway test key as a trust root. The signing helper requires both public files and accepts signatures from either; the later client PR will embed both.
@@ -94,7 +96,7 @@ Setup reference for a fresh repository or deliberate rotation (do not overwrite 
 4. **Create these two environment secrets**, not repository-wide secrets. The key secret is the complete password-encrypted minisign secret-key file, not base64 wrapped. Supply the password interactively when `gh` prompts; never put it into shell history. Do not upload the offline key.
 
    ```sh
-   gh secret set RELEASE_MINISIGN_KEY --repo shuv1337/rex-rune --env release < /secure/path/rex-rune-release.key
+   gh secret set RELEASE_MINISIGN_KEY --repo shuv1337/rex-rune --env release < /secure/path/rex-linux-release.key
    gh secret set RELEASE_MINISIGN_PASSWORD --repo shuv1337/rex-rune --env release
    # Lists names, not secret values:
    gh secret list --repo shuv1337/rex-rune --env release
@@ -203,7 +205,7 @@ For the offline alternative in plan question 6 (key custody), keep building, att
    tag=v0.5.0
    cp packaging/install/install.sh dist/install.sh
    for file in latest.json SHA256SUMS install.sh; do
-     minisign -S -s /secure/path/rex-rune-release-backup.key -m "dist/$file" \
+     minisign -S -s /secure/path/rex-linux-release-backup.key -m "dist/$file" \
        -t "rex-linux $tag $file"
    done
    # Same metadata verification gate as CI; requires all eight packages but no secrets.

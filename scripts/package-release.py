@@ -30,8 +30,9 @@ def bridge(temp, stage, binary, version, arch):
     "rex-linux <version>"), resources/dev.shuv.rex-linux.desktop and the three icons under
     that name. It takes nothing else. The binary is this release's; started as rex-linux it
     reports that name, and at its first start it moves the installation to the rex-rune
-    names (update::installer::migrate_legacy_install). No installer script is included:
-    nothing but that updater should install from this archive.
+    names (update::installer::migrate_legacy_install). Nothing but that updater should
+    install from this archive. A copy of the 0.7.x install.sh that someone kept would pick
+    it by name and run its install.sh, so that script only says where to go instead.
     """
     tree = temp / f"rex-linux-{version}-{arch}-linux-gnu"
     (tree / "bin").mkdir(parents=True)
@@ -54,6 +55,18 @@ def bridge(temp, stage, binary, version, arch):
     for filename in ("LICENSE", "BUILD-INFO"):
         shutil.copy2(stage / filename, tree / filename)
     shutil.copytree(stage / "licenses", tree / "licenses")
+    (tree / "install.sh").write_text(
+        "#!/bin/sh\n"
+        "# Run by an install.sh kept from Rex Linux 0.7.x, which picks this archive by its name.\n"
+        "cat >&2 <<'EOF'\n"
+        "Rex Linux is now Rex Rune, and this archive is only for the updater inside Rex Linux 0.7.x.\n"
+        "Nothing was installed. Use the current installer instead:\n"
+        "  curl --proto '=https' --tlsv1.2 -fsSL https://github.com/shuv1337/rex-rune/releases/latest/download/install.sh | sh\n"
+        "It replaces a rex-linux install, keeps your settings and leaves rex-linux as a link to rex-rune.\n"
+        "EOF\n"
+        "exit 1\n"
+    )
+    (tree / "install.sh").chmod(0o755)
     (tree / "README").write_text(
         f"Rex Rune {version}, packaged for the updater built into Rex Linux 0.7.x.\n\n"
         "Rex Linux was renamed Rex Rune. This archive keeps the old layout only so that\n"

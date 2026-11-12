@@ -90,12 +90,25 @@ impl InstallLayout {
         self.binary.with_file_name(".rex-update-transaction")
     }
 
+    /// Whether this is an installation the 0.7.x updater made or was making: its binary is
+    /// still `rex-linux`, and so are its launcher, icons and receipt.
+    fn is_legacy(&self) -> bool {
+        self.binary
+            .file_name()
+            .is_some_and(|name| name == crate::legacy::NAME)
+    }
+
+    /// The installed files, in [`INSTALL_FILES`] order. An interrupted update from 0.7.x
+    /// journalled the old names, so recovery has to look for those to undo it.
     fn destinations(&self) -> Vec<PathBuf> {
         INSTALL_FILES
             .iter()
             .map(|(path, _)| {
                 if path.is_empty() {
                     self.binary.clone()
+                } else if self.is_legacy() {
+                    self.data
+                        .join(path.replace(crate::legacy::CURRENT, crate::legacy::NAME))
                 } else {
                     self.data.join(path)
                 }
@@ -317,6 +330,7 @@ fn migrate_legacy_install_at(exe: &Path, data: &Path) -> Result<Option<PathBuf>>
     for (path, mode) in INSTALL_FILES {
         if path.ends_with(".json") {
             install(&new_receipt, path, mode)?;
+            sync_dir(data.join(path).parent().context("missing receipt parent")?)?;
         }
     }
     // The old launcher and icons first: the receipt goes last, so an interruption here

@@ -139,7 +139,7 @@ def landing(site, certificate, tags):
 <title>Rex Rune packages</title><h1>Rex Rune packages</h1><p>{message}</p>
 <p><a href="{CERTIFICATE}">OpenPGP public certificate</a></p>
 <p><a href="https://github.com/{REPO}/blob/master/docs/auto-update-operator-walkthrough.md">Setup, fingerprints and recovery</a></p>
-<p>Signed pacman repository <code>[{REPOSITORY}]</code>: https://pkg.shuv.dev/arch/$arch. The package is <code>rex-rune-bin</code>; it replaces <code>rex-linux-bin</code>, the client's name before 0.8. APT is not available yet.</p></html>\n''')
+<p>Signed pacman repository <code>[{REPOSITORY}]</code>: https://pkg.shuv.dev/arch/$arch. The package is <code>rex-rune-bin</code>; it replaces <code>rex-linux-bin</code>, the client's name before it was renamed. APT is not available yet.</p></html>\n''')
 
 
 def list_releases(require_tag):

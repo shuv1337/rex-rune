@@ -1,6 +1,6 @@
 # Cross-server relay: consent and host boundary for `client_call_requested`
 
-Design for [issue #20](https://github.com/shuv1337/rex-rune/issues/20), written 2026-11-11 (PST) against `master` at `ad196ff` (Rex Rune 0.6.0, API window 10–13). Status: proposed. Nothing here is implemented: Rex Rune still sends no `servers` list, and the two tests that pin that stay. It builds on the Remote control work for [#12](https://github.com/shuv1337/rex-rune/issues/12) ([plan](../plans/remote-ui-execution.md)) and replaces the sketch in [roadmap 0.5.2, section 7](../plans/roadmap-0.5.2.md#7-20-cross-server-relay-client_call_requested).
+Design for [issue #20](https://github.com/shuv1337/rex-rune/issues/20), written 2026-11-11 (PST) against `master` at `ad196ff` (Rex Linux 0.6.0, API window 10–13). Status: proposed. Nothing here is implemented: Rex Linux still sends no `servers` list, and the two tests that pin that stay. It builds on the Remote control work for [#12](https://github.com/shuv1337/rex-rune/issues/12) ([plan](../plans/remote-ui-execution.md)) and replaces the sketch in [roadmap 0.5.2, section 7](../plans/roadmap-0.5.2.md#7-20-cross-server-relay-client_call_requested).
 
 ## Recommendation
 
@@ -17,7 +17,7 @@ Sources: `vendor/rexrs/codegen/help.json` (the `client.action` and `client.reply
 - `client.action` accepts `servers: [{name, id}]`, the other servers this client is connected to. A config action (one whose name has no dot) on A can then call `rex.server(name)`, which returns the full Lua API (`rex.session`, `rex.block.call`, `rex.call`) pointed at that server. `client.key` takes no `servers`, so Lua key handlers cannot relay; only key presses bound to config actions can.
 - When the action calls the other server, A sends this client `client_call_requested {call_id, server, method, args}`, where `server` is the `id` the client chose. The client makes that one call on B and answers with `client.reply` on A's connection within 10 seconds. If no reply comes, or the reply is an error, that call fails inside the action and the action keeps running. The action as a whole has 30 seconds.
 - `client.reply` is not ordered, so it never waits behind the `client.action` it serves. `call_id` is never reused on a connection.
-- Today Rex Rune sends `client.action` only for a key bound to a server action (`src/app/input.rs`, `Kind::Server`), with no `servers` (pinned in `src/connection/keymap_tests.rs` and `src/app/bindings_integration_tests.rs`). If a `client_call_requested` event did arrive, `handle_event` would drop it and the action would wait the full 10 seconds.
+- Today Rex Linux sends `client.action` only for a key bound to a server action (`src/app/input.rs`, `Kind::Server`), with no `servers` (pinned in `src/connection/keymap_tests.rs` and `src/app/bindings_integration_tests.rs`). If a `client_call_requested` event did arrive, `handle_event` would drop it and the action would wait the full 10 seconds.
 - The SDK's `call()` buffers every event until its own reply arrives (`vendor/rexrs/src/async_client.rs`). The relay therefore needs A's worker to read events while its `client.action` is still waiting (section 8).
 
 ## 2. Threat model
@@ -77,7 +77,7 @@ Control means arbitrary code on B: `session.new_window` takes a `command`, and `
 On each `client.action` the client sends to host A:
 
 - `servers` is sent only for a config action (the name has no dot) with `origin: "key"`. It is never sent for block actions, and the `server` field is never sent: running A's action against a session on B is a different feature.
-- Each entry is a target B with a grant from A at Read layout or above, other than A itself. Hosts whose `server.status` reports the same `host_id` as A are skipped. A target is listed even while it is offline, so that `rex.server("devbox")` fails with Rex Rune's message rather than "no server named devbox".
+- Each entry is a target B with a grant from A at Read layout or above, other than A itself. Hosts whose `server.status` reports the same `host_id` as A are skipped. A target is listed even while it is offline, so that `rex.server("devbox")` fails with Rex Linux's message rather than "no server named devbox".
 - `name` is the saved host's label, the same name `rex hosts` and `rex.servers()` use. If two saved hosts share a label, neither is listed, and Settings says why.
 - `id` is a random 128-bit token per target per launch, never the endpoint. The client keeps the list it sent with the outstanding request.
 
@@ -87,15 +87,15 @@ With no grants, the request is byte-for-byte what it is today, so the existing p
 
 The checks run in this order. The first failure answers with the message shown and sends nothing to B. The waiting action sees only the message.
 
-1. No `client.action` from this client is outstanding on this connection and epoch: `refused`, "Rex Rune relays calls only while one of your key bindings is running." This also shows a warning notice, once per host per launch.
+1. No `client.action` from this client is outstanding on this connection and epoch: `refused`, "Rex Linux relays calls only while one of your key bindings is running." This also shows a warning notice, once per host per launch.
 2. `server` is not in that request's list: `refused`, "That host was not offered to this action."
-3. The grant is now Off or below the method's level (re-read at call time): `refused`, "studio may not call session.new_window on devbox. Change this in Rex Rune: Settings → Remote Hosts."
-4. The method is Never or unknown: `not_supported`, "Rex Rune never relays hosts.put."
+3. The grant is now Off or below the method's level (re-read at call time): `refused`, "studio may not call session.new_window on devbox. Change this in Rex Linux: Settings → Remote Hosts."
+4. The method is Never or unknown: `not_supported`, "Rex Linux never relays hosts.put."
 5. The action already made 64 calls, another call is in flight, or `args` is over 256 KiB: `refused`, naming the limit.
-6. B is offline or reconnecting in Rex Rune: `refused`, "devbox is offline in Rex Rune; nothing was sent."
+6. B is offline or reconnecting in Rex Linux: `refused`, "devbox is offline in Rex Linux; nothing was sent."
 7. Otherwise, make the call on B's relay connection (below) with an 8-second budget, including connection setup, and reply with B's result, or with B's error code and message unchanged.
 
-**The relay connection.** One connection per target, opened on first use, using the same transport as the target's saved endpoint (including an existing `ssh://` forward). Its HELLO names it "Rex Rune relay from studio", followed by the client label, so it shows up in `rex client ls` on B. It never attaches and never sends `servers`. It closes after 60 seconds idle, on revocation, on a timeout, or when the app quits. The alternative, B's own control connection, would put relayed calls in the same serial queue as the user's keys on B. It could also stall for up to 10 seconds when A's action calls B while B's worker is waiting on an action that calls A, and B could not tell relayed calls from the user's.
+**The relay connection.** One connection per target, opened on first use, using the same transport as the target's saved endpoint (including an existing `ssh://` forward). Its HELLO names it "Rex Linux relay from studio", followed by the client label, so it shows up in `rex client ls` on B. It never attaches and never sends `servers`. It closes after 60 seconds idle, on revocation, on a timeout, or when the app quits. The alternative, B's own control connection, would put relayed calls in the same serial queue as the user's keys on B. It could also stall for up to 10 seconds when A's action calls B while B's worker is waiting on an action that calls A, and B could not tell relayed calls from the user's.
 
 ## 7. Audit and visibility
 
@@ -115,7 +115,7 @@ The checks run in this order. The first failure answers with the message shown a
 | B does not answer in time | The reply says "devbox did not answer within 8 s; the call may have run." The relay connection is closed, nothing is retried, and the next call opens a fresh connection. |
 | A disconnects mid-action | Pending calls are dropped. A call already sent to B finishes, and its result is discarded (its reply would carry a stale epoch). |
 | Revoked mid-action | The next call is refused (check 3); the call in flight finishes. |
-| A's worker is busy | The relay requires A's worker to keep reading events while its `client.action` is waiting. Today `call()` buffers them until the reply arrives. The fix is either a minimal vendored `rexrs` patch (send now, then wait while handing events to a callback), documented in `vendor/rexrs/REX-RUNE.md`, or a split send-and-wait in the worker. This is the first implementation step. |
+| A's worker is busy | The relay requires A's worker to keep reading events while its `client.action` is waiting. Today `call()` buffers them until the reply arrives. The fix is either a minimal vendored `rexrs` patch (send now, then wait while handing events to a callback), documented in `vendor/rexrs/REX-LINUX.md`, or a split send-and-wait in the worker. This is the first implementation step. |
 | A stray event before any of this ships | Today it waits out the server's 10 seconds. Answering `not_supported` at once is a small hardening worth taking separately. |
 
 ## 9. Test plan

@@ -1,6 +1,6 @@
 # Rex API 13 compatibility
 
-Verified on Linux x86-64 on **2026-11-10 (PST)**, based on Rex Rune 0.5.1.
+Verified on Linux x86-64 on **2026-11-10 (PST)**, based on Rex Linux 0.5.1.
 The client now advertises **API revisions 10–13**. Uploads still require 11;
 no new remote permissions or server lifecycle behavior was added.
 
@@ -10,7 +10,7 @@ The statements below that no download UI or data-stream consumer exists describe
 the 0.5.1 snapshot this section was first written against.
 
 **Important correction to the original compatibility concern:** this snapshot
-supports older negotiated revisions. The installed Rex Rune **0.5.0 actually
+supports older negotiated revisions. The installed Rex Linux **0.5.0 actually
 connects** to it, rather than being refused. Direct HELLO checks with ranges
 10–12 and 10–13 receive WELCOME revision 12 and 13 respectively. This update
 adds explicit revision-13 support; the tested snapshot does not strand 0.5.0.
@@ -183,7 +183,7 @@ Main PID changed from **431123 to 956205**. Read-only `server.version` through
 `unix:///run/user/1000/rex/server.sock` confirms the exact API-13 snapshot/commit
 above. The original session IDs were preserved.
 
-Both this branch's build and installed **`~/.local/bin/rex-rune` 0.5.0** were
+Both this branch's build and installed **`~/.local/bin/rex-linux` 0.5.0** were
 launched on a private Xvfb, with separate scratch workspace/HOME/XDG settings,
 notifications disabled, and attached to the existing session. `client.list`
 confirmed each process connected and attached; `client.inspect` confirmed its
@@ -516,7 +516,7 @@ A longer one needs the client's own cap, which the plan already has.
 
 ## Client implementation and acceptance
 
-Rex Rune implements the contract above as the **Download file…** action
+Rex Linux implements the contract above as the **Download file…** action
 (`pane.download`; see the README's Downloads section). It gates on the negotiated
 revision (13 or higher), sends no `if_none_match` (a `not_modified` reply is an
 error), opens the data stream with `rex.data.bytes.v1` on the host's own data
