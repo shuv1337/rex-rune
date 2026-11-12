@@ -220,24 +220,50 @@ struct Desktop {
 
 const DISCONNECTED: &str = "Session bus disconnected";
 
-/// The service answered, with an error: the connection and its signals are still good.
+/// The service answered a call on its pinned connection with an error: the connection
+/// and its signals are still good. Only asked of `Notify` and `CloseNotification`, never
+/// of connecting: an error while finding or starting the service comes from the bus.
 fn answered(error: &zbus::Error) -> bool {
-    use zbus::fdo::Error::{NameHasNoOwner, NoReply, ServiceUnknown, Timeout};
+    use zbus::fdo::Error::*;
     match error {
         zbus::Error::MethodError(..) => true,
         zbus::Error::FDO(error) => !matches!(
             **error,
-            ServiceUnknown(_) | NameHasNoOwner(_) | NoReply(_) | Timeout(_)
+            ServiceUnknown(_)
+                | NameHasNoOwner(_)
+                | NoReply(_)
+                | Timeout(_)
+                | TimedOut(_)
+                | NoServer(_)
+                | Disconnected(_)
+                | SpawnExecFailed(_)
+                | SpawnForkFailed(_)
+                | SpawnChildExited(_)
+                | SpawnChildSignaled(_)
+                | SpawnFailed(_)
+                | SpawnFailedToSetup(_)
+                | SpawnConfigInvalid(_)
+                | SpawnServiceNotValid(_)
         ),
         _ => false,
     }
 }
 
+/// A call to the pinned service, bounded. `Rejected` is its refusal; the flag says the
+/// connection can no longer be trusted.
+async fn pinned<T>(
+    future: impl std::future::Future<Output = zbus::Result<T>>,
+) -> Result<T, (Service, bool)> {
+    match tokio::time::timeout(std::time::Duration::from_secs(3), future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) if answered(&error) => Err((Service::Rejected, false)),
+        Ok(Err(error)) => Err((failure(error), true)),
+        Err(_) => Err((Service::Unreachable("Service did not respond".into()), true)),
+    }
+}
+
 fn failure(error: zbus::Error) -> Service {
     // Short, stable reasons; don't put daemon-controlled diagnostics in Settings.
-    if answered(&error) {
-        return Service::Rejected;
-    }
     let reason = match error {
         zbus::Error::FDO(error) => match *error {
             zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_) => {
@@ -344,28 +370,24 @@ impl Backend for Desktop {
             hints,
             -1i32,
         );
-        let call = bus.proxy.call::<_, _, u32>("Notify", &body);
-        match tokio::time::timeout(std::time::Duration::from_secs(3), call).await {
-            Ok(Ok(id)) => Ok(id),
-            // A refusal keeps the connection: reconnecting would take a new bus name and
-            // lose the clicks and closes of notifications already sent.
-            Ok(Err(error)) if answered(&error) => Err(failure(error)),
-            Ok(Err(error)) => {
+        // A refusal keeps the connection: reconnecting would take a new bus name and
+        // lose the clicks and closes of notifications already sent.
+        let result = pinned(bus.proxy.call::<_, _, u32>("Notify", &body)).await;
+        result.map_err(|(error, lost)| {
+            if lost {
                 self.bus = None;
-                Err(failure(error))
             }
-            Err(_) => {
-                self.bus = None;
-                Err(Service::Unreachable("Service did not respond".into()))
-            }
-        }
+            error
+        })
     }
 
     async fn close(&mut self, id: u32) -> Result<(), Service> {
         let Some(bus) = &self.bus else {
             return Err(Service::Unreachable(DISCONNECTED.into()));
         };
-        bounded(bus.proxy.call("CloseNotification", &(id,))).await
+        pinned(bus.proxy.call("CloseNotification", &(id,)))
+            .await
+            .map_err(|(error, _)| error)
     }
 }
 
@@ -376,8 +398,6 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
     };
     let mut ledger = Ledger::default();
     let mut tokens = HashMap::new();
-    // One navigation per notification, however often its action is reported.
-    let mut clicked = std::collections::HashSet::new();
     // Seeing a tab sends a command on every activity update; wake the UI only for news.
     let mut shown = ledger.health.clone();
     loop {
@@ -390,10 +410,8 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                 ledger.execute(command, &mut desktop).await;
                 if desktop.bus.as_ref().map(|bus| &bus.identity) != identity.as_ref() {
                     tokens.clear();
-                    clicked.clear();
                 }
                 tokens.retain(|id, _| ledger.target(*id).is_some());
-                clicked.retain(|id| ledger.target(*id).is_some());
                 if ledger.health != shown || test {
                     shown = ledger.health.clone();
                     let health = shown.clone();
@@ -409,7 +427,6 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                 let Some(signal) = signal else {
                     desktop.bus = None;
                     tokens.clear();
-                    clicked.clear();
                     ledger.health.service = Service::Unreachable(DISCONNECTED.into());
                     shown = ledger.health.clone();
                     let health = shown.clone();
@@ -427,8 +444,7 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                     Some("ActionInvoked") => {
                         if let Ok((id, action)) = signal.body().deserialize::<(u32, String)>()
                             && action == "default"
-                            && let Some(target) = ledger.target(id)
-                            && clicked.insert(id)
+                            && let Some(target) = ledger.click(id)
                         {
                             let token = tokens.remove(&id);
                             // Keep the id until Seen closes it (or NotificationClosed arrives).
@@ -439,7 +455,6 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                         if let Ok((id, _reason)) = signal.body().deserialize::<(u32, u32)>() {
                             ledger.closed(id);
                             tokens.remove(&id);
-                            clicked.remove(&id);
                         }
                     }
                     _ => {}

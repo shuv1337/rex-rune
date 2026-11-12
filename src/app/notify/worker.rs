@@ -65,11 +65,25 @@ pub struct Ledger {
     pub health: Health,
     /// Oldest first.
     live: Vec<(u32, Note)>,
+    /// Notifications whose click was already followed.
+    clicked: Vec<u32>,
 }
 
 impl Ledger {
     pub fn closed(&mut self, id: u32) {
         self.live.retain(|(live, _)| *live != id);
+        self.clicked.retain(|clicked| *clicked != id);
+    }
+
+    /// Where a clicked notification leads: once, however often its action is reported.
+    /// The id stays remembered until seeing the tab closes it.
+    pub fn click(&mut self, id: u32) -> Option<NoteTarget> {
+        let target = self.target(id)?;
+        if self.clicked.contains(&id) {
+            return None;
+        }
+        self.clicked.push(id);
+        Some(target)
     }
 
     pub fn target(&self, id: u32) -> Option<NoteTarget> {
@@ -120,6 +134,7 @@ impl Ledger {
         let owner = bus.ready().await?;
         if self.owner.as_ref() != Some(&owner) {
             self.live.clear();
+            self.clicked.clear();
             self.owner = Some(owner);
         }
         self.health.service = Service::Available;
@@ -135,17 +150,16 @@ impl Ledger {
                     .collect();
                 // Remove before calling: seeing the tab again never replays failed closes.
                 self.live.retain(|(id, _)| !ids.contains(id));
-                let mut failure = None;
+                self.clicked.retain(|id| !ids.contains(id));
                 for id in ids {
                     // A refusal means the daemon no longer has it, which is what was wanted.
+                    // Anything else ends the attempt: a daemon that does not answer is
+                    // not asked again for each remaining notification.
                     if let Err(error) = bus.close(id).await
                         && error != Service::Rejected
                     {
-                        failure = Some(error);
+                        return Err(error);
                     }
-                }
-                if let Some(error) = failure {
-                    return Err(error);
                 }
             }
         }
@@ -157,11 +171,15 @@ impl Ledger {
         let id = bus.send(&note, replaces).await?;
         self.live
             .retain(|(live, _)| *live != replaces && *live != id);
+        // A replacement can reuse a clicked notification's id; it is a new notification.
+        self.clicked
+            .retain(|clicked| *clicked != replaces && *clicked != id);
         // Test notifications have no navigation or tab lifecycle.
         if note.target.is_some() {
             self.live.push((id, note));
             if self.live.len() > REMEMBERED {
-                self.live.remove(0);
+                let (forgotten, _) = self.live.remove(0);
+                self.clicked.retain(|clicked| *clicked != forgotten);
             }
         }
         Ok(())

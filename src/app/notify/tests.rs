@@ -25,19 +25,33 @@ fn dbus_missing_service_errors_are_not_found() {
 }
 
 #[test]
-fn an_answer_that_refuses_is_rejected_and_keeps_the_connection() {
-    // The service answered: it is reachable, and its reason is not shown.
+fn only_an_error_reply_from_the_service_counts_as_its_answer() {
+    // The service replied with an error: it is there, and its reason is not shown.
     let refused: zbus::Error = zbus::fdo::Error::Failed("private daemon details".into()).into();
     assert!(answered(&refused));
-    assert_eq!(failure(refused), Service::Rejected);
     assert_eq!(Service::Rejected.reason(), "Service rejected the request");
-    // Nothing answered: the connection is not trusted again.
+    // Nothing answered, or the bus answered for a service that is not there.
     for error in [
         zbus::fdo::Error::NoReply("slow".into()).into(),
+        zbus::fdo::Error::TimedOut("slow".into()).into(),
         zbus::fdo::Error::ServiceUnknown("gone".into()).into(),
+        zbus::fdo::Error::Disconnected("bus".into()).into(),
+        zbus::fdo::Error::SpawnChildExited("daemon failed to start".into()).into(),
+        zbus::fdo::Error::SpawnExecFailed("daemon missing".into()).into(),
         zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::other("closed"))),
     ] {
         assert!(!answered(&error), "{error:?}");
+    }
+    // Finding or starting the service never reads as its refusal: a daemon that failed
+    // to start is unreachable, and its diagnostics stay out of Settings.
+    for error in [
+        zbus::fdo::Error::SpawnChildExited("private daemon details".into()),
+        zbus::fdo::Error::Failed("private daemon details".into()),
+    ] {
+        assert_eq!(
+            failure(error.into()),
+            Service::Unreachable("Could not reach the service".into())
+        );
     }
     assert_eq!(
         failure(zbus::fdo::Error::NoReply("slow".into()).into()),
@@ -60,8 +74,41 @@ fn a_refused_close_is_not_trouble_but_an_unanswered_one_is() {
     out.close_failure = Some(silent.clone());
     out.execute(Command::Seen(n.target.clone().unwrap()));
     assert_eq!(out.ledger.health.service, silent);
-    out.execute(Command::Seen(n.target.unwrap()));
+    out.execute(Command::Seen(n.target.clone().unwrap()));
     assert_eq!(out.closed.len(), 2, "one attempt per notification");
+    // A daemon that does not answer is asked once, not once per remaining notification.
+    for _ in 0..3 {
+        out.execute(Command::Send(note("one", Kind::Program)));
+    }
+    out.close_failure = Some(silent);
+    out.execute(Command::Seen(n.target.clone().unwrap()));
+    assert_eq!(out.closed.len(), 3);
+    out.execute(Command::Seen(n.target.unwrap()));
+    assert_eq!(out.closed.len(), 3, "and the rest are not tried later");
+}
+
+#[test]
+fn a_click_leads_once_and_a_replacement_with_its_id_is_a_new_notification() {
+    let mut out = Outbox::default();
+    let n = note("one", Kind::Activity(Blocked));
+    out.execute(Command::Send(n.clone()));
+    assert_eq!(out.ledger.click(1), n.target);
+    assert_eq!(
+        out.ledger.click(1),
+        None,
+        "a repeated action does not navigate again"
+    );
+    assert_eq!(out.ledger.click(99), None, "not ours");
+    // The close after the click never reached the daemon; the next note reuses the id.
+    out.execute(Command::Send(n.clone()));
+    assert_eq!(out.sent[1], (n.clone(), 1, 1));
+    assert_eq!(
+        out.ledger.click(1),
+        n.target,
+        "the new notification can be clicked"
+    );
+    out.ledger.closed(1);
+    assert_eq!(out.ledger.click(1), None);
 }
 
 #[test]
