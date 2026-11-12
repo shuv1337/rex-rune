@@ -141,10 +141,31 @@ impl Workspace {
         }
     }
 
+    /// The tab is on screen, or its notification was clicked. Asked once for the notes sent
+    /// since it was last seen, never on every update: a daemon that does not answer costs
+    /// one bounded attempt, and a close that failed is not tried again.
     pub fn close_tab_notification(&mut self, target: NoteTarget) {
+        if self.notified_tabs.remove(&target) {
+            self.close_notifications(target);
+        }
+    }
+
+    /// Close what this client sent about `target`, whether or not it was a tab's.
+    pub fn close_notifications(&mut self, target: NoteTarget) {
+        self.notified_tabs.remove(&target);
         // Merely viewing tabs must not start a desktop worker or connect to D-Bus.
         if self.notifier.is_some() || cfg!(test) {
             self.notification_command(Command::Seen(target));
+        }
+    }
+
+    /// The worker's news. A check or a note that finishes while a test is still on its way
+    /// leaves "Sending test…" showing.
+    pub(super) fn notification_health_posted(&mut self, health: Health, answers_test: bool) {
+        let sending = !answers_test && self.notification_health.test == TestResult::Sending;
+        self.notification_health = health;
+        if sending {
+            self.notification_health.test = TestResult::Sending;
         }
     }
 }
@@ -191,13 +212,32 @@ struct Bus {
     identity: String,
 }
 
-#[derive(Default)]
 struct Desktop {
     bus: Option<Bus>,
+    /// Decoded once for the worker's life.
+    image: Option<Variant<'static>>,
+}
+
+const DISCONNECTED: &str = "Session bus disconnected";
+
+/// The service answered, with an error: the connection and its signals are still good.
+fn answered(error: &zbus::Error) -> bool {
+    use zbus::fdo::Error::{NameHasNoOwner, NoReply, ServiceUnknown, Timeout};
+    match error {
+        zbus::Error::MethodError(..) => true,
+        zbus::Error::FDO(error) => !matches!(
+            **error,
+            ServiceUnknown(_) | NameHasNoOwner(_) | NoReply(_) | Timeout(_)
+        ),
+        _ => false,
+    }
 }
 
 fn failure(error: zbus::Error) -> Service {
     // Short, stable reasons; don't put daemon-controlled diagnostics in Settings.
+    if answered(&error) {
+        return Service::Rejected;
+    }
     let reason = match error {
         zbus::Error::FDO(error) => match *error {
             zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_) => {
@@ -206,10 +246,9 @@ fn failure(error: zbus::Error) -> Service {
             zbus::fdo::Error::NoReply(_) | zbus::fdo::Error::Timeout(_) => {
                 "Service did not respond"
             }
-            _ => "Service rejected the request",
+            _ => "Could not reach the service",
         },
-        zbus::Error::InputOutput(_) => "Session bus disconnected",
-        zbus::Error::MethodError(_, _, _) => "Service rejected the request",
+        zbus::Error::InputOutput(_) => DISCONNECTED,
         _ => "Could not reach the service",
     };
     Service::Unreachable(reason.into())
@@ -267,7 +306,15 @@ impl Backend for Desktop {
                 _ => self.bus = None,
             }
         }
-        let bus = bounded(Self::connect()).await?;
+        let bus = bounded(Self::connect())
+            .await
+            .map_err(|error| match error {
+                // There was no connection to lose.
+                Service::Unreachable(reason) if reason == DISCONNECTED => {
+                    Service::Unreachable("Could not connect to the session bus".into())
+                }
+                error => error,
+            })?;
         let identity = bus.identity.clone();
         self.bus = Some(bus);
         Ok(identity)
@@ -279,7 +326,7 @@ impl Backend for Desktop {
             ("desktop-entry", Variant::from("dev.shuv.rex-linux")),
             ("urgency", Variant::from(note.kind.urgency())),
         ]);
-        if let Some(image) = image_data() {
+        if let Some(image) = self.image.as_ref().and_then(|i| i.try_clone().ok()) {
             hints.insert("image-data", image);
         }
         let actions = if note.target.is_some() {
@@ -287,38 +334,50 @@ impl Backend for Desktop {
         } else {
             vec![]
         };
-        let result = bounded(bus.proxy.call(
-            "Notify",
-            &(
-                "Rex",
-                replaces,
-                "dev.shuv.rex-linux",
-                &note.summary,
-                &note.body,
-                actions,
-                hints,
-                -1i32,
-            ),
-        ))
-        .await;
-        if result.is_err() {
-            self.bus = None;
+        let body = (
+            "Rex",
+            replaces,
+            "dev.shuv.rex-linux",
+            &note.summary,
+            &note.body,
+            actions,
+            hints,
+            -1i32,
+        );
+        let call = bus.proxy.call::<_, _, u32>("Notify", &body);
+        match tokio::time::timeout(std::time::Duration::from_secs(3), call).await {
+            Ok(Ok(id)) => Ok(id),
+            // A refusal keeps the connection: reconnecting would take a new bus name and
+            // lose the clicks and closes of notifications already sent.
+            Ok(Err(error)) if answered(&error) => Err(failure(error)),
+            Ok(Err(error)) => {
+                self.bus = None;
+                Err(failure(error))
+            }
+            Err(_) => {
+                self.bus = None;
+                Err(Service::Unreachable("Service did not respond".into()))
+            }
         }
-        result
     }
 
     async fn close(&mut self, id: u32) -> Result<(), Service> {
         let Some(bus) = &self.bus else {
-            return Err(Service::Unreachable("Session bus disconnected".into()));
+            return Err(Service::Unreachable(DISCONNECTED.into()));
         };
         bounded(bus.proxy.call("CloseNotification", &(id,))).await
     }
 }
 
 async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
-    let mut desktop = Desktop::default();
+    let mut desktop = Desktop {
+        bus: None,
+        image: image_data(),
+    };
     let mut ledger = Ledger::default();
     let mut tokens = HashMap::new();
+    // One navigation per notification, however often its action is reported.
+    let mut clicked = std::collections::HashSet::new();
     // Seeing a tab sends a command on every activity update; wake the UI only for news.
     let mut shown = ledger.health.clone();
     loop {
@@ -331,12 +390,14 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                 ledger.execute(command, &mut desktop).await;
                 if desktop.bus.as_ref().map(|bus| &bus.identity) != identity.as_ref() {
                     tokens.clear();
+                    clicked.clear();
                 }
                 tokens.retain(|id, _| ledger.target(*id).is_some());
+                clicked.retain(|id| ledger.target(*id).is_some());
                 if ledger.health != shown || test {
                     shown = ledger.health.clone();
                     let health = shown.clone();
-                    handle.update(move |s, _| s.notification_health = health);
+                    handle.update(move |s, _| s.notification_health_posted(health, test));
                 }
             }
             signal = async {
@@ -348,10 +409,11 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                 let Some(signal) = signal else {
                     desktop.bus = None;
                     tokens.clear();
-                    ledger.health.service = Service::Unreachable("Session bus disconnected".into());
+                    clicked.clear();
+                    ledger.health.service = Service::Unreachable(DISCONNECTED.into());
                     shown = ledger.health.clone();
                     let health = shown.clone();
-                    handle.update(move |s, _| s.notification_health = health);
+                    handle.update(move |s, _| s.notification_health_posted(health, false));
                     continue;
                 };
                 match signal.header().member().map(|m| m.as_str()) {
@@ -366,6 +428,7 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                         if let Ok((id, action)) = signal.body().deserialize::<(u32, String)>()
                             && action == "default"
                             && let Some(target) = ledger.target(id)
+                            && clicked.insert(id)
                         {
                             let token = tokens.remove(&id);
                             // Keep the id until Seen closes it (or NotificationClosed arrives).
@@ -376,6 +439,7 @@ async fn run(notes: flume::Receiver<Command>, handle: AppHandle<Workspace>) {
                         if let Ok((id, _reason)) = signal.body().deserialize::<(u32, u32)>() {
                             ledger.closed(id);
                             tokens.remove(&id);
+                            clicked.remove(&id);
                         }
                     }
                     _ => {}

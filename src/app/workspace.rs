@@ -133,6 +133,8 @@ pub struct Workspace {
     /// Notifications headless tests would have sent.
     pub outbox: Vec<Note>,
     pub notification_health: super::notify::Health,
+    /// Tabs with a desktop notification sent since they were last on screen.
+    pub notified_tabs: std::collections::HashSet<super::notify::NoteTarget>,
     #[cfg(test)]
     pub notification_outbox: super::notify::Outbox,
     pub integrations: super::integrations::Integrations,
@@ -280,6 +282,7 @@ impl Workspace {
             notifier: None,
             outbox: Vec::new(),
             notification_health: Default::default(),
+            notified_tabs: Default::default(),
             #[cfg(test)]
             notification_outbox: Default::default(),
             integrations: Default::default(),

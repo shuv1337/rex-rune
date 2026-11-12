@@ -22,10 +22,64 @@ fn dbus_missing_service_errors_are_not_found() {
     ] {
         assert_eq!(failure(error.into()), Service::NotFound);
     }
+}
+
+#[test]
+fn an_answer_that_refuses_is_rejected_and_keeps_the_connection() {
+    // The service answered: it is reachable, and its reason is not shown.
+    let refused: zbus::Error = zbus::fdo::Error::Failed("private daemon details".into()).into();
+    assert!(answered(&refused));
+    assert_eq!(failure(refused), Service::Rejected);
+    assert_eq!(Service::Rejected.reason(), "Service rejected the request");
+    // Nothing answered: the connection is not trusted again.
+    for error in [
+        zbus::fdo::Error::NoReply("slow".into()).into(),
+        zbus::fdo::Error::ServiceUnknown("gone".into()).into(),
+        zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::other("closed"))),
+    ] {
+        assert!(!answered(&error), "{error:?}");
+    }
     assert_eq!(
-        failure(zbus::fdo::Error::Failed("private daemon details".into()).into()),
-        Service::Unreachable("Service rejected the request".into())
+        failure(zbus::fdo::Error::NoReply("slow".into()).into()),
+        Service::Unreachable("Service did not respond".into())
     );
+}
+
+#[test]
+fn a_refused_close_is_not_trouble_but_an_unanswered_one_is() {
+    let n = note("one", Kind::Activity(Blocked));
+    // The daemon no longer has the notification: closed is what was wanted.
+    let mut out = Outbox::default();
+    out.execute(Command::Send(n.clone()));
+    out.close_failure = Some(Service::Rejected);
+    out.execute(Command::Seen(n.target.clone().unwrap()));
+    assert_eq!(out.ledger.health.service, Service::Available);
+    // No answer is trouble, and the close is still not tried again.
+    let silent = Service::Unreachable("Service did not respond".into());
+    out.execute(Command::Send(n.clone()));
+    out.close_failure = Some(silent.clone());
+    out.execute(Command::Seen(n.target.clone().unwrap()));
+    assert_eq!(out.ledger.health.service, silent);
+    out.execute(Command::Seen(n.target.unwrap()));
+    assert_eq!(out.closed.len(), 2, "one attempt per notification");
+}
+
+#[test]
+fn only_the_newest_notifications_are_remembered() {
+    let mut out = Outbox::default();
+    let total = REMEMBERED + 6;
+    for i in 0..total {
+        out.execute(Command::Send(note(&format!("tab-{i}"), Kind::Program)));
+    }
+    assert_eq!(out.ledger.remembered(), REMEMBERED);
+    // The oldest are forgotten, not closed: seeing their tab asks the daemon nothing.
+    assert_eq!(out.ledger.target(1), None);
+    out.execute(Command::Seen(note("tab-0", Kind::Program).target.unwrap()));
+    assert!(out.closed.is_empty());
+    let newest = note(&format!("tab-{}", total - 1), Kind::Program);
+    out.execute(Command::Seen(newest.target.unwrap()));
+    assert_eq!(out.closed, [total as u32]);
+    assert_eq!(out.ledger.remembered(), REMEMBERED - 1);
 }
 
 #[test]
@@ -80,11 +134,11 @@ fn program_messages_are_unreplaced_but_close_with_their_tab() {
 #[test]
 fn failed_notify_drops_once_and_a_later_note_succeeds() {
     let mut out = Outbox {
-        send_failure: Some(Service::Unreachable("Service rejected the request".into())),
+        send_failure: Some(Service::Rejected),
         ..Default::default()
     };
     out.execute(Command::Send(note("failed", Kind::Activity(Blocked))));
-    assert!(matches!(out.ledger.health.service, Service::Unreachable(_)));
+    assert_eq!(out.ledger.health.service, Service::Rejected);
     out.execute(Command::Send(note("later", Kind::Activity(Blocked))));
     assert_eq!(
         out.attempts
@@ -163,7 +217,7 @@ fn failed_replacement_keeps_the_previous_live_id() {
     let mut out = Outbox::default();
     let n = note("one", Kind::Activity(Blocked));
     out.execute(Command::Send(n.clone()));
-    out.send_failure = Some(Service::Unreachable("Service rejected the request".into()));
+    out.send_failure = Some(Service::Rejected);
     out.execute(Command::Send(n.clone()));
     out.execute(Command::Seen(n.target.unwrap()));
     assert_eq!(out.closed, [1]);

@@ -459,12 +459,16 @@ impl Workspace {
         if cfg!(test) {
             self.outbox.push(note.clone());
         }
+        // Only a tab can be seen; a message whose tab is unknown closes on a click.
+        if let Some(target) = note.target.as_ref().filter(|t| t.window.is_some()) {
+            self.notified_tabs.insert(target.clone());
+        }
         self.notification_command(Command::Send(note));
     }
 
     /// A notification was clicked: raise the window and show its session and tab.
     pub fn open_note(&mut self, target: NoteTarget, token: Option<String>, tx: &mut Tx) {
-        self.close_tab_notification(target.clone());
+        self.close_notifications(target.clone());
         self.handle.activate(token.unwrap_or_default());
         let Some(index) = self.host_index(target.host) else {
             return;

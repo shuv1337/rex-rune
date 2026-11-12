@@ -351,6 +351,7 @@ fn notifications(s: &Workspace) -> El {
         Service::Available => ("Available", ChipTone::Good),
         Service::NotFound => ("Not found", ChipTone::Attention),
         Service::Unreachable(_) => ("Unreachable", ChipTone::Attention),
+        Service::Rejected => ("Rejected", ChipTone::Attention),
     };
     let test = match &health.test {
         TestResult::None => "No test sent yet.".to_owned(),
@@ -383,42 +384,6 @@ fn notifications(s: &Workspace) -> El {
         }),
     ];
     page([
-        section(
-            "Desktop service",
-            [
-                card([
-                    setting(
-                        "Notification service",
-                        "Last check, not a delivery receipt.",
-                        state_chip("notification-health", status, tone, health.service.reason()),
-                    ),
-                    setting(
-                        "Send test notification",
-                        &test,
-                        row()
-                            .gap(6.)
-                            .center_y()
-                            .children(matches!(health.test, TestResult::Failed(_)).then(|| {
-                                state_chip(
-                                    "notification-test-failed",
-                                    "Failed",
-                                    ChipTone::Attention,
-                                    &test,
-                                )
-                            }))
-                            .child(button(
-                                "notification-test",
-                                "Send test",
-                                Pill::Neutral,
-                                |s, _| {
-                                    s.notification_command(Command::Test);
-                                },
-                            )),
-                    ),
-                ]),
-                footnote("Tests work even when desktop notifications are off."),
-            ],
-        ),
         section(
             "",
             [card([
@@ -467,6 +432,42 @@ fn notifications(s: &Workspace) -> El {
                     |n| &mut n.program_messages,
                 ),
             )])],
+        ),
+        section(
+            "Desktop service",
+            [
+                card([
+                    setting(
+                        "Notification service",
+                        "Last check, not a delivery receipt.",
+                        state_chip("notification-health", status, tone, health.service.reason()),
+                    ),
+                    setting(
+                        "Send test notification",
+                        &test,
+                        row()
+                            .gap(6.)
+                            .center_y()
+                            .children(matches!(health.test, TestResult::Failed(_)).then(|| {
+                                state_chip(
+                                    "notification-test-failed",
+                                    "Failed",
+                                    ChipTone::Attention,
+                                    &test,
+                                )
+                            }))
+                            .child(button(
+                                "notification-test",
+                                "Send test",
+                                Pill::Neutral,
+                                |s, _| {
+                                    s.notification_command(Command::Test);
+                                },
+                            )),
+                    ),
+                ]),
+                footnote("Tests work even when desktop notifications are off."),
+            ],
         ),
     ])
 }

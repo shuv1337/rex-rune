@@ -208,8 +208,9 @@ try:
     settings()
     assert "Available" in capture("available")
     assert not calls("Notify"), "opening Settings must not send a notification"
-    # Coordinates are the existing Settings card's trailing button at 1024x700.
-    click(851, 215)
+    # The search result scrolls the page to its end, where Desktop service is the last
+    # section; this is its card's trailing button at 1024x700.
+    click(851, 618)
     wait(lambda: len(calls("Notify")) == 1, "test button did not send")
     test = calls("Notify")[0]
     assert test["summary"] == "Rex test notification" and test["urgency"] == 1 and test["actions"] == []

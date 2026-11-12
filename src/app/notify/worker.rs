@@ -1,7 +1,11 @@
 //! Decisions shared by the D-Bus worker and the headless outbox. Failed commands are
 //! consumed once; only a later command can establish another connection.
 use super::{Kind, Note, NoteTarget};
-use std::collections::HashMap;
+
+/// Notifications remembered for replacing, closing and clicking. Past this the oldest is
+/// forgotten (left on the desktop, no longer ours to close), so a daemon that never says
+/// a notification closed cannot grow the list.
+pub(super) const REMEMBERED: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -18,6 +22,8 @@ pub enum Service {
     Available,
     NotFound,
     Unreachable(String),
+    /// The service answered and refused the request: it is there, and reachable.
+    Rejected,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,6 +46,7 @@ impl Service {
         match self {
             Self::NotFound => "No notification service",
             Self::Unreachable(reason) => reason,
+            Self::Rejected => "Service rejected the request",
             _ => "",
         }
     }
@@ -56,16 +63,23 @@ pub(super) trait Backend {
 pub struct Ledger {
     owner: Option<String>,
     pub health: Health,
-    live: HashMap<u32, Note>,
+    /// Oldest first.
+    live: Vec<(u32, Note)>,
 }
 
 impl Ledger {
     pub fn closed(&mut self, id: u32) {
-        self.live.remove(&id);
+        self.live.retain(|(live, _)| *live != id);
     }
 
     pub fn target(&self, id: u32) -> Option<NoteTarget> {
-        self.live.get(&id)?.target.clone()
+        let (_, note) = self.live.iter().find(|(live, _)| *live == id)?;
+        note.target.clone()
+    }
+
+    #[cfg(test)]
+    pub fn remembered(&self) -> usize {
+        self.live.len()
     }
 
     fn replaces(&self, note: &Note) -> u32 {
@@ -84,8 +98,8 @@ impl Ledger {
         if let Command::Seen(target) = &command
             && !self
                 .live
-                .values()
-                .any(|note| note.target.as_ref() == Some(target))
+                .iter()
+                .any(|(_, note)| note.target.as_ref() == Some(target))
         {
             return;
         }
@@ -120,12 +134,13 @@ impl Ledger {
                     .filter_map(|(id, note)| (note.target.as_ref() == Some(&target)).then_some(*id))
                     .collect();
                 // Remove before calling: seeing the tab again never replays failed closes.
-                for id in &ids {
-                    self.live.remove(id);
-                }
+                self.live.retain(|(id, _)| !ids.contains(id));
                 let mut failure = None;
                 for id in ids {
-                    if let Err(error) = bus.close(id).await {
+                    // A refusal means the daemon no longer has it, which is what was wanted.
+                    if let Err(error) = bus.close(id).await
+                        && error != Service::Rejected
+                    {
                         failure = Some(error);
                     }
                 }
@@ -140,10 +155,14 @@ impl Ledger {
     async fn send(&mut self, note: Note, bus: &mut impl Backend) -> Result<(), Service> {
         let replaces = self.replaces(&note);
         let id = bus.send(&note, replaces).await?;
-        self.live.remove(&replaces);
+        self.live
+            .retain(|(live, _)| *live != replaces && *live != id);
         // Test notifications have no navigation or tab lifecycle.
         if note.target.is_some() {
-            self.live.insert(id, note);
+            self.live.push((id, note));
+            if self.live.len() > REMEMBERED {
+                self.live.remove(0);
+            }
         }
         Ok(())
     }
@@ -159,6 +178,7 @@ pub struct Outbox {
     pub closed: Vec<u32>,
     pub failure: Option<Service>,
     pub send_failure: Option<Service>,
+    pub close_failure: Option<Service>,
     pub attempts: Vec<Note>,
     pub owner: Option<String>,
     pub(super) next_id: u32,
@@ -191,7 +211,7 @@ impl Backend for Outbox {
     }
     async fn close(&mut self, id: u32) -> Result<(), Service> {
         self.closed.push(id);
-        Ok(())
+        self.close_failure.take().map_or(Ok(()), Err)
     }
 }
 

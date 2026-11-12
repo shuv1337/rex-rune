@@ -123,6 +123,71 @@ fn activity_outbox_replaces_and_seen_closes_only_that_tab() {
     assert_eq!(ws.notification_outbox.closed, [2, 1]);
 }
 
+fn seen_commands(ws: &Workspace) -> usize {
+    ws.notification_outbox
+        .commands
+        .iter()
+        .filter(|c| matches!(c, Command::Seen(_)))
+        .count()
+}
+
+#[test]
+fn a_seen_tab_asks_once_per_notification_and_never_on_every_update() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, _host) = tabbed_workspace("single");
+    // A tab on screen with nothing sent about it asks for nothing, however often it updates.
+    for _ in 0..5 {
+        ws.track_activity(0);
+    }
+    assert_eq!(seen_commands(&ws), 0);
+
+    // A note goes out while the window is away; the daemon then stops answering.
+    ws.window_focused = false;
+    set_activity(&mut ws, "block:a", &[("", record(Blocked, true))]);
+    assert_eq!(ws.notification_outbox.sent.len(), 1);
+    ws.window_focused = true;
+    let silent = Service::Unreachable("Service did not respond".into());
+    ws.notification_outbox.failure = Some(silent.clone());
+    ws.track_activity(0);
+    assert_eq!(seen_commands(&ws), 1);
+    assert_eq!(ws.notification_health.service, silent);
+    assert!(ws.notification_outbox.closed.is_empty());
+
+    // Later updates of the tab in front queue nothing behind the silent daemon.
+    for _ in 0..20 {
+        ws.track_activity(0);
+    }
+    assert_eq!(seen_commands(&ws), 1, "no retry on every host update");
+
+    // The next note for that tab is what earns the next attempt.
+    ws.window_focused = false;
+    set_activity(&mut ws, "block:a", &[("", record(Working, true))]);
+    set_activity(&mut ws, "block:a", &[("", record(Error, true))]);
+    ws.window_focused = true;
+    ws.track_activity(0);
+    assert_eq!(seen_commands(&ws), 2);
+    assert!(!ws.notification_outbox.closed.is_empty());
+}
+
+#[test]
+fn a_test_on_its_way_stays_sending_until_its_own_answer() {
+    let (mut ws, _host) = tabbed_workspace("single");
+    ws.notification_health.test = TestResult::Sending;
+    let checked = Health {
+        service: Service::Available,
+        test: TestResult::None,
+    };
+    ws.notification_health_posted(checked.clone(), false);
+    assert_eq!(ws.notification_health.service, Service::Available);
+    assert_eq!(ws.notification_health.test, TestResult::Sending);
+    let answered = Health {
+        test: TestResult::Sent,
+        ..checked
+    };
+    ws.notification_health_posted(answered.clone(), true);
+    assert_eq!(ws.notification_health, answered);
+}
+
 /// Opt-in real worker test, without native UI libraries that can terminate the process
 /// when their own session-bus connection disappears. Never falls back to a personal bus.
 #[test]
@@ -276,7 +341,7 @@ fn draw(case: &str) {
     );
     settle(&mut rt);
     camera.snap(&mut rt, &format!("notification-{case}"));
-    rt.update(|_, tx| tx.scroll_center("notify-messages"));
+    rt.update(|_, tx| tx.scroll_center("notification-test"));
     settle(&mut rt);
     camera.snap(&mut rt, &format!("notification-{case}-bottom"));
 }
