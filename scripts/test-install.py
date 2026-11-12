@@ -199,9 +199,9 @@ os.execv("/usr/bin/curl", ["curl", *args])
         unrelated.write_text("keep")
 
         def filelist():
-            # Desktop-file-utils owns and regenerates its shared MIME cache.
+            # Desktop-file-utils owns and regenerates its shared caches (intent.cache from 0.28).
             return {str(p.relative_to(home)): p.read_bytes() for p in home.rglob("*")
-                    if p.is_file() and p.name not in ("mimeinfo.cache", "icon-theme.cache")}
+                    if p.is_file() and p.name not in ("mimeinfo.cache", "intent.cache", "icon-theme.cache")}
 
         baseline = filelist()
         for shell in ("dash", "bash", "busybox"):
@@ -225,7 +225,7 @@ os.execv("/usr/bin/curl", ["curl", *args])
                 latest.unlink()
                 latest.symlink_to(site / "releases/download/v0.5.2", target_is_directory=True)
                 invoke(fixture, ("--uninstall",), shell=shell)
-                assert filelist() == baseline, "uninstall changed unrelated files"
+                assert filelist() == baseline, f"uninstall changed unrelated files: {sorted(set(filelist()) ^ set(baseline))}"
         print("PASS fresh, upgrade, current, downgrade, explicit pin, uninstall: 3 shells x 2 verifiers", flush=True)
 
         release = site / "releases/download/v0.5.2"
