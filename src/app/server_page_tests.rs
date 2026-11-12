@@ -156,6 +156,9 @@ fn pending_partial_refused_and_unknown_fields_remain_distinct() {
     ws.hosts[0].model.protocol.api_revision = 0;
     let mut rt = open(ws, (1024., 700.));
     assert!(shows(&rt, "Waiting for report"));
+    for label in ["Built-in Tailscale", "Tailscale HTTPS", "Tailscale address"] {
+        assert!(page_text(&rt).contains(&format!("{label}\nWaiting for report")));
+    }
     assert!(shows(&rt, "Not reported") && !shows(&rt, "Not connected"));
     assert!(!has(&rt, "server-copy-tailnet"));
     rt.update(|s, _| {
@@ -312,8 +315,21 @@ fn address_forms_strip_credentials_and_never_echo_unknown_syntax() {
         ),
         (
             "unix:///run/rex.sock?token=x#x",
-            Some("unix:///run/rex.sock"),
+            Some("unix:///run/rex.sock?token=x#x"),
         ),
+        (
+            "unix:///tmp/rex?a/server.sock",
+            Some("unix:///tmp/rex?a/server.sock"),
+        ),
+        (
+            "unix:///tmp/rex#1/server.sock",
+            Some("unix:///tmp/rex#1/server.sock"),
+        ),
+        (
+            "unix:///home/me/My Sockets/réx.sock",
+            Some("unix:///home/me/My Sockets/réx.sock"),
+        ),
+        ("unix://relative.sock", None),
         ("127.0.0.1:7297", Some("127.0.0.1:7297")),
         ("[::1]:7297", Some("[::1]:7297")),
         ("javascript:password", None),
@@ -328,13 +344,34 @@ fn address_forms_strip_credentials_and_never_echo_unknown_syntax() {
     ws.settings.hosts[0].endpoint = "future://secret-configured".into();
     if let Answer::Reported(p) = &mut ws.hosts[0].model.server_info.process {
         p.listeners[0].endpoint = "https://u:secret-listener@example.org?secret-query".into();
+        for endpoint in ["tailnet://:7297", "localhost:7297"] {
+            p.listeners.push(rexrs::api::server::Listener {
+                endpoint: endpoint.into(),
+                ..Default::default()
+            });
+        }
         p.tailscale.as_mut().unwrap().https.as_mut().unwrap().url =
             Some("javascript:secret-link".into());
     }
     let rt = open(ws, (1024., 700.));
     assert!(!has(&rt, "server-copy-endpoint") && !has(&rt, "server-copy-tailnet"));
     assert!(shows(&rt, "https://example.org/") && shows(&rt, "Address unavailable"));
+    assert_eq!(
+        page_text(&rt).matches("Endpoint format not shown").count(),
+        2
+    );
     assert!(!page_text(&rt).contains("secret"));
+
+    // Copy a Unix endpoint exactly as transport interprets it, not as a URL.
+    let literal = "unix:///home/me/My Sockets/réx?1#2.sock";
+    let mut ws = fixture();
+    ws.settings.hosts[0].endpoint = literal.into();
+    let mut rt = open(ws, (640., 480.));
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    assert!(shows(&rt, literal));
+    tap(&mut rt, "server-copy-endpoint");
+    assert_eq!(clipboard.text().as_ref().map(|v| v.as_str()), Some(literal));
 }
 
 #[test]

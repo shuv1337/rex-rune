@@ -10,18 +10,21 @@ use rune::{El, col, text};
 
 const MISSING: &str = "Not reported";
 
-/// Only known address forms, with URL credentials, query and fragment removed. Never link
-/// reported addresses. Unknown listener syntax is omitted rather than echoed unfiltered.
+/// Preserve literal absolute Unix paths; strip credentials, query and fragment from URLs.
+/// Never link reported addresses. Unknown listener syntax is not echoed unfiltered.
 pub(super) fn address(raw: &str) -> Option<String> {
     if raw.chars().any(char::is_control) {
         return None;
+    }
+    // Transport treats everything after unix:// as a literal path, including ? and #.
+    if let Some(path) = raw.strip_prefix("unix://") {
+        return path.starts_with('/').then(|| raw.to_owned());
     }
     if let Ok(socket) = raw.parse::<std::net::SocketAddr>() {
         return Some(socket.to_string());
     }
     let mut url = url::Url::parse(raw).ok()?;
     match url.scheme() {
-        "unix" if url.host_str().is_none() && url.path().starts_with('/') => {}
         "https" | "http" | "wss" | "ws" | "ssh" if url.host_str().is_some() => {
             url.set_password(None).ok()?;
             url.set_username("").ok()?;
@@ -197,7 +200,7 @@ pub fn section(s: &Workspace) -> El {
     for (index, listener) in listeners.into_iter().flatten().enumerate() {
         listener_rows.push(fact(
             &format!("Listener {}", index + 1),
-            address(&listener.endpoint).unwrap_or_else(|| "Address unavailable".into()),
+            address(&listener.endpoint).unwrap_or_else(|| "Endpoint format not shown".into()),
             None,
         ));
     }
@@ -220,7 +223,7 @@ pub fn section(s: &Workspace) -> El {
         _ => "Unknown (starting)",
     });
     let https = tailscale.and_then(|t| t.https.as_ref());
-    let https_state = https.map_or(MISSING, |h| {
+    let https_state = https.map_or(p_missing, |h| {
         if h.state == "available" {
             "Available"
         } else {
@@ -246,7 +249,12 @@ pub fn section(s: &Workspace) -> El {
                     last_state(https_state, model.connected),
                     None,
                 ),
-                address_row("server-copy-tailnet", "Tailscale address", remote, MISSING),
+                address_row(
+                    "server-copy-tailnet",
+                    "Tailscale address",
+                    remote,
+                    p_missing,
+                ),
             ]),
             footnote(
                 "Last reported by this Rex server, not this client's local Tailscale. Missing data does not mean disabled.",
@@ -256,9 +264,9 @@ pub fn section(s: &Workspace) -> El {
     page([
         current,
         footnote(if model.connected {
-            "Last reported server facts, not live monitoring. Counts and states may have changed. Addresses omit credentials, queries and fragments; timestamps are as reported."
+            "Last reported server facts, not live monitoring. Counts and states may have changed. URLs omit credentials, queries and fragments; Unix paths and timestamps are as reported."
         } else {
-            "Disconnected: last reported server facts only. They do not mean the server is running now. Addresses omit credentials, queries and fragments; timestamps are as reported."
+            "Disconnected: last reported server facts only. They do not mean the server is running now. URLs omit credentials, queries and fragments; Unix paths and timestamps are as reported."
         }).key("server-freshness"),
         build,
         process_rows,
