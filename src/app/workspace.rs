@@ -115,8 +115,10 @@ pub struct Workspace {
     pub switcher_fx: ScrollFx,
     /// The Settings page's scroll thumb.
     pub settings_fx: ScrollFx,
-    /// What is typed in Settings → Shortcuts' read-only filter.
+    /// What is typed in Settings → Shortcuts' filter.
     pub shortcut_filter: TextEdit,
+    /// The Shortcuts row that is taking a new key.
+    pub recorder: Option<super::recorder::Recorder>,
     pub sidebar_drag_start: Option<f32>,
     scratch: TextEdit,
     next_host: u64,
@@ -213,7 +215,7 @@ impl Workspace {
                 Ok(theme) => (theme, None),
                 Err(error) => (None, Some(error)),
             };
-        let local_keymap = super::actions::resolve(&settings.shortcut_file.overrides);
+        let local_keymap = super::recorder::local_keymap(&settings);
         let mut this = Self {
             logo: None,
             images: None,
@@ -261,6 +263,7 @@ impl Workspace {
             switcher_fx: ScrollFx::default(),
             settings_fx: ScrollFx::default(),
             shortcut_filter: TextEdit::new(""),
+            recorder: None,
             sidebar_drag_start: None,
             scratch: TextEdit::new(""),
             next_host: 0,
@@ -661,7 +664,7 @@ impl Workspace {
         }
     }
 
-    fn keymap_declaration(&self) -> rex_linux::connection::keymap::Declaration {
+    pub(super) fn keymap_declaration(&self) -> rex_linux::connection::keymap::Declaration {
         let overrides = self.settings.shortcut_file.overrides.clone();
         rex_linux::connection::keymap::Declaration {
             generation: self.keymap_generation,
@@ -669,7 +672,7 @@ impl Workspace {
                 .actions(super::actions::declarations())
                 .server_actions("all")
                 .defaults([rex_linux::keymap::defaults()])
-                .overrides([overrides.layer.clone()]),
+                .overrides(super::recorder::layers(&self.settings)),
             overrides,
         }
     }
@@ -742,14 +745,7 @@ impl Workspace {
         if previous == self.settings.shortcut_file.overrides {
             return;
         }
-        self.local_keymap = super::actions::resolve(&self.settings.shortcut_file.overrides);
-        self.keymap_generation += 1;
-        self.bindings.sequence.clear();
-        // Disconnected workers retain the declaration for their next successful connect too.
-        let declaration = self.keymap_declaration();
-        for index in 0..self.hosts.len() {
-            self.send(index, HostCommand::Keymap(Box::new(declaration.clone())));
-        }
+        self.keymap_changed();
         if let Some(notice) = self.settings.shortcut_file.notice.take() {
             self.notify(notice);
         }
@@ -1233,7 +1229,7 @@ impl Workspace {
         if !action.opens_followup()
             && !matches!(
                 action,
-                Intent::Theme(_) | Intent::Chrome(_) | Intent::Choose(_)
+                Intent::Theme(_) | Intent::Chrome(_) | Intent::Choose(_) | Intent::Shortcuts(_)
             )
             && self.panel.is_some()
         {
@@ -1392,6 +1388,7 @@ impl Workspace {
                 self.reload_shortcuts();
                 self.shortcut_filter = TextEdit::new("");
                 self.settings_nav.opened();
+                self.recorder = None;
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
@@ -1421,6 +1418,7 @@ impl Workspace {
             }
             Intent::Retry => self.send(self.active, HostCommand::Reconnect),
             Intent::Command(command) => command.run(self, tx),
+            Intent::Shortcuts(item) => self.shortcut_menu(item, tx),
         }
     }
 
@@ -1786,6 +1784,8 @@ impl Workspace {
                     | PanelKind::Chromes
                     | PanelKind::Choice(_)
                     | PanelKind::Discover
+                    | PanelKind::ShortcutMenu
+                    | PanelKind::ResetShortcuts
             ) && previous
                 .as_ref()
                 .is_some_and(|p| matches!(p.kind, PanelKind::Settings)))
@@ -1824,6 +1824,7 @@ impl Workspace {
     /// Show a Settings section; Integrations reads the agents' state when first shown.
     pub fn open_section(&mut self, section: SettingsSection) {
         self.settings_section = section;
+        self.recorder = None;
         if section == SettingsSection::Shortcuts {
             self.reload_shortcuts();
         }
@@ -1842,6 +1843,7 @@ impl Workspace {
     }
 
     pub fn close_panel(&mut self, tx: &mut Tx) {
+        self.recorder = None;
         self.leave_download_dialog();
         self.bindings.sequence.clear();
         self.panel = None;
@@ -2072,6 +2074,11 @@ impl Workspace {
             PanelKind::RemoveHost(host) => {
                 let back = self.settings_back();
                 self.remove_host(host, tx);
+                self.panel = back;
+            }
+            PanelKind::ResetShortcuts => {
+                let back = self.settings_back();
+                self.reset_recorded();
                 self.panel = back;
             }
             PanelKind::StartSsh { endpoint } => self.start_ssh(endpoint),
