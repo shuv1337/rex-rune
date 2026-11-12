@@ -131,7 +131,8 @@ prints exactly `rex-linux <version>`, and the launcher and icons are named
   trusted comment. Current clients require the same id.
 - **Each target has two archives.** `tarball` is the bridge,
   `rex-linux-<version>-<target>.tar.gz`: this release's binary as `bin/rex-linux` with
-  the old launcher and icon names, and no installer script. `archive` is
+  the old launcher and icon names, and an `install.sh` that only refuses and names the
+  current installer (a kept copy of the 0.7.x `install.sh` would run it). `archive` is
   `rex-rune-<version>-<target>.tar.gz`, which current clients and `install.sh` install.
 - **Started as `rex-linux`, the client names itself that way** in `--version`, through
   the bridge's binary or the compatibility link.
@@ -153,8 +154,11 @@ until then the old launcher keeps working.
 
 An update from 0.7.x that is cut off part-way is undone as any other: 0.7.5 journals
 the files under their old names, the journal's format is unchanged, and a client
-started as `rex-linux` looks for those names. Recovery runs before settings move, so
-the restored 0.7.x client finds them where it left them.
+started as `rex-linux` looks for those names. Recovery runs before settings move, and
+nothing is moved by a process whose installation was just rolled back, so the restored
+0.7.x client finds its settings and receipt where it left them. If `install.sh`
+replaces the installation before the client starts again, the journal that update
+left is cleared as superseded.
 
 One limit: a start with a different `XDG_DATA_HOME` from the install's does not find
 the receipt, so the rename waits for a start that has it.

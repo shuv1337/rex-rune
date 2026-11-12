@@ -90,7 +90,7 @@ def main():
             executable(tools / "getconf", "#!/bin/sh\necho 'glibc 2.39'\n")
         # The production signature and its rex-linux trusted comment verify with both
         # verifiers: only a verified release reaches the message about its old name.
-        declined = f"0.5.1 was published as rex-linux; install it with its own installer: {REPO}/releases/download/v0.5.1/install.sh"
+        declined = f"0.5.1 was published as rex-linux; install it with its own installer: curl -fsSL {REPO}/releases/download/v0.5.1/install.sh | sh -s -- --version 0.5.1"
         for verifier in (False, True):
             for args in (("--version", "0.5.1"), ("--version", "0.5.1", "--check")):
                 invoke(args=args, ok=False, mini_sign=verifier, contains=declined)

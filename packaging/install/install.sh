@@ -174,7 +174,7 @@ PY
     hash=$(awk -v f="$archive" '$2==f {n++; h=$1; if(NF!=2 || length($1)!=64 || $1 ~ /[^0-9a-f]/) bad=1} END {if(n!=1 || bad) exit 1; print h}' "$work/SHA256SUMS") || {
         # A verified release with only the old tarball predates the rename.
         if awk -v f="rex-linux-$version-$target.tar.gz" '$2==f {n++} END {exit n!=1}' "$work/SHA256SUMS"; then
-            die "$version was published as rex-linux; install it with its own installer: $REPO/releases/download/v$version/install.sh"
+            die "$version was published as rex-linux; install it with its own installer: curl -fsSL $REPO/releases/download/v$version/install.sh | sh -s -- --version $version"
         fi
         die 'signed checksums missing or ambiguous for this tarball'
     }

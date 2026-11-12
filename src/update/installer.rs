@@ -849,6 +849,14 @@ fn recover_with_cleanup(
     let mut restored_binary = false;
     if !tx.join("committed").exists() {
         let journal: Journal = serde_json::from_slice(&fs::read(tx.join("journal.json"))?)?;
+        // A journal the 0.7.x updater left for `rex-linux`, met by `rex-rune` beside it: an
+        // installer has since replaced that installation whole, as for any later repair.
+        if !layout.is_legacy()
+            && journal.binary == layout.binary.with_file_name(crate::legacy::NAME)
+        {
+            cleanup(layout)?;
+            return Ok(Recovery::Superseded);
+        }
         ensure!(
             journal.binary == layout.binary,
             "recovery journal belongs to a different binary"

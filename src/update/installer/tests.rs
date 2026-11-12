@@ -944,17 +944,63 @@ fn an_update_from_the_old_client_cut_off_midway_is_rolled_back_by_its_old_names(
         fs::write(path, b"old").unwrap();
     }
     let old = contents(&layout);
-    // Icons, launcher and binary replaced; the receipt not yet.
-    interrupt(&layout, 5, false);
-    assert_ne!(contents(&layout), old);
-    assert_eq!(
-        recover(&layout).unwrap(),
-        Recovery::Restored(layout.binary.clone()),
-        "the old client's binary is back, to be started again"
-    );
-    assert_eq!(contents(&layout), old);
-    assert!(!layout.transaction().exists());
+    // Icons, launcher and binary replaced with the receipt still to go, then all six
+    // replaced with the commit not yet marked: the two points at which this client, not
+    // the old one, is the binary that starts next.
+    for replaced in [5, 6] {
+        interrupt(&layout, replaced, false);
+        assert_ne!(contents(&layout), old);
+        assert_eq!(
+            recover_install_at(&layout, Duration::from_secs(2), false).unwrap(),
+            Recovery::Restored(layout.binary.clone()),
+            "the old client's binary is back, to be started again"
+        );
+        assert_eq!(contents(&layout), old);
+        assert!(!layout.transaction().exists());
+    }
     // Nothing was looked for, or left, under the new names.
     assert!(!layout.data.join("rex-rune").exists());
     assert!(!layout.data.join("applications").join(DESKTOP).exists());
+
+    // A commit that was marked is finished, not undone: only its journal goes.
+    interrupt(&layout, 6, false);
+    fs::write(layout.transaction().join("committed"), b"").unwrap();
+    let new = contents(&layout);
+    assert_eq!(recover(&layout).unwrap(), Recovery::Unchanged);
+    assert_eq!(contents(&layout), new);
+    assert!(!layout.transaction().exists());
+}
+
+/// An update from 0.7.x is cut off, and then `install.sh` replaces the installation with
+/// `rex-rune` and a `rex-linux` link. The journal still names `rex-linux`. The client clears
+/// it as superseded instead of refusing it at every start and blocking every later update.
+#[test]
+fn an_old_clients_journal_left_behind_a_reinstall_is_cleared_as_superseded() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let old_layout = InstallLayout {
+        local: temp.path().join(".local"),
+        binary: temp.path().join(".local/bin/rex-linux"),
+        data: temp.path().join(".local/share"),
+    };
+    for path in old_layout.destinations() {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"old").unwrap();
+    }
+    interrupt(&old_layout, 5, false);
+    // install.sh: the new names, the old ones removed, the old command a link.
+    let layout = layout(temp.path());
+    for path in old_layout.destinations() {
+        fs::remove_file(path).unwrap();
+    }
+    std::os::unix::fs::symlink("rex-rune", &old_layout.binary).unwrap();
+    let installed = contents(&layout);
+    assert_eq!(layout.transaction(), old_layout.transaction());
+    assert_eq!(recover(&layout).unwrap(), Recovery::Superseded);
+    assert!(!layout.transaction().exists());
+    assert_eq!(contents(&layout), installed);
+    assert_eq!(recover(&layout).unwrap(), Recovery::Unchanged);
+    layout.validate_receipt("0.7.3").unwrap();
 }
