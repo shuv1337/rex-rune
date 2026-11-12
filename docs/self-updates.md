@@ -204,7 +204,11 @@ The rename has its own checks. Unit tests move a `rex-linux` installation to the
 names, finish a move cut short after the binary was renamed, and refuse an unverified
 one. `scripts/test-bridge.py` holds a bridge tarball to the 0.7.x updater's rules, and
 the release workflow runs it on the real build before taking over real 0.7.5 tarball
-and `.deb` installs.
+and `.deb` installs. `scripts/bridge-e2e.sh` runs the whole path in a scratch home: the
+updater built from the v0.7.5 tag, with only its download pointed at a loopback
+fixture, installs this checkout's release build from the bridge tarball, and the
+client's first start then renames the installation and moves its settings. Run it
+before the release that carries the rename.
 
 Real-font screenshots can be captured by running this test alone:
 

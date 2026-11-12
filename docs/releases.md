@@ -155,6 +155,8 @@ bash scripts/install-script-test.sh
 python3 scripts/test-install-receipt.py # desktop-file-utils required
 # After packaging: the bridge tarball against the 0.7.x updater's rules.
 python3 scripts/test-bridge.py dist/rex-linux-*.tar.gz --binary target/release/rex-rune
+# The 0.7.5 updater installing this build, then the first start (a few minutes; see the script).
+bash scripts/bridge-e2e.sh
 python3 scripts/test-arch-repo.py       # Docker, gpg, minisign, zstd; throwaway keys only
 # If installed (also runs ShellCheck when available):
 actionlint .github/workflows/release.yml
