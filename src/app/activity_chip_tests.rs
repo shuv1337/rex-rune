@@ -432,6 +432,38 @@ fn at_the_minimum_width_there_is_no_chip_and_the_bar_is_as_it_was() {
             "download {transfer}"
         );
     }
+    // Interface zoom lays the toolbar out narrower than the window: a 960 pt window at
+    // 150% has a 640 pt toolbar, so no chip there either, and the bar is as it was.
+    let zoomed = |waiting: bool| {
+        let (mut ws, _rx) = fixture();
+        ws.settings.ui_scale = 1.5;
+        ws.hosts[0]
+            .model
+            .views
+            .get_mut("s")
+            .unwrap()
+            .active_window_id = Some("idle".into());
+        if !waiting {
+            for h in &mut ws.hosts {
+                h.model.activity.clear();
+            }
+        }
+        let mut rt = runtime_at(ws, (960., 720.));
+        settle(&mut rt);
+        assert_eq!(rt.state.ui_scale(), 1.5);
+        assert!(!has(&rt, "activity-chip"));
+        assert_eq!(rt.state.activity_chip().is_some(), waiting);
+        [
+            "identity",
+            "tab-track",
+            "tabs",
+            "title-drag",
+            "commands",
+            "close-app",
+        ]
+        .map(|key| rect(&rt, key))
+    };
+    assert_eq!(zoomed(true), zoomed(false));
     // Just above it the chip is drawn and the strip keeps its floor.
     let (mut ws, _rx) = fixture();
     ws.hosts[0]
@@ -444,6 +476,35 @@ fn at_the_minimum_width_there_is_no_chip_and_the_bar_is_as_it_was() {
     settle(&mut rt);
     assert!(has(&rt, "activity-chip"));
     room(&rt, 720., false, "720");
+}
+
+#[test]
+fn the_chip_arriving_alone_reveals_the_active_tab_again() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let (mut ws, _rx) = fixture();
+    for h in &mut ws.hosts {
+        h.model.activity.clear();
+    }
+    // The last of five tabs is on screen, so the strip overflows at this width.
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .active_window_id = Some("idle".into());
+    let mut rt = runtime_at(ws, (800., 700.));
+    settle(&mut rt);
+    assert!(!has(&rt, "activity-chip") && !has(&rt, "download-chip"));
+    room(&rt, 800., false, "at rest");
+    // Nothing else in the bar changes: only a background tab blocks.
+    rt.update(|s, _| state(s, 1, "build", ProgramState::Blocked));
+    settle(&mut rt);
+    assert!(has(&rt, "activity-chip"));
+    room(&rt, 800., false, "chip arrived alone");
+    rt.update(|s, _| state(s, 1, "build", ProgramState::Working));
+    settle(&mut rt);
+    assert!(!has(&rt, "activity-chip"));
+    room(&rt, 800., false, "chip left alone");
 }
 
 #[test]
@@ -464,6 +525,16 @@ fn the_chip_is_in_the_toolbar_only_and_never_floats_over_the_terminal() {
         // is floated over the terminal for it.
         assert_eq!(has(&rt, "activity-chip"), mode == ToolbarBehavior::Always);
         assert!(!has(&rt, "pending-sequence-float"), "{mode:?}");
+        if mode != ToolbarBehavior::Always {
+            // A download does float, as before, and brings no activity chip with it.
+            rt.update(|s, _| download(s));
+            settle(&mut rt);
+            assert!(has(&rt, "pending-sequence-float") && has(&rt, "download-chip"));
+            assert!(!has(&rt, "activity-chip"));
+            rt.update(|s, _| s.hosts[0].model.downloads.clear());
+            settle(&mut rt);
+            assert!(!has(&rt, "pending-sequence-float"));
+        }
         if mode != ToolbarBehavior::Always {
             // Revealing the toolbar shows the chip in it, without moving the panes.
             rt.update(|s, _| s.toggle_toolbar());
