@@ -3625,6 +3625,9 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
 
 #[test]
 fn a_palette_round_trip_leaves_terminal_output_and_its_selection_alone() {
+    // Compare geometry with this runtime's fonts, not a parallel test's TextSystem.
+    // Runtime construction updates the scoped fonts as well as its own renderer.
+    let _families = rune::text::with_families("Inter", "Inter");
     use rex_linux::{
         connection::{Connection, TerminalSender},
         settings::ChromeTheme,
