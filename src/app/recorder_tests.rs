@@ -568,6 +568,36 @@ fn remove_takes_a_key_off_its_action_and_recording_it_again_brings_the_default_b
 }
 
 #[test]
+fn recording_another_row_of_the_same_action_keeps_the_original_removal() {
+    let mut rt = open(workspace());
+    reach(&mut rt, "shortcut-key:pane.split:right:0");
+    settle(&mut rt);
+    click(&mut rt, "shortcut-remove");
+    settle(&mut rt);
+    assert!(runs(&rt.state, &["ctrl+shift+d"]).is_none());
+
+    reach(&mut rt, "shortcut-key:pane.split:down:0");
+    settle(&mut rt);
+    ctrl_shift_key(&mut rt, 'd');
+    press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert_eq!(
+        runs(&rt.state, &["ctrl+shift+d"]),
+        Some(("pane.split".into(), json!({"direction": "down"})))
+    );
+
+    reach(&mut rt, "shortcut-key:pane.split:down:0");
+    settle(&mut rt);
+    click(&mut rt, "shortcut-remove");
+    settle(&mut rt);
+    assert!(
+        runs(&rt.state, &["ctrl+shift+d"]).is_none(),
+        "removing the recorded Split down must not restore the removed Split right"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn an_action_that_needs_an_argument_has_no_recorder() {
     let mut rt = open(workspace());
     let rows = rt.state.shortcut_rows();

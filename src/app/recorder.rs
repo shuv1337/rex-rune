@@ -326,19 +326,20 @@ impl Workspace {
         // The row has the keys from another of its bindings: only the old ones go.
         if verdict != Verdict::Same {
             let keys: Vec<String> = recorder.chords.iter().map(Chord::spelling).collect();
-            let recorded = &mut self.settings.recorded_shortcuts;
-            // Keys this page took off the action come back as they were, when they were
-            // the file's or a default's; anything else is a binding of this layer.
-            let restored = recorded.restore(&keys, &recorder.action, recorder.mode.as_deref());
-            if !(restored
-                && bound_below(
-                    &self.settings,
-                    &keys,
-                    &recorder.action,
-                    recorder.args.as_ref(),
-                    recorder.mode.as_deref(),
-                ))
-            {
+            // Only restore a matching lower-layer binding. Another row of the same
+            // action may have removed these keys; its removal must survive this binding.
+            let restored = bound_below(
+                &self.settings,
+                &keys,
+                &recorder.action,
+                recorder.args.as_ref(),
+                recorder.mode.as_deref(),
+            ) && self.settings.recorded_shortcuts.restore(
+                &keys,
+                &recorder.action,
+                recorder.mode.as_deref(),
+            );
+            if !restored {
                 self.settings.recorded_shortcuts.bind(
                     keys,
                     &recorder.action,
