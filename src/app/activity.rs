@@ -354,7 +354,19 @@ impl Workspace {
             ProgramState::Idle => false,
         };
         // A muted tab stays quiet whatever its programs do.
-        if !config.system_notifications || !wanted || self.tab_muted(index, &window) {
+        if !wanted || self.tab_muted(index, &window) {
+            return;
+        }
+        let desktop = config.system_notifications;
+        // The same news, visibility, mute and event-kind decision feeds both channels.
+        // A read-back completion can satisfy the legacy `finished` rule, but is not audio news.
+        if config.play_sounds
+            && activity.live
+            && let Some(sound) = super::sounds::Sound::for_state(state)
+        {
+            self.sound_request(super::sounds::Request::Event(sound));
+        }
+        if !desktop {
             return;
         }
         let word = match state {
