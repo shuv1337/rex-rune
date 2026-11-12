@@ -96,10 +96,46 @@ correct in both).
   capture did not change, so the hover image above is the headless one.
 - Whether Rex for macOS disables Close on a single-pane tab when other tabs exist.
 
+## Review (Cursor-pool Opus, on `78cc32b`)
+
+It asked for one change before merge:
+
+- **With the toolbar on Show on hover, the pane's Close sat under the toolbar's reveal
+  edge.** The lone pane's header was the top 30 pt of the window, with Close at y 3 to
+  27, and the toolbar comes out when the pointer rests in the top 8 pt. A pointer aimed
+  at Close pane, or overshooting toward the corner, brought the toolbar out over it, with
+  **Close app** where Close pane had been, and Close app asks nothing. Split right and
+  Split down were covered the same way by Settings and Commands. Before this change no
+  layout put a control inside that edge.
+
+  Now, while the toolbar has no row of its own (Show on hover or Hidden), a lone pane's
+  header sits 8 pt down (`pane_header::clearance`): clear of the reveal edge and of the
+  window's 6 pt resize edge. `a_lone_panes_header_stays_clear_of_the_top_edge_when_the_toolbar_has_no_row`
+  checks both toolbar modes with the default header: the header and its buttons start
+  below the edge, resting on Close pane brings out no toolbar, a press there opens Close
+  pane's confirmation and never a window action, a press where the sidebar button used
+  to be is the header's, and the edge above the header still reveals the toolbar. It
+  fails without the clearance (`~/.cache/agent-ws/pane-header-review-before.log`). This
+  also restores default-layout coverage for the two toolbar tests that now pin headers
+  Hidden.
+
+Also from it:
+
+- On an edge-to-edge pane the header's name now starts at the terminal's horizontal
+  padding (8 pt at least) and lines up with the text under it; on a card it keeps 14 pt.
+- The Pane headers helper reads "Auto shows them on every pane in Comfortable density."
+
+After these changes: `cargo fmt --all -- --check`; `TMPDIR=/var/tmp cargo test --locked
+--all-features` **1041 passed, 0 failed, 6 ignored**; strict clippy; release build; the
+after capture above retaken; `terminal-selection-x11`, `pane-padding-x11`,
+`header-fading-x11`, `insert-path-x11` and `activity-list-x11` passed again.
+
 ## Follow-ups not taken
 
-- The header's name starts 14 pt from the edge and the terminal's text 8 pt (the pane
-  padding), so on an edge-to-edge pane the two do not line up.
+- The dimmed Zoom and Close are still plain buttons to assistive technology, with no
+  disabled state (the pattern Zoom already had).
+- No native script clicks Split right on a default lone pane; the pointer scripts pin
+  headers Hidden.
 - With the toolbar Hidden or On hover, the lone pane's header is now the top row of the
-  window. People who chose a hidden toolbar for the room may want Pane headers → Hidden
-  as well; nothing sets that for them.
+  window, 38 pt in all. People who chose a hidden toolbar for the room may want Pane
+  headers → Hidden as well; nothing sets that for them.

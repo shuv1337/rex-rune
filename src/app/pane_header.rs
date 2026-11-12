@@ -15,7 +15,7 @@ use super::{
 };
 use rex_rune::{
     layout,
-    settings::{PaneDensity, PaneHeader},
+    settings::{PaneDensity, PaneHeader, interface::ToolbarBehavior},
 };
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Icon, SpringPair, Transition, Tx, el, row, text};
@@ -109,6 +109,21 @@ pub fn rows(s: &Workspace, _window: &Window) -> bool {
 /// other.
 pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
     single(window) && s.settings.pane_header != PaneHeader::Always
+}
+
+/// Room kept above a lone pane's header row while the toolbar has no row of its own. The
+/// header is then the top of the window, and the toolbar's reveal edge (and the window's
+/// resize edge within it) must stay clear of its buttons: a pointer resting on Close would
+/// otherwise bring the toolbar out over it, with Close app where Close pane was.
+pub fn clearance(s: &Workspace, window: &Window) -> f32 {
+    if full_bleed(s, window)
+        && rows(s, window)
+        && s.settings.interface.toolbar != ToolbarBehavior::Always
+    {
+        super::toolbar_reveal::EDGE
+    } else {
+        0.
+    }
 }
 
 pub fn placement(s: &Workspace, window: &Window, block: &str) -> Placement {
