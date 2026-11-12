@@ -92,6 +92,12 @@ fn asymmetric_padding_keeps_layout_and_sizes_only_owned_panes() {
             let (mut ws, host) = tabbed_workspace("split");
             ws.settings.pane_density = density;
             ws.settings.pane_header = PaneHeader::Always;
+            if foreign_background {
+                ws.term_theme = Some(rex_linux::terminal_theme::TerminalTheme {
+                    background: Some(0x331122),
+                    ..Default::default()
+                });
+            }
             ws.settings.terminal.font.line_height = 20;
             ws.settings.terminal.font.spacing = 20;
             ws.settings.terminal.font.spacing_unit = SpacingUnit::Percent;
@@ -113,6 +119,12 @@ fn asymmetric_padding_keeps_layout_and_sizes_only_owned_panes() {
                     .lock()
                     .unwrap()
                     .owner = block == "block:b";
+            }
+            if foreign_background {
+                assert_eq!(
+                    ws.terminals[&ws.term_key("block:b")].body(&ws.term_colors()),
+                    0x331122
+                );
             }
             let mut rt = runtime(ws);
             settle(&mut rt);
@@ -355,6 +367,68 @@ fn outline_auto_and_explicit_choices_preserve_terminal_content_and_send_nothing(
     }
 }
 
+#[test]
+fn compact_outline_overlays_foreign_background_without_changing_content() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let (mut ws, host) = tabbed_workspace("split");
+    ws.settings.pane_density = PaneDensity::Compact;
+    ws.settings.pane_header = PaneHeader::Hidden;
+    ws.term_theme = Some(rex_linux::terminal_theme::TerminalTheme {
+        background: Some(0x331122),
+        ..Default::default()
+    });
+    let (sender, sent) = flume::unbounded();
+    framed_terminal(&mut ws, "block:b", &sender, b"\x1b]11;#331122\x07unchanged");
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    let content = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .filter(|e| e.path.contains("grid:block:b/"))
+            .map(|e| (e.key, e.text, e.rect, e.fill, e.text_color, e.opacity))
+            .collect::<Vec<_>>()
+    };
+    let before = content(&rt);
+    assert!(!before.is_empty());
+    assert_eq!(
+        rt.state.terminals[&rt.state.term_key("block:b")].body(&rt.state.term_colors()),
+        0x331122
+    );
+    let grid_before = rect(&rt, "grid:block:b");
+    for (outline, drop_hover, visible) in [
+        (Some(true), false, true),
+        (Some(false), false, false),
+        (None, false, false),
+        (Some(false), true, true),
+    ] {
+        rt.update(|s, _| {
+            s.settings.interface.highlight_active_pane = outline;
+            s.drop_hover = drop_hover.then(|| "block:b".into());
+        });
+        settle(&mut rt);
+        let elements = rt.elements();
+        let ring = elements
+            .iter()
+            .position(|e| !e.exiting && e.key.as_deref() == Some("pane-outline:block:b"));
+        assert_eq!(ring.is_some(), visible);
+        if let Some(index) = ring {
+            assert_eq!(elements[index].rect, rect(&rt, "pane:block:b"));
+            assert!(
+                elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.path.contains("grid:block:b/"))
+                    .all(|(i, _)| i < index),
+                "outline paints after terminal descendants"
+            );
+        }
+        assert_eq!(rect(&rt, "grid:block:b"), grid_before);
+        assert_eq!(content(&rt), before);
+        assert!(sent.is_empty() && host.is_empty() && rt.state.claimed.is_empty());
+    }
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
 /// Run alone with REX_TEST_SNAP_DIR; REX_M27_MINIMUM=1 uses 640×480.
 #[test]
 fn pane_ergonomics_draw() {
@@ -406,7 +480,29 @@ fn pane_ergonomics_draw() {
     });
     settle(&mut rt);
     camera.snap(&mut rt, "panes-outline-compact");
-    rt.update(|s, tx| s.perform(Intent::Settings, tx));
+    rt.update(|s, _| {
+        s.term_theme = Some(rex_linux::terminal_theme::TerminalTheme {
+            background: Some(0x331122),
+            ..Default::default()
+        });
+        for block in ["block:b", "block:c"] {
+            framed_terminal(
+                s,
+                block,
+                &sender,
+                b"\x1b]11;#331122\x07$ custom background\r\nunchanged content",
+            );
+        }
+    });
+    settle(&mut rt);
+    camera.snap(&mut rt, "panes-outline-compact-foreign");
+    rt.update(|s, _| s.settings.interface.highlight_active_pane = Some(false));
+    settle(&mut rt);
+    camera.snap(&mut rt, "panes-outline-compact-foreign-off");
+    rt.update(|s, tx| {
+        s.settings.interface.highlight_active_pane = Some(true);
+        s.perform(Intent::Settings, tx);
+    });
     tap(&mut rt, "active-pane-outline");
     camera.snap(&mut rt, "panes-outline-settings");
     press(&mut rt, Key::Escape);

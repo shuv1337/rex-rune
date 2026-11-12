@@ -273,9 +273,7 @@ fn pane_card(
     // A flat single pane has no neighbour to distinguish; cards (including zoomed
     // cards) retain the existing density-following cue unless explicitly overridden.
     let outlined = focused && outlines(s, window, bleed);
-    if bleed && (outlined || s.drop_hover.as_deref() == Some(block)) {
-        c = c.border(1., rgb(accent()).alpha(0.85));
-    }
+    let ring = bleed && (outlined || s.drop_hover.as_deref() == Some(block));
     if !bleed {
         c = c
             .radius(CARD_RADIUS)
@@ -649,6 +647,20 @@ fn pane_card(
                 .color(rgb(muted())),
             ),
         ),
+    };
+    // Flat terminal backgrounds cover the card's own paint. Draw the cue over
+    // them without adding an inset or changing the grid when focus moves.
+    let c = if ring {
+        c.child(
+            el().key(format!("pane-outline:{block}"))
+                .absolute(0., 0.)
+                .size(rect[2], rect[3])
+                .border(1., rgb(accent()).alpha(0.85))
+                .inert()
+                .motion(STILL),
+        )
+    } else {
+        c
     };
     // With no header to hold it, the strip floats over the pane's top-right corner.
     let c = match strip(s, block, rect[2], m).filter(|_| placement == Placement::None) {
