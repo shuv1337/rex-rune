@@ -10,7 +10,7 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 
 > **Status:** early. The protocol layer, workspace, terminal rendering and input are implemented and tested against real servers, but some areas (see [Current scope](#current-scope)) still need hands-on validation.
 
-Releases are for Linux. The client also [builds from source on macOS](#building-on-macos), where it is newer and rougher. Windows is not supported yet.
+Releases are for Linux. The client also [builds from source on macOS](#building-on-macos), where it is newer and rougher. [Windows source builds](#building-on-windows) are checked by CI only; nobody has run the client UI or attached it to a server on Windows.
 
 ## Features
 
@@ -176,7 +176,7 @@ Older releases do not gain signatures or attestations retroactively.
 
 - Rust 1.96 or newer (edition 2024; see `rust-version` in `Cargo.toml`).
 - [Zig](https://ziglang.org/) 0.17.x. The `ghostty-vt` crate builds Ghostty's VT library from a checksum-pinned source archive with Zig.
-- Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan, xkbcommon, fontconfig and the Wayland/X11 client libraries. Or macOS: see [Building on macOS](#building-on-macos).
+- Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan, xkbcommon, fontconfig and the Wayland/X11 client libraries. For macOS or Windows source builds, see [Building on macOS](#building-on-macos) and [Building on Windows](#building-on-windows).
 - A running Rex server that supports API revision 10, 11, 12 or 13. Verified with Linux servers **0.0.1794323808-g757adf (API 13)** and **0.1.0-preview.14 (`7e460d0`, API 12)**; see [API-13 compatibility results](docs/server-api13.md) and [preview.14 results](docs/server-preview14.md). Rex is in alpha, so older revisions aren't supported; update Rex on a host that refuses the connection. Uploading files needs revision 11.
 
 ## Build
@@ -230,6 +230,55 @@ The window frame is the one part that has been started and measured but not look
 
 CI builds the app and runs the unit and headless UI tests on macOS for every pull request.
 
+### Building on Windows
+
+A source build only, for `x86_64-pc-windows-msvc`. There is no Windows release or installer. Nobody has run the client UI on Windows or checked attachment to a real server there. CI on `windows-2025` compiles the probes and app, links and runs the Ghostty VT integration tests, checks platform functions, and runs `--version` and `--help`. That is the extent of the Windows runtime checks.
+
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with the **Desktop development with C++** workload and its Windows SDK. Install [rustup](https://rustup.rs/) and [Zig](https://ziglang.org/) 0.17.x (CI uses 0.17.1). Put Zig on `PATH`, then use a Developer PowerShell for Visual Studio:
+
+```powershell
+rustup toolchain install 1.96.1-x86_64-pc-windows-msvc
+rustup override set 1.96.1-x86_64-pc-windows-msvc
+cargo build --locked --no-default-features --bins
+cargo test --locked --no-default-features --test cursor_policy --test prompt_navigation --test keymap_fixture
+cargo build --locked --bin rex-rune
+.\target\debug\rex-rune.exe --version
+.\target\debug\rex-rune.exe --help
+```
+
+If the `ghostty-vt-sys` build script cannot download its source because TLS verification fails, fetch and verify the archive yourself. These are the exact URL and SHA-256 from the crate's `GHOSTTY.lock` and [CI workflow](.github/workflows/ci.yml). Stop if the hash does not match. Use a new, empty extraction folder:
+
+```powershell
+$archive = Join-Path $env:TEMP "rex-ghostty.tar.gz"
+$source = Join-Path $env:TEMP ("rex-ghostty-" + [guid]::NewGuid())
+curl.exe --proto '=https' --tlsv1.2 -fsSLo $archive https://tip.files.ghostty.org/83fb95624b0439ee660c2679b43b38c8b63769cd/libghostty-vt-source.tar.gz
+if ($LASTEXITCODE -ne 0) { throw "Ghostty download failed" }
+$expected = "ed57ae9b95581c88f2614e976c1d3f146c02d443a3c26139200eb9de6e645eb4"
+if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "Ghostty hash mismatch" }
+New-Item -ItemType Directory $source | Out-Null
+tar.exe -xzf $archive -C $source --strip-components=1
+if ($LASTEXITCODE -ne 0) { throw "Ghostty extraction failed" }
+$env:GHOSTTY_SOURCE_DIR = $source
+cargo build --locked --bin rex-rune
+```
+
+| Area | On Windows |
+| --- | --- |
+| VT decoding and command-line startup | Linked and run in CI; no window or rendering check |
+| `https://`, `wss://`, `http://`, `ws://` hosts | The unchanged TCP and Rustls path compiles; real server attachment is untested |
+| Local host and `unix://` | Refused with a message suggesting an `https://` host. `REX_SERVER` overrides the default; otherwise Local keeps an unsupported `unix://` placeholder. Named pipes are not implemented |
+| `ssh://` hosts | Refused before starting SSH; no loopback TCP forwarding |
+| Downloads | Refused before creating a file or requesting a download ticket |
+| Uploads | Compile with portable random IDs; end-to-end uploads are untested |
+| Folders | Settings in `%APPDATA%\rex-rune`, state in `%LOCALAPPDATA%\rex-rune`, home from `USERPROFILE`. Missing AppData variables fall back to `<home>\AppData\Roaming` and `<home>\AppData\Local`. The default download folder is `<home>\Downloads`, though downloads are refused |
+| Fonts | Bundled IBM Plex Mono and Inter; native font discovery is not implemented |
+| Window chrome, input, clipboard and IME | Not tested on Windows |
+| Primary selection | Windows has none; the setting is not shown |
+| Notifications, opening links, Show in folder | Not available yet |
+| Updates | Source builds only; no installer or restart after an update |
+
+To try a host, run `rex-rune.exe --endpoint https://my-host.example.ts.net --session work` with an existing session. This is not a verified Windows attachment recipe.
+
 ## Run
 
 ```sh
@@ -253,7 +302,7 @@ Options:
 
 | Option | Meaning |
 | --- | --- |
-| `--endpoint <URL>` | `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](#hosts)). Defaults to `$REX_SERVER`, then `unix://$XDG_RUNTIME_DIR/rex/server.sock` (or `unix:///run/user/<uid>/rex/server.sock` if `XDG_RUNTIME_DIR` is unset); on macOS, `unix://$HOME/Library/Application Support/rex/server.sock`. |
+| `--endpoint <URL>` | `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](#hosts)). Defaults to `$REX_SERVER`, then `unix://$XDG_RUNTIME_DIR/rex/server.sock` (or `unix:///run/user/<uid>/rex/server.sock` if `XDG_RUNTIME_DIR` is unset); on macOS, `unix://$HOME/Library/Application Support/rex/server.sock`. On Windows, set `REX_SERVER` or name a network endpoint; the default local placeholder reports that Unix sockets are unavailable. |
 | `--session <LABEL\|ID>` | Select a session by exact label or ID. Missing or ambiguous names never pick an arbitrary session. |
 | `--new <LABEL>` | Explicitly create a persistent session (conflicts with `--session`). Ordinary attachment never creates or destroys sessions. |
 | `--block <ID>` | Initially focus this terminal block. |
