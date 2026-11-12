@@ -239,14 +239,26 @@ fn interrupted_transaction_is_recoverable_and_completed_one_is_kept() {
     }
     fs::write(
         stage.path().join("journal.json"),
-        b"[true,true,true,true,true,true]",
+        serde_json::to_vec(&Journal {
+            binary: layout.binary.clone(),
+            data: layout.data.clone(),
+            existed: vec![true; 6],
+        })
+        .unwrap(),
     )
     .unwrap();
     fs::rename(stage.path(), layout.transaction()).unwrap();
     for (i, dest) in destinations.iter().enumerate().take(5) {
         fs::rename(layout.transaction().join(format!("new-{i}")), dest).unwrap();
     }
-    recover(&layout).unwrap();
+    // Next launch may have a different XDG_DATA_HOME. Restore the recorded
+    // destinations, not whatever the new launch's environment happens to name.
+    let changed_environment = InstallLayout {
+        data: temp.path().join("other-data"),
+        ..layout.clone()
+    };
+    recover(&changed_environment).unwrap();
+    assert!(!changed_environment.data.exists());
     assert_eq!(contents(&layout), old);
     recover(&layout).unwrap();
     commit(&layout, self::stage(&layout), |_| Ok(())).unwrap();

@@ -55,7 +55,9 @@ are never touched.
 
 Individual files are atomically replaced, not the entire multi-directory tree in
 one filesystem operation. An interrupted transaction is recovered before the UI
-starts on the next launch. If restoration fails (for example, storage becomes
+starts on the next launch, using the journal's original install paths even if the
+launch's XDG environment changed. Recovery re-execs the restored binary before
+any workspace actions run. If restoration fails (for example, storage becomes
 unavailable), the app reports the error and retains `.rex-update-transaction`
 next to the binary for another recovery attempt; do not delete its backups.
 Completed updates remove the backups. There is no user-requested rollback button

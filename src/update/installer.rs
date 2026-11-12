@@ -21,15 +21,22 @@ pub enum Progress {
     Installing,
 }
 
+#[derive(Serialize, Deserialize)]
+struct Journal {
+    binary: PathBuf,
+    data: PathBuf,
+    existed: Vec<bool>,
+}
+
 #[derive(Clone, Debug)]
-pub struct InstallLayout {
+struct InstallLayout {
     local: PathBuf,
     binary: PathBuf,
     data: PathBuf,
 }
 
 impl InstallLayout {
-    pub fn current() -> Result<Self> {
+    fn current() -> Result<Self> {
         let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
         let bin = std::env::var_os("XDG_BIN_HOME")
             .map(PathBuf::from)
@@ -39,10 +46,6 @@ impl InstallLayout {
             binary: bin.join("rex-linux"),
             data: xdg_data_dir(),
         })
-    }
-
-    pub fn binary(&self) -> &Path {
-        &self.binary
     }
 
     fn receipt(&self) -> PathBuf {
@@ -122,21 +125,29 @@ impl InstallLayout {
 }
 
 /// Recover only this user's running install, never package-managed or source builds.
-/// Returns true when rollback requires re-executing the restored binary before UI startup.
-pub fn recover_current_install() -> Result<bool> {
-    let Ok(layout) = InstallLayout::current() else {
-        return Ok(false);
+/// Returns the restored binary when rollback requires re-exec before UI startup.
+pub fn recover_current_install() -> Result<Option<PathBuf>> {
+    let Ok(mut layout) = InstallLayout::current() else {
+        return Ok(None);
     };
-    if std::env::current_exe().ok().as_deref() != Some(layout.binary())
-        || !layout.transaction().exists()
-    {
-        return Ok(false);
+    // Desktop launches and terminal launches can have different XDG settings.
+    // Find the journal beside the actual executable, and restore its saved data path.
+    layout.binary = std::env::current_exe()?;
+    if !layout.transaction().exists() {
+        return Ok(None);
     }
-    layout.validate_paths()?;
+    ensure!(
+        unsafe { libc::geteuid() } != 0,
+        "update recovery never runs as root"
+    );
+    ensure!(
+        layout.binary.starts_with(fs::canonicalize(&layout.local)?),
+        "update recovery requires a user installation under ~/.local"
+    );
     let _lock = layout.lock()?;
     let rolled_back = !layout.transaction().join("committed").exists();
     recover(&layout)?;
-    Ok(rolled_back)
+    Ok(rolled_back.then_some(layout.binary))
 }
 
 /// Download and install a freshly re-verified manifest, never trusting cached UI metadata.
@@ -468,7 +479,14 @@ fn commit(
         }
     }
     let journal = stage.path().join("journal.json");
-    fs::write(&journal, serde_json::to_vec(&existed)?)?;
+    fs::write(
+        &journal,
+        serde_json::to_vec(&Journal {
+            binary: layout.binary.clone(),
+            data: layout.data.clone(),
+            existed,
+        })?,
+    )?;
     File::open(journal)?.sync_all()?;
     sync_dir(stage.path())?;
     fs::rename(stage.path(), layout.transaction())?;
@@ -527,8 +545,18 @@ fn recover(layout: &InstallLayout) -> Result<()> {
         return Ok(());
     }
     if !tx.join("committed").exists() {
-        let existed: Vec<bool> = serde_json::from_slice(&fs::read(tx.join("journal.json"))?)?;
-        let destinations = layout.destinations();
+        let journal: Journal = serde_json::from_slice(&fs::read(tx.join("journal.json"))?)?;
+        ensure!(
+            journal.binary == layout.binary,
+            "recovery journal belongs to a different binary"
+        );
+        let original = InstallLayout {
+            data: journal.data,
+            ..layout.clone()
+        };
+        original.validate_paths()?;
+        let existed = journal.existed;
+        let destinations = original.destinations();
         ensure!(
             existed.len() == destinations.len(),
             "invalid update recovery journal"
