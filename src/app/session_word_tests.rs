@@ -428,6 +428,14 @@ fn switcher_session_words_draw() {
             .collect()
     };
     assert_eq!(words(&rt), ["Needs approval", "Error", "Done"]);
+    let word_at = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.path.contains("entry:") && e.text.as_deref() == Some("Needs approval"))
+            .expect("the word")
+            .rect
+    };
+    let before = word_at(&rt);
     // Selecting a row brings its Rename and Close buttons; its word stays beside them.
     rt.update(|s, _| {
         let at = s
@@ -444,10 +452,62 @@ fn switcher_session_words_draw() {
         camera.snap(&mut rt, "switcher-session-words-selected");
     }
     assert_eq!(words(&rt), ["Needs approval", "Error", "Done"]);
+    let close = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.label.as_deref() == Some("Close session"))
+        .expect("the highlighted row's Close button");
+    // The highlight follows the pointer, so a word that moved would jump under it.
+    let after = word_at(&rt);
     assert!(
-        rt.elements()
-            .iter()
-            .any(|e| e.label.as_deref() == Some("Close session"))
+        (after[0] - before[0]).abs() < 0.5 && (after[2] - before[2]).abs() < 0.5,
+        "the word keeps its place: {before:?} -> {after:?}"
     );
+    // The row is announced with its word, and everything stays inside it.
+    let row = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.label.as_deref() == Some("other-label, Needs approval"))
+        .expect("the row's label carries the word");
+    assert!(
+        close.rect[0] + close.rect[2] <= row.rect[0] + row.rect[2] + 0.5
+            && after[0] + after[2] <= close.rect[0],
+        "word {after:?}, close {:?}, row {:?}",
+        close.rect,
+        row.rect
+    );
+    let name = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.path.contains("entry:") && e.text.as_deref() == Some("other-label"))
+        .expect("the name");
+    assert!(name.rect[2] > 40., "the name keeps room: {:?}", name.rect);
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn another_hosts_selected_session_is_out_of_sight_and_a_dropped_host_says_nothing() {
+    // Two hosts, each on its session `s`, each with a tab waiting for approval there.
+    let (mut ws, receivers) = super::activity_list_tests::fixture();
+    let row = |ws: &Workspace, host: usize| {
+        ws.entries()
+            .into_iter()
+            .find(|e| matches!(&e.action, Intent::Select(h, id) if *h == host && id == "s"))
+            .expect("the session's row")
+    };
+    ws.picker(true);
+    assert_eq!(ws.active, 0);
+    // The session on screen speaks through its tabs.
+    assert!(row(&ws, 0).current);
+    assert_eq!(row(&ws, 0).tone, None);
+    // The other host's selected session is not on screen, so its row speaks.
+    assert!(!row(&ws, 1).current);
+    assert_eq!(row(&ws, 1).detail, "Needs approval");
+    assert_eq!(ws.session_word(1, "s").unwrap().0, "Needs approval");
+    // What a host said before its connection dropped is not news, here or in the sidebar,
+    // as the Activity list and the chip already hold.
+    ws.hosts[1].model.connected = false;
+    assert_eq!(row(&ws, 1).tone, None);
+    assert_eq!(ws.session_word(1, "s"), None);
+    assert!(receivers.iter().all(|rx| rx.is_empty()));
 }
