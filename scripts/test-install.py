@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run ONLY in a disposable container via install-script-test.sh (writes /usr/bin).
 
-Real 0.5.1 assets exercise the production keys and both verifiers. Local packages
+Real 0.5.1 assets exercise the production keys and both verifiers. That release was
+published as rex-linux, so the installer verifies it and then declines it. Local packages
 are built by package-release.py with stub toolchains/binaries; the installer test
 copy changes exactly the repository URL and the two key constants. A curl shim
 allows HTTP solely for the loopback fixture, never in the production installer.
@@ -87,21 +88,14 @@ def main():
             # running the binary is unsupported. --check never executes it.
             (tools / "getconf").unlink(missing_ok=True)
             executable(tools / "getconf", "#!/bin/sh\necho 'glibc 2.39'\n")
+        # The production signature and its rex-linux trusted comment verify with both
+        # verifiers: only a verified release reaches the message about its old name.
+        declined = f"0.5.1 was published as rex-linux; install it with its own installer: {REPO}/releases/download/v0.5.1/install.sh"
         for verifier in (False, True):
-            if compatible:
-                p = invoke(args=("--version", "0.5.1"), mini_sign=verifier, contains=f"Installed the Rex Rune desktop client (rex-rune 0.5.1) at {installed} and launcher {desktop}.")
-                assert p.stdout.count(f"Installed the Rex Rune desktop client (rex-rune 0.5.1) at {installed} and launcher {desktop}.") == 1
-                assert p.stdout.count("Installed the Rex Rune desktop client") == 1
-                assert p.stdout.count("This does not install or change the Rex server (rex).") == 1
-                assert p.stdout.count(f"rex-rune needs a Rex server installed separately; see {REPO}#build-requirements.") == 1
-                assert checked([str(installed), "--version"]) == "rex-rune 0.5.1"
-                assert desktop.exists()
-                invoke(args=("--version", "0.5.1"), mini_sign=verifier, contains="already current")
-                invoke(args=("--uninstall",))
-                assert not installed.exists() and not desktop.exists()
-            else:
-                invoke(args=("--version", "0.5.1", "--check"), mini_sign=verifier, contains="0.5.1 available")
-        print("PASS real v0.5.1 assets with minisign and OpenSSL", flush=True)
+            for args in (("--version", "0.5.1"), ("--version", "0.5.1", "--check")):
+                invoke(args=args, ok=False, mini_sign=verifier, contains=declined)
+            assert not installed.exists() and not desktop.exists()
+        print("PASS real v0.5.1 signature with minisign and OpenSSL; pre-rename release declined", flush=True)
 
         site = root / "site"
         site.mkdir()
@@ -121,10 +115,7 @@ os.execv("/usr/bin/curl", ["curl", *args])
         # Tamper the actual signed v0.5.1 assets too, without changing trust roots.
         real = site / "releases/download/v0.5.1"
         real.mkdir(parents=True)
-        arch = checked(["uname", "-m"])
         names = ["SHA256SUMS", "SHA256SUMS.minisig"]
-        if compatible:
-            names.append(f"rex-rune-0.5.1-{arch}-linux-gnu.tar.gz")
         for name in names:
             checked(["curl", "--proto", "=https", "-fsSL", f"{REPO}/releases/download/v0.5.1/{name}", "-o", str(real / name)])
         real_script = root / "real-assets.sh"
@@ -134,10 +125,11 @@ os.execv("/usr/bin/curl", ["curl", *args])
             original = path.read_bytes()
             path.write_bytes(original + b"tampered\n")
             for verifier in (False, True):
-                args = ("--version", "0.5.1") + (() if compatible else ("--check",))
-                invoke(real_script, args, ok=False, mini_sign=verifier)
+                invoke(real_script, ("--version", "0.5.1"), ok=False, mini_sign=verifier, contains="signature verification failed")
                 assert not installed.exists()
             path.write_bytes(original)
+        for verifier in (False, True):
+            invoke(real_script, ("--version", "0.5.1"), ok=False, mini_sign=verifier, contains="was published as rex-linux")
         shutil.rmtree(real)
         print("PASS tampered real v0.5.1 assets rejected by both verifiers", flush=True)
         keys = root / "keys"
@@ -177,7 +169,9 @@ os.execv("/usr/bin/curl", ["curl", *args])
             executable(stubs / name, f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
         for version in ("0.5.1", "0.5.2"):
             (build / "Cargo.toml").write_text(f'[package]\nversion = "{version}"\n')
-            executable(build / "target/release/rex-rune", f"#!/bin/sh\necho 'rex-rune {version}'\n")
+            # Like the client, the stub names itself as it was started: the packager checks
+            # that the bridge's bin/rex-linux answers as the 0.7.x updater requires.
+            executable(build / "target/release/rex-rune", f'#!/bin/sh\necho "${{0##*/}} {version}"\n')
             checked(["python3", str(build / "scripts/package-release.py")], env={**env, "PATH": f"{stubs}:{tools}"})
             release = site / "releases/download" / f"v{version}"
             release.mkdir(parents=True)
@@ -188,7 +182,8 @@ os.execv("/usr/bin/curl", ["curl", *args])
 
         def sign(version="0.5.2", key="ci", comment=None):
             path = site / "releases/download" / f"v{version}" / "SHA256SUMS"
-            checked(["minisign", "-S", "-s", str(keys / f"{key}.key"), "-m", str(path), "-t", comment or f"rex-rune v{version} SHA256SUMS"])
+            # The signing product id stayed rex-linux through the rename.
+            checked(["minisign", "-S", "-s", str(keys / f"{key}.key"), "-m", str(path), "-t", comment or f"rex-linux v{version} SHA256SUMS"])
 
         sign("0.5.1")
         sign()
@@ -249,13 +244,17 @@ os.execv("/usr/bin/curl", ["curl", *args])
         for verifier in (False, True):
             invoke(fixture, ok=False, mini_sign=verifier)
         sig.write_text(original)
-        sign(comment="rex-rune v0.5.3 SHA256SUMS")
+        sign(comment="rex-linux v0.5.3 SHA256SUMS")
         for verifier in (False, True):
             invoke(fixture, ("--version", "0.5.2"), ok=False, mini_sign=verifier)
         # Legacy unprehashed Ed signatures must be rejected identically.
-        checked(["minisign", "-S", "-l", "-s", str(keys / "ci.key"), "-m", str(release / "SHA256SUMS"), "-t", "rex-rune v0.5.2 SHA256SUMS"])
+        checked(["minisign", "-S", "-l", "-s", str(keys / "ci.key"), "-m", str(release / "SHA256SUMS"), "-t", "rex-linux v0.5.2 SHA256SUMS"])
         for verifier in (False, True):
             invoke(fixture, ok=False, mini_sign=verifier)
+        # The new name in a trusted comment is not a release signature at all.
+        sign(comment="rex-rune v0.5.2 SHA256SUMS")
+        for verifier in (False, True):
+            invoke(fixture, ok=False, mini_sign=verifier, contains="signature verification failed")
         sign(key="backup")
         invoke(fixture, ("--check",), contains="0.5.2 available")
         sign(key="unknown")
@@ -274,16 +273,16 @@ os.execv("/usr/bin/curl", ["curl", *args])
         print("PASS tampered packages/checksums/signatures/comments; backup, unknown, and opt-in tag keys", flush=True)
 
         # Existing packages and mismatching receipts refuse before network/install.
-        package_binary = Path("/usr/bin/rex-rune")
-        assert not package_binary.exists()
-        package_binary.write_text("package sentinel")
-        try:
-            invoke(fixture, ok=False, contains="package install detected")
-            invoke(fixture, ("--force", "--check"))
-            invoke(fixture, ("--uninstall",))
-            assert package_binary.read_text() == "package sentinel"
-        finally:
-            package_binary.unlink()
+        for package_binary in (Path("/usr/bin/rex-rune"), Path("/usr/bin/rex-linux")):
+            assert not package_binary.exists()
+            package_binary.write_text("package sentinel")
+            try:
+                invoke(fixture, ok=False, contains="package install detected")
+                invoke(fixture, ("--force", "--check"))
+                invoke(fixture, ("--uninstall",))
+                assert package_binary.read_text() == "package sentinel"
+            finally:
+                package_binary.unlink()
         receipt = home / ".local/share/rex-rune/install.json"
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text('{"path":"/wrong","sha256":"wrong"}')
@@ -319,6 +318,68 @@ os.execv("/usr/bin/curl", ["curl", *args])
                 run([*command, "-s", "--", "--uninstall"], input=partial.read_text(), env=env)
                 assert filelist() == baseline
         print("PASS package guard, receipt guard, missing dependencies, truncated scripts", flush=True)
+
+        # An install.sh install from before the rename: rex-linux, its launcher, icons
+        # and receipt. Upgrading it leaves one launcher, the old command as a link and
+        # the preferences where the client will move them from.
+        old_binary = home / ".local/bin/rex-linux"
+        old_desktop = home / ".local/share/applications/dev.shuv.rex-linux.desktop"
+        old_receipt = home / ".local/share/rex-linux/install.json"
+        old_icons = [home / f".local/share/icons/hicolor/{n}x{n}/apps/dev.shuv.rex-linux.png" for n in (32, 128, 256)]
+        old_preferences = home / ".config/rex-linux/workspace.json"
+
+        def old_install(version="0.5.1", receipt=True):
+            executable(old_binary, f"#!/bin/sh\necho 'rex-linux {version}'\n")
+            old_desktop.parent.mkdir(parents=True, exist_ok=True)
+            old_desktop.write_text("[Desktop Entry]\nType=Application\nName=Rex Linux\nExec=rex-linux\n")
+            for icon in old_icons:
+                icon.parent.mkdir(parents=True, exist_ok=True)
+                icon.write_bytes(b"old icon")
+            old_preferences.parent.mkdir(parents=True, exist_ok=True)
+            old_preferences.write_text('{"old":true}')
+            if receipt:
+                old_receipt.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256(old_binary.read_bytes()).hexdigest()
+                old_receipt.write_text(f'{{"schema":1,"path":"{old_binary}","version":"{version}","sha256":"{digest}"}}')
+
+        for shell in ("dash", "bash", "busybox"):
+            for receipt_present in (True, False):
+                old_install(receipt=receipt_present)
+                invoke(fixture, ("--check",), shell=shell, contains="0.5.2 available (installed: 0.5.1)")
+                p = invoke(fixture, ("--upgrade",), shell=shell, contains=f"Installed the Rex Rune desktop client (rex-rune 0.5.2) at {installed} and launcher {desktop}.")
+                assert p.stdout.count(f"This replaces the rex-linux install: one launcher, your preferences kept, and {old_binary} is now a link to rex-rune.") == 1
+                assert installed.is_file() and not installed.is_symlink()
+                assert old_binary.is_symlink() and os.readlink(old_binary) == "rex-rune"
+                assert checked([str(old_binary), "--version"]) == "rex-linux 0.5.2", "the old command starts the new client"
+                launchers = sorted(path.name for path in desktop.parent.glob("*.desktop"))
+                assert launchers == ["dev.shuv.rex-rune.desktop"], launchers
+                assert not any(icon.exists() for icon in old_icons) and not old_receipt.parent.exists()
+                assert old_preferences.read_text() == '{"old":true}'
+                invoke(fixture, shell=shell, contains="already current")
+                invoke(fixture, ("--uninstall",), shell=shell)
+                assert not installed.exists() and not old_binary.is_symlink() and not old_binary.exists()
+                assert old_preferences.read_text() == '{"old":true}'
+                shutil.rmtree(old_preferences.parent)
+                assert filelist() == baseline, "uninstall left part of the old install"
+        # A receipt that does not match the old binary refuses, as for a current install.
+        old_install()
+        old_binary.write_text("#!/bin/sh\necho 'rex-linux 0.5.1'\n# changed\n")
+        invoke(fixture, ok=False, contains="receipt does not match")
+        assert not installed.exists() and old_desktop.exists()
+        invoke(fixture, ("--uninstall",))
+        shutil.rmtree(old_preferences.parent)
+        assert filelist() == baseline
+        # A release signed and published under the old name is declined, not half-installed.
+        old_release = site / "releases/download/v0.5.0"
+        old_release.mkdir()
+        old_tarball = f"rex-linux-0.5.0-{checked(['uname', '-m'])}-linux-gnu.tar.gz"
+        (old_release / old_tarball).write_bytes(b"not read")
+        (old_release / "SHA256SUMS").write_text(f"{hashlib.sha256(b'not read').hexdigest()}  {old_tarball}\n")
+        sign("0.5.0")
+        for verifier in (False, True):
+            invoke(fixture, ("--version", "0.5.0"), ok=False, mini_sign=verifier, contains="0.5.0 was published as rex-linux")
+        assert filelist() == baseline
+        print("PASS takeover of a rex-linux install in 3 shells, with and without a receipt; old releases declined", flush=True)
         server.shutdown()
 
 

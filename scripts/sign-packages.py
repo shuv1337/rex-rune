@@ -6,7 +6,7 @@ from package_signing import Signer
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--dist', type=Path, default=Path('dist'))
-parser.add_argument('--certificate', type=Path, default=Path('packaging/keys/rex-rune-archive-key.asc'))
+parser.add_argument('--certificate', type=Path, default=Path('packaging/keys/rex-linux-archive-key.asc'))
 args = parser.parse_args()
 packages = sorted(args.dist.glob('*.pkg.tar.zst'))
 if len(packages) != 2:

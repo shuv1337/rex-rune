@@ -44,7 +44,7 @@ fn untrusted_equal_older_and_unsupported_releases_never_download_or_modify_insta
             &id,
             &pair,
             &bytes,
-            &format!("rex-rune v{version} latest.json"),
+            &format!("rex-linux v{version} latest.json"),
             true,
         );
         if tamper {
@@ -711,7 +711,7 @@ fn signed_fixture_end_to_end() {
         &super::super::tests::sample_manifest_json("99.0.0", "0.7.0"),
     )
     .unwrap();
-    let artifact = &mut manifest.targets.get_mut(&target).unwrap().tarball;
+    let artifact = &mut manifest.targets.get_mut(&target).unwrap().archive;
     artifact.size = tarball.len() as u64;
     artifact.sha256 = hex_sha256(&tarball);
     let bytes = serde_json::to_vec(&manifest).unwrap();
@@ -720,7 +720,7 @@ fn signed_fixture_end_to_end() {
         &id,
         &pair,
         &bytes,
-        "rex-rune v99.0.0 latest.json",
+        "rex-linux v99.0.0 latest.json",
         true,
     );
     let (base, server) = serve(vec![bytes, sig.into_bytes(), tarball]);
@@ -781,4 +781,138 @@ fn signed_fixture_end_to_end() {
             .stdout,
         b"rex-rune 99.0.0\n"
     );
+}
+
+/// An installation as the 0.7.x updater leaves it after installing a renamed release:
+/// this binary and everything around it under the `rex-linux` names.
+fn legacy_install(temp: &Path) -> (PathBuf, PathBuf) {
+    let (bin, data) = (temp.join(".local/bin"), temp.join(".local/share"));
+    fs::create_dir_all(&bin).unwrap();
+    let binary = bin.join("rex-linux");
+    fs::write(&binary, b"#!/bin/sh\necho 'rex-linux 99.0.0'\n").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let legacy = |path: &str| data.join(path.replace("rex-rune", "rex-linux"));
+    for (path, _) in INSTALL_FILES {
+        if path.is_empty() {
+            continue;
+        }
+        fs::create_dir_all(legacy(path).parent().unwrap()).unwrap();
+        if path.ends_with(".json") {
+            let receipt = InstallReceipt {
+                schema: 1,
+                path: binary.to_string_lossy().into(),
+                version: "99.0.0".into(),
+                sha256: hash_file(&binary).unwrap(),
+            };
+            fs::write(legacy(path), serde_json::to_vec(&receipt).unwrap()).unwrap();
+        } else {
+            fs::write(legacy(path), path.as_bytes()).unwrap();
+        }
+    }
+    (fs::canonicalize(&binary).unwrap(), data)
+}
+
+fn assert_migrated(temp: &Path, data: &Path) {
+    let bin = fs::canonicalize(temp.join(".local/bin")).unwrap();
+    let (old, new) = (bin.join("rex-linux"), bin.join("rex-rune"));
+    assert_eq!(fs::read_link(&old).unwrap(), Path::new("rex-rune"));
+    assert!(
+        fs::symlink_metadata(&new).unwrap().is_file(),
+        "the binary itself has the new name"
+    );
+    assert_eq!(
+        Command::new(&old).arg("--version").output().unwrap().stdout,
+        b"rex-linux 99.0.0\n",
+        "the old name still starts it"
+    );
+    assert!(verify_install_receipt(
+        &data.join("rex-rune/install.json"),
+        &new
+    ));
+    assert_eq!(
+        fs::metadata(data.join("rex-rune/install.json"))
+            .unwrap()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let launcher = fs::read_to_string(data.join("applications").join(DESKTOP)).unwrap();
+    assert!(launcher.contains(&format!("TryExec={}", new.display())));
+    assert!(launcher.contains("StartupWMClass=dev.shuv.rex-rune"));
+    for (path, _) in INSTALL_FILES {
+        if path.is_empty() {
+            continue;
+        }
+        assert!(data.join(path).is_file(), "{path} is installed");
+        assert!(
+            !data.join(path.replace("rex-rune", "rex-linux")).exists(),
+            "{path} has no old-name twin: one launcher, one set of icons"
+        );
+        if path.ends_with(".png") {
+            assert_eq!(fs::read(data.join(path)).unwrap(), path.as_bytes());
+        }
+    }
+    assert!(!data.join("rex-linux").exists());
+    // Nothing is left to do, so a second start changes nothing.
+    assert_eq!(migrate_legacy_install_at(&new, data).unwrap(), None);
+}
+
+#[test]
+fn an_installation_made_by_the_old_updater_takes_the_new_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let (binary, data) = legacy_install(temp.path());
+    let new = binary.with_file_name("rex-rune");
+    assert_eq!(
+        migrate_legacy_install_at(&binary, &data).unwrap(),
+        Some(new)
+    );
+    assert_migrated(temp.path(), &data);
+}
+
+#[test]
+fn a_move_cut_short_after_the_rename_finishes_at_the_next_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let (binary, data) = legacy_install(temp.path());
+    // The earlier start got as far as renaming the binary, then stopped.
+    let new = binary.with_file_name("rex-rune");
+    fs::rename(&binary, &new).unwrap();
+    assert_eq!(
+        migrate_legacy_install_at(&new, &data).unwrap(),
+        Some(new.clone())
+    );
+    assert_migrated(temp.path(), &data);
+}
+
+#[test]
+fn only_a_verified_old_installation_is_moved() {
+    // No receipt: a source build or a package, whatever it is called.
+    let temp = tempfile::tempdir().unwrap();
+    let (binary, data) = legacy_install(temp.path());
+    let receipt = data.join("rex-linux/install.json");
+    let saved = fs::read(&receipt).unwrap();
+    fs::remove_file(&receipt).unwrap();
+    assert_eq!(migrate_legacy_install_at(&binary, &data).unwrap(), None);
+
+    // A receipt for other bytes: not the binary install.sh or the updater put there.
+    fs::write(&receipt, &saved).unwrap();
+    fs::write(&binary, b"#!/bin/sh\necho changed\n").unwrap();
+    assert_eq!(migrate_legacy_install_at(&binary, &data).unwrap(), None);
+
+    // A `rex-rune` already beside it: left for the user to sort out.
+    let temp = tempfile::tempdir().unwrap();
+    let (binary, data) = legacy_install(temp.path());
+    fs::write(binary.with_file_name("rex-rune"), b"other").unwrap();
+    assert_eq!(migrate_legacy_install_at(&binary, &data).unwrap(), None);
+
+    // An update in progress keeps the installation to itself.
+    let temp = tempfile::tempdir().unwrap();
+    let (binary, data) = legacy_install(temp.path());
+    let lock = FileLock::try_acquire(&binary.with_file_name(".rex-update.lock")).unwrap();
+    assert_eq!(migrate_legacy_install_at(&binary, &data).unwrap(), None);
+    drop(lock);
+
+    // Refused each time, it was left exactly as the old updater made it.
+    assert!(binary.is_file() && !binary.is_symlink());
+    assert!(data.join("rex-linux/install.json").is_file());
+    assert!(!data.join("applications").join(DESKTOP).exists());
 }

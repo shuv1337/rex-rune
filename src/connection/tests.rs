@@ -1864,3 +1864,19 @@ async fn a_worker_gets_its_search_whatever_the_control_connection_is_doing() {
     ));
     assert!(received.try_recv().is_err());
 }
+
+#[test]
+fn the_old_name_answers_version_as_the_old_updater_checks_it() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        Options::version_line(false),
+        format!("rex-rune {version}\n")
+    );
+    // The 0.7.x updater runs `bin/rex-linux --version` and installs only on this exact line.
+    assert_eq!(
+        Options::version_line(true),
+        format!("rex-linux {version}\n")
+    );
+    let options = Options::from_arguments(["rex-linux", "--session", "work"].map(Into::into), true);
+    assert_eq!(options.session.as_deref(), Some("work"));
+}

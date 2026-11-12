@@ -23,6 +23,11 @@ pub const DEFAULT_SIGNATURE_URL: &str =
     "https://github.com/shuv1337/rex-rune/releases/latest/download/latest.json.minisig";
 pub const INSTALL_SCRIPT_COMMAND: &str = "curl --proto '=https' --tlsv1.2 -fsSL https://github.com/shuv1337/rex-rune/releases/latest/download/install.sh | sh";
 
+/// The product id in signed release metadata: `latest.json`'s `product` and the trusted
+/// comment of every release signature. It is the name this client had through 0.7.x and
+/// stays as it is, because every published updater and installer checks for exactly it.
+pub const MANIFEST_PRODUCT: &str = "rex-linux";
+
 pub const CI_PUBLIC_KEY: &str = include_str!("../packaging/keys/release.pub");
 pub const BACKUP_PUBLIC_KEY: &str = include_str!("../packaging/keys/release-backup.pub");
 
@@ -76,7 +81,9 @@ pub struct ReleaseManifest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetArtifacts {
     pub min_glibc: String,
-    pub tarball: TarballArtifact,
+    /// The `rex-rune` tarball this client installs. `latest.json` also carries `tarball`,
+    /// which is not read here: it names the bridge tarball laid out for the 0.7.x updater.
+    pub archive: TarballArtifact,
     pub deb: DebArtifact,
 }
 
@@ -108,7 +115,7 @@ impl ReleaseManifest {
             manifest.schema
         );
         ensure!(
-            manifest.product == "rex-rune",
+            manifest.product == MANIFEST_PRODUCT,
             "unexpected product {:?}",
             manifest.product
         );
@@ -145,12 +152,12 @@ impl ReleaseManifest {
                 "unexpected target {target:?}"
             );
             ensure!(
-                entry.tarball.size > 0 && is_hex_sha256(&entry.tarball.sha256),
+                entry.archive.size > 0 && is_hex_sha256(&entry.archive.sha256),
                 "invalid tarball entry for {target}"
             );
             ensure!(
                 entry
-                    .tarball
+                    .archive
                     .url
                     .starts_with(&format!("{REPOSITORY}/releases/download/{expected_tag}/")),
                 "unexpected tarball URL for {target}"
@@ -189,15 +196,15 @@ pub fn verify_and_parse_manifest(
         "signature exceeds {MAX_SIGNATURE_BYTES} bytes"
     );
     let parsed_sig = ParsedMinisig::parse(minisig_text)?;
-    let prefix = "rex-rune v";
+    let prefix = format!("{MANIFEST_PRODUCT} v");
     let suffix = " latest.json";
     let comment_version = parsed_sig
         .trusted_comment
-        .strip_prefix(prefix)
+        .strip_prefix(prefix.as_str())
         .and_then(|s| s.strip_suffix(suffix))
         .with_context(|| {
             format!(
-                "trusted comment {:?} does not match 'rex-rune vX.Y.Z latest.json'",
+                "trusted comment {:?} does not match '{MANIFEST_PRODUCT} vX.Y.Z latest.json'",
                 parsed_sig.trusted_comment
             )
         })?;
@@ -896,11 +903,13 @@ impl Default for CheckConfig {
     }
 }
 
-/// Whether `REX_RUNE_NO_UPDATE_CHECK=1` is set in the environment.
+/// Whether `REX_RUNE_NO_UPDATE_CHECK=1` is set in the environment. The variable's name from
+/// before the rename, `REX_LINUX_NO_UPDATE_CHECK`, still counts.
 pub fn env_disabled() -> bool {
-    std::env::var_os("REX_RUNE_NO_UPDATE_CHECK")
-        .and_then(|v| v.into_string().ok())
-        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
+    ["REX_RUNE_NO_UPDATE_CHECK", "REX_LINUX_NO_UPDATE_CHECK"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name)?.into_string().ok())
+        .any(|v| matches!(v.trim(), "1" | "true" | "yes"))
 }
 
 pub fn now_epoch_secs() -> u64 {
@@ -1253,7 +1262,7 @@ mod tests {
             let (key_id, pair, key) = test_keypair();
             let bytes = sample_manifest_json("0.8.0", "0.7.0");
             let signature =
-                sign_minisig(&key_id, &pair, &bytes, "rex-rune v0.8.0 latest.json", true);
+                sign_minisig(&key_id, &pair, &bytes, "rex-linux v0.8.0 latest.json", true);
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let state_path = path.clone();
@@ -1359,7 +1368,7 @@ mod tests {
         let sha = "a".repeat(64);
         serde_json::to_vec_pretty(&serde_json::json!({
             "schema": 1,
-            "product": "rex-rune",
+            "product": MANIFEST_PRODUCT,
             "version": version,
             "tag": format!("v{version}"),
             "published": "2026-11-20T10:00:00Z",
@@ -1369,6 +1378,11 @@ mod tests {
                 "x86_64-linux-gnu": {
                     "min_glibc": "2.39",
                     "tarball": {
+                        "url": format!("{REPOSITORY}/releases/download/v{version}/rex-linux-{version}-x86_64-linux-gnu.tar.gz"),
+                        "size": 12345,
+                        "sha256": sha
+                    },
+                    "archive": {
                         "url": format!("{REPOSITORY}/releases/download/v{version}/rex-rune-{version}-x86_64-linux-gnu.tar.gz"),
                         "size": 12345,
                         "sha256": sha
@@ -1382,6 +1396,11 @@ mod tests {
                 "aarch64-linux-gnu": {
                     "min_glibc": "2.39",
                     "tarball": {
+                        "url": format!("{REPOSITORY}/releases/download/v{version}/rex-linux-{version}-aarch64-linux-gnu.tar.gz"),
+                        "size": 12345,
+                        "sha256": sha
+                    },
+                    "archive": {
                         "url": format!("{REPOSITORY}/releases/download/v{version}/rex-rune-{version}-aarch64-linux-gnu.tar.gz"),
                         "size": 12345,
                         "sha256": sha
@@ -1455,7 +1474,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-rune v0.6.1 latest.json",
+            "rex-linux v0.6.1 latest.json",
             true,
         );
 
@@ -1474,7 +1493,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-rune v0.6.0 latest.json",
+            "rex-linux v0.6.0 latest.json",
             true,
         );
         assert!(
@@ -1486,7 +1505,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-rune v0.6.1 SHA256SUMS",
+            "rex-linux v0.6.1 SHA256SUMS",
             true,
         );
         assert!(verify_and_parse_manifest(&manifest_bytes, &wrong_file_sig, &[&pub_text]).is_err());
@@ -1496,7 +1515,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-rune v0.6.1 latest.json",
+            "rex-linux v0.6.1 latest.json",
             false,
         );
         assert!(verify_and_parse_manifest(&manifest_bytes, &legacy_sig, &[&pub_text]).is_err());
@@ -1673,7 +1692,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-rune v0.6.1 latest.json",
+            "rex-linux v0.6.1 latest.json",
             true,
         );
 

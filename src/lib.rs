@@ -15,6 +15,7 @@ pub mod connection;
 pub mod download;
 pub mod keymap;
 pub mod layout;
+pub mod legacy;
 pub mod links;
 pub mod settings;
 pub mod ssh;

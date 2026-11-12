@@ -210,6 +210,141 @@ fn recover_install_at(
     Ok(recovery)
 }
 
+/// The launcher of the current layout, for an installation that arrives without one.
+const LAUNCHER_TEMPLATE: &str = include_str!("../../resources/dev.shuv.rex-rune.desktop");
+
+/// Give an installation the 0.7.x updater has just made its `rex-rune` names.
+///
+/// That updater knows only the `rex-linux` layout, so the release it installs arrives as
+/// `bin/rex-linux` with the old launcher, icons and receipt. At the next start this moves
+/// the binary to `rex-rune` and leaves `rex-linux` as a link to it, writes the new
+/// launcher, icons and receipt, and removes the old ones, so one launcher remains.
+///
+/// The old receipt is what starts it, and it is removed last. Every step before that can
+/// be repeated, so the next start finishes what an interrupted one began. Returns the
+/// binary's path once the move is complete, and `None` when there was nothing to move.
+pub fn migrate_legacy_install() -> Result<Option<PathBuf>> {
+    if unsafe { libc::geteuid() } == 0 {
+        return Ok(None);
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return Ok(None);
+    };
+    migrate_legacy_install_at(&exe, &xdg_data_dir())
+}
+
+fn migrate_legacy_install_at(exe: &Path, data: &Path) -> Result<Option<PathBuf>> {
+    use crate::legacy::{CURRENT, NAME};
+    let legacy_receipt = data.join(NAME).join("install.json");
+    let Some(receipt) = fs::read(&legacy_receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<InstallReceipt>(&bytes).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(bin) = exe.parent() else {
+        return Ok(None);
+    };
+    let (old, new) = (bin.join(NAME), bin.join(CURRENT));
+    // Only this very binary, under either of its names, in the directory the receipt names.
+    let recorded = Path::new(&receipt.path);
+    let same_directory = recorded
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .is_some_and(|parent| parent == bin);
+    if receipt.schema != 1
+        || recorded.file_name().is_none_or(|name| name != NAME)
+        || !same_directory
+        || (exe != old && exe != new)
+        || hash_file(exe)? != receipt.sha256
+    {
+        return Ok(None);
+    }
+    // A `rex-rune` beside a running `rex-linux` is someone else's file, not ours to replace.
+    if exe == old && fs::symlink_metadata(&new).is_ok() {
+        return Ok(None);
+    }
+    // An update in progress, or an interrupted one, owns the installation for now.
+    let Some(_lock) = FileLock::try_acquire(&bin.join(".rex-update.lock")) else {
+        return Ok(None);
+    };
+    if bin.join(".rex-update-transaction").exists() {
+        return Ok(None);
+    }
+    let legacy = |path: &str| data.join(path.replace(CURRENT, NAME));
+    let install = |source: &Path, path: &str, mode: u32| -> Result<()> {
+        let destination = data.join(path);
+        let directory = destination.parent().context("missing install parent")?;
+        fs::create_dir_all(directory)?;
+        let temporary = tempfile::NamedTempFile::new_in(directory)?;
+        fs::copy(source, temporary.path())?;
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(mode))?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&destination)?;
+        Ok(())
+    };
+
+    let stage = tempfile::tempdir()?;
+    let template = stage.path().join(DESKTOP);
+    fs::write(&template, LAUNCHER_TEMPLATE)?;
+    let rendered = stage.path().join("rendered");
+    fs::create_dir(&rendered)?;
+    let launcher = render_launcher(&template, &new, &rendered)?;
+    for (path, mode) in INSTALL_FILES {
+        if path.ends_with(".desktop") {
+            install(&launcher, path, mode)?;
+        } else if path.ends_with(".png") && legacy(path).is_file() {
+            install(&legacy(path), path, mode)?;
+        }
+    }
+    if exe == old {
+        fs::rename(&old, &new)?;
+    }
+    if matches!(fs::symlink_metadata(&old), Err(error) if error.kind() == io::ErrorKind::NotFound) {
+        std::os::unix::fs::symlink(CURRENT, &old)?;
+    }
+    sync_dir(bin)?;
+    let new_receipt = stage.path().join("receipt.json");
+    fs::write(
+        &new_receipt,
+        serde_json::to_vec(&InstallReceipt {
+            schema: 1,
+            path: new.to_string_lossy().into_owned(),
+            version: receipt.version,
+            sha256: receipt.sha256,
+        })?,
+    )?;
+    for (path, mode) in INSTALL_FILES {
+        if path.ends_with(".json") {
+            install(&new_receipt, path, mode)?;
+        }
+    }
+    // The old launcher and icons first: the receipt goes last, so an interruption here
+    // is still finished by the next start.
+    for (path, _) in INSTALL_FILES {
+        if !path.is_empty() && !path.ends_with(".json") {
+            remove_if_present(&legacy(path))?;
+        }
+    }
+    remove_if_present(&legacy_receipt)?;
+    let _ = fs::remove_dir(data.join(NAME));
+    refresh_caches(&InstallLayout {
+        local: PathBuf::new(),
+        binary: new.clone(),
+        data: data.to_path_buf(),
+    });
+    Ok(Some(new))
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("could not remove {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Download and install a freshly re-verified manifest, never trusting cached UI metadata.
 /// The expected version binds the operation to the release shown when the user clicked.
 pub fn install(
@@ -277,7 +412,7 @@ fn install_with(
         .get(&target)
         .context("release does not support this architecture")?;
     check_glibc(&release_target.min_glibc)?;
-    let artifact = &release_target.tarball;
+    let artifact = &release_target.archive;
     ensure!(
         artifact.size <= MAX_ARCHIVE,
         "tarball exceeds 256 MiB limit"
@@ -518,43 +653,11 @@ fn prepare(layout: &InstallLayout, stage: &Path, package: &Path, version: &str) 
         .into();
     let desktop_dir = stage.join("desktop");
     fs::create_dir(&desktop_dir)?;
-    let path = layout
-        .binary
-        .to_str()
-        .context("install path is not UTF-8")?;
-    ensure!(
-        !path.contains(['\n', '\r']),
-        "desktop launcher path contains a newline"
-    );
-    // Same quoting and desktop-file-utils transformation as scripts/install-desktop.sh.
-    let quoted = format!(
-        "\"{}\"",
-        path.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('`', "\\`")
-            .replace('$', "\\$")
-    );
-    let status = Command::new("desktop-file-install")
-        .arg(format!("--dir={}", desktop_dir.display()))
-        .args([
-            "--set-key=Exec",
-            &format!("--set-value={quoted}"),
-            "--set-key=TryExec",
-            &format!("--set-value={path}"),
-        ])
-        .arg(package.join("resources").join(DESKTOP))
-        .status()
-        .context("desktop-file-install is required")?;
-    ensure!(status.success(), "desktop-file-install failed");
-    let desktop = desktop_dir.join(DESKTOP);
-    ensure!(
-        Command::new("desktop-file-validate")
-            .arg(&desktop)
-            .status()?
-            .success(),
-        "desktop launcher validation failed"
-    );
-    sources.push(desktop);
+    sources.push(render_launcher(
+        &package.join("resources").join(DESKTOP),
+        &layout.binary,
+        &desktop_dir,
+    )?);
     sources.push(binary.clone());
     let receipt = stage.join("receipt.json");
     fs::write(
@@ -576,6 +679,44 @@ fn prepare(layout: &InstallLayout, stage: &Path, package: &Path, version: &str) 
         File::open(path)?.sync_all()?;
     }
     Ok(())
+}
+
+/// Write `template` into `directory` as a launcher that starts `binary`, and return it.
+/// Same quoting and desktop-file-utils transformation as scripts/install-desktop.sh.
+fn render_launcher(template: &Path, binary: &Path, directory: &Path) -> Result<PathBuf> {
+    let path = binary.to_str().context("install path is not UTF-8")?;
+    ensure!(
+        !path.contains(['\n', '\r']),
+        "desktop launcher path contains a newline"
+    );
+    let quoted = format!(
+        "\"{}\"",
+        path.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('`', "\\`")
+            .replace('$', "\\$")
+    );
+    let status = Command::new("desktop-file-install")
+        .arg(format!("--dir={}", directory.display()))
+        .args([
+            "--set-key=Exec",
+            &format!("--set-value={quoted}"),
+            "--set-key=TryExec",
+            &format!("--set-value={path}"),
+        ])
+        .arg(template)
+        .status()
+        .context("desktop-file-install is required")?;
+    ensure!(status.success(), "desktop-file-install failed");
+    let desktop = directory.join(template.file_name().context("launcher has no name")?);
+    ensure!(
+        Command::new("desktop-file-validate")
+            .arg(&desktop)
+            .status()?
+            .success(),
+        "desktop launcher validation failed"
+    );
+    Ok(desktop)
 }
 
 fn sync_dir(path: &Path) -> Result<()> {

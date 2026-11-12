@@ -1,8 +1,11 @@
-use clap::Parser;
 mod app;
 
 fn main() -> anyhow::Result<()> {
-    let options = rex_rune::connection::Options::parse();
+    let options = rex_rune::connection::Options::from_command_line();
+    // Before anything reads settings or update state: both moved with the rename.
+    for (old, new) in rex_rune::legacy::migrate_user_dirs() {
+        eprintln!("Moved {} to {}", old.display(), new.display());
+    }
     if options.check_update {
         let code = rex_rune::update::run_cli_check(&rex_rune::update::CheckConfig::default());
         std::process::exit(code);
@@ -19,6 +22,17 @@ fn main() -> anyhow::Result<()> {
             "A later installation superseded the interrupted update; its obsolete journal and backups were discarded.".into(),
         )),
         Err(error) => Some(app::StartupNotice::Error(recovery_error(error))),
+    };
+    // A 0.7.x updater installs this release under the old names. Give it the new ones.
+    let recovery_notice = match rex_rune::update::installer::migrate_legacy_install() {
+        Ok(_) => recovery_notice,
+        Err(error) => recovery_notice.or_else(|| {
+            let notice = format!(
+                "Could not finish moving this installation from rex-linux to rex-rune: {error:#}. Rex still works and tries again at the next start."
+            );
+            eprintln!("{notice}");
+            Some(app::StartupNotice::Error(notice))
+        }),
     };
     if let Some(binary) = app::run(options, recovery_notice)? {
         // The workspace is gone and host shutdown has completed before replacing

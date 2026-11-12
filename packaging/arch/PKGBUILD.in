@@ -6,8 +6,11 @@ pkgdesc='Native Linux client for existing Rex terminal servers'
 arch=('x86_64' 'aarch64')
 url='https://github.com/shuv1337/rex-rune'
 license=('MIT')
-provides=('rex-rune')
-conflicts=('rex-rune')
+# rex-linux-bin is this package before the rename: pacman offers the replacement on the
+# next -Syu, and the old names still resolve to it for anything that asks for them.
+provides=('rex-rune' 'rex-linux' "rex-linux-bin=${pkgver}")
+conflicts=('rex-rune' 'rex-linux' 'rex-linux-bin')
+replaces=('rex-linux-bin')
 depends=('glibc>=2.39' 'gcc-libs' 'fontconfig' 'libxkbcommon' 'libxkbcommon-x11'
          'wayland' 'libx11' 'libxcb' 'libglvnd' 'vulkan-icd-loader'
          'xdg-utils' 'ca-certificates' 'hicolor-icon-theme')
@@ -20,6 +23,8 @@ sha256sums_aarch64=('@SHA256_AARCH64@')
 package() {
     cd "rex-rune-${pkgver}-${CARCH}-linux-gnu"
     install -Dm755 bin/rex-rune "$pkgdir/usr/bin/rex-rune"
+    # The old command keeps working for scripts and key bindings.
+    ln -s rex-rune "$pkgdir/usr/bin/rex-linux"
     install -Dm644 resources/dev.shuv.rex-rune.desktop "$pkgdir/usr/share/applications/dev.shuv.rex-rune.desktop"
     for size in 32 128 256; do
         install -Dm644 "resources/icons/${size}x${size}/apps/dev.shuv.rex-rune.png" \

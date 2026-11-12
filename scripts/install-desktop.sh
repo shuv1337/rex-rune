@@ -12,6 +12,18 @@ applications="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
 desktop="$applications/dev.shuv.rex-rune.desktop"
 receipt="${XDG_DATA_HOME:-$HOME/.local/share}/rex-rune/install.json"
+# What an install made before the rename from rex-linux left in the same places.
+legacy_desktop="$applications/dev.shuv.rex-linux.desktop"
+legacy_receipt="${XDG_DATA_HOME:-$HOME/.local/share}/rex-linux/install.json"
+
+# One launcher and one set of icons: remove the old name's, never its preferences.
+remove_legacy_launcher() {
+    rm -f -- "$legacy_desktop" "$legacy_receipt"
+    rmdir -- "$(dirname -- "$legacy_receipt")" 2>/dev/null || true
+    for size in 32 128 256; do
+        rm -f -- "$icons/${size}x${size}/apps/dev.shuv.rex-linux.png"
+    done
+}
 
 usage() {
     echo "Usage: $0 [--copy] [path/to/rex-rune] | --uninstall" >&2
@@ -45,10 +57,11 @@ copy=false
 case "${1:-}" in
     --uninstall)
         [[ $# -eq 1 ]] || usage
-        rm -f -- "$bin_dir/rex-rune" "$desktop" "$receipt"
+        rm -f -- "$bin_dir/rex-rune" "$bin_dir/rex-linux" "$desktop" "$receipt"
         for size in 32 128 256; do
             rm -f -- "$icons/${size}x${size}/apps/dev.shuv.rex-rune.png"
         done
+        remove_legacy_launcher
         refresh_caches
         echo "Removed Rex Rune's launcher, icons and $bin_dir/rex-rune"
         exit 0
@@ -82,6 +95,11 @@ if $copy; then
     if [[ ! "$source_binary" -ef "$binary" ]]; then
         install -Dm755 "$source_binary" "$binary"
     fi
+    # An install from before the rename keeps answering to its old name: scripts,
+    # aliases and key bindings that start rex-linux go on working.
+    if [[ -f "$bin_dir/rex-linux" && ! -L "$bin_dir/rex-linux" ]]; then
+        ln -sfn -- rex-rune "$bin_dir/rex-linux"
+    fi
 fi
 exec_value="$(desktop_exec_quote "$binary")"
 
@@ -95,6 +113,7 @@ desktop-file-install --dir="$applications" \
     --set-key=TryExec --set-value="$binary" \
     "$root/resources/dev.shuv.rex-rune.desktop"
 desktop-file-validate "$desktop"
+remove_legacy_launcher
 refresh_caches
 if [[ -n "$receipt_version" ]]; then
     # JSON strings, including unusual XDG paths, without adding a Python dependency.

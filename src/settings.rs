@@ -299,7 +299,7 @@ impl Settings {
             .unwrap_or_else(hostname)
     }
 
-    fn config_dir() -> PathBuf {
+    pub(crate) fn config_dir() -> PathBuf {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| {

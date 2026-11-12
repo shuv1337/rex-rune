@@ -22,6 +22,47 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
+def bridge(temp, stage, binary, version, arch):
+    """The same release laid out as the 0.7.x updater expects it, for that updater alone.
+
+    Before the rename the client was rex-linux, and its updater installs only a tarball
+    whose root is rex-linux-<version>-<target>, holding bin/rex-linux (which must print
+    "rex-linux <version>"), resources/dev.shuv.rex-linux.desktop and the three icons under
+    that name. It takes nothing else. The binary is this release's; started as rex-linux it
+    reports that name, and at its first start it moves the installation to the rex-rune
+    names (update::installer::migrate_legacy_install). No installer script is included:
+    nothing but that updater should install from this archive.
+    """
+    tree = temp / f"rex-linux-{version}-{arch}-linux-gnu"
+    (tree / "bin").mkdir(parents=True)
+    shutil.copy2(binary, tree / "bin/rex-linux")
+    actual = run(str(tree / "bin/rex-linux"), "--version")
+    if actual != f"rex-linux {version}":
+        raise SystemExit(f"The 0.7.x updater needs 'rex-linux {version}' from bin/rex-linux, got {actual!r}")
+    resources = tree / "resources"
+    resources.mkdir()
+    launcher = (stage / "resources/dev.shuv.rex-rune.desktop").read_text().splitlines(keepends=True)
+    # Until the first start replaces it: the old command and the icons that updater installs.
+    (resources / "dev.shuv.rex-linux.desktop").write_text("".join(
+        line.replace("rex-rune", "rex-linux") if line.startswith(("Exec=", "TryExec=", "Icon=")) else line
+        for line in launcher
+    ))
+    for size in (32, 128, 256):
+        icons = resources / f"icons/{size}x{size}/apps"
+        icons.mkdir(parents=True)
+        shutil.copy2(stage / f"resources/icons/{size}x{size}/apps/dev.shuv.rex-rune.png", icons / "dev.shuv.rex-linux.png")
+    for filename in ("LICENSE", "BUILD-INFO"):
+        shutil.copy2(stage / filename, tree / filename)
+    shutil.copytree(stage / "licenses", tree / "licenses")
+    (tree / "README").write_text(
+        f"Rex Rune {version}, packaged for the updater built into Rex Linux 0.7.x.\n\n"
+        "Rex Linux was renamed Rex Rune. This archive keeps the old layout only so that\n"
+        "updater can install this release; the client then moves itself to the new names.\n"
+        f"To install by hand, use rex-rune-{version}-{arch}-linux-gnu.tar.gz or install.sh.\n"
+    )
+    return tree
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deb", action="store_true")
@@ -86,17 +127,23 @@ def main():
             info.mtime = epoch
             return info
 
-        archive = dist / f"{name}.tar.gz"
-        # gzip's timestamp is fixed too; do not encode a temporary filename.
-        with archive.open("wb") as output:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=epoch) as compressed:
-                with tarfile.open(fileobj=compressed, mode="w") as tar:
-                    tar.add(stage, arcname=name, filter=normalize)
-        print(archive)
+        def write_archive(tree, name):
+            archive = dist / f"{name}.tar.gz"
+            # gzip's timestamp is fixed too; do not encode a temporary filename.
+            with archive.open("wb") as output:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=epoch) as compressed:
+                    with tarfile.open(fileobj=compressed, mode="w") as tar:
+                        tar.add(tree, arcname=name, filter=normalize)
+            print(archive)
+
+        write_archive(stage, name)
+        write_archive(bridge(Path(temp), stage, binary, version, arch), f"rex-linux-{version}-{arch}-linux-gnu")
         if args.deb:
             deb = Path(temp) / "deb"
             (deb / "usr/bin").mkdir(parents=True)
             shutil.copy2(binary, deb / "usr/bin/rex-rune")
+            # The old command keeps working for scripts and key bindings.
+            (deb / "usr/bin/rex-linux").symlink_to("rex-rune")
             (deb / "usr/share/rex-rune").mkdir(parents=True)
             (deb / "usr/share/rex-rune/channel").write_text("channel=deb\nhint=Install the latest .deb from GitHub Releases\n")
             (deb / "usr/share/applications").mkdir(parents=True)
@@ -120,8 +167,11 @@ def main():
             (deb / "DEBIAN/control").write_text(
                 f"Package: rex-rune\nVersion: {version}\nArchitecture: {deb_arch}\n"
                 "Maintainer: shuv1337 <shuv@shuv.dev>\nSection: utils\nPriority: optional\n"
-                f"Installed-Size: {sum(p.stat().st_size for p in (deb / 'usr').rglob('*') if p.is_file()) // 1024}\n"
-                f"Depends: {depends}\nHomepage: https://github.com/shuv1337/rex-rune\n"
+                f"Installed-Size: {sum(p.stat().st_size for p in (deb / 'usr').rglob('*') if p.is_file() and not p.is_symlink()) // 1024}\n"
+                f"Depends: {depends}\n"
+                # Takes over from the package this was before the rename, in one transaction.
+                "Replaces: rex-linux\nConflicts: rex-linux\nProvides: rex-linux\n"
+                "Homepage: https://github.com/shuv1337/rex-rune\n"
                 "Description: Native Linux client for existing Rex terminal servers\n"
                 " Unofficial Rune-based client. Requires a Rex server with API revisions 10–13.\n"
             )
