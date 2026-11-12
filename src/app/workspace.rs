@@ -557,7 +557,7 @@ impl Workspace {
         for queued in client_actions {
             // File dialogs need this person's own key or click, whatever a host returns.
             if super::actions::find(&queued.action.action).is_some_and(|s| s.requires_person()) {
-                self.inform("Returned client action skipped: a host cannot start file dialogs.");
+                self.inform("Returned client action skipped: a host cannot start a download or open the path browser.");
                 continue;
             }
             // Focus events following the reply may legitimately move to another pane.

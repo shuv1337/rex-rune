@@ -111,6 +111,45 @@ async fn directory_reads_only_list_and_cancels_closed_old_epoch_and_expired_requ
 }
 
 #[tokio::test]
+async fn an_oversized_listing_request_fails_only_that_listing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = start(&listener).await;
+        // The oversized request never reaches the wire; the next one does, on this
+        // same connection.
+        let request = recv(&mut ws).await;
+        assert_eq!(request["payload"]["args"]["path"], "~/tree/");
+        send(
+            &mut ws,
+            json!({"type":"response","id":request["id"],"payload":{"path":"/home/dev/tree","home":"/home/dev","status":"ok","entries":[],"truncated":false}}),
+        )
+        .await;
+        let extra = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        assert!(extra.is_err(), "no reconnect");
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let open = Arc::new(());
+    // The mock server's message limit is 64 KiB.
+    let mut huge = listing(1, 1, &open);
+    huge.args = ListDir::new().path("x".repeat(200_000)).files(true);
+    host.commands
+        .send(HostCommand::ListDir(Box::new(huge)))
+        .unwrap();
+    assert_eq!(answer(&host, 1).await.result, Err(Failure::Request));
+    host.commands
+        .send(HostCommand::ListDir(Box::new(listing(2, 1, &open))))
+        .unwrap();
+    assert!(answer(&host, 2).await.result.is_ok());
+    assert!(host.model.lock().unwrap().connected);
+    assert_eq!(host.model.lock().unwrap().connection_epoch, 1);
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn a_slow_listing_does_not_hold_up_other_requests_on_the_host() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());

@@ -44,18 +44,28 @@ pub fn split_path(text: &str) -> (&str, &str) {
         .map_or(("", text), |at| (&text[..=at], &text[at + 1..]))
 }
 
+/// Linux's longest path, in bytes.
+const PATH_MAX: usize = 4096;
 const REFUSED: &str = "Paths with control or invisible formatting characters can't be inserted.";
 
 /// A character that is never pasted or listed: controls (which a terminal would act on),
-/// line and paragraph separators, and the invisible formatting characters that can make a
-/// name read as a different one (bidirectional controls, zero-width space, word joiner,
-/// byte-order mark, tags). Zero-width joiner and non-joiner stay: scripts and emoji
+/// line and paragraph separators, and invisible formatting characters that could disguise
+/// a name, such as a right-to-left override (bidirectional controls, zero-width space,
+/// soft hyphen, word joiner, blank fillers, byte-order mark, tags). This is not a defence
+/// against look-alike letters. Zero-width joiner and non-joiner stay: scripts and emoji
 /// sequences need them.
 pub fn refused(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{061C}'
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{180E}'
+                | '\u{3164}'
+                | '\u{FFA0}'
                 | '\u{200B}'
                 | '\u{200E}'
                 | '\u{200F}'
@@ -175,6 +185,11 @@ impl Workspace {
         let text = panel.inputs[0].text.clone();
         if text.chars().any(refused) {
             panel.error = Some(REFUSED.into());
+            return;
+        }
+        // No path this long can be listed, and a pasted megabyte must not become a request.
+        if text.len() > PATH_MAX {
+            panel.error = Some("That path is too long.".into());
             return;
         }
         let model = &self.hosts[target.host].model;

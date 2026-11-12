@@ -63,6 +63,9 @@ pub(super) fn finish(shared: &Shared, request: &Request, result: Result<ListDirR
     });
 }
 
+/// Room for a request's type, id and method around its payload.
+const ENVELOPE: usize = 256;
+
 /// A host's listing in flight, at most one: a browser asks for one at a time.
 #[derive(Default)]
 pub(super) struct Reader {
@@ -92,6 +95,13 @@ impl Reader {
         // A new browser's first read can arrive while a closed one's is still out.
         self.abandon(shared, Failure::Request);
         let payload = serde_json::json!({"session_id":request.session, "block_id":request.block, "args":request.args});
+        // A detached request skips the client's own size check, and a server closes the
+        // connection on a message over its limit: that must fail this listing only.
+        let size = serde_json::to_vec(&payload).map_or(usize::MAX, |bytes| bytes.len());
+        if size.saturating_add(ENVELOPE) > control.welcome().limits.max_message_bytes {
+            finish(shared, &request, Err(Failure::Request));
+            return Ok(());
+        }
         match control.transport().detach(ListDir::NAME, payload).await {
             Ok(reply) => {
                 self.read = Some((request, reply));

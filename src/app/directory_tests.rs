@@ -116,8 +116,14 @@ fn quoting_is_posix_and_only_when_needed() {
         assert!(directory::quote(&format!("/tmp/a{c}b")).is_err());
     }
     // Separators and invisible formatting are refused too: single quotes would keep them
-    // literal, but a name could read as a different one (`invoice<RLO>fdp.sh`).
+    // literal, but a right-to-left override could disguise a name (`invoice<RLO>fdp.sh`).
     for c in [
+        '\u{00AD}',
+        '\u{034F}',
+        '\u{115F}',
+        '\u{180E}',
+        '\u{3164}',
+        '\u{FFA0}',
         '\u{061C}',
         '\u{200B}',
         '\u{200E}',
@@ -514,6 +520,14 @@ fn truncated_listing_sends_prefix_and_controls_are_refused() {
     edit(&mut ws, "~/invoice\u{202E}fdp.sh");
     assert!(rx.is_empty());
     assert!(error(&ws).contains("control or invisible formatting characters"));
+    // A pasted megabyte is not a path and never becomes a request.
+    edit(&mut ws, &format!("/{}", "x".repeat(1_200_000)));
+    assert!(rx.is_empty());
+    assert_eq!(error(&ws), "That path is too long.");
+    edit(&mut ws, &format!("/{}", "x".repeat(4095)));
+    let r = request(&rx);
+    assert_eq!(r.args.path.as_deref(), Some("/"));
+    reply(&mut ws, &r, Ok(response()));
     edit(&mut ws, "~/");
     let r = request(&rx);
     let mut answer = response();
