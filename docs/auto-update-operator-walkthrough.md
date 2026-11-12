@@ -287,7 +287,7 @@ Then `sudo pacman -Syu rex-rune-bin`. Both package and database signatures are
 mandatory. Future upgrades use `sudo pacman -Syu`, without an AUR helper.
 
 An install of `rex-linux-bin` needs no change to `pacman.conf`. Its next
-`sudo pacman -Syu` (or `omarchy update`) asks `Replace rex-linux-bin with
+`sudo pacman -Syu` (`omarchy update` on Omarchy) asks `Replace rex-linux-bin with
 rex-linux/rex-rune-bin?`; answering yes removes the old package and installs the
 new one, which also provides the `rex-linux` command as a link.
 

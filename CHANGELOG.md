@@ -4,7 +4,7 @@
 
 ### Changed
 
-- **Rex Linux is now Rex Rune.** The binary, crate, packages, launcher, icons, app id and settings folder are `rex-rune` (`dev.shuv.rex-rune`, `~/.config/rex-rune`). Existing installs move over when they update: **Update now** in 0.7.x installs this release and the next start renames the binary, launcher and icons; `sudo pacman -Syu` replaces `rex-linux-bin` with `rex-rune-bin`; `sudo apt install ./rex-rune_*.deb` replaces `rex-linux`; `install.sh` and `scripts/install-desktop.sh` take over an install made under the old name. Each leaves one launcher. Settings and update state move once, at the first start, from `~/.config/rex-linux` and `~/.local/state/rex-linux`. `rex-linux` stays as a link to `rex-rune`, and `REX_LINUX_NO_UPDATE_CHECK` still works; both will go in a later release. The pacman repository section stays `[rex-linux]`. `install.sh` no longer installs releases published before the rename; use that release's own `install.sh`. See [Renamed from Rex Linux](README.md#renamed-from-rex-linux).
+- **Rex Linux is now Rex Rune.** The binary, crate, packages, launcher, icons, app id and settings folder are `rex-rune` (`dev.shuv.rex-rune`, `~/.config/rex-rune`). Existing installs move over when they update: **Update now** in 0.7.x installs this release and the next start renames the binary, launcher and icons; `sudo pacman -Syu` (`omarchy update` on Omarchy) replaces `rex-linux-bin` with `rex-rune-bin`; `sudo apt install ./rex-rune_*.deb` replaces `rex-linux`; `install.sh` and `scripts/install-desktop.sh` take over an install made under the old name. Each leaves one launcher. Settings and update state move once, at the first start, from `~/.config/rex-linux` and `~/.local/state/rex-linux`. `rex-linux` stays as a link to `rex-rune`, and `REX_LINUX_NO_UPDATE_CHECK` still works; both will go in a later release. The pacman repository section stays `[rex-linux]`. `install.sh` no longer installs releases published before the rename; use that release's own `install.sh`. See [Renamed from Rex Linux](README.md#renamed-from-rex-linux).
 
 - **Activity coverage:** after each connection, read every session's program status once, selected session first and the rest paced in the background, up to three reads at a time. Already-waiting tabs in unopened sessions now feed the Activity list, sidebar word and toolbar chip without notifications or read receipts. The list names reads in progress, failed reads and disconnected hosts. No polling or cap; see [measurements and limits](docs/parity-2026-11/M3.2-status-sweep.md).
 
@@ -12,7 +12,13 @@
 
 ### Added
 
+- **Recently used paths (partial M3.1):** Insert path and Go to directory offer the last ten paths used on each saved host, shared by its sessions on this computer. Settings → Terminal → Show recently used paths is on by default; turning it off forgets the lists. Choosing a recent still only pastes, never presses Enter or checks that the path exists. See [checks and limits](docs/parity-2026-11/M3.1-recent-paths.md).
+
 - **Activity toolbar chip (partial M3.2):** a chip in the toolbar opens Activity while known, unmuted tabs other than the one on screen need you (`3 need you`) or, with none waiting, have errors (`2 errors`). Working, Done and Bell keep the toolbar quiet, and so does the Activity in tabs switch. It never floats over the terminal, is not drawn below 720 pt of window width, waits for a key sequence or a download chip in windows under 1000 pt, never marks tabs seen and sends nothing to servers. Coverage now includes the per-connection status pass described above; an absent chip is not an all-clear while reading, after failed reads, or for missing events and suppressed activity. See [checks and limits](docs/parity-2026-11/M3.2-activity-chip.md).
+
+### Fixed
+
+- **Update instructions on Omarchy:** the update notice and Settings → Updates no longer offer `sudo pacman -Syu rex-linux-bin` as an alternative on Omarchy, where Omarchy's update guard refuses a direct system upgrade. They name `omarchy update` only. Arch without Omarchy is unchanged.
 
 ## 0.7.5 - 2026-11-12
 

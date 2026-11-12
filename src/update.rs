@@ -567,9 +567,11 @@ impl InstallChannel {
                 if *omarchy {
                     ChannelGuidance {
                         summary: format!(
-                            "Rex Rune {version} is available. Run `omarchy update` (or `sudo pacman -Syu rex-rune-bin`)."
+                            "Rex Rune {version} is available. Run `omarchy update`."
                         ),
-                        detail: "Installed via the signed Arch / Omarchy repository. Run `omarchy update` or `sudo pacman -Syu rex-rune-bin`.".into(),
+                        // Omarchy's update guard refuses a direct `pacman -Syu`, so only
+                        // its own command is offered here.
+                        detail: "Installed via the signed Arch / Omarchy repository. Run `omarchy update` in a terminal; it updates Rex Rune with the rest of the system.".into(),
                         command: Some("omarchy update".into()),
                     }
                 } else {
@@ -1631,6 +1633,12 @@ mod tests {
             }
         );
         assert!(omarchy.guidance("0.6.1").summary.contains("omarchy update"));
+        // Omarchy's update guard refuses a direct `pacman -Syu`, so it is never offered there.
+        let guidance = omarchy.guidance("0.6.1");
+        assert!(
+            !guidance.summary.contains("pacman") && !guidance.detail.contains("pacman"),
+            "{guidance:?}"
+        );
         assert_eq!(
             omarchy.guidance("0.6.1").command.as_deref(),
             Some("omarchy update")
