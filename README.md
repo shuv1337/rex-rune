@@ -212,18 +212,21 @@ What differs from Linux today:
 
 | Area | On macOS |
 | --- | --- |
-| Shortcuts | The Linux defaults, on the Control key. Command is bound to nothing of Rex's; text fields take ⌘A, ⌘C and ⌘V |
-| Window | Borderless, without the close, minimize and zoom buttons; Rex's own close button and drag region work |
+| Shortcuts | On the Command key: see [Shortcuts on macOS](#shortcuts-on-macos) |
+| Window | The system's title bar and frame, with its close, minimize and zoom buttons, edge resizing and full screen. Rex's toolbar sits under it and has no close button of its own. Drawing the toolbar in the title bar, beside the traffic lights, is not done yet |
 | Primary selection | macOS has none, so the setting is not shown |
 | Links and Show in folder | Opened with `open`; Show in folder selects the file in Finder |
+| Sounds | Played with `afplay` from the system's alert sounds: Ping when a program needs you, Basso for an error, Glass when one is done |
+| Tailnet machines in Add host | `tailscale` from `PATH`, else the one inside Tailscale.app |
+| Integrations and Start personal server | `rex` from `PATH` or `~/.local/bin`, else the one inside Rex.app or Rex Beta.app |
+| Ghostty theme names | Also read from Ghostty.app's own themes |
 | Notifications | Not available: Settings reports no notification service |
-| Sounds | Not available: no sound player is looked for on macOS |
-| Tailnet machines in Add host | Found only if `tailscale` is on `PATH`; the Tailscale app keeps its CLI inside the app bundle |
-| Integrations | `rex` is looked for on `PATH` and in `~/.local/bin`, not inside the Rex app |
-| Ghostty theme names | Resolve from `~/.config/ghostty/themes`, and from Ghostty's own only when `GHOSTTY_RESOURCES_DIR` is set |
+| Fonts | Through fontconfig, as above |
 | Downloads | The first save into `~/Downloads` can raise a macOS privacy prompt for the program that started the client; if it is refused, the download fails with a permission error |
 | Updates | Settings → Updates reports a source build; nothing is installed for you |
 | `ssh://` hosts, uploads, everything on the server | As on Linux |
+
+The window frame is the one part that has only been started and measured, not looked at: this was built without screen access to the Mac. The window opens at the requested size with the session's title; how the toolbar looks under the title bar has not been seen.
 
 CI builds the app and runs the unit and headless UI tests on macOS for every pull request.
 
@@ -371,7 +374,7 @@ Global tab navigation uses cached tab order without enabling extra prefetch: a s
 | Shift PageUp / PageDown, wheel | Scroll local history | `pane.scroll`, `{"lines":-20}` / `{"lines":20}` (wheel is pointer input) |
 | Ctrl + / Ctrl − / Ctrl 0 | Enlarge / shrink / reset the whole interface | `client.zoom.in` / `client.zoom.out` / `client.zoom.reset` |
 
-These are the client defaults; bound chords do not reach terminal programs, and every other key goes to the focused pane. Interface zoom changes in 10% steps (70–150%), is saved as `ui_scale`, and is independent of the terminal font size. `Ctrl =` and the numpad `+`/`−` also work. Commands lists the zoom actions too, and every other action here that needs no argument.
+These are the client defaults on Linux; [on macOS they are on the Command key](#shortcuts-on-macos). Bound chords do not reach terminal programs, and every other key goes to the focused pane. Interface zoom changes in 10% steps (70–150%), is saved as `ui_scale`, and is independent of the terminal font size. `Ctrl =` and the numpad `+`/`−` also work. Commands lists the zoom actions too, and every other action here that needs no argument.
 
 The following actions have no default key binding:
 
@@ -415,6 +418,24 @@ pane wider than it is tall, otherwise below it); `pane.focus` accepts `left`,
 `pane.send_key` takes a single supported chord, not a sequence; for example
 `{"key":"ctrl+b"}`.
 
+### Shortcuts on macOS
+
+On macOS the defaults are on Command (⌘), which reaches no program in the terminal, so Control keeps its terminal meanings (`Ctrl C`, `Ctrl T`, `Ctrl W`) and nothing needs Shift to stay clear of them. Each Linux default above is the same key with Command in Control's place, except these:
+
+| Shortcut on macOS | Linux default | Action |
+| --- | --- | --- |
+| ⌘T | Ctrl Shift T | New tab |
+| ⌘W | Ctrl Shift W | Close the focused pane, or the tab |
+| ⌘C / ⌘V | Ctrl Shift C / V | Copy / paste |
+| ⌘F | Ctrl Shift F | Search the terminal |
+| ⌘D / ⇧⌘D | Ctrl Shift D / Ctrl Alt D | Split right / down |
+| ⌥⌘ arrows | Ctrl Alt arrows | Focus an adjacent pane |
+| ⇧⌘[ / ⇧⌘] (and ⌘ Page Up / Down) | Ctrl PageUp / PageDown | Previous / next tab in the session |
+| Ctrl Tab / Ctrl Shift Tab | the same | Next / previous tab across sessions |
+| Shift PageUp / PageDown | the same | Scroll local history |
+
+So ⌘K switches sessions, ⇧⌘P opens Commands, ⌘, opens Settings and ⌘= / ⌘− / ⌘0 zoom. A key pressed with Command that is bound to nothing goes to the terminal as Super. In `shortcuts.json` and on the Shortcuts page Command is spelled `cmd`, and keycaps read Cmd and Option. The layer of built-in defaults is still named `linux` where a report names a binding's source, on every platform.
+
 ### Configuring shortcuts
 
 In **Settings → Shortcuts**, press a row’s keys to replace or remove them, or
@@ -456,7 +477,7 @@ uses defaults and appears in Settings → Shortcuts → Problems.
 }
 ```
 
-Layers run lowest to highest: **Linux defaults → each server’s Rex config → shortcuts.json → recorded shortcuts**.
+Layers run lowest to highest: **built-in defaults → each server’s Rex config → shortcuts.json → recorded shortcuts**.
 The app sends its defaults, override layers and action registry to `client.keymap`;
 `rex.bind`, `rex.unbind`, Lua-function sequences and config-file actions participate
 in the same resolution. The active host’s map is used—not a union of hosts.
