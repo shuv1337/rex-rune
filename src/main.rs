@@ -1,8 +1,7 @@
 mod app;
 
 fn main() -> anyhow::Result<()> {
-    // Read once while this is the only thread: off Linux it is read by setting it.
-    rex_rune::platform::process::umask();
+    rex_rune::platform::init();
     let options = rex_rune::connection::Options::from_command_line();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     use rex_rune::update::installer::Recovery;
@@ -86,8 +85,7 @@ fn recovery_error(error: impl std::fmt::Display) -> String {
 }
 
 fn reexec(binary: std::path::PathBuf, args: &[std::ffi::OsString]) -> anyhow::Error {
-    use std::os::unix::process::CommandExt;
-    std::process::Command::new(binary).args(args).exec().into()
+    app::platform::restart(binary, args)
 }
 
 fn restart_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {

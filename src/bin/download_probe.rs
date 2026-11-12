@@ -28,8 +28,8 @@ use std::{
 const MIB: u64 = 1024 * 1024;
 
 fn main() -> Result<()> {
-    // Read once while this is the only thread: off Linux it is read by setting it.
-    rex_rune::platform::process::umask();
+    rex_rune::platform::downloads::available()?;
+    rex_rune::platform::init();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
@@ -157,9 +157,7 @@ impl Probe {
             bytes == std::fs::metadata(source)?.len(),
             "reported {bytes} bytes"
         );
-        let mode =
-            std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path)?.permissions());
-        ensure!(mode & 0o111 == 0, "saved with an executable bit: {mode:o}");
+        rex_rune::platform::fs::verify_download_mode(&path)?;
         let left: Vec<_> = std::fs::read_dir(&dest)?
             .map(|e| e.unwrap().file_name())
             .collect();
@@ -361,7 +359,7 @@ async fn run() -> Result<()> {
         std::fs::create_dir_all(&real)?;
         let link = probe.work.join("dest-link");
         let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&real, &link)?;
+        rex_rune::platform::fs::download_probe_symlink(&real, &link)?;
         let id = probe.start(&source.join("small.txt"), &link);
         let State::Failed(Failure::Destination(message)) = probe.finish(id).await? else {
             bail!("not refused: {:?}", probe.state(id));

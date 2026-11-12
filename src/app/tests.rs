@@ -16,6 +16,8 @@ mod command_tests;
 mod compatibility_tests;
 #[path = "directory_tests.rs"]
 mod directory_tests;
+// These fixtures exercise Unix process identity and the POSIX download store.
+#[cfg(unix)]
 #[path = "downloads_tests.rs"]
 mod downloads_tests;
 #[path = "find_tests.rs"]

@@ -114,6 +114,10 @@ impl Downloads {
         request: Request,
         new_ref: fn() -> Result<String>,
     ) -> Result<()> {
+        if let Err(error) = crate::platform::downloads::available() {
+            refuse(shared, request, Failure::Destination(error.to_string()));
+            return Ok(());
+        }
         let id = request.id;
         let running = download::active(&shared.model.lock().expect("host model").downloads);
         if running >= request.config.limits.per_host {

@@ -19,7 +19,7 @@ use std::{
 };
 
 pub mod name;
-pub mod store;
+pub use crate::platform::downloads::store;
 pub mod stream;
 
 pub use store::{Destination, Partial, Placement, Records};
@@ -678,5 +678,6 @@ pub fn display_text(text: &str) -> String {
     short
 }
 
-#[cfg(test)]
+// These fixtures exercise POSIX file modes, symlinks and crash cleanup.
+#[cfg(all(test, unix))]
 pub(crate) mod tests;

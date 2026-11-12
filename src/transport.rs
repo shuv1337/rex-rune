@@ -21,7 +21,7 @@ pub fn local_endpoint() -> String {
 
 async fn io(endpoint: &str, url: &url::Url) -> Result<Box<dyn Io>> {
     if let Some(path) = endpoint.strip_prefix("unix://") {
-        return Ok(Box::new(tokio::net::UnixStream::connect(path).await?));
+        return crate::platform::local::connect(std::path::Path::new(path)).await;
     }
     let host = url.host_str().context("endpoint needs a host")?;
     let port = url

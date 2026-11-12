@@ -3,7 +3,8 @@
 use crate::{transport, wire};
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
-use std::{io::Read, path::PathBuf, sync::Arc, time::Duration};
+use ring::rand::{SecureRandom, SystemRandom};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::io::AsyncReadExt;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -63,9 +64,9 @@ impl File {
 /// for batch IDs.
 pub fn new_uuid() -> Result<String> {
     let mut b = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut b))
-        .context("No randomness for an upload ID")?;
+    SystemRandom::new()
+        .fill(&mut b)
+        .map_err(|_| anyhow::anyhow!("No randomness for an upload ID"))?;
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
@@ -142,6 +143,7 @@ mod tests {
     fn upload_ids_are_lower_case_version_4_uuids() {
         let id = new_uuid().unwrap();
         assert_eq!(id.len(), 36);
+        assert!(id.split('-').map(str::len).eq([8, 4, 4, 4, 12]));
         assert_eq!(&id[14..15], "4");
         assert!("89ab".contains(&id[19..20]));
         assert!(
