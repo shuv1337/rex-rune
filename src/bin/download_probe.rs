@@ -201,8 +201,12 @@ async fn run() -> Result<()> {
         .context("usage: rex-download-probe <endpoint> <work-dir> [server-pid]")?;
     let work = PathBuf::from(args.next().context("work directory")?);
     let server_pid = args.next().map(|p| p.parse()).transpose()?;
+    let own = format!(
+        "unix://{}",
+        rex_rune::platform::local::default_socket().display()
+    );
     ensure!(
-        endpoint.starts_with("unix://") && !endpoint.contains("/run/user/"),
+        endpoint.starts_with("unix://") && !endpoint.contains("/run/user/") && endpoint != own,
         "refusing {endpoint}: pass the socket of a disposable server you started"
     );
     let work = std::fs::canonicalize({

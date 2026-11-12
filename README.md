@@ -10,6 +10,8 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 
 > **Status:** early. The protocol layer, workspace, terminal rendering and input are implemented and tested against real servers, but some areas (see [Current scope](#current-scope)) still need hands-on validation.
 
+Releases are for Linux. The client also [builds from source on macOS](#building-on-macos), where it is newer and rougher. Windows is not supported yet.
+
 ## Features
 
 - **Settings → About** (also **About Rex Rune** in Commands) shows the app icon, version and how it was installed, the build commit and date, and for the active host, when connected, its Rex server's version, the negotiated API revision and the range of revisions the server supports. The server's version comes from one read-only `server.version` request on each connection (its status arrives with the session list); nothing is attached, created or changed, and a server that doesn't answer is shown as not reported rather than guessed. **Copy version info** copies the client version, commit, build date, build channel (`official`, `nix` or `source`), OS and architecture, and the server version and API revisions. **Copy debug info** adds the install channel, display server, desktop, interface theme and zoom, terminal font, and for each saved host its kind (Unix socket, HTTPS, SSH), connection state, API revision and server version. Both are in Commands too, and neither contains a host name, address, session name, client id or credential. Open the repository, this version’s release notes, the MIT license or the issue tracker from the same page. Source archives without Git show `unknown` for build metadata.
@@ -173,7 +175,7 @@ Older releases do not gain signatures or attestations retroactively.
 
 - Rust 1.96 or newer (edition 2024; see `rust-version` in `Cargo.toml`).
 - [Zig](https://ziglang.org/) 0.17.x. The `ghostty-vt` crate builds Ghostty's VT library from a checksum-pinned source archive with Zig.
-- Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan, xkbcommon, fontconfig and the Wayland/X11 client libraries.
+- Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan, xkbcommon, fontconfig and the Wayland/X11 client libraries. Or macOS: see [Building on macOS](#building-on-macos).
 - A running Rex server that supports API revision 10, 11, 12 or 13. Verified with Linux servers **0.0.1794323808-g757adf (API 13)** and **0.1.0-preview.14 (`7e460d0`, API 12)**; see [API-13 compatibility results](docs/server-api13.md) and [preview.14 results](docs/server-preview14.md). Rex is in alpha, so older revisions aren't supported; update Rex on a host that refuses the connection. Uploading files needs revision 11.
 
 ## Build
@@ -187,6 +189,36 @@ Optionally, [mise](https://mise.jdx.dev/) can provide the toolchain: [`mise.toml
 The repository is also a Nix flake: `nix build .#rex-rune` builds a package with the desktop entry and icons, and `nix develop` gives a shell with the toolchain and libraries. See [Nix packaging](docs/nix.md).
 
 `Cargo.lock` pins the dependency graph. Server connections use Rustls with the system trust roots; release metadata checks use Rustls with WebPKI roots and verify Ed25519 Minisign signatures against the embedded release public keys. The workspace also builds three probes (`rex-probe`, `rex-workspace-probe`, `rex-update-probe`) that do not need the UI; use `--no-default-features` to build only those.
+
+### Building on macOS
+
+A source build only: there is no macOS release, app bundle or signing. Checked on Apple Silicon with macOS 27; Intel Macs are untested.
+
+```sh
+xcode-select --install                 # the command-line tools, if they are not installed
+brew install zig fontconfig            # Zig 0.17.x; fontconfig finds installed fonts
+rustup toolchain install 1.96.1        # or `mise install`, which also provides Zig
+cargo build --locked --release --bin rex-rune
+target/release/rex-rune --new work
+```
+
+- **Zig must be 0.17.x.** If Homebrew has linked another version (`zig@0.15`, say), put a 0.17 `zig` first on `PATH` or point `ZIG` at it.
+- **The local server** is found at `~/Library/Application Support/rex/server.sock`, where the Rex app's server listens. `REX_SERVER` or `--endpoint` names another.
+- **Settings** are in `~/Library/Application Support/rex-rune`, not `~/.config`.
+- **Fonts** are resolved through fontconfig's `fc-match` and `fc-list`. Without them on `PATH`, only the bundled IBM Plex Mono and Inter are available, and a prompt that needs a Nerd Font draws boxes. A terminal has Homebrew on `PATH`; an app started another way may not.
+
+What differs from Linux today:
+
+| Area | On macOS |
+| --- | --- |
+| Shortcuts | The Linux defaults, on the Control key. Command is not bound |
+| Window | Borderless, without the close, minimize and zoom buttons; Rex's own close button and drag region work |
+| Primary selection | macOS has none, so the setting is not shown |
+| Notifications, opening links, Show in folder | Not available yet |
+| Updates | Settings → Updates reports a source build; nothing is installed for you |
+| `ssh://` hosts, downloads, uploads, everything on the server | As on Linux |
+
+CI builds the app and runs the unit and headless UI tests on macOS for every pull request.
 
 ## Run
 
@@ -211,7 +243,7 @@ Options:
 
 | Option | Meaning |
 | --- | --- |
-| `--endpoint <URL>` | `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](#hosts)). Defaults to `$REX_SERVER`, then `unix://$XDG_RUNTIME_DIR/rex/server.sock` (or `unix:///run/user/1000/rex/server.sock` if `XDG_RUNTIME_DIR` is unset). |
+| `--endpoint <URL>` | `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](#hosts)). Defaults to `$REX_SERVER`, then `unix://$XDG_RUNTIME_DIR/rex/server.sock` (or `unix:///run/user/<uid>/rex/server.sock` if `XDG_RUNTIME_DIR` is unset); on macOS, `unix://$HOME/Library/Application Support/rex/server.sock`. |
 | `--session <LABEL\|ID>` | Select a session by exact label or ID. Missing or ambiguous names never pick an arbitrary session. |
 | `--new <LABEL>` | Explicitly create a persistent session (conflicts with `--session`). Ordinary attachment never creates or destroys sessions. |
 | `--block <ID>` | Initially focus this terminal block. |
@@ -237,7 +269,7 @@ With mise, `mise run install` builds the release binary and runs the script with
 
 ## Configuration
 
-Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json` (default `~/.config/rex-rune/workspace.json`): saved hosts (label, endpoint, collapsed state, optional default shell), the last host and session per host, whether the sidebar is open and its width, the last non-maximized window size in points (`window_size`, saved after resizing settles for one second), tab position (`vertical_tabs`), pane density (`pane_density`: `"compact"` or `"comfortable"`, the default), pane headers (`pane_header`: `"auto"`, the default, `"always"`, `"on_hover"` or `"hidden"`; an unknown value is Auto), horizontal pane padding (`pane_padding`: 0–32 pt, default 8 pt) and optional vertical padding (`interface.pane_padding_vertical`; absent follows the legacy horizontal value on all four sides), terminal font family (`font_family`), ordered fallback families (`font_fallbacks`), font size, the chrome palette (`chrome_theme`: `"midnight"`, `"rose_pine"`, `"rose_pine_moon"` or `"gruvbox_dark"`; an unknown value is Midnight), the terminal theme (`terminal_theme`: `"follow_server"`, `"builtin_default"` for Rex's own colours, `"follow_chrome"`, or `"named:<name>"` with `rex/midnight`, `rex/rose-pine`, `rex/rose-pine-moon`, `rex/gruvbox-dark` or a Ghostty theme's file name), whether you have picked a terminal theme yourself (`terminal_theme_chosen`) and whether this client has ever declared one (`terminal_theme_declared`), interface zoom (`ui_scale`), the corner notices appear in (`notice_position`), the activity and notification choices (`notifications`), the tabs muted on this client (`muted_tabs`), automatic update checks (`updates.check`, default `true`), automatic installation for eligible install.sh installs (`updates.install_automatically`, default `false`), and whether agents may name sessions (`agent_session_naming`). Update check state and dismissed versions are stored in `$XDG_STATE_HOME/rex-rune/update.json`. Use `--config <path>` to keep a separate workspace.
+Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json` (default `~/.config/rex-rune/workspace.json`; on macOS `~/Library/Application Support/rex-rune/workspace.json`): saved hosts (label, endpoint, collapsed state, optional default shell), the last host and session per host, whether the sidebar is open and its width, the last non-maximized window size in points (`window_size`, saved after resizing settles for one second), tab position (`vertical_tabs`), pane density (`pane_density`: `"compact"` or `"comfortable"`, the default), pane headers (`pane_header`: `"auto"`, the default, `"always"`, `"on_hover"` or `"hidden"`; an unknown value is Auto), horizontal pane padding (`pane_padding`: 0–32 pt, default 8 pt) and optional vertical padding (`interface.pane_padding_vertical`; absent follows the legacy horizontal value on all four sides), terminal font family (`font_family`), ordered fallback families (`font_fallbacks`), font size, the chrome palette (`chrome_theme`: `"midnight"`, `"rose_pine"`, `"rose_pine_moon"` or `"gruvbox_dark"`; an unknown value is Midnight), the terminal theme (`terminal_theme`: `"follow_server"`, `"builtin_default"` for Rex's own colours, `"follow_chrome"`, or `"named:<name>"` with `rex/midnight`, `rex/rose-pine`, `rex/rose-pine-moon`, `rex/gruvbox-dark` or a Ghostty theme's file name), whether you have picked a terminal theme yourself (`terminal_theme_chosen`) and whether this client has ever declared one (`terminal_theme_declared`), interface zoom (`ui_scale`), the corner notices appear in (`notice_position`), the activity and notification choices (`notifications`), the tabs muted on this client (`muted_tabs`), automatic update checks (`updates.check`, default `true`), automatic installation for eligible install.sh installs (`updates.install_automatically`, default `false`), and whether agents may name sessions (`agent_session_naming`). Update check state and dismissed versions are stored in `$XDG_STATE_HOME/rex-rune/update.json`. Use `--config <path>` to keep a separate workspace.
 
 Settings (the gear button in the toolbar, `Ctrl ,`, or Settings… in Commands) has Server (read-only facts last reported by the active host, with credential-free address copy; [scope and evidence](docs/parity-2026-11/M3.3-server-settings.md)), Interface (chrome theme, zoom, toolbar visibility, pane density, pane headers, active-pane outline, header fading, sidebar, tab position, tab icon count, tab fill, download folder, notice corner), Terminal (font picker, style, size, Advanced font settings and ordered fallbacks, pane padding, theme, cursor, selection, sequence hints, each host's default shell, generated titles), Shortcuts, Integrations (Rex's skill and hooks for coding agents on this machine), Notifications (activity in tabs, desktop notifications and which changes send one), Remote Hosts (add, edit or remove saved hosts), Updates and About sections. A host's name, endpoint and default shell can also be edited from its sidebar header's right-click menu, from Edit host… in Commands, or from an offline session's menu. Removing a host only stops this client connecting to it; its sessions keep running on the server. A changed endpoint connects to that server as a new host. How hosts are added is described under [Hosts](#hosts).
 
