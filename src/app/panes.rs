@@ -107,6 +107,7 @@ fn header(
     let menu_id = block.to_owned();
     let h = row()
         .key(format!("pane-header:{block}"))
+        .hover_group()
         .w_full()
         .h(CARD_HEADER)
         .pl(14.)

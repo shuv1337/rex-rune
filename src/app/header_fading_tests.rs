@@ -379,6 +379,37 @@ fn header_fading_preserves_hover_disabled_buttons_and_keyboard_destination() {
 }
 
 #[test]
+fn header_name_hover_restores_colour_without_focus_or_input() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    for (tab, block) in [("single", "block:a"), ("split", "block:c")] {
+        let (mut ws, host) = tabbed_workspace(tab);
+        ws.settings.pane_header = PaneHeader::Always;
+        ws.window_focused = false;
+        let (sender, sent) = flume::unbounded();
+        framed_terminal(&mut ws, block, &sender, b"unchanged");
+        let mut rt = runtime(ws);
+        settle(&mut rt);
+        let key = format!("pane-name:{block}");
+        let original = element(&rt, &key).text_color.unwrap();
+        let grid = subtree(&rt, &format!("grid:{block}"));
+        rt.update(|s, _| s.settings.interface.fade_pane_headers_in_inactive_window = true);
+        settle(&mut rt);
+        let faded = Some(original.alpha(original.a * pane_header::FADE));
+        assert_eq!(element(&rt, &key).text_color, faded);
+        let [x, y, w, h] = rect(&rt, &key);
+        rt.pointer_move(x + w / 2., y + h / 2.);
+        settle(&mut rt);
+        assert_eq!(element(&rt, &key).text_color, Some(original));
+        rt.pointer_move(0., 0.);
+        settle(&mut rt);
+        assert_eq!(element(&rt, &key).text_color, faded);
+        assert_same(&grid, &subtree(&rt, &format!("grid:{block}")));
+        assert!(host.is_empty() && sent.is_empty() && rt.state.claimed.is_empty());
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+}
+
+#[test]
 fn header_fading_keeps_interface_zoom_and_floating_header_geometry() {
     let _families = rune::text::with_families("Inter", "Inter");
     for scale in [0.7, 1., 1.5] {
@@ -443,6 +474,12 @@ fn header_fading_draw() {
     rt.update(|s, _| s.settings.interface.fade_inactive_pane_headers = true);
     settle(&mut rt);
     camera.snap(&mut rt, "headers-inactive-pane");
+    let [x, y, w, h] = rect(&rt, "pane-name:block:c");
+    rt.pointer_move(x + w / 2., y + h / 2.);
+    settle(&mut rt);
+    camera.snap(&mut rt, "headers-inactive-name-hover");
+    rt.pointer_move(0., 0.);
+    settle(&mut rt);
     rt.update(|s, _| {
         s.settings.interface.fade_pane_headers_in_inactive_window = true;
         s.window_focus(false);
