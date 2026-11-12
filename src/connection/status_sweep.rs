@@ -73,9 +73,10 @@ pub(super) fn record(
     // Most panes report nothing: don't wake the app to tell it so.
     {
         let mut model = shared.model.lock().expect("host model");
-        // What this pane had reported is now known, so its next report is watched.
-        model.status_read.insert(block.into());
         if records.is_empty() && !model.activity.contains_key(block) {
+            // The pane had reported nothing, and that is now known: its first report
+            // will be a state this client watched begin.
+            model.status_read.insert(block.into());
             return;
         }
     }
@@ -87,6 +88,9 @@ pub(super) fn record(
         {
             return;
         }
+        // Only now, with the reply about to be kept: a reply that is thrown away must
+        // not count as having read the pane.
+        m.status_read.insert(block.into());
         // Same snapshot semantics as the selected-session query. These are old reports,
         // not live news: no notification or unseen-Done receipt is invented here.
         let records = merge(m.activity.remove(block), records);

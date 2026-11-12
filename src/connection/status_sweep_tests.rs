@@ -174,6 +174,13 @@ async fn sweep_refusals_are_not_retried_and_slow_status_does_not_block_commands(
     focus_window(&host);
     ready.recv().await.unwrap();
     until(&host, |m| !m.activity_reading && m.activity_incomplete).await;
+    {
+        // An answered read, even an empty one, makes the pane's next report a watched
+        // one; a refused read does not.
+        let m = host.model.lock().unwrap();
+        assert!(m.status_read.contains("slow"));
+        assert!(!m.status_read.contains("refused"));
+    }
     focus_window(&host);
     until(&host, |m| m.views[SESSION].revision == 2).await;
     // Synchronize command completion before closing, rather than waiting for no requests.
