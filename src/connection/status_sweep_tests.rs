@@ -377,7 +377,7 @@ async fn three_reads_are_out_at_once_never_four_and_a_removal_goes_to_its_own_pa
             "a fourth read went out with three unanswered"
         );
         // One pane's record is removed while all three reads are out. The answers then
-        // come back out of order, each older than the removal.
+        // come back out of order, after the removal.
         send(
             &mut ws,
             block_event(3, OTHER, "b", "program_status_removed", json!({"ids":[""]})),
