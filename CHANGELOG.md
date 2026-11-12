@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Activity toolbar chip (partial M3.2):** a conditional chip opens Activity when known, unmuted tabs off screen need you or have errors. Needs-you wins; Working, Done and Bell keep the toolbar quiet. It follows Activity in tabs, yields to pending key sequences in narrow windows and never marks tabs seen or sends server commands. Sessions not opened since connecting may be missing. See [checks and limits](docs/parity-2026-11/M3.2-activity-chip.md).
+- **Activity toolbar chip (partial M3.2):** a chip in the toolbar opens Activity while known, unmuted tabs other than the one on screen need you (`3 need you`) or, with none waiting, have errors (`2 errors`). Working, Done and Bell keep the toolbar quiet, and so does the Activity in tabs switch. It never floats over the terminal, is not drawn below 720 pt of window width, waits for a key sequence or a download chip in windows under 1000 pt, never marks tabs seen and sends nothing to servers. Sessions not opened since connecting may be missing, so an absent chip is not a guarantee. See [checks and limits](docs/parity-2026-11/M3.2-activity-chip.md).
 
 - **Session activity in the sidebar (partial M3.2):** a sidebar session row whose tabs are out of sight now shows the most pressing word one of them would: a needs-you word, Error, Bell or Paused, or an unseen Done. The session on screen and sessions with their tabs listed under them are unchanged; muted tabs and the Activity in tabs switch keep it quiet. See [checks and limits](docs/parity-2026-11/M3.2-session-words.md).
 

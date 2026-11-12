@@ -243,12 +243,7 @@ fn tab_track(s: &Workspace) -> El {
     if fill {
         names = names.grow(1.).min_w(floors.max(0.));
     }
-    // At minimum width, the two arrow slots would consume the active tab's remaining
-    // room beside live activity. Wheel/keyboard navigation and automatic reveal still work.
-    let crowded = s.viewport[0] < 1000.
-        && super::downloads_view::chip_label(s).is_some()
-        && s.activity_chip().is_some();
-    let overflow = s.tab_strip.overflows() && !crowded;
+    let overflow = s.tab_strip.overflows();
     let (fade, pos) = (s.tab_fade.clone(), s.tab_pos.clone());
     let mut strip = row()
         .key("tabs")
@@ -354,22 +349,11 @@ fn bar_button(
         )
 }
 
-/// Shared room policy for live status chips: short below 1000 pt or during a sequence,
-/// absent during a sequence in a narrow toolbar. Sidebar tabs leave room for full words
-/// unless activity also needs a chip: then the same compact policy protects the actions.
-pub fn compact_status(s: &Workspace) -> Option<bool> {
-    let pending = s.bindings.sequence.depth > 0;
-    let narrow = s.viewport[0] < 1000.;
-    let constrained = !s.sidebar_tabs() || s.activity_chip().is_some();
-    if constrained && narrow && pending {
-        return None;
-    }
-    Some(constrained && (narrow || pending))
-}
-
+/// One chip while a tab out of sight waits on the person, or failing that has errored:
+/// `3 need you`, `1 error`. A press opens the Activity list. It is drawn only in the
+/// toolbar, never floated over the terminal: a tab can wait for hours.
 fn activity_chip(s: &Workspace) -> Option<El> {
-    let compact = compact_status(s)?;
-    let summary = s.activity_chip()?;
+    let summary = s.activity_chip_shown()?;
     let label = summary.label();
     Some(chip_press(chip(
         row()
@@ -386,11 +370,7 @@ fn activity_chip(s: &Workspace) -> Option<El> {
             ))
             // The list's first field takes focus, just as it does from Commands.
             .on_press(|s: &mut Workspace| s.show_activity())
-            .child(
-                text(if compact { summary.short() } else { label })
-                    .font(medium(11.5))
-                    .color(rgb(summary.tone())),
-            ),
+            .child(text(label).font(medium(11.5)).color(rgb(summary.tone()))),
     )))
 }
 
@@ -471,15 +451,13 @@ pub fn sequence_chip(s: &Workspace) -> Option<El> {
 pub fn floating_status(s: &Workspace) -> Option<El> {
     let sequence = sequence_chip(s);
     let download = super::downloads_view::chip_label(s).is_some();
-    let activity = activity_chip(s);
-    if sequence.is_none() && !download && activity.is_none() {
+    if sequence.is_none() && !download {
         return None;
     }
     Some(
         row()
             .gap(8.)
             .children(sequence)
-            .children(activity)
             .children(download.then(|| download_chip(s))),
     )
 }

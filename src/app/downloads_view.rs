@@ -423,15 +423,24 @@ pub struct ChipText {
     pub percent: Option<String>,
 }
 
+/// Window width below which the chip is `↓ 42%`, so the tab strip keeps room for the active
+/// tab. The full text stays in its tooltip and accessible name.
+pub(super) const CHIP_FULL_WIDTH: f32 = 1000.;
+
 /// The chip's text, or `None` when nothing is being received. A transfer still waiting for
 /// Rex or for an answer to a question is not running yet: its dialog is the place for it.
 ///
 /// The tab strip gives way to every chip, so: the chip is short in a narrow window and while a
 /// key sequence is pending, and in a narrow window it steps aside for the pending-sequence chip
 /// (a moment's gap, and the strip keeps what little room it has). With the tabs in the sidebar
-/// only another live activity chip competes; without one the download chip stays full.
+/// nothing competes and the chip is always full.
 pub fn chip_label(s: &Workspace) -> Option<ChipText> {
-    let compact = super::toolbar::compact_status(s)?;
+    let pending = s.bindings.sequence.depth > 0;
+    let narrow = s.viewport[0] < CHIP_FULL_WIDTH;
+    if !s.sidebar_tabs() && narrow && pending {
+        return None;
+    }
+    let compact = !s.sidebar_tabs() && (narrow || pending);
     let rows = s.download_rows();
     let running: Vec<&Row> = rows
         .iter()

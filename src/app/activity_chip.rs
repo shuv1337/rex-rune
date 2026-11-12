@@ -5,6 +5,10 @@ use super::{
 };
 use rex_linux::connection::activity::ProgramState;
 
+/// Window width below which the chip is not drawn: at 640 pt it would take half the tab
+/// track.
+const MIN_WIDTH: f32 = 720.;
+
 pub struct Summary {
     pub count: usize,
     pub needs_you: bool,
@@ -20,20 +24,32 @@ impl Summary {
         }
     }
 
-    pub fn short(&self) -> String {
-        if self.needs_you {
-            format!("Need {}", self.count)
-        } else {
-            self.label()
-        }
-    }
-
     pub fn tone(&self) -> u32 {
         if self.needs_you { warning() } else { danger() }
     }
 }
 
 impl Workspace {
+    /// The chip as the toolbar draws it. In a narrow window it waits for the briefer chips,
+    /// a key sequence in progress and bytes arriving, so the tab strip keeps its room and
+    /// the download chip behaves exactly as it does without this one. Near the minimum
+    /// window width it would leave the tab strip a sliver, so it is not drawn at all.
+    pub fn activity_chip_shown(&self) -> Option<Summary> {
+        if self.viewport[0] < MIN_WIDTH {
+            return None;
+        }
+        let narrow = self.viewport[0] < super::downloads_view::CHIP_FULL_WIDTH;
+        if narrow
+            && (self.bindings.sequence.depth > 0
+                || super::downloads_view::chip_label(self).is_some())
+        {
+            return None;
+        }
+        self.activity_chip()
+    }
+
+    /// What the chip would say: tabs other than the one on screen that wait on the person,
+    /// or failing that have errored.
     pub fn activity_chip(&self) -> Option<Summary> {
         if !self.settings.notifications.show_in_tabs {
             return None;
