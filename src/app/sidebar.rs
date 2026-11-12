@@ -210,6 +210,21 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                 .grow(1.)
                 .shrink(),
         );
+    // A session on screen speaks through its tabs, and so does one whose tabs are listed
+    // under it; any other says the most pressing thing one of its tabs would.
+    if !selected
+        && !s.settings.vertical_tabs
+        && let Some((word, tone, tab)) = s.session_word(index, id)
+    {
+        e = e.child(
+            text(word.to_string())
+                .key(format!("session-word:{index}:{id}"))
+                .label(format!("{word}: {tab}"))
+                .help(tab)
+                .font(medium(10.5))
+                .color(rgb(tone)),
+        );
+    }
     if let Some(count) = count {
         e = e.child(
             text(count.to_string())
