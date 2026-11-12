@@ -21,6 +21,7 @@ pub mod directory;
 pub mod downloads;
 mod prefetch;
 pub mod server_info;
+mod status_sweep;
 pub mod titles;
 
 /// The label new tabs get. A tab that still has it shows its program's terminal title.
@@ -251,6 +252,9 @@ pub struct HostModel {
     /// Bumped whenever `activity` is dropped wholesale (on reconnect), so the UI starts its
     /// before-and-after comparison over instead of reading the gap as programs finishing.
     pub activity_epoch: u64,
+    /// Initial activity coverage on this connection, not a read receipt.
+    pub activity_reading: bool,
+    pub activity_incomplete: bool,
     /// The server refused `set_theme`, so this host is never sent a theme again.
     pub themes_unsupported: bool,
     /// A theme was declared to this server, by `set_theme` or in a new block's layout.
@@ -499,9 +503,11 @@ struct ControlState {
     bootstrap_seq: u64,
     list_seq: u64,
     view_seq: HashMap<String, u64>,
-    /// Blocks whose program status, title and initial process metadata were asked for.
+    /// Blocks whose title and initial process metadata were asked for.
     queried: HashSet<String>,
-    /// Unattached sessions fetched once with session.view to place their block events.
+    status_queried: HashSet<String>,
+    status_failed: HashSet<String>,
+    /// Sessions whose initial background session.view was attempted (including failures).
     viewed: HashSet<String>,
     /// The theme last declared to each block on this connection.
     themed: HashMap<String, SetTheme>,
@@ -1059,15 +1065,9 @@ async fn query_activity(control: &mut Client, shared: &Shared, state: &mut Contr
         state.queried.insert(block.clone());
         let target = json!({"session_id":session, "block_id":block, "args":{}});
         let method = format!("{}.program_status", activity::TERMINAL);
-        if let Ok(reply) = request(control, &method, target.clone()).await {
-            let records = activity::parse_status(&reply);
-            shared.update(|m| {
-                m.activity.remove(&block);
-                if !records.is_empty() {
-                    m.activity
-                        .insert(block.clone(), records.into_iter().collect());
-                }
-            });
+        if state.status_queried.insert(block.clone()) {
+            let reply = request(control, &method, target.clone()).await.ok();
+            status_sweep::record(shared, state, &session, &block, reply);
         }
         let method = format!("{}.title", activity::TERMINAL);
         if let Ok(reply) = request(control, &method, target.clone()).await {
@@ -1316,16 +1316,8 @@ async fn handle_event(
             ) else {
                 return Ok(());
             };
-            let unplaced = {
-                let m = shared.model.lock().expect("host model");
-                !m.views.contains_key(id) && m.sessions.iter().any(|s| s.session_id == id)
-            };
             shared.update(|m| m.apply_block_event(id, block, change));
-            // Read-only, and allowed for any session once attach_all is active. Once per
-            // connection: a failure leaves that session's tabs without activity.
-            if unplaced && state.viewed.insert(id.to_owned()) {
-                let _ = refresh(control, shared, state, id).await;
-            }
+            // The paced sweep places unviewed sessions without holding up this event.
         }
         // Becoming the owner, even without a resize, makes the block themable.
         "block_owner_changed" => {
@@ -1395,7 +1387,7 @@ async fn run_host(
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
                 m.views.clear();
-                // Reports made while disconnected were missed; queries refill what's shown.
+                // Reports made while disconnected were missed; the per-connection pass refills them.
                 m.activity.clear();
                 m.programs.clear();
                 m.foreground.clear();
@@ -1403,6 +1395,8 @@ async fn run_host(
                 m.places.clear();
                 m.progress.clear();
                 m.activity_epoch += 1;
+                m.activity_reading = true;
+                m.activity_incomplete = false;
             });
             let mut state = ControlState::default();
             let mut downloads = downloads::Downloads::default();
@@ -1473,6 +1467,7 @@ async fn run_host(
             directory_reads.abandon(shared, directory::Failure::Disconnected);
             retry = 0;
             prefetch.reset();
+            let mut sweep = status_sweep::Reader::default();
             let mut pace = tokio::time::interval(prefetch::PACE);
             pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut expiry = tokio::time::interval(Duration::from_millis(100));
@@ -1494,7 +1489,15 @@ async fn run_host(
                     }
                     state.performs_since = None;
                 }
-                let due = prefetch.due(&shared.model.lock().expect("host model"), Instant::now());
+                let next = status_sweep::next(shared, &state);
+                status_sweep::coverage(shared, &state, next.is_some() || sweep.in_flight() || prefetch.in_flight());
+                let due = if sweep.in_flight() || prefetch.in_flight() {
+                    None
+                } else if next.is_some() {
+                    Some(Instant::now())
+                } else {
+                    prefetch.due(&shared.model.lock().expect("host model"), Instant::now())
+                };
                 tokio::select! {
                     _ = expiry.tick() => {
                         busy_since = Some(Instant::now());
@@ -1502,9 +1505,21 @@ async fn run_host(
                     }
                     _ = prefetch::wait(&mut pace, due.unwrap_or_else(Instant::now)), if due.is_some() => {
                         busy_since = Some(Instant::now());
-                        let next = prefetch.next(&shared.model.lock().expect("host model"), Instant::now());
-                        if let Some(id) = next {
-                            prefetch.start(&mut control, id).await?;
+                        match next {
+                            Some(status_sweep::Work::Status(session, block)) => {
+                                state.status_queried.insert(block.clone());
+                                sweep.start(&mut control, session, block).await?;
+                            }
+                            work => {
+                                let id = match work {
+                                    Some(status_sweep::Work::View(id)) => Some(id),
+                                    _ => prefetch.next(&shared.model.lock().expect("host model"), Instant::now()),
+                                };
+                                if let Some(id) = id {
+                                    state.viewed.insert(id.clone());
+                                    prefetch.start(&mut control, id).await?;
+                                }
+                            }
                         }
                     }
                     (id, text) = prefetch.finished(), if prefetch.in_flight() => {
@@ -1518,6 +1533,9 @@ async fn run_host(
                                 apply_view(shared, &id, view);
                             }
                         }
+                    }
+                    (session, block, reply) = sweep.finished(), if sweep.in_flight() => {
+                        status_sweep::record(shared, &mut state, &session, &block, reply);
                     }
                     reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
                     _ = directory_reads.finished(shared), if directory_reads.in_flight() => {}
