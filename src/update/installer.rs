@@ -6,12 +6,38 @@ use std::{
     collections::HashSet,
     io::{self, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    process::Command,
+    process::{Command, Stdio},
+    time::Instant,
 };
 
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 1024 * 1024 * 1024;
 const DESKTOP: &str = "dev.shuv.rex-linux.desktop";
+const RECOVERY_WAIT: Duration = Duration::from_secs(2);
+
+// Order is also the journal's stable file order. Keep destinations and modes together.
+const INSTALL_FILES: [(&str, u32); 6] = [
+    ("icons/hicolor/32x32/apps/dev.shuv.rex-linux.png", 0o644),
+    ("icons/hicolor/128x128/apps/dev.shuv.rex-linux.png", 0o644),
+    ("icons/hicolor/256x256/apps/dev.shuv.rex-linux.png", 0o644),
+    ("applications/dev.shuv.rex-linux.desktop", 0o644),
+    ("", 0o755), // binary, outside the data directory
+    ("rex-linux/install.json", 0o600),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+}
+
+fn identity(path: &Path) -> io::Result<Identity> {
+    let meta = fs::symlink_metadata(path)?;
+    Ok(Identity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
 
 #[derive(Clone, Debug)]
 pub enum Progress {
@@ -26,6 +52,8 @@ struct Journal {
     binary: PathBuf,
     data: PathBuf,
     existed: Vec<bool>,
+    #[serde(default)]
+    new_inodes: Vec<Identity>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,17 +85,16 @@ impl InstallLayout {
     }
 
     fn destinations(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<_> = [32, 128, 256]
-            .map(|size| {
-                self.data.join(format!(
-                    "icons/hicolor/{size}x{size}/apps/dev.shuv.rex-linux.png"
-                ))
+        INSTALL_FILES
+            .iter()
+            .map(|(path, _)| {
+                if path.is_empty() {
+                    self.binary.clone()
+                } else {
+                    self.data.join(path)
+                }
             })
-            .into();
-        paths.push(self.data.join("applications").join(DESKTOP));
-        paths.push(self.binary.clone());
-        paths.push(self.receipt());
-        paths
+            .collect()
     }
 
     fn validate_paths(&self) -> Result<()> {
@@ -133,7 +160,14 @@ pub fn recover_current_install() -> Result<Option<PathBuf>> {
     // Desktop launches and terminal launches can have different XDG settings.
     // Find the journal beside the actual executable, and restore its saved data path.
     layout.binary = std::env::current_exe()?;
-    if !layout.transaction().exists() {
+    recover_install_at(&layout, RECOVERY_WAIT)
+}
+
+fn recover_install_at(layout: &InstallLayout, timeout: Duration) -> Result<Option<PathBuf>> {
+    // Source/package builds have nothing to recover or sweep.
+    let under_local =
+        fs::canonicalize(&layout.local).is_ok_and(|local| layout.binary.starts_with(local));
+    if !layout.transaction().exists() && !under_local {
         return Ok(None);
     }
     ensure!(
@@ -141,13 +175,16 @@ pub fn recover_current_install() -> Result<Option<PathBuf>> {
         "update recovery never runs as root"
     );
     ensure!(
-        layout.binary.starts_with(fs::canonicalize(&layout.local)?),
+        under_local,
         "update recovery requires a user installation under ~/.local"
     );
-    let _lock = layout.lock()?;
-    let rolled_back = !layout.transaction().join("committed").exists();
-    recover(&layout)?;
-    Ok(rolled_back.then_some(layout.binary))
+    let _lock = FileLock::acquire_timeout(
+        &layout.binary.with_file_name(".rex-update.lock"), timeout,
+    ).context("update recovery timed out waiting for another update, or install directory is not writable")?;
+    // Recheck the journal under the lock: another process may have completed it.
+    sweep_staging(layout)?;
+    let rolled_back = recover(layout)?;
+    Ok(rolled_back.then(|| layout.binary.clone()))
 }
 
 /// Download and install a freshly re-verified manifest, never trusting cached UI metadata.
@@ -157,13 +194,16 @@ pub fn install(
     expected: &str,
     mut progress: impl FnMut(Progress),
 ) -> Result<PathBuf> {
-    let layout = InstallLayout::current()?;
+    let mut layout = InstallLayout::current()?;
+    // Resolve a symlinked HOME/bin directory, but retain the final component so
+    // validate_paths still rejects a symlink in place of the installed file.
+    layout.binary = fs::canonicalize(layout.binary.parent().unwrap())?.join("rex-linux");
     ensure!(
         InstallChannel::detect() == InstallChannel::Tarball,
         "self-update requires a verified install.sh receipt (not a package or source build)"
     );
     ensure!(
-        std::env::current_exe()? == layout.binary,
+        std::env::current_exe()? == fs::canonicalize(&layout.binary)?,
         "running binary is not the install.sh binary at {}",
         layout.binary.display()
     );
@@ -192,6 +232,7 @@ fn install_with(
         StableVersion::parse(&manifest.version)? > StableVersion::parse(&config.current_version)?,
         "refusing an equal version or downgrade"
     );
+    let state_lock = lock_update_state(&config.state_path)?;
     let mut state = UpdateState::load(&config.state_path);
     ensure!(
         matches!(
@@ -206,12 +247,14 @@ fn install_with(
         "manual upgrade required by this release's update_from floor"
     );
     state.save(&config.state_path)?;
+    drop(state_lock);
     let target = format!("{}-linux-gnu", std::env::consts::ARCH);
-    let artifact = &manifest
+    let release_target = manifest
         .targets
         .get(&target)
-        .context("release does not support this architecture")?
-        .tarball;
+        .context("release does not support this architecture")?;
+    check_glibc(&release_target.min_glibc)?;
+    let artifact = &release_target.tarball;
     ensure!(
         artifact.size <= MAX_ARCHIVE,
         "tarball exceeds 256 MiB limit"
@@ -221,6 +264,7 @@ fn install_with(
         .tempdir_in(layout.binary.parent().unwrap())?;
     let archive = stage.path().join("archive.tar.gz");
     fetch(artifact, &archive, progress)?;
+    progress(Progress::Verifying);
     verify_archive(&archive, artifact)?;
     progress(Progress::Extracting);
     let unpack = stage.path().join("unpack");
@@ -236,6 +280,71 @@ fn install_with(
     Ok(())
 }
 
+fn check_glibc(required: &str) -> Result<()> {
+    let current = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }.to_str()?;
+    let parse = |version: &str| -> Result<(u32, u32)> {
+        let (major, minor) = version.split_once('.').context("invalid glibc version")?;
+        Ok((major.parse()?, minor.parse()?))
+    };
+    ensure!(
+        parse(current)? >= parse(required)?,
+        "this release requires glibc {required} or newer; this system has {current}. Upgrade your operating system before updating Rex"
+    );
+    Ok(())
+}
+
+fn download_error(error: impl Into<anyhow::Error>) -> anyhow::Error {
+    let error = error.into();
+    let timed_out = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<ureq::Error>()
+            .is_some_and(|e| matches!(e, ureq::Error::Timeout(_)))
+            || cause.downcast_ref::<io::Error>().is_some_and(|e| {
+                e.kind() == io::ErrorKind::TimedOut
+                    || e.get_ref()
+                        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+                        .is_some_and(|inner| matches!(inner, ureq::Error::Timeout(_)))
+            })
+    });
+    error.context(if timed_out {
+        "tarball download timed out"
+    } else {
+        "tarball download failed"
+    })
+}
+
+// Capture into a file rather than a pipe: a noisy child cannot block before the deadline.
+fn binary_version(binary: &Path, timeout: Duration) -> Result<std::process::Output> {
+    let mut stdout = tempfile::tempfile()?;
+    let mut child = Command::new(binary)
+        .arg("--version")
+        .stdout(stdout.try_clone()?)
+        .stderr(Stdio::null())
+        .spawn()
+        .context("new binary cannot run")?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("new binary --version timed out");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    use std::io::{Seek, SeekFrom};
+    stdout.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    stdout.take(4096).read_to_end(&mut bytes)?;
+    Ok(std::process::Output {
+        status,
+        stdout: bytes,
+        stderr: Vec::new(),
+    })
+}
+
 fn download(
     artifact: &TarballArtifact,
     path: &Path,
@@ -246,15 +355,13 @@ fn download(
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .https_only(true)
         .max_redirects(5)
-        .timeout_global(Some(Duration::from_secs(300)))
+        .timeout_global(Some(Duration::from_secs(3600)))
+        .timeout_per_read(Some(Duration::from_secs(30)))
         .timeout_connect(Some(Duration::from_secs(20)))
         .user_agent("rex-linux")
         .build()
         .into();
-    let mut response = agent
-        .get(url.as_str())
-        .call()
-        .context("tarball download failed")?;
+    let mut response = agent.get(url.as_str()).call().map_err(download_error)?;
     ensure!(
         response.status().as_u16() == 200,
         "unexpected tarball HTTP status"
@@ -285,7 +392,7 @@ fn copy_download(
     loop {
         // Read at most one byte past the signed bound, solely to detect excess.
         let remaining = (size - received + 1).min(buf.len() as u64) as usize;
-        let n = reader.read(&mut buf[..remaining])?;
+        let n = reader.read(&mut buf[..remaining]).map_err(download_error)?;
         if n == 0 {
             break;
         }
@@ -373,10 +480,7 @@ fn prepare(layout: &InstallLayout, stage: &Path, package: &Path, version: &str) 
     let binary = package.join("bin/rex-linux");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
     // No package scripts are executed. Check the verified binary can run before replacing anything.
-    let output = Command::new(&binary)
-        .arg("--version")
-        .output()
-        .context("new binary cannot run")?;
+    let output = binary_version(&binary, Duration::from_secs(10))?;
     ensure!(
         output.status.success()
             && String::from_utf8_lossy(&output.stdout).trim() == format!("rex-linux {version}"),
@@ -434,7 +538,9 @@ fn prepare(layout: &InstallLayout, stage: &Path, package: &Path, version: &str) 
         &receipt,
         serde_json::to_vec(&InstallReceipt {
             schema: 1,
-            path: layout.binary.to_string_lossy().into_owned(),
+            path: fs::canonicalize(&layout.binary)?
+                .to_string_lossy()
+                .into_owned(),
             version: version.into(),
             sha256: hash_file(&binary)?,
         })?,
@@ -443,16 +549,7 @@ fn prepare(layout: &InstallLayout, stage: &Path, package: &Path, version: &str) 
     for (i, source) in sources.iter().enumerate() {
         let path = stage.join(format!("new-{i}"));
         fs::copy(source, &path)?;
-        fs::set_permissions(
-            &path,
-            fs::Permissions::from_mode(if i == 4 {
-                0o755
-            } else if i == 5 {
-                0o600
-            } else {
-                0o644
-            }),
-        )?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(INSTALL_FILES[i].1))?;
         File::open(path)?.sync_all()?;
     }
     Ok(())
@@ -485,6 +582,9 @@ fn commit(
             binary: layout.binary.clone(),
             data: layout.data.clone(),
             existed,
+            new_inodes: (0..destinations.len())
+                .map(|i| identity(&stage.path().join(format!("new-{i}"))))
+                .collect::<io::Result<_>>()?,
         })?,
     )?;
     File::open(journal)?.sync_all()?;
@@ -510,15 +610,15 @@ fn commit(
                 fs::remove_file(marker)?;
                 sync_dir(&layout.transaction())?;
             }
-            recover(layout)
+            recover(layout).map(|_| ())
         })()
         .with_context(|| {
             format!(
-                "update failed ({error:#}); rollback needs recovery at {}",
+                "{error:#}; rollback needs recovery at {}",
                 layout.transaction().display()
             )
         })?;
-        return Err(error.context("update failed; previous installation restored"));
+        return Err(error.context("previous installation restored"));
     }
     // Once committed, cleanup failure is not an installation failure. Next launch retries it.
     let _ = cleanup_transaction(layout);
@@ -539,11 +639,29 @@ fn cleanup_transaction(layout: &InstallLayout) -> Result<()> {
     Ok(())
 }
 
-fn recover(layout: &InstallLayout) -> Result<()> {
+// Called only while holding the installation lock. Active stages use the same lock.
+fn sweep_staging(layout: &InstallLayout) -> Result<()> {
+    for entry in fs::read_dir(layout.binary.parent().unwrap())? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".rex-update-")
+            && name != ".rex-update-transaction"
+            && entry.file_type()?.is_dir()
+        {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// True only when an interrupted transaction actually replaced the binary back.
+fn recover(layout: &InstallLayout) -> Result<bool> {
     let tx = layout.transaction();
     if !tx.exists() {
-        return Ok(());
+        return Ok(false);
     }
+    let mut restored_binary = false;
     if !tx.join("committed").exists() {
         let journal: Journal = serde_json::from_slice(&fs::read(tx.join("journal.json"))?)?;
         ensure!(
@@ -554,34 +672,55 @@ fn recover(layout: &InstallLayout) -> Result<()> {
             data: journal.data,
             ..layout.clone()
         };
-        original.validate_paths()?;
         let existed = journal.existed;
         let destinations = original.destinations();
         ensure!(
-            existed.len() == destinations.len(),
-            "invalid update recovery journal"
+            existed.len() == destinations.len() && journal.new_inodes.len() == destinations.len(),
+            "invalid or legacy update recovery journal; see docs/self-updates.md for manual recovery"
         );
+        // Classify EVERY destination before touching any. A later installer/repair
+        // supersedes the whole transaction, including files that were absent before.
+        let mut replaced = Vec::new();
+        for (i, dest) in destinations.iter().enumerate() {
+            let current = match identity(dest) {
+                Ok(id) => Some(id),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            };
+            let old = if existed[i] {
+                Some(identity(&tx.join(format!("old-{i}")))?)
+            } else {
+                None
+            };
+            if current == old {
+                replaced.push(false);
+            } else if current == Some(journal.new_inodes[i]) {
+                replaced.push(true);
+            } else {
+                cleanup_transaction(layout)?;
+                return Ok(false);
+            }
+        }
+        original.validate_paths()?;
         let mut failures = Vec::new();
         for (i, dest) in destinations.iter().enumerate().rev() {
             let restore_result = (|| -> Result<()> {
+                if !replaced[i] {
+                    return Ok(());
+                }
                 if existed[i] {
                     let backup = tx.join(format!("old-{i}"));
-                    let old = fs::metadata(&backup)?;
-                    if fs::metadata(dest).is_ok_and(|current| {
-                        current.dev() == old.dev() && current.ino() == old.ino()
-                    }) {
-                        // Not replaced yet (or already restored). In particular,
-                        // don't try renaming over the file whose rename failed.
-                        return Ok(());
-                    }
                     let restore = tx.join(format!("restore-{i}"));
                     if restore.exists() {
                         fs::remove_file(&restore)?;
                     }
                     fs::hard_link(backup, &restore)?;
                     fs::rename(restore, dest)?;
-                } else if dest.exists() {
+                } else {
                     fs::remove_file(dest)?;
+                }
+                if dest == &layout.binary {
+                    restored_binary = true;
                 }
                 sync_dir(dest.parent().unwrap())
             })();
@@ -598,7 +737,8 @@ fn recover(layout: &InstallLayout) -> Result<()> {
         File::create(tx.join("committed"))?.sync_all()?;
         sync_dir(&tx)?;
     }
-    cleanup_transaction(layout)
+    cleanup_transaction(layout)?;
+    Ok(restored_binary)
 }
 
 fn refresh_caches(layout: &InstallLayout) {

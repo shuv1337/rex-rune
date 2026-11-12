@@ -229,7 +229,7 @@ pub fn section(s: &Workspace) -> El {
                 "updates-restart",
                 "Restart to finish",
                 Pill::Primary,
-                |s, _| s.restart_after_update(),
+                |s, tx| s.restart_after_update(tx),
             )
         } else {
             value(if matches!(u.installation, Installation::Working(_)) {
@@ -486,21 +486,15 @@ impl Workspace {
         }
     }
 
-    fn restart_after_update(&mut self) {
-        use std::os::unix::process::CommandExt;
+    fn restart_after_update(&mut self, tx: &mut Tx) {
         let Installation::Ready(binary) = &self.updates.installation else {
             return;
         };
         let binary = binary.clone();
         self.save();
-        // Clean relaunch: do not replay CLI creation flags, commands, or remote requests.
-        let error = std::process::Command::new(binary)
-            .arg("--config")
-            .arg(&self.settings_path)
-            .exec();
-        self.notify(format!(
-            "Restart failed: {error}. Quit and reopen Rex to finish updating."
-        ));
+        *self.restart.lock().unwrap() = Some(binary);
+        // Let Rune drop the workspace and the main thread wait for transfer cleanup.
+        tx.close_window();
     }
 
     pub fn init_updates(&mut self) {

@@ -3,9 +3,11 @@
 Settings → Updates offers **Update now** for the install.sh/tarball channel.
 **Copy command** remains a manual fallback. Progress and failures stay on that
 page; a successful install offers **Restart to finish**. Restart saves the
-workspace and re-execs the installed binary with the same settings-file path,
-without replaying CLI commands or session-creation arguments. Rex server sessions
-keep running and the normal saved-workspace attachment behavior applies.
+workspace, closes the window, and waits for host shutdown (up to two seconds) so
+in-flight downloads can remove partial files before re-exec. Original launch
+arguments, including `--config`, `--font`, `--font-size` and `--window-size`, are
+preserved, except `--new`: session creation is never replayed. Rex server sessions
+keep running.
 
 ## Eligibility and trust
 
@@ -22,15 +24,21 @@ keep running and the normal saved-workspace attachment behavior applies.
   strictly newer than the running/receipt version, satisfy `update_from`, and not
   be older than the highest previously verified release. If latest changed, use
   Check now and retry. Cached update-state JSON is never an artifact trust source.
+  The signed manifest has **no expiry**: a valid older manifest at or above the
+  local high-water mark is accepted. The high-water mark prevents rollback below
+  an observed release, not freezing updates at an already observed release.
 - The archive URL comes only from that verified manifest. Initial and redirected
-  requests must be HTTPS. Connection timeout is 20 seconds, total request timeout
-  300 seconds. Downloads must match the signed size exactly (also capped at
-  256 MiB) and SHA-256 before any extraction or execution.
+  requests must be HTTPS. Connection timeout is 20 seconds; each transport read
+  has a 30-second idle timeout, with a one-hour overall cap including redirects.
+  Timeouts are reported as “timed out”. Downloads must match the signed size
+  exactly (also capped at 256 MiB) and SHA-256 before extraction or execution.
+  The signed target's minimum glibc version is checked before downloading.
 - Extraction is into a private directory beside the installed binary. Paths must
   stay below the version/architecture package root; absolute paths, `..`, `.`,
   duplicate paths, all symlinks/hardlinks and special files are refused. Expanded
   payload is capped at 1 GiB and 20,000 entries. No archive installer script runs.
-  The verified new binary must successfully report the expected `--version`.
+  The verified new binary must report the expected `--version` within 10 seconds;
+  otherwise it is killed and the existing installation is left untouched.
 
 ## Files and rollback
 
@@ -49,20 +57,57 @@ and icon caches are refreshed best-effort after committing the payload.
 All files are prepared before replacement. A lock prevents simultaneous in-app
 updates. A journal and hard-linked backups are synced before replacing files via
 same-filesystem atomic renames; the old binary stays backed up until the whole
-installation, including its receipt, commits. A failed replacement restores all
-previous files, including files originally absent. Preferences and the Rex server
-are never touched.
+installation, including its receipt, commits. The journal records each prepared
+file's device/inode identity. Recovery restores only destinations still belonging
+to this transaction, skipping files already restored or not yet replaced. If any
+destination belongs to a later installer/repair, the entire journal is discarded
+without changing any destination. Files absent before are removed only if they
+still have this transaction's new inode. Preferences and the Rex server are never
+touched.
 
 Individual files are atomically replaced, not the entire multi-directory tree in
 one filesystem operation. An interrupted transaction is recovered before the UI
 starts on the next launch, using the journal's original install paths even if the
 launch's XDG environment changed. Recovery re-execs the restored binary before
-any workspace actions run. If restoration fails (for example, storage becomes
-unavailable), the app reports the error and retains `.rex-update-transaction`
-next to the binary for another recovery attempt; do not delete its backups.
-Completed updates remove the backups. There is no user-requested rollback button
-or `--rollback` command; deliberately installing an older release remains the
-shell installer's explicit `--version` operation.
+any workspace actions run. Recovery waits up to two seconds for the install lock.
+If recovery fails or the lock remains busy, Rex logs the error to stderr and
+**continues opening**, with a persistent (dismissible) UI notice. A failed recovery
+retains `.rex-update-transaction` next to the binary for another attempt. Committed
+journals and abandoned `.rex-update-*` / `.rex-update-cleanup-*` directories are
+swept under the same lock, including when no transaction was started.
+
+### Manual recovery
+
+First close Rex windows and allow any updater to finish; do not run recovery as
+root. A transient lock/storage failure can be retried by reopening Rex. Persistent
+errors (a legacy journal without inode records, mismatched binary paths, or data
+folders symlinked outside `~/.local`) require manual repair. There is no rollback
+button or `--rollback` command.
+
+Keep the journal and its `old-*` backups until a complete manual installation has
+been verified. Do **not** copy individual backups over files from a later repair.
+For a default install, retire the journal under the install lock before repairing:
+
+```sh
+bin="${XDG_BIN_HOME:-$HOME/.local/bin}"
+(
+  flock -w 10 9 || exit 1
+  if [ -d "$bin/.rex-update-transaction" ]; then
+    mv "$bin/.rex-update-transaction" "$bin/.rex-recovery-backup-$(date +%s)"
+  fi
+  curl --proto '=https' --tlsv1.2 -fsSL \
+    https://github.com/shuv1337/rex-rune/releases/latest/download/install.sh | sh
+) 9>"$bin/.rex-update.lock"
+"$bin/rex-linux" --version
+```
+
+Use the original installation's `XDG_BIN_HOME` and `XDG_DATA_HOME` if customized
+(the journal's `binary` and `data` fields record them). Check that the launcher
+opens and the expected version is installed before deleting the retained
+`.rex-recovery-backup-*` directory. If repair fails, retain it for diagnosis.
+Directories outside the supported boundary can still be managed by the manual
+installer, but remain ineligible for in-app updates. Deliberately installing an
+older release remains the shell installer's explicit `--version` operation.
 
 ## Automatic installation
 
@@ -94,7 +139,12 @@ URL to the local fixture. It executes the installed fixture binary and checks it
 version, permissions and receipt. The shipped app has no alternate-key or HTTP
 artifact option. Additional tests cover tampered/unknown signatures, size/hash
 failures, downgrade/floor/changed-release refusals, unsafe tar paths and links,
-read-only files, rollback at every replacement and interrupted recovery.
+read-only files, rollback at every replacement, partial rollback failures, lock
+contention, stale-stage cleanup, actual-executable recovery, and a real
+`install-desktop.sh` repair after interruption. The signed fixture includes a PAX
+long path, matching Python tarfile releases; archive tests exercise size bombs
+and more than 20,000 entries. Cases requiring non-root installation are skipped
+when running tests as root.
 
 Real-font screenshots can be captured by running this test alone:
 

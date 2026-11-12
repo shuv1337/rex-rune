@@ -527,6 +527,14 @@ impl InstallChannel {
     }
 
     /// Channel-specific update instructions for `version`.
+    fn cli_guidance(&self, version: &str) -> String {
+        if matches!(self, Self::Tarball) {
+            format!("Installed with install.sh. To update, run `{INSTALL_SCRIPT_COMMAND}`.")
+        } else {
+            self.guidance(version).detail
+        }
+    }
+
     pub fn guidance(&self, version: &str) -> ChannelGuidance {
         let version = &crate::format_version(version);
         let deb_arch = match std::env::consts::ARCH {
@@ -878,11 +886,7 @@ pub fn now_epoch_secs() -> u64 {
 
 /// Perform a verified release metadata check and update the persistent state file under an advisory lock.
 pub fn check_for_updates(config: &CheckConfig, force: bool) -> Result<(CheckOutcome, UpdateState)> {
-    let lock_path = config.state_path.with_extension("lock");
-    if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _lock = FileLock::try_acquire(&lock_path);
+    let _lock = lock_update_state(&config.state_path)?;
 
     let mut state = UpdateState::load(&config.state_path);
     let now = now_epoch_secs();
@@ -1044,7 +1048,29 @@ struct FileLock {
     file: File,
 }
 
+fn lock_update_state(path: &Path) -> Result<FileLock> {
+    let lock_path = path.with_extension("lock");
+    if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    FileLock::acquire_timeout(&lock_path, Duration::from_secs(2))
+        .context("update state is busy or not writable; try again shortly")
+}
+
 impl FileLock {
+    fn acquire_timeout(path: &Path, timeout: Duration) -> Option<Self> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(lock) = Self::try_acquire(path) {
+                return Some(lock);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn try_acquire(path: &Path) -> Option<Self> {
         let file = OpenOptions::new()
             .create(true)
@@ -1098,12 +1124,12 @@ pub fn run_cli_check(config: &CheckConfig) -> i32 {
             },
             _,
         )) => {
-            let guidance = channel.guidance(&version);
+            let guidance = channel.cli_guidance(&version);
             println!(
                 "Rex Linux {version} is available (installed: {}, channel: {}). {} Release notes: {notes_url}",
                 config.current_version,
                 channel.id(),
-                guidance.detail
+                guidance
             );
             10
         }
@@ -1134,6 +1160,29 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::TcpListener;
+
+    #[test]
+    fn update_state_lock_is_required_and_cli_guidance_has_no_ui_buttons() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = CheckConfig {
+            state_path: temp.path().join("update.json"),
+            ..CheckConfig::default()
+        };
+        let original = UpdateState {
+            highest_verified: Some("99.0.0".into()),
+            ..UpdateState::default()
+        };
+        original.save(&config.state_path).unwrap();
+        let lock = lock_update_state(&config.state_path).unwrap();
+        assert!(lock_update_state(&config.state_path).is_err());
+        assert!(check_for_updates(&config, true).is_err());
+        assert_eq!(UpdateState::load(&config.state_path), original);
+        drop(lock);
+        assert!(lock_update_state(&config.state_path).is_ok());
+        let guidance = InstallChannel::Tarball.cli_guidance("99.0.0");
+        assert!(guidance.contains(INSTALL_SCRIPT_COMMAND));
+        assert!(!guidance.contains("Update now") && !guidance.contains("Copy command"));
+    }
 
     // Deterministic test keypair generated exclusively for unit tests.
     // Secret seed: [7u8; 32], Key ID: 0102030405060708

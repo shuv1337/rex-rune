@@ -3,6 +3,29 @@ use crate::app::updates::Installation;
 use rex_linux::update::{InstallChannel, UpdateState};
 
 #[test]
+fn updater_restart_requests_normal_shutdown_instead_of_exec_in_callback() {
+    let mut ws = workspace();
+    ws.updates.channel = InstallChannel::Tarball;
+    let binary = std::path::PathBuf::from("/nonexistent/rex-linux");
+    ws.updates.installation = Installation::Ready(binary.clone());
+    let restart = ws.restart.clone();
+    ws.open_updates_settings();
+    let mut rt = runtime(ws);
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+    click(&mut rt, "updates-restart");
+    assert_eq!(*restart.lock().unwrap(), Some(binary));
+    assert!(
+        !rt.state
+            .notices
+            .iter()
+            .any(|notice| notice.text.contains("Restart failed"))
+    );
+    let _ = std::fs::remove_file(&rt.state.settings_path);
+}
+
+#[test]
 fn updater_controls_are_channel_gated_and_show_progress_error_and_restart() {
     let mut ws = workspace();
     ws.updates.channel = InstallChannel::Tarball;
