@@ -46,6 +46,15 @@ fn data_dirs(
         .collect()
 }
 
+/// The directories of `PATH` a player may be run from. A relative entry (`.`, an empty
+/// one, `bin`) means "wherever the app was started", which could be a folder holding
+/// someone else's `pw-play`: those are never searched.
+fn search_path(path: Option<OsString>) -> Vec<PathBuf> {
+    std::env::split_paths(&path.unwrap_or_default())
+        .filter(|p| p.is_absolute())
+        .collect()
+}
+
 /// PATH is local launch configuration. Resolve once per attempt to an absolute path;
 /// never use a shell, a title, status message, program name or remote environment.
 pub(super) fn select(
@@ -139,10 +148,7 @@ impl Files for System {
 impl Player for System {
     type Child = Child;
     fn find(&mut self, sound: Sound) -> Option<Invocation> {
-        let cwd = std::env::current_dir().ok()?;
-        let paths = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|p| if p.is_absolute() { p } else { cwd.join(p) })
-            .collect::<Vec<_>>();
+        let paths = search_path(std::env::var_os("PATH"));
         let data = data_dirs(
             std::env::var_os("HOME").map(PathBuf::from),
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),

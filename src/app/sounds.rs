@@ -52,12 +52,14 @@ pub enum Health {
 impl Health {
     pub fn text(self) -> &'static str {
         match self {
-            Self::Unchecked => "Sound playback has not been checked yet.",
-            Self::Available => "Sound player found. Play checks the done sound.",
-            Self::Missing => "No sound player or freedesktop sound files found.",
-            Self::Failed => "The last sound attempt failed.",
-            Self::TimedOut => "The last sound attempt timed out.",
-            Self::WorkerStopped => "The sound worker could not start.",
+            // What the switch does, until there is something to report about it.
+            Self::Unchecked | Self::Available => {
+                "For tabs you aren't looking at, when one needs you, fails or finishes."
+            }
+            Self::Missing => "Nothing that can play a sound was found on this computer.",
+            Self::Failed => "The last sound could not be played.",
+            Self::TimedOut => "The last sound did not finish and was stopped.",
+            Self::WorkerStopped => "Sounds could not be started.",
         }
     }
 }

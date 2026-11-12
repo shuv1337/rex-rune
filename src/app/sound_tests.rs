@@ -169,7 +169,10 @@ fn sound_failure_does_not_affect_notifications_or_add_a_notice() {
     flush(&mut ws);
     ws.sound_request(Request::Check);
     assert_eq!(ws.sound_health, Health::Failed);
-    assert_eq!(ws.sound_health.text(), "The last sound attempt failed.");
+    assert_eq!(
+        ws.sound_health.text(),
+        "The last sound could not be played."
+    );
     assert_eq!(ws.notification_outbox.sent.len(), 1);
     assert!(ws.notices.is_empty());
 }

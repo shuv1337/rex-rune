@@ -182,6 +182,17 @@ fn xdg_defaults_overrides_and_first_matching_file() {
 }
 
 #[test]
+fn a_relative_path_entry_is_never_searched_for_a_player() {
+    // `.`, an empty entry and `bin` all mean "wherever the app was started".
+    assert_eq!(
+        search_path(Some(".::bin:/usr/bin:relative/dir:/opt/tools".into())),
+        vec![PathBuf::from("/usr/bin"), "/opt/tools".into()]
+    );
+    assert!(search_path(None).is_empty());
+    assert!(search_path(Some(".".into())).is_empty());
+}
+
+#[test]
 fn hung_player_is_killed_and_reaped_at_limit_without_real_time() {
     let mut player = FakePlayer {
         result: None,
