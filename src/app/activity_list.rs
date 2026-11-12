@@ -45,13 +45,14 @@ impl Workspace {
         }
     }
 
-    /// The list's one quiet line: what it cannot know. A host that is offline is named
-    /// first, so an empty list beside a host that is down does not read as all clear.
+    /// The list's one quiet line: what it cannot know. A host that is not connected (offline,
+    /// still connecting or reconnecting) is named first, so an empty list beside a host that
+    /// is down does not read as all clear.
     pub fn activity_coverage(&self) -> String {
         match self.hosts.iter().filter(|h| !h.model.connected).count() {
             0 => COVERAGE.into(),
-            1 => "1 host is offline. Tabs in unopened sessions may be missing.".into(),
-            n => format!("{n} hosts are offline. Tabs in unopened sessions may be missing."),
+            1 => "1 host is not connected. Tabs in unopened sessions may be missing.".into(),
+            n => format!("{n} hosts are not connected. Tabs in unopened sessions may be missing."),
         }
     }
 

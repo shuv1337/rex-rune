@@ -4,7 +4,7 @@
 
 ### Changed
 
-- **Activity list:** the filter also matches a row's state (`error`, `needs`, `working`); opening the list from the toolbar chip starts on the first tab that is not the one in front; and while a saved host is offline the list's one line says so, so an empty list beside a host that is down does not read as all clear.
+- **Activity list:** the filter also matches a row's state (`error`, `needs`, `working`); opening the list from the toolbar chip starts on the first tab that is not the one in front; and while a saved host is not connected the list's one line says so, so an empty list beside a host that is down does not read as all clear.
 
 ### Added
 

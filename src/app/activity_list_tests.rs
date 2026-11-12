@@ -142,7 +142,7 @@ fn states_order_mute_hosts_sessions_and_filter() {
 }
 
 #[test]
-fn the_filter_matches_the_state_and_the_coverage_line_names_offline_hosts() {
+fn the_filter_matches_the_state_and_the_coverage_line_names_unconnected_hosts() {
     let (mut ws, _rx) = fixture();
     ws.show_activity();
     // No tab, session or host is called any of these: only the state can match.
@@ -161,12 +161,12 @@ fn the_filter_matches_the_state_and_the_coverage_line_names_offline_hosts() {
     ws.hosts[1].model.connected = false;
     assert_eq!(
         ws.activity_coverage(),
-        "1 host is offline. Tabs in unopened sessions may be missing."
+        "1 host is not connected. Tabs in unopened sessions may be missing."
     );
     ws.hosts[0].model.connected = false;
     assert_eq!(
         ws.activity_coverage(),
-        "2 hosts are offline. Tabs in unopened sessions may be missing."
+        "2 hosts are not connected. Tabs in unopened sessions may be missing."
     );
     // With every host down nothing is listed, and the line says why.
     assert!(ws.entries().is_empty());
@@ -197,13 +197,24 @@ fn opening_from_the_chip_starts_on_a_tab_that_is_not_the_one_in_front() {
         Some(target(&ws, 0, "s", "blocked"))
     );
     ws.panel = None;
-    // The same tab id on the other host is not the tab in front.
+    // The same session and tab id on the other host is not the tab in front: with it
+    // the only other tab that needs you, it is the row the list opens on.
     for id in ["blocked", "error", "done", "build"] {
         ws.hosts[0].model.activity.remove(id);
     }
+    ws.hosts[1].model.activity.remove("blocked");
+    ws.hosts[1]
+        .model
+        .activity
+        .get_mut("front")
+        .unwrap()
+        .get_mut("")
+        .unwrap()
+        .state = ProgramState::Blocked;
     ws.unseen_done.clear();
     ws.show_activity_elsewhere();
-    assert_eq!(ws.activity_selection().unwrap().host, ws.hosts[1].id);
+    assert_eq!(ws.panel.as_ref().unwrap().selected, 1);
+    assert_eq!(ws.activity_selection(), Some(target(&ws, 1, "s", "front")));
     ws.panel = None;
     // Only the tab in front qualifies: the list still opens, on it.
     ws.hosts[1].model.connected = false;
