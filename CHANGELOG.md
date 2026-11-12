@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Toolbar visibility (focused M2.7):** Settings → Interface → Toolbar visibility offers Always show (unchanged default), Show on hover and Hidden. Hidden modes give the 52 pt row to the terminals; hovering the top edge or **Reveal toolbar** (`Ctrl Alt Shift T`, Commands and Shortcuts) floats it without resizing their content. The action is local-only and temporary. Downloads and pending key sequences still have visible chips; notices and window-manager Move/Close remain available. This recovers only the toolbar slice of preserved W2, not its other interface changes. See [scope and checks](docs/plans/m2.7-toolbar-visibility.md).
+
 ### Added
 
 - **Generated titles (M2.10):** Settings → Terminal → Prefer generated titles names default tabs and panes from the foreground program and directory (`vim - ~/rex`), while user names and program-set titles win. Off by default, including old settings files; toolbar, sidebar, pane menus and window titles agree. Adapted the untitled-pane naming and home-directory retention from [Matt Porter (@ohporter)'s `e94fe1d`](https://github.com/ohporter/rex-rune/commit/e94fe1da4725b80a412c27be6fd01a00c1ec1caa), using per-terminal metadata and the shared title resolver rather than a pane-only fallback.

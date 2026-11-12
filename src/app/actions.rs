@@ -54,6 +54,7 @@ enum Handler {
     ClearTerminal,
     ResetTerminal,
     PaneHeaders,
+    Toolbar,
     FindNext,
     FindPrevious,
     MoveTab,
@@ -127,6 +128,7 @@ specs! {
     "pane.clear" => ClearTerminal,
     "pane.reset" => ResetTerminal,
     super::pane_header::TOGGLE => PaneHeaders,
+    super::toolbar_reveal::TOGGLE => Toolbar,
     super::find::NEXT => FindNext,
     super::find::PREVIOUS => FindPrevious,
     "client.tab.move" => MoveTab,
@@ -250,6 +252,7 @@ impl Spec {
             ClearTerminal | ResetTerminal => Remote::Never(
                 "Only the person at this computer can clear or reset terminals from here.",
             ),
+            Toolbar => Remote::Never("Only the person at this computer can reveal the toolbar."),
             PaneHeaders => {
                 Remote::Never("Only the person at this computer can show or hide pane headers.")
             }
@@ -368,6 +371,7 @@ impl Spec {
             Handler::ClearTerminal => "Clear terminal",
             Handler::ResetTerminal => "Reset terminal",
             Handler::PaneHeaders => "Reveal pane headers",
+            Handler::Toolbar => "Reveal toolbar",
             Handler::FindNext => "Find next",
             Handler::FindPrevious => "Find previous",
             Handler::MoveTab => "Move tab",
@@ -401,6 +405,7 @@ impl Spec {
             | Handler::ZoomOut
             | Handler::ZoomReset
             | Handler::PaneHeaders
+            | Handler::Toolbar
             | Handler::Help
             | Handler::CollapseOtherHosts
             | Handler::ChooseTheme
@@ -565,6 +570,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::Settings => s.perform(Intent::Settings, tx),
         Handler::Sidebar => s.perform(Intent::Sidebar, tx),
         Handler::PaneHeaders => s.toggle_pane_headers(),
+        Handler::Toolbar => s.toggle_toolbar(),
         Handler::Close => s.close_focused(tx),
         Handler::Search => s.open_search(),
         Handler::FindNext => s.find_step(true),
