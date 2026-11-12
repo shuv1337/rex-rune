@@ -93,6 +93,7 @@ try:
         (tree / name).touch()
     (tree / "folder").mkdir()
     (tree / "my dir").mkdir()
+    (tree / "my file").touch()
     (tree / "folder" / "child").touch()
     server = subprocess.Popen(["rex", "server", "run", "--listen", endpoint, "--restore=false",
                                "--config", "/dev/null", "--state-dir", str(work / "rex-state")],
@@ -175,7 +176,10 @@ try:
     desk.key("Return")
     time.sleep(.5)
     field("~/tree/my")
-    assert "my dir" in capture("go-browser"), "folder not listed"
+    words = capture("go-browser")
+    assert "my dir" in words, "folder not listed"
+    # Folders only: the file sharing the typed prefix is not offered.
+    assert "my file" not in words, words
     desk.key("Down", "Return")
     time.sleep(.5)
     assert counter.read_bytes() == prompts, "choosing a folder executed a line"
@@ -196,10 +200,17 @@ try:
     wait(where.exists, "pwd not recorded")
     time.sleep(.2)
     assert where.read_text().strip() == str(tree / "my dir"), where.read_text()
+    # Back to the tree, so the checks below list it again rather than the empty folder.
+    prompts = counter.read_bytes()
+    paste("cd " + shlex.quote(str(tree)))
+    enter()
+    wait(lambda: len(counter.read_bytes()) == len(prompts) + 1, "could not return to the tree")
     desk.x("windowsize", window, 640, 480)
     time.sleep(.5)
     browser()
-    assert "a space" in capture("browser-640")
+    # `folder` appears only in the browser's rows, never in the terminal behind it.
+    words = capture("browser-640")
+    assert "a space" in words and "folder" in words, words
     field("~/tree/does-not-exist/")
     words = capture("missing-640")
     assert "doesn't exist" in words, words
