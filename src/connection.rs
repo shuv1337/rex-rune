@@ -300,8 +300,10 @@ impl HostModel {
 
     pub fn apply_block_event(&mut self, session: &str, block: String, event: BlockEvent) {
         match event {
-            BlockEvent::StatusChanged { id, record } => {
-                self.activity.entry(block).or_default().insert(id, record);
+            BlockEvent::StatusChanged { id, mut record } => {
+                let records = self.activity.entry(block).or_default();
+                record.observe_at(records.get(&id), std::time::Instant::now());
+                records.insert(id, record);
             }
             BlockEvent::StatusRemoved { ids } => {
                 if let Some(records) = self.activity.get_mut(&block) {

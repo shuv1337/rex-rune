@@ -271,7 +271,20 @@ pub fn list_row(
         None => e
             .child(match columns {
                 Some(columns) => columns,
-                None if r.keys.is_empty() => text(r.detail.to_owned()).font(ui(11.)).color(detail),
+                None if r.keys.is_empty() => {
+                    let state = text(r.detail.to_owned()).font(ui(11.)).color(detail);
+                    if let Some(time) = r.activity.and_then(|a| a.elapsed.as_ref()) {
+                        col().items_end().child(state).child(
+                            text(time.text.clone())
+                                .font(ui(11.))
+                                .color(rgb(muted()))
+                                .label(time.label.clone())
+                                .help(time.label.clone()),
+                        )
+                    } else {
+                        state
+                    }
+                }
                 // An unavailable row's keys recede with its label.
                 None => {
                     keycaps(r.keys, r.selected)

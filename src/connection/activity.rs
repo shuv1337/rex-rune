@@ -4,6 +4,9 @@
 //! `program_status`, `process` and `title` methods.
 use super::titles::Place;
 use serde_json::Value;
+use std::time::{Instant, SystemTime};
+
+pub mod time;
 
 pub const TERMINAL: &str = "com.superlogical.terminal";
 
@@ -74,10 +77,16 @@ pub struct StatusRecord {
     /// Reported while this client was listening, not read back by a query: only live
     /// changes are news worth a notification.
     pub live: bool,
+    /// Presentation-only age; never used by notification or completion policy.
+    pub age: Option<time::Age>,
 }
 
 impl StatusRecord {
     pub fn parse(value: &Value) -> Self {
+        Self::parse_at(value, Instant::now(), SystemTime::now())
+    }
+
+    pub fn parse_at(value: &Value, now: Instant, wall: SystemTime) -> Self {
         let text = |key: &str| {
             value[key]
                 .as_str()
@@ -100,6 +109,20 @@ impl StatusRecord {
                 .filter(|p| *p <= 100)
                 .map(|p| p as u8),
             live: false,
+            age: value["updated_at"]
+                .as_str()
+                .and_then(|s| time::Age::read_back(s, now, wall)),
+        }
+    }
+
+    /// A live repeat updates its words/progress, not the state start. A read-back age
+    /// remains explicitly a last-report lower bound even after a same-state live report.
+    pub fn observe_at(&mut self, previous: Option<&Self>, now: Instant) {
+        if self.live {
+            self.age = previous
+                .filter(|p| p.state == self.state)
+                .and_then(|p| p.age)
+                .or_else(|| Some(time::Age::live(now)));
         }
     }
 }

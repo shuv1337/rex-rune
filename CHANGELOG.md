@@ -4,6 +4,8 @@
 
 ### Changed
 
+- **Activity elapsed time:** Activity rows show whole-minute, hour or day ages without ticking. Live same-state reports keep their start; read-back ages are explicitly labeled “reported” because the server timestamp advances on every report, not only state changes. The open list redraws locally once a minute, with no status reads or read receipts. See [meaning and checks](docs/parity-2026-11/M3.2-elapsed-time.md).
+
 - **Activity coverage:** after each connection, read every session's program status once, selected session first and the rest paced in the background, up to three reads at a time. Already-waiting tabs in unopened sessions now feed the Activity list, sidebar word and toolbar chip without notifications or read receipts. The list names reads in progress, failed reads and disconnected hosts. No polling or cap; see [measurements and limits](docs/parity-2026-11/M3.2-status-sweep.md).
 
 - **Activity list:** the filter also matches a row's state (`error`, `needs`, `working`); opening the list from the toolbar chip starts on the first tab that is not the one in front; and while a saved host is not connected the list's one line says so, so an empty list beside a host that is down does not read as all clear.
