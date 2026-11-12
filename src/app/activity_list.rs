@@ -10,7 +10,7 @@ use rex_linux::connection::activity::ProgramState;
 use rune::{Icon, Tx};
 
 pub const ACTION: &str = "client.activity";
-pub const COVERAGE: &str = "Only received activity is shown. Some tabs may be missing.";
+pub const COVERAGE: &str = "Tabs in sessions not opened since connecting may be missing.";
 
 pub struct Presentation {
     pub icon: &'static Icon,
@@ -123,9 +123,10 @@ impl Workspace {
                     .is_some_and(|v| v.windows.iter().any(|w| w.window_id == target.window))
         });
         if valid {
-            // The notification path owns navigation and notification closing. Done/Bell
+            // The notification path owns navigation and notification closing, without
+            // asking the desktop to raise a window that is already in front. Done/Bell
             // clear only after the selected view is acknowledged, through track_activity.
-            self.open_note(target, None, tx);
+            self.show_noted_tab(target, tx);
         } else {
             self.inform("That tab is no longer available.");
         }

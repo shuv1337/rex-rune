@@ -473,8 +473,14 @@ impl Workspace {
 
     /// A notification was clicked: raise the window and show its session and tab.
     pub fn open_note(&mut self, target: NoteTarget, token: Option<String>, tx: &mut Tx) {
-        self.close_notifications(target.clone());
         self.handle.activate(token.unwrap_or_default());
+        self.show_noted_tab(target, tx);
+    }
+
+    /// Show the tab a notification or an Activity row is about, and close what this client
+    /// sent about it. The window is already in front for a row; only a click raises it.
+    pub fn show_noted_tab(&mut self, target: NoteTarget, tx: &mut Tx) {
+        self.close_notifications(target.clone());
         let Some(index) = self.host_index(target.host) else {
             return;
         };
