@@ -414,12 +414,14 @@ fn history_starts_again_each_time_settings_opens() {
 
 #[test]
 fn back_and_forward_restore_scroll_and_a_new_visit_discards_forward() {
+    let _families = rune::text::with_families("Inter", "Inter");
     let mut rt = settings(1, (640., 480.));
     assert!(!enabled(&rt, "settings-back") && !enabled(&rt, "settings-forward"));
     click(&mut rt, "settings-section:notifications");
     settle(&mut rt);
-    let page = rect(&rt, "settings-scroll:notifications");
-    rt.wheel(page[0] + page[2] / 2., page[1] + page[3] / 2., -110.);
+    // The health card adds rows above Programs; navigate to the actual control rather
+    // than assuming a fixed scroll distance will leave it visible.
+    rt.update(|_, tx| tx.scroll_center("notify-messages"));
     settle(&mut rt);
     let scrolled = rt.state.settings_nav.offset().get();
     assert!(scrolled > 20., "{scrolled}");
