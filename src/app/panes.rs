@@ -129,8 +129,13 @@ fn header(
         })
         .child(
             text(label.clone())
+                .key(format!("pane-name:{block}"))
                 .font(medium(11.5))
-                .color(rgb(if focused { ink() } else { muted() }))
+                .color(
+                    rgb(if focused { ink() } else { muted() })
+                        .alpha(pane_header::header_opacity(s, block)),
+                )
+                .group_color(rgb(if focused { ink() } else { muted() }))
                 .truncate()
                 .help_when_truncated(label)
                 .shrink(),
