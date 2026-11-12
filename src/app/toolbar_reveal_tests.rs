@@ -409,6 +409,80 @@ fn the_hover_edge_leaves_presses_to_the_terminal() {
 }
 
 #[test]
+fn hover_revealed_toolbar_keeps_tab_session_and_window_context_menus() {
+    let (mut rt, host, sent) = drawn("split", ToolbarBehavior::OnHover);
+    for (key, kind) in [
+        ("tab:single", PanelKind::Window),
+        ("identity", PanelKind::Session),
+    ] {
+        rest_at(&mut rt, 300., 200.);
+        rest_at(&mut rt, 300., 4.);
+        settle(&mut rt);
+        assert!(has(&rt, "toolbar"));
+        let r = rect(&rt, key);
+        let (x, y) = (r[0] + 20., r[1] + r[3] / 2.);
+        rest_at(&mut rt, x, y);
+        rt.secondary_down(x, y);
+        rt.frame(1. / 60.);
+        rt.secondary_up(x, y);
+        settle(&mut rt);
+        let panel = rt.state.panel.as_ref().expect("context menu opens");
+        assert_eq!(
+            std::mem::discriminant(&panel.kind),
+            std::mem::discriminant(&kind),
+            "context menu for {key}"
+        );
+        press(&mut rt, Key::Escape);
+        settle(&mut rt);
+    }
+
+    rest_at(&mut rt, 300., 200.);
+    rest_at(&mut rt, 300., 4.);
+    settle(&mut rt);
+    let r = rect(&rt, "title-drag");
+    let (x, y) = (r[0] + r[2] / 2., r[1] + r[3] / 2.);
+    rest_at(&mut rt, x, y);
+    rt.events.clear();
+    rt.secondary_down(x, y);
+    rt.frame(1. / 60.);
+    rt.secondary_up(x, y);
+    settle(&mut rt);
+    // Rune keeps the native menu request private. Its input trace confirms dispatch
+    // to the toolbar handler that calls Tx::show_window_menu, not the hover band.
+    assert!(
+        rt.events
+            .iter()
+            .any(|event| event.starts_with("secondary press ") && event.ends_with("/toolbar")),
+        "window-menu handler reached: {:?}",
+        rt.events
+    );
+    assert!(sent_verbs(&sent).is_empty() && requests(&host).is_empty());
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_hover_edge_keeps_the_terminals_context_menu_before_reveal() {
+    let (mut ws, _host) = tabbed_workspace("single");
+    ws.settings.interface.toolbar = ToolbarBehavior::OnHover;
+    ws.settings.pane_padding = 0.;
+    let (sender, _sent) = flume::unbounded();
+    framed_terminal(&mut ws, "block:a", &sender, b"first line\r\nsecond");
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    // Below the native 6 pt resize band, within the unrevealed 8 pt hover band.
+    assert!(!has(&rt, "toolbar"));
+    rt.secondary_down(300., 7.);
+    rt.frame(1. / 60.);
+    rt.secondary_up(300., 7.);
+    settle(&mut rt);
+    assert!(matches!(
+        rt.state.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Pane)
+    ));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn reveal_toolbar_floats_it_from_the_keyboard_to_move_or_close_the_window() {
     let spec = actions::find("client.toolbar.toggle").expect("registered");
     assert_eq!(spec.title(), "Reveal toolbar");

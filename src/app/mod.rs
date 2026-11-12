@@ -95,14 +95,19 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .origin(0., 0.)
         .scale(scale)
         .scale_motion(STILL)
-        .fill(rgb(ground()))
-        .child(
-            col()
-                .absolute(0., 0.)
-                .size(viewport[0], viewport[1])
-                .pt(toolbar_reveal::row_height(s))
-                .child(body),
-        );
+        .fill(rgb(ground()));
+    // Hover tracks position even behind content. Keep the band below both panes and
+    // toolbar so secondary presses reach their context menus rather than this sibling.
+    if s.settings.interface.toolbar == rex_linux::settings::interface::ToolbarBehavior::OnHover {
+        root = root.child(toolbar_reveal::band(s));
+    }
+    root = root.child(
+        col()
+            .absolute(0., 0.)
+            .size(viewport[0], viewport[1])
+            .pt(toolbar_reveal::row_height(s))
+            .child(body),
+    );
     root = match toolbar_reveal::placement(s) {
         toolbar_reveal::Placement::Row => root.child(toolbar::toolbar(s).absolute(0., 0.)),
         toolbar_reveal::Placement::Floating => {
@@ -112,9 +117,6 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             root.children(toolbar::floating_status(s).map(toolbar_reveal::sequence_float))
         }
     };
-    if s.settings.interface.toolbar == rex_linux::settings::interface::ToolbarBehavior::OnHover {
-        root = root.child(toolbar_reveal::band(s));
-    }
     if let Some(toasts) = dialogs::toasts(s) {
         root = root.child(toasts);
     }
