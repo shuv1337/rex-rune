@@ -118,13 +118,54 @@ Directories outside the supported boundary can still be managed by the manual
 installer, but remain ineligible for in-app updates. Deliberately installing an
 older release remains the shell installer's explicit `--version` operation.
 
+## Updating from Rex Linux 0.7.x
+
+The client was `rex-linux` through 0.7.x, and the updater inside those clients cannot
+change. It checks that `latest.json` has `product: "rex-linux"` and a signature whose
+trusted comment is `rex-linux vX.Y.Z latest.json`, downloads the target's `tarball`, and
+installs it only if the archive's root is `rex-linux-<version>-<target>`, `bin/rex-linux`
+prints exactly `rex-linux <version>`, and the launcher and icons are named
+`dev.shuv.rex-linux`. A renamed release keeps all of that true:
+
+- **Signed metadata keeps the product id `rex-linux`**, in `latest.json` and in every
+  trusted comment. Current clients require the same id.
+- **Each target has two archives.** `tarball` is the bridge,
+  `rex-linux-<version>-<target>.tar.gz`: this release's binary as `bin/rex-linux` with
+  the old launcher and icon names, and no installer script. `archive` is
+  `rex-rune-<version>-<target>.tar.gz`, which current clients and `install.sh` install.
+- **Started as `rex-linux`, the client names itself that way** in `--version`, through
+  the bridge's binary or the compatibility link.
+
+The 0.7.x updater therefore installs the new release under the old names. At the next
+start, the client finds a `rex-linux` receipt that matches its own binary and finishes
+the rename (`update::installer::migrate_legacy_install`):
+
+1. writes `dev.shuv.rex-rune.desktop` and the three `dev.shuv.rex-rune.png` icons;
+2. renames `bin/rex-linux` to `bin/rex-rune` and leaves `rex-linux` as a link to it;
+3. writes `$XDG_DATA_HOME/rex-rune/install.json`;
+4. removes the old launcher and icons, then the old receipt.
+
+The old receipt is what triggers the move and is removed last, so a start interrupted
+part-way is finished by the next one. Nothing is moved unless the receipt names this
+directory and matches this binary's SHA-256, while an update is in progress, or as
+root. If `desktop-file-install` fails, a notice says so and the next start tries again;
+until then the old launcher keeps working.
+
+Two limits. An update from 0.7.x that is cut off by a crash between replacing the
+binary and replacing its receipt is reported as superseded at the next start, and needs
+`install.sh` to repair it. And a start with a different `XDG_DATA_HOME` from the
+install's does not find the receipt, so the rename waits for a start that has it.
+
+Settings and update state are moved separately, for every install method: see
+[Renamed from Rex Linux](../README.md#renamed-from-rex-linux).
+
 ## Automatic installation
 
 **Install updates automatically** defaults **off**, including existing settings
 files. When enabled (`updates.install_automatically: true`), a successful scheduled
 or manual check can install an eligible release in the background and offer
 restart. It never restarts without a click. Automatic checks must also be on;
-`REX_RUNE_NO_UPDATE_CHECK=1` disables automatic installation too. The daily check
+`REX_RUNE_NO_UPDATE_CHECK=1` (or its old name, `REX_LINUX_NO_UPDATE_CHECK=1`) disables automatic installation too. The daily check
 cadence is unchanged. An installation error stays visible for manual retry; it
 does not create a rapid background retry loop. Checks and installation cannot run
 concurrently in one workspace. Across processes, the update-state lock covers only
@@ -158,6 +199,12 @@ contention, stale-stage cleanup, actual-executable recovery, and a real
 long path, matching Python tarfile releases; archive tests exercise size bombs
 and more than 20,000 entries. Cases requiring non-root installation are skipped
 when running tests as root.
+
+The rename has its own checks. Unit tests move a `rex-linux` installation to the new
+names, finish a move cut short after the binary was renamed, and refuse an unverified
+one. `scripts/test-bridge.py` holds a bridge tarball to the 0.7.x updater's rules, and
+the release workflow runs it on the real build before taking over real 0.7.5 tarball
+and `.deb` installs.
 
 Real-font screenshots can be captured by running this test alone:
 

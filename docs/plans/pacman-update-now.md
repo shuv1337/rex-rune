@@ -23,7 +23,7 @@ This note compares the ways to get there and recommends one. It builds nothing.
   The database names the newest version; the newest five releases' packages and their
   detached OpenPGP signatures stay in the directory, so an exact version can be
   fetched by URL. A machine trusts it by importing and locally signing the Rex
-  archive key and adding a `[rex-rune]` section with `SigLevel = Required
+  archive key and adding a `[rex-linux]` section with `SigLevel = Required
   DatabaseRequired` (the [operator walkthrough](../auto-update-operator-walkthrough.md)
   has the steps).
 - **The signed manifest.** Every release publishes `latest.json` with a Minisign
@@ -45,7 +45,7 @@ the first five; the reviews checked the hook and the control-group file ownershi
   (`rex-rune-bin-0.7.5-1-x86_64.pkg.tar.zst`, 22,135,553 bytes), and the site serves
   that file at that size with a 119-byte `.sig` beside it. Downloaded as an ordinary
   user, the file's SHA-256 matches the manifest's, and `gpgv` with only
-  `packaging/keys/rex-rune-archive-key.asc` as its keyring reports a good signature
+  `packaging/keys/rex-linux-archive-key.asc` as its keyring reports a good signature
   by the CI subkey `55B8…DE75` (and a bad one for other bytes).
 - `pkexec`, `gpgv`, `curl` and `systemd-run` are installed and `polkitd` runs.
   Omarchy's shell carries its own polkit agent (`/usr/share/omarchy/shell/plugins/polkit`).
@@ -86,7 +86,7 @@ The package adds three files:
   bound to that exact path (`org.freedesktop.policykit.exec.path`), with a fixed
   message that names Rex Rune and does not echo the caller's arguments.
 - `/usr/share/rex-rune/archive-key.gpg`: the Rex package-signing certificate
-  (`packaging/keys/rex-rune-archive-key.asc`), for the helper alone.
+  (`packaging/keys/rex-linux-archive-key.asc`), for the helper alone.
 
 Update now runs `pkexec --disable-internal-agent /usr/lib/rex-rune/rex-rune-update
 <version>`. polkit decides whether to allow it. With the action's default

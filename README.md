@@ -46,6 +46,25 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 
 **Attachment-only by default.** Attaching and reconnecting never start, stop, replace or reconfigure a Rex server and do not need a `rex` executable. A missing default server on an SSH host offers a separately confirmed, one-time **Start personal server…** action (see [SSH setup](#ssh-setup)); it never enables automatic starts on future connections. Settings → Integrations runs local `rex skill` with `--autostart=false`. Both explicit CLI features search `PATH`, then `$XDG_BIN_HOME` or `~/.local/bin` for desktop launches. An unavailable server is shown as disconnected and retried. Closing the client leaves server programs running.
 
+## Renamed from Rex Linux
+
+This client was **Rex Linux** (`rex-linux`) through 0.7.x. It is now **Rex Rune** (`rex-rune`), after the toolkit it is built on and the repository it lives in. The binary, packages, launcher, icons and settings folder all took the new name. An existing install moves over when it updates:
+
+| Installed with | Update with | Result |
+| --- | --- | --- |
+| `install.sh` or the tarball | **Update now** in Settings → Updates, or `install.sh` again | `~/.local/bin/rex-rune`, with the launcher and icons renamed. After **Update now** the rename happens at the next start |
+| pacman (`rex-linux-bin`) | `sudo pacman -Syu` or `omarchy update` | pacman asks to replace `rex-linux-bin` with `rex-rune-bin`. The `[rex-linux]` entry in `pacman.conf` stays as it is |
+| `.deb` | `sudo apt install ./rex-rune_*.deb` | apt removes `rex-linux` and installs `rex-rune` in one step |
+| Nix | Update the flake input | The package and binary are `rex-rune`; the `rex-linux` output name still resolves |
+| Source | `git pull`, then build and `mise run install` | `rex-rune` replaces the old launcher and copied binary |
+
+- **One launcher.** Each route removes the old `dev.shuv.rex-linux` launcher and icons when it installs the new ones.
+- **Settings and state move once**, at the first start: `~/.config/rex-linux` becomes `~/.config/rex-rune`, and `~/.local/state/rex-linux` becomes `~/.local/state/rex-rune` (under `XDG_CONFIG_HOME` and `XDG_STATE_HOME` when set). Nothing is merged: if the new folder already exists, the old one is left alone.
+- **`rex-linux` still starts the client.** Packages install it as a link to `rex-rune`, and an upgraded `install.sh` install keeps one in `~/.local/bin`. A later release will remove the link, so change scripts, aliases and key bindings to `rex-rune`.
+- `REX_LINUX_NO_UPDATE_CHECK` still works; the variable is now `REX_RUNE_NO_UPDATE_CHECK`.
+- **Three names stay**, because installed clients and package managers look for them: the pacman repository `[rex-linux]` with its certificate `rex-linux-archive-key.asc`, the `rex-linux` product id inside signed release metadata, and the `rex-linux-*.tar.gz` release archives. Those archives exist only for the updater inside 0.7.x; install from `rex-rune-*.tar.gz`.
+- `install.sh` installs releases from the rename onwards. For an older one, use that release's own `install.sh`.
+
 ## Install a binary release
 
 **Rex Rune is a desktop client, not a Rex server.** Every install method (pacman `rex-rune-bin`, `.deb`, Nix, tarball or `install.sh`) installs only the `rex-rune` client binary, its `.desktop` launcher and icons, and never installs, replaces or shadows the `rex` server. On distributions where `/bin` is a symlink to `/usr/bin` (`usrmerge`), `which -a rex` can list both `/usr/bin/rex` and `/bin/rex`; that is one file, not a second server.
@@ -57,7 +76,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/shuv1337/rex-rune/relea
 # Explicit upgrade, check, pin (including deliberate downgrade), or uninstall:
 # ... | sh -s -- --upgrade
 # ... | sh -s -- --check
-# ... | sh -s -- --version 0.5.1
+# ... | sh -s -- --version X.Y.Z
 # ... | sh -s -- --uninstall
 ```
 
@@ -78,10 +97,12 @@ keys fails closed after rotation. **Only** explicit `--trust-repo-keys` expands
 trust to keys at the requested release's protected tag (never `master`), printing
 the key ID and fingerprint. Prefer fetching and reviewing the current script.
 
-`/usr/bin/rex-rune` or a mismatching install receipt blocks replacement;
-`--force` deliberately overrides those guards, **not signature checks or downgrade
-protection**. A receipt requires Python 3 to validate; pre-receipt installs such
-as 0.5.1 upgrade without it. Avoid mixing user installs and package managers.
+`/usr/bin/rex-rune` (or `/usr/bin/rex-linux`) or a mismatching install receipt blocks
+replacement; `--force` deliberately overrides those guards, **not signature checks or
+downgrade protection**. A receipt requires Python 3 to validate; pre-receipt installs
+such as 0.5.1 upgrade without it. An install made as `rex-linux` is checked the same
+way and replaced: its launcher and icons are removed, and `~/.local/bin/rex-linux`
+becomes a link to `rex-rune`. Avoid mixing user installs and package managers.
 
 ### Manual download
 
@@ -91,11 +112,11 @@ Download a package and `SHA256SUMS` from [Releases](https://github.com/shuv1337/
 sha256sum --ignore-missing -c SHA256SUMS
 
 # Debian/Ubuntu: install the one .deb matching your architecture.
-sudo apt install ./rex-rune_0.7.0_amd64.deb
+sudo apt install ./rex-rune_X.Y.Z_amd64.deb
 
-# Or extract the matching tarball and install for your user (no root).
-tar -xzf rex-rune-0.7.0-x86_64-linux-gnu.tar.gz
-cd rex-rune-0.7.0-x86_64-linux-gnu
+# Or extract the matching rex-rune tarball and install for your user (no root).
+tar -xzf rex-rune-X.Y.Z-x86_64-linux-gnu.tar.gz
+cd rex-rune-X.Y.Z-x86_64-linux-gnu
 bash install.sh
 ```
 
@@ -702,7 +723,7 @@ Other crates are used under their own licenses; see `Cargo.lock`.
 - [Superlogical Rex](https://www.superlogical.com/rex), the server and protocol this client speaks. The implementation follows the server's `/llms.txt` API revision 13 contract; revisions 10–12 are also supported.
 - [anomalyco/rune](https://github.com/anomalyco/rune) and [a10y/rexrs](https://github.com/a10y/rexrs).
 - [Ghostty](https://github.com/ghostty-org/ghostty) for the terminal core.
-- [m4nik1/rex-rune-client](https://github.com/m4nik1/rex-rune-client) and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx), whose protocol work served as references.
+- [m4nik1/rex-linux-client](https://github.com/m4nik1/rex-linux-client) and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx), whose protocol work served as references.
 
 ## License
 

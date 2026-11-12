@@ -128,6 +128,8 @@ rustPlatform.buildRustPackage {
     wrapProgram "$out/bin/rex-rune" \
       --prefix PATH : ${lib.makeBinPath [ fontconfig ]} \
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries}
+    # The command's name before the rename, for scripts and key bindings that start it.
+    ln -s rex-rune "$out/bin/rex-linux"
   '';
   meta = {
     description = "Native Linux Rune client for existing Rex terminal servers";

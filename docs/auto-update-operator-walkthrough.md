@@ -84,7 +84,7 @@ Built today. Steps 1 to 5 can run any time; step 6 starts the clock.
 10. **CI signs and publishes.** In `publish`, in this order:
     - writes `SHA256SUMS` and `latest.json`, and saves both as `unsigned-release-metadata`;
     - signs both with the CI minisign key;
-    - verifies each signature against `packaging/keys/`, checks the trusted comments (`rex-rune vX.Y.Z latest.json`), and rechecks packages against `SHA256SUMS` against `latest.json`;
+    - verifies each signature against `packaging/keys/`, checks the trusted comments (`rex-linux vX.Y.Z latest.json`; the product id kept its name through the rename), and rechecks packages against `SHA256SUMS` against `latest.json`;
     - creates a draft, uploads the assets, publishes, and marks it latest.
 
     Any failure before the draft publishes nothing. Assets per release:
@@ -174,7 +174,7 @@ Configured by the agent on 2026-11-10 (PST):
 - `github-pages` permits `master` (bootstrap) and `v*` tags; administrator bypass
   is off. The signing `release` environment still permits **only v* tags**,
   requires shuv1337's review, and disallows administrator bypass.
-- Public certificate: `packaging/keys/rex-rune-archive-key.asc`, also on the site.
+- Public certificate: `packaging/keys/rex-linux-archive-key.asc`, also on the site.
   Primary: **4BC4B85F4AF37FA0D834B0B52B192F3817340BAB**.
   Signing subkey: **55B8D5A1BB0A48B766F0323FB588FF9861CADE75**.
   Subkey expiry: **2029-11-09 12:14 PST**.
@@ -182,7 +182,7 @@ Configured by the agent on 2026-11-10 (PST):
   certify-only, as the working copy. Its separate passphrase is in the owner's
   1Password Personal vault (item "Rex Rune pacman-repo OpenPGP primary
   (4BC4…0BAB)") since 2026-11-10; the login Keychain item
-  `rex-rune-openpgp-primary` was deleted after a restore test. That item also
+  `rex-linux-openpgp-primary` was deleted after a restore test. That item also
   holds an encrypted secret-key export (primary plus CI subkey) and the
   revocation certificate. It is offline-style storage on a separate online Mac,
   not air-gapped storage. A non-cloud offline backup is still an operator
@@ -238,7 +238,7 @@ dig +short CNAME pkg.shuv.dev
 gh api repos/shuv1337/rex-rune/pages/health
 gh api repos/shuv1337/rex-rune/pages --jq '{cname, https_enforced, cert: .https_certificate.state}'
 gh api -X PUT repos/shuv1337/rex-rune/pages -F https_enforced=true
-curl -fsSI https://pkg.shuv.dev/rex-rune-archive-key.asc
+curl -fsSI https://pkg.shuv.dev/rex-linux-archive-key.asc
 ```
 
 **Never leave a dangling CNAME.** Before disabling Pages, removing its custom
@@ -267,20 +267,29 @@ If the keyserver is unavailable, use the same certificate over HTTPS instead
 of `--recv-keys`, then run the fingerprint and local-sign commands above:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSLo rex-rune-archive-key.asc https://pkg.shuv.dev/rex-rune-archive-key.asc
-sudo pacman-key --add rex-rune-archive-key.asc
+curl --proto '=https' --tlsv1.2 -fsSLo rex-linux-archive-key.asc https://pkg.shuv.dev/rex-linux-archive-key.asc
+sudo pacman-key --add rex-linux-archive-key.asc
 ```
 
 Add this **once** to `/etc/pacman.conf` (keep the literal `$arch`):
 
 ```ini
-[rex-rune]
+[rex-linux]
 SigLevel = Required DatabaseRequired
 Server = https://pkg.shuv.dev/arch/$arch
 ```
 
+The section is still called `[rex-linux]`, the client's name through 0.7.x: pacman
+fetches `<section>.db`, and every `pacman.conf` that already has the repository
+uses that name. The certificate file keeps its name for the same reason.
+
 Then `sudo pacman -Syu rex-rune-bin`. Both package and database signatures are
 mandatory. Future upgrades use `sudo pacman -Syu`, without an AUR helper.
+
+An install of `rex-linux-bin` needs no change to `pacman.conf`. Its next
+`sudo pacman -Syu` (or `omarchy update`) asks `Replace rex-linux-bin with
+rex-linux/rex-rune-bin?`; answering yes removes the old package and installs the
+new one, which also provides the `rex-linux` command as a link.
 
 If `~/.local/bin/rex-rune` shadows `/usr/bin/rex-rune`, first uninstall the
 user copy with the install script's `--uninstall` (preferences are retained).
@@ -525,7 +534,7 @@ All **[Agent]**, read-only, about ten minutes. Report only what is wrong.
    ```sh
    gh api repos/$repo/pages --jq '{cname, https_enforced, cert: .https_certificate.state}'
    dig +short CNAME pkg.shuv.dev
-   gpg --show-keys packaging/keys/rex-rune-archive-key.asc     # the subkey's expiry: more than 180 days away
+   gpg --show-keys packaging/keys/rex-linux-archive-key.asc     # the subkey's expiry: more than 180 days away
    ```
 
    Then the Arch container check (section 5, step 2) and, after PR U5, the Ubuntu one (section 6, step 2).

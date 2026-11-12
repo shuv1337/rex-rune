@@ -36,6 +36,8 @@
       packages = forSystems (system: {
         default = packageFor system;
         rex-rune = self.packages.${system}.default;
+        # The output's name before the rename; `nix profile upgrade rex-linux` still resolves.
+        rex-linux = self.packages.${system}.default;
       });
       checks = forSystems (system: {
         rex-rune = self.packages.${system}.default;

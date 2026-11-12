@@ -9,7 +9,7 @@ on revision 11. No server lifecycle operations were added to attachment.
 - Release: `0.1.0-preview.14`, commit
   `7e460d02f51573990bfcdc6c44a5606d11c7d47a` (Linux amd64).
 - Server build time: **2026-11-09 13:00:41 PST**.
-- Archive: `rex-rune-amd64.tar.gz`, from the preview channel's
+- Archive: `rex-linux-amd64.tar.gz`, from the preview channel's
   [release manifest](https://blob.superlogical.com/api/releases/rex/preview).
 - SHA-256: `36ece39653ecc4c1a95ae0ddf9a728f9a3df2ab663488b970f991b1378ff940a`.
 - Extracted directly under `~/.cache/agent-ws/rex-preview14/bin`; no installer was
