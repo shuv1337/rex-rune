@@ -18,7 +18,15 @@ use std::{
 /// A new empty folder for one test's downloads.
 fn scratch() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    // These tests read the folder back from dialogs and notices, which shorten a long one
+    // (that has its own tests). macOS's temporary folder is some fifty characters long.
+    let temp = std::env::temp_dir();
+    let temp = if temp.as_os_str().len() > 24 && Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        temp
+    };
+    let dir = temp.join(format!(
         "rex-download-ui-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -1658,13 +1666,7 @@ fn the_launch_cleanup_deletes_a_recorded_partial_of_a_dead_process_and_nothing_e
     }
     let records = state.join("downloads.json");
     // This process's own start time, as the core reads it, so its record says it is running.
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
-    let started: u64 = stat[stat.rfind(')').unwrap() + 1..]
-        .split_whitespace()
-        .nth(19)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let started = rex_rune::platform::process::start_time(std::process::id()).unwrap();
     let record = |name: &str, pid: u32, started: u64| serde_json::json!({"dir": dir, "name": name, "pid": pid, "started": started, "created": 1});
     // `other` belongs to this very process, which is running: it must stay.
     std::fs::write(

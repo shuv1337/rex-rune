@@ -190,10 +190,7 @@ impl Target {
 
 /// Where every process's tunnel sockets live.
 fn tunnels_directory() -> PathBuf {
-    match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(runtime) if !runtime.is_empty() => PathBuf::from(runtime).join("rex-rune"),
-        _ => std::env::temp_dir().join(format!("rex-rune-{}", uid())),
-    }
+    crate::platform::dirs::runtime()
 }
 
 /// Remove the socket directories of processes that are gone, which a crash or a kill leaves
@@ -211,24 +208,10 @@ fn sweep_stale_tunnels(directory: &std::path::Path) {
         else {
             continue;
         };
-        if pid != std::process::id() && !process_exists(pid) {
+        if pid != std::process::id() && !crate::platform::process::exists(pid) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-}
-
-fn process_exists(pid: u32) -> bool {
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
-}
-
-fn uid() -> String {
-    std::fs::metadata("/proc/self")
-        .ok()
-        .map(|m| {
-            use std::os::unix::fs::MetadataExt;
-            m.uid().to_string()
-        })
-        .unwrap_or_else(|| "user".into())
 }
 
 /// Finds the Rex socket on the other machine, trying in order: the path `rex server status`

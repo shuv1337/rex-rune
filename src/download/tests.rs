@@ -694,13 +694,9 @@ async fn a_partial_file_is_private_until_finished_then_world_readable_never_exec
     assert!(records.list().is_empty());
 }
 
+/// The umask as the store reads it: the real one on Linux, 022 where it cannot be read.
 fn umask() -> u32 {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap();
-    let line = status
-        .lines()
-        .find_map(|l| l.strip_prefix("Umask:"))
-        .unwrap();
-    u32::from_str_radix(line.trim(), 8).unwrap()
+    crate::platform::process::umask()
 }
 
 #[tokio::test]
