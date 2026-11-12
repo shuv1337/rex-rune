@@ -39,6 +39,9 @@ pub struct Partial {
 }
 
 impl Partial {
+    /// Admission never creates a partial file here, so there is nothing to discard.
+    pub fn discard(self) {}
+
     pub async fn write(&mut self, _bytes: &[u8]) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,

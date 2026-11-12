@@ -114,5 +114,7 @@ jobs:
       - name: The app starts
         shell: bash
         run: |
-          test "$(target/debug/rex-rune.exe --version)" = "rex-rune $(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          test "$(target/debug/rex-rune.exe --version)" = "rex-rune $(python -c 'import sys,tomllib; sys.stdout.write(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           target/debug/rex-rune.exe --help > /dev/null
+      - name: App platform boundary
+        run: cargo test --locked --bin rex-rune app::platform::tests

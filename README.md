@@ -274,7 +274,7 @@ cargo build --locked --bin rex-rune
 | Fonts | Bundled IBM Plex Mono and Inter; native font discovery is not implemented |
 | Window chrome, input, clipboard and IME | Not tested on Windows |
 | Primary selection | Windows has none; the setting is not shown |
-| Notifications, opening links, Show in folder | Not available yet |
+| Notifications, sounds, opening links, Show in folder | Not available yet |
 | Updates | Source builds only; no installer or restart after an update |
 
 To try a host, run `rex-rune.exe --endpoint https://my-host.example.ts.net --session work` with an existing session. This is not a verified Windows attachment recipe.
