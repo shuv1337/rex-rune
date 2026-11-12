@@ -92,8 +92,9 @@ fn last_pane(s: &Workspace, window: &Window) -> bool {
     single(window) && s.model().view().is_some_and(|v| v.windows.len() == 1)
 }
 
-/// Whether this tab's panes carry a header row above their terminal.
-pub fn rows(s: &Workspace, window: &Window) -> bool {
+/// Whether this tab's panes carry a header row above their terminal. The tab no longer
+/// matters (a lone pane has one too); it stays in the signature for the callers that have it.
+pub fn rows(s: &Workspace, _window: &Window) -> bool {
     match s.settings.pane_header {
         PaneHeader::Always => true,
         // A lone pane has one too, as in Rex for macOS: Split right and Split down are
