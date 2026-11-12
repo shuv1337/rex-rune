@@ -114,9 +114,8 @@ It asked for one change before merge:
   checks both toolbar modes with the default header: the header and its buttons start
   below the edge, resting on Close pane brings out no toolbar, a press there opens Close
   pane's confirmation and never a window action, a press where the sidebar button used
-  to be is the header's, and the edge above the header still reveals the toolbar. It
-  fails without the clearance (`~/.cache/agent-ws/pane-header-review-before.log`). This
-  also restores default-layout coverage for the two toolbar tests that now pin headers
+  to be is the header's, and the edge above the header still reveals the toolbar. With the clearance set to zero it fails on its first assertion (the header at y 0
+  where y 8 is expected). This also restores default-layout coverage for the two toolbar tests that now pin headers
   Hidden.
 
 Also from it:
@@ -129,6 +128,16 @@ After these changes: `cargo fmt --all -- --check`; `TMPDIR=/var/tmp cargo test -
 --all-features` **1041 passed, 0 failed, 6 ignored**; strict clippy; release build; the
 after capture above retaken; `terminal-selection-x11`, `pane-padding-x11`,
 `header-fading-x11`, `insert-path-x11` and `activity-list-x11` passed again.
+
+A focused re-check of that commit found it ready to merge and two stale lines in
+DESIGN.md, corrected. It also noted two things that were already so before this change
+and are left:
+
+- With **Pane headers → On hover** and **Toolbar → Show on hover** together, a lone pane's
+  floating header sits at the top of the window, so its Close is under the toolbar's
+  reveal edge, as the row was before the fix above.
+- With no toolbar row, the floating key-sequence or download chip at the top left covers
+  the start of the header's name.
 
 ## Follow-ups not taken
 

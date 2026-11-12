@@ -312,7 +312,10 @@ fn a_lone_panes_header_stays_clear_of_the_top_edge_when_the_toolbar_has_no_row()
         settle(&mut rt);
         assert!(rt.shell_request.is_none(), "{toolbar:?}: the window stays");
         assert!(
-            rt.state.panel.is_some(),
+            matches!(
+                rt.state.panel.as_ref().map(|p| &p.kind),
+                Some(PanelKind::Confirm { method, .. }) if method == "block.close"
+            ),
             "{toolbar:?}: Close pane's confirmation"
         );
         press(&mut rt, Key::Escape);
