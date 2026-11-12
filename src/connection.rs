@@ -1367,6 +1367,7 @@ async fn run_host(
     let mut prefetch = prefetch::Prefetch::default();
     let mut keymap: Option<Box<keymap::Declaration>> = None;
     let mut server_reads = server_info::Reader::default();
+    let mut directory_reads = directory::Reader::default();
     // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
     // fresh one, and its end is a disconnect like any other.
     let ssh = crate::ssh::Target::parse(&configured)?;
@@ -1468,6 +1469,8 @@ async fn run_host(
             if let Some(declaration) = &keymap { keymap::refresh(&mut control, shared, declaration).await; }
             server_reads.reset();
             server_reads.start(&mut control).await?;
+            // The last connection's listing can no longer be answered.
+            directory_reads.abandon(shared, directory::Failure::Disconnected);
             retry = 0;
             prefetch.reset();
             let mut pace = tokio::time::interval(prefetch::PACE);
@@ -1517,6 +1520,7 @@ async fn run_host(
                         }
                     }
                     reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
+                    _ = directory_reads.finished(shared), if directory_reads.in_flight() => {}
                     event = control.next_event() => {
                         busy_since = Some(Instant::now());
                         let event = event?;
@@ -1552,7 +1556,7 @@ async fn run_host(
                             continue;
                         }
                         if let HostCommand::ListDir(request) = command {
-                            directory::run(&mut control, shared, *request).await;
+                            directory_reads.start(&mut control, shared, *request).await?;
                             continue;
                         }
                         if let HostCommand::Download(request) = command {

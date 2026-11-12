@@ -111,6 +111,59 @@ async fn directory_reads_only_list_and_cancels_closed_old_epoch_and_expired_requ
 }
 
 #[tokio::test]
+async fn a_slow_listing_does_not_hold_up_other_requests_on_the_host() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = start(&listener).await;
+        let slow = recv(&mut ws).await;
+        assert_eq!(slow["method"], "com.superlogical.terminal.list_dir");
+        // The listing stays unanswered while the host's other work is asked and answered.
+        let list = recv(&mut ws).await;
+        assert_eq!(list["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list,
+            2,
+            json!({"sessions":[{"session_id":SESSION,"label":"renamed"},
+                {"session_id":OTHER,"label":"elsewhere"}]}),
+        )
+        .await;
+        let view = recv(&mut ws).await;
+        assert_eq!(view["method"], "session.view");
+        reply(
+            &mut ws,
+            &view,
+            3,
+            json!({"session_id":SESSION,"label":"renamed","revision":2}),
+        )
+        .await;
+        send(
+            &mut ws,
+            json!({"type":"response","id":slow["id"],"payload":{"path":"/mnt/slow","home":"/home/dev","status":"ok","entries":[{"name":"late","file":true}],"truncated":false}}),
+        )
+        .await;
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let open = Arc::new(());
+    host.commands
+        .send(HostCommand::ListDir(Box::new(listing(1, 1, &open))))
+        .unwrap();
+    host.commands.send(HostCommand::RefreshSessions).unwrap();
+    until(&host, |m| {
+        m.sessions.len() == 2 && m.views.get(SESSION).is_some_and(|v| v.revision == 2)
+    })
+    .await;
+    let reply = answer(&host, 1).await;
+    assert_eq!(reply.result.as_ref().unwrap().entries[0].name, "late");
+    assert!(host.model.lock().unwrap().connected);
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn a_silent_directory_request_times_out_once_without_input_or_replay() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());

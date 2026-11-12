@@ -110,9 +110,116 @@ fn quoting_is_posix_and_only_when_needed() {
     ] {
         assert_eq!(directory::quote(path).unwrap(), quoted, "{path}");
     }
-    for c in ['\0', '\n', '\r', '\t', '\u{1b}', '\u{7f}', '\u{85}'] {
+    for c in [
+        '\0', '\n', '\r', '\t', '\u{1b}', '\u{7f}', '\u{85}', '\u{9b}',
+    ] {
         assert!(directory::quote(&format!("/tmp/a{c}b")).is_err());
     }
+    // Separators and invisible formatting are refused too: single quotes would keep them
+    // literal, but a name could read as a different one (`invoice<RLO>fdp.sh`).
+    for c in [
+        '\u{061C}',
+        '\u{200B}',
+        '\u{200E}',
+        '\u{200F}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{202A}',
+        '\u{202E}',
+        '\u{2060}',
+        '\u{2066}',
+        '\u{2069}',
+        '\u{FEFF}',
+        '\u{E0001}',
+        '\u{E007F}',
+    ] {
+        assert!(directory::refused(c), "{:04X}", c as u32);
+        assert!(directory::quote(&format!("/tmp/a{c}b")).is_err());
+    }
+    // Joiners that scripts and emoji sequences need, and ordinary text, are kept.
+    for name in [
+        "/tmp/👩\u{200D}💻",
+        "/tmp/می\u{200C}خواهم",
+        "/tmp/שלום",
+        "/tmp/a\u{00A0}b",
+    ] {
+        assert_eq!(directory::quote(name).unwrap(), format!("'{name}'"));
+    }
+}
+
+#[test]
+fn returned_names_with_refused_characters_are_left_out() {
+    let mut reply = response();
+    for name in [
+        "invoice\u{202E}fdp.sh",
+        "line\u{2028}break",
+        "zero\u{200B}width",
+        "ok\u{200D}joined",
+    ] {
+        reply.entries.push(rexrs::api::terminal::Entry {
+            name: name.into(),
+            file: Some(true),
+            ..Default::default()
+        });
+    }
+    let labels: Vec<_> = directory::rows(&reply, "")
+        .into_iter()
+        .map(|row| row.label)
+        .collect();
+    assert!(labels.contains(&"ok\u{200D}joined".to_owned()));
+    assert!(
+        labels
+            .iter()
+            .all(|label| !label.chars().any(directory::refused)),
+        "{labels:?}"
+    );
+    assert!(
+        !labels
+            .iter()
+            .any(|l| l.starts_with("invoice") || l.starts_with("line") || l.starts_with("zero"))
+    );
+}
+
+#[test]
+fn insert_path_is_never_remote_and_a_host_cannot_open_it() {
+    use crate::app::actions::Remote;
+    let spec = actions::find(ACTION).expect("registered");
+    assert!(matches!(spec.remote(), Remote::Never(_)));
+    assert!(spec.requires_person());
+    // A client.perform request is refused, with consent on, and lists nothing.
+    let (mut ws, rx) = fixture();
+    ws.settings.hosts[0].remote_control = true;
+    ws.remote_perform(
+        0,
+        crate::app::tests::remote_tests::pending(ACTION, serde_json::json!({})),
+        &mut rune::Tx::default(),
+    );
+    crate::app::tests::remote_tests::code(
+        crate::app::tests::remote_tests::reply(&rx),
+        "not_supported",
+    );
+    assert!(ws.panel.is_none(), "no browser");
+    // Nor can an action the host returns from a key binding.
+    let mut model = ws.hosts[0].model.clone();
+    model
+        .client_actions
+        .push(rex_linux::connection::actions::Queued {
+            generation: ws.keymap_generation,
+            session: Some("s".into()),
+            block: Some("block:b".into()),
+            action: rexrs::api::client::ClientAction {
+                action: ACTION.into(),
+                args: None,
+            },
+        });
+    *ws.hosts[0].connection.model.lock().unwrap() = model;
+    ws.sync(0, &mut rune::Tx::default());
+    assert!(ws.panel.is_none());
+    assert!(
+        rx.try_iter()
+            .all(|c| !matches!(c, HostCommand::ListDir(_) | HostCommand::Terminal { .. }))
+    );
+    assert!(ws.notices.iter().any(|n| n.text.contains("cannot start")));
 }
 #[test]
 fn path_prefix_splitting_preserves_spaces_empty_components_and_home() {
@@ -403,7 +510,10 @@ fn truncated_listing_sends_prefix_and_controls_are_refused() {
     assert_eq!(ws.entries().len(), 2);
     edit(&mut ws, "~/bad\nname");
     assert!(rx.is_empty());
-    assert!(error(&ws).contains("control characters"));
+    assert!(error(&ws).contains("control or invisible formatting characters"));
+    edit(&mut ws, "~/invoice\u{202E}fdp.sh");
+    assert!(rx.is_empty());
+    assert!(error(&ws).contains("control or invisible formatting characters"));
     edit(&mut ws, "~/");
     let r = request(&rx);
     let mut answer = response();

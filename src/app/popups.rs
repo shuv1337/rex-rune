@@ -573,7 +573,12 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                     TextInput::new(&panel.inputs[0])
                         .placeholder(placeholder)
                         .active_descendant(Some(format!("entry:{}", panel.selected)))
-                        .leading_icon(&SEARCH)
+                        // A magnifying glass marks search fields only.
+                        .leading_icon(if matches!(panel.kind, PanelKind::Directory(_)) {
+                            &FOLDER
+                        } else {
+                            &SEARCH
+                        })
                         .leading_icon_size(14.)
                         .text_style(ui(13.))
                         .height(32.)

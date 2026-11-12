@@ -1,4 +1,8 @@
 //! One read-only directory request. Results are correlated and never replayed.
+//!
+//! A listing waits on the terminal machine's filesystem, which can be slow (a network
+//! mount), so it is sent without waiting for it, as the server's version and status reads
+//! are: keys, events and every other request on the host keep flowing meanwhile.
 use super::{Client, Shared};
 use rexrs::api::{
     BlockMethod,
@@ -6,8 +10,9 @@ use rexrs::api::{
 };
 use std::{
     sync::{Arc, Weak},
-    time::{Duration, Instant},
+    time::Instant,
 };
+use tokio::sync::oneshot;
 
 pub struct Request {
     pub id: u64,
@@ -58,35 +63,87 @@ pub(super) fn finish(shared: &Shared, request: &Request, result: Result<ListDirR
     });
 }
 
-pub(super) async fn run(control: &mut Client, shared: &Shared, request: Request) {
-    if request.open.strong_count() == 0 {
-        return;
-    }
-    let epoch = shared.model.lock().expect("host model").connection_epoch;
-    if epoch != request.epoch {
-        finish(shared, &request, Err(Failure::Disconnected));
-        return;
-    }
-    let remaining = request.deadline.saturating_duration_since(Instant::now());
-    let result = if remaining.is_zero() {
-        Err(Failure::Timeout)
-    } else {
-        let payload = serde_json::json!({"session_id":request.session, "block_id":request.block, "args":request.args});
-        match tokio::time::timeout(
-            remaining.min(Duration::from_secs(8)),
-            control.call_raw(ListDir::NAME, payload),
-        )
-        .await
-        {
-            Err(_) | Ok(Err(rexrs::Error::TimedOut)) => Err(Failure::Timeout),
-            Ok(Err(rexrs::Error::Api(
-                rexrs::ApiError::MethodNotFound { .. }
-                | rexrs::ApiError::RevisionTooLow { .. }
-                | rexrs::ApiError::NotSupported { .. },
-            ))) => Err(Failure::Unsupported),
-            Ok(Err(_)) => Err(Failure::Request),
-            Ok(Ok(value)) => serde_json::from_value(value).map_err(|_| Failure::Request),
+/// A host's listing in flight, at most one: a browser asks for one at a time.
+#[derive(Default)]
+pub(super) struct Reader {
+    read: Option<(Request, oneshot::Receiver<String>)>,
+}
+
+impl Reader {
+    /// Send the request without waiting for its answer. Only a failed send is an error.
+    pub async fn start(
+        &mut self,
+        control: &mut Client,
+        shared: &Shared,
+        request: Request,
+    ) -> rexrs::Result<()> {
+        if request.open.strong_count() == 0 {
+            return Ok(());
         }
-    };
-    finish(shared, &request, result);
+        let epoch = shared.model.lock().expect("host model").connection_epoch;
+        if epoch != request.epoch {
+            finish(shared, &request, Err(Failure::Disconnected));
+            return Ok(());
+        }
+        if request.deadline <= Instant::now() {
+            finish(shared, &request, Err(Failure::Timeout));
+            return Ok(());
+        }
+        // A new browser's first read can arrive while a closed one's is still out.
+        self.abandon(shared, Failure::Request);
+        let payload = serde_json::json!({"session_id":request.session, "block_id":request.block, "args":request.args});
+        match control.transport().detach(ListDir::NAME, payload).await {
+            Ok(reply) => {
+                self.read = Some((request, reply));
+                Ok(())
+            }
+            Err(error) => {
+                finish(shared, &request, Err(Failure::Disconnected));
+                Err(error)
+            }
+        }
+    }
+
+    pub fn in_flight(&self) -> bool {
+        self.read.is_some()
+    }
+
+    /// Wait for the listing in flight to answer or run out of time, and record it.
+    /// Cancel-safe: dropping this leaves the request in flight.
+    pub async fn finished(&mut self, shared: &Shared) {
+        let Some((request, reply)) = &mut self.read else {
+            return std::future::pending().await;
+        };
+        let deadline = tokio::time::Instant::from_std(request.deadline);
+        let result = match tokio::time::timeout_at(deadline, reply).await {
+            Err(_) => Err(Failure::Timeout),
+            // The socket went away with the answer still owed.
+            Ok(Err(_)) => Err(Failure::Disconnected),
+            Ok(Ok(text)) => parse(&text),
+        };
+        if let Some((request, _)) = self.read.take() {
+            finish(shared, &request, result);
+        }
+    }
+
+    /// The connection ended, or another listing takes this one's place: its answer, if
+    /// one still comes, is dropped.
+    pub fn abandon(&mut self, shared: &Shared, failure: Failure) {
+        if let Some((request, _)) = self.read.take() {
+            finish(shared, &request, Err(failure));
+        }
+    }
+}
+
+/// A raw response: its listing, or why there is none.
+fn parse(text: &str) -> Result<ListDirResponse, Failure> {
+    let mut response: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| Failure::Request)?;
+    if !response["error"].is_null() {
+        return Err(match response["error"]["code"].as_str() {
+            Some("method_not_found" | "revision_too_low" | "not_supported") => Failure::Unsupported,
+            _ => Failure::Request,
+        });
+    }
+    serde_json::from_value(response["payload"].take()).map_err(|_| Failure::Request)
 }

@@ -44,10 +44,34 @@ pub fn split_path(text: &str) -> (&str, &str) {
         .map_or(("", text), |at| (&text[..=at], &text[at + 1..]))
 }
 
+const REFUSED: &str = "Paths with control or invisible formatting characters can't be inserted.";
+
+/// A character that is never pasted or listed: controls (which a terminal would act on),
+/// line and paragraph separators, and the invisible formatting characters that can make a
+/// name read as a different one (bidirectional controls, zero-width space, word joiner,
+/// byte-order mark, tags). Zero-width joiner and non-joiner stay: scripts and emoji
+/// sequences need them.
+pub fn refused(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200B}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
 /// POSIX single quoting, never raw controls. Tilde is resolved by Rex before this call.
 pub fn quote(path: &str) -> Result<String, &'static str> {
-    if path.chars().any(char::is_control) {
-        return Err("Paths with control characters can't be inserted.");
+    if path.chars().any(refused) {
+        return Err(REFUSED);
     }
     // A bare relative option-like name must remain a path when pasted after a command.
     let path = if path.starts_with('-') {
@@ -100,7 +124,7 @@ pub fn rows(reply: &ListDirResponse, prefix: &str) -> Vec<PathRow> {
             !e.name.is_empty()
                 && !matches!(e.name.as_str(), "." | "..")
                 && !e.name.contains('/')
-                && !e.name.chars().any(char::is_control)
+                && !e.name.chars().any(refused)
                 && (!e.name.starts_with('.') || prefix.starts_with('.'))
                 && e.name.to_lowercase().starts_with(&lower)
         })
@@ -149,8 +173,8 @@ impl Workspace {
             return;
         };
         let text = panel.inputs[0].text.clone();
-        if text.chars().any(char::is_control) {
-            panel.error = Some("Paths with control characters can't be inserted.".into());
+        if text.chars().any(refused) {
+            panel.error = Some(REFUSED.into());
             return;
         }
         let model = &self.hosts[target.host].model;
@@ -234,7 +258,7 @@ impl Workspace {
                 if panel.error.is_some() {
                     return;
                 }
-                if !reply.path.starts_with('/') || reply.path.chars().any(char::is_control) {
+                if !reply.path.starts_with('/') || reply.path.chars().any(refused) {
                     panel.error = Some("Rex returned a path that can't be inserted.".into());
                     return;
                 }

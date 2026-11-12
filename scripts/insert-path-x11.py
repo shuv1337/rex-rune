@@ -126,6 +126,8 @@ try:
     words = capture("browser-1024")
     assert "a space" in words and "Alice" in words and "folder" in words, words
     assert "hidden" not in words, words
+    # The newline-bearing name is never offered: no row can paste a raw control character.
+    assert "bad" not in words, words
     field("~/tree/.")
     assert "hidden" in capture("hidden"), "dot prefix did not reveal dotfile"
     field("~/tree/fol")
