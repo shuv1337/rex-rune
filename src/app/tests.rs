@@ -48,6 +48,8 @@ mod terminal_settings_tests;
 mod titles_tests;
 #[path = "toolbar_reveal_tests.rs"]
 mod toolbar_reveal_tests;
+#[path = "updates_tests.rs"]
+mod updates_tests;
 #[path = "wiring_tests.rs"]
 mod wiring_tests;
 #[path = "workspace_fixes_tests.rs"]

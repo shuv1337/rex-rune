@@ -1,5 +1,7 @@
 //! Low-cost, privacy-respecting release metadata check, Minisign verification, install-channel
-//! detection, and persistent update state. Never downloads binaries or modifies the installation.
+//! detection, and persistent update state. Metadata checks never download binaries.
+//! `installer` explicitly updates verified, user-writable install.sh installations.
+pub mod installer;
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
 use ring::signature::{ED25519, UnparsedPublicKey};
@@ -444,11 +446,10 @@ pub struct ChannelGuidance {
     pub command: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct InstallReceipt {
     schema: u32,
     path: String,
-    #[allow(dead_code)]
     version: String,
     sha256: String,
 }
@@ -568,9 +569,9 @@ impl InstallChannel {
             }
             Self::Tarball => ChannelGuidance {
                 summary: format!(
-                    "Rex Linux {version} is available. Re-run the verified install.sh command to upgrade."
+                    "Rex Linux {version} is available. Open Settings → Updates to install it."
                 ),
-                detail: "Installed in ~/.local/bin with install.sh. Run the verified installer command in a terminal to upgrade.".into(),
+                detail: "Installed with install.sh. Update now verifies and replaces the client, launcher and icons; restart when ready. Copy command is the terminal fallback.".into(),
                 command: Some(INSTALL_SCRIPT_COMMAND.into()),
             },
             Self::Deb { custom_hint } => {
@@ -618,7 +619,7 @@ impl InstallChannel {
                 summary: format!(
                     "Rex Linux {version} is available on GitHub Releases."
                 ),
-                detail: "Standalone binary without a package marker or install receipt. Download the latest release from GitHub Releases.".into(),
+                detail: "No package marker or verified install receipt matches this binary. Self-update is unavailable; repair the install with install.sh or download the latest release from GitHub Releases.".into(),
                 command: None,
             },
         }
@@ -914,6 +915,15 @@ pub fn check_for_updates(config: &CheckConfig, force: bool) -> Result<(CheckOutc
         ));
     }
 
+    let manifest = fetch_verified_manifest(config)?;
+
+    apply_verified_manifest(&mut state, &config.current_version, &manifest, now).map(|outcome| {
+        let _ = state.save(&config.state_path);
+        (outcome, state)
+    })
+}
+
+fn fetch_verified_manifest(config: &CheckConfig) -> Result<ReleaseManifest> {
     let manifest_bytes = fetch_bytes(
         &config.manifest_url,
         MAX_MANIFEST_BYTES,
@@ -926,12 +936,7 @@ pub fn check_for_updates(config: &CheckConfig, force: bool) -> Result<(CheckOutc
     )?;
     let sig_text = std::str::from_utf8(&sig_bytes).context("signature is not valid UTF-8")?;
     let key_refs: Vec<&str> = config.public_keys.iter().map(String::as_str).collect();
-    let manifest = verify_and_parse_manifest(&manifest_bytes, sig_text, &key_refs)?;
-
-    apply_verified_manifest(&mut state, &config.current_version, &manifest, now).map(|outcome| {
-        let _ = state.save(&config.state_path);
-        (outcome, state)
-    })
+    verify_and_parse_manifest(&manifest_bytes, sig_text, &key_refs)
 }
 
 /// Apply a verified manifest to `state`, enforcing anti-rollback (`highest_verified`) and `update_from`.
@@ -1132,7 +1137,7 @@ mod tests {
 
     // Deterministic test keypair generated exclusively for unit tests.
     // Secret seed: [7u8; 32], Key ID: 0102030405060708
-    fn test_keypair() -> ([u8; 8], ring::signature::Ed25519KeyPair, String) {
+    pub(super) fn test_keypair() -> ([u8; 8], ring::signature::Ed25519KeyPair, String) {
         use ring::signature::KeyPair as _;
         let seed = [7u8; 32];
         let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
@@ -1146,7 +1151,7 @@ mod tests {
         (key_id, pair, pub_text)
     }
 
-    fn sign_minisig(
+    pub(super) fn sign_minisig(
         key_id: &[u8; 8],
         pair: &ring::signature::Ed25519KeyPair,
         message: &[u8],
@@ -1174,7 +1179,7 @@ mod tests {
         )
     }
 
-    fn sample_manifest_json(version: &str, update_from: &str) -> Vec<u8> {
+    pub(super) fn sample_manifest_json(version: &str, update_from: &str) -> Vec<u8> {
         let sha = "a".repeat(64);
         serde_json::to_vec_pretty(&serde_json::json!({
             "schema": 1,
