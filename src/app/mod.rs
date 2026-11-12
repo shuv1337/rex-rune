@@ -326,6 +326,7 @@ pub fn run(
             workspace
         })
         .args(rune_args)
+        .chrome(platform::chrome::FRAME)
         .window_options(rune::WindowOptions {
             borderless: platform::chrome::OWN_FRAME,
             min_size: Some((640., 480.)),

@@ -291,7 +291,15 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if s.recording().is_some() {
         return super::recorder::key(s, ev, tx);
     }
+    use super::platform::keys::{WindowMenuKey, window_menu_key};
+    let window_key = window_menu_key(&ev.key, ev.mods);
     if let Some(panel) = &s.panel {
+        // The system's Close would fall through to the window and quit Rex: with a popup
+        // or Settings open, Command+W closes that instead.
+        if window_key == Some(WindowMenuKey::Close) {
+            s.cancel_panel(tx);
+            return true;
+        }
         if panel.is_list() && tx.focused().is_none() {
             return list_key(s, ev, tx);
         }
@@ -308,6 +316,11 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     s.last_keypress = Some(std::time::Instant::now());
     if dispatch(s, ev, tx, false) {
         return true;
+    }
+    // Unbound, these are the window's: Minimize, and Close if its shortcut was taken away.
+    // Left untaken, the system's window menu acts on them instead of the program.
+    if window_key.is_some() {
+        return false;
     }
     forward(s, ev, tx, Vec::new())
 }

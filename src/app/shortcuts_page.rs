@@ -38,6 +38,7 @@ const SERVER: &str = "Server";
 
 const HERE: &str = "Recorded here";
 const HELP: &str = "Press a row’s keys to replace or remove them, or Record shortcut to give it some. Filter by a name or a key, such as ctrl+k.";
+const HELP_COMMAND: &str = "Press a row’s keys to replace or remove them, or Record shortcut to give it some. Filter by a name or a key, such as cmd+k.";
 const LAYERS: &str = "Shortcuts recorded here override shortcuts.json, which overrides the host's Rex configuration and the built-in defaults. Keys in a named mode apply only while that mode is active; within each mode, bindings are listed in priority order.";
 
 /// One action on the page.
@@ -981,7 +982,12 @@ pub fn page(s: &Workspace) -> El {
     let found = listing(all, &query);
     let mut sections = Vec::new();
     if query.is_empty() {
-        sections.push(footnote(HELP).key("shortcuts-help"));
+        let help = if rex_rune::keymap::command_key() {
+            HELP_COMMAND
+        } else {
+            HELP
+        };
+        sections.push(footnote(help).key("shortcuts-help"));
     }
     if found.is_empty() {
         let nothing = match &found.key {

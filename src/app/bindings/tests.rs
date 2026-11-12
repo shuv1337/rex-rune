@@ -419,3 +419,86 @@ fn a_press_spells_the_chord_that_finds_it_on_any_layout() {
         );
     }
 }
+
+/// What a Mac keyboard sends, matched as a Mac's shortcuts are: Command is `cmd`, Control
+/// is Control, and neither stands in for the other.
+#[test]
+fn on_a_mac_command_matches_cmd_and_control_stays_control() {
+    let command = Mods {
+        cmd: true,
+        logo: true,
+        ..Mods::default()
+    };
+    let control = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    let press = |key: Key, mods: Mods, code: Option<Code>, base: Option<char>, binding: &str| {
+        let event = KeyEvent { key, mods };
+        let input = Input {
+            event: &event,
+            code,
+            base,
+            repeat: false,
+        };
+        matches_on(&Chord::parse(binding).unwrap(), input, true)
+    };
+    let k = || Key::Command('k');
+    let typed_k = || Key::Text("k".into());
+    assert!(press(k(), command, Some(Code::KeyK), Some('k'), "cmd+k"));
+    assert!(!press(k(), command, Some(Code::KeyK), Some('k'), "ctrl+k"));
+    // Control+K is the program's: no Command shortcut takes it.
+    assert!(!press(
+        typed_k(),
+        control,
+        Some(Code::KeyK),
+        Some('k'),
+        "cmd+k"
+    ));
+    assert!(press(
+        typed_k(),
+        control,
+        Some(Code::KeyK),
+        Some('k'),
+        "ctrl+k"
+    ));
+    assert!(press(Key::Tab, control, Some(Code::Tab), None, "ctrl+tab"));
+    let option_command = Mods {
+        alt: true,
+        ..command
+    };
+    assert!(press(
+        Key::Left,
+        option_command,
+        Some(Code::ArrowLeft),
+        None,
+        "alt+cmd+left"
+    ));
+    // Shift+Command+]: the layout types `}`, the key's own character is `]`.
+    let shift_command = Mods {
+        shift: true,
+        ..command
+    };
+    assert!(press(
+        Key::Command('}'),
+        shift_command,
+        Some(Code::BracketRight),
+        Some(']'),
+        "shift+cmd+]"
+    ));
+    // Recording spells Command as `cmd`, and the spelling finds its own press.
+    let event = KeyEvent {
+        key: k(),
+        mods: command,
+    };
+    let input = Input {
+        event: &event,
+        code: Some(Code::KeyK),
+        base: Some('k'),
+        repeat: false,
+    };
+    let recorded = chord_of_on(input, true).unwrap();
+    assert_eq!(recorded.spelling(), "cmd+k");
+    assert_eq!(recorded.keycaps_on(true), ["Cmd", "K"]);
+    assert!(matches_on(&recorded, input, true));
+}

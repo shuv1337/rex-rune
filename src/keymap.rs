@@ -312,19 +312,17 @@ impl Chord {
     }
 
     pub fn keycaps(&self) -> Vec<String> {
+        self.keycaps_on(command_key())
+    }
+
+    /// [`Self::keycaps`] with a Mac's own names for two of the keys (`command`), or a PC's.
+    pub fn keycaps_on(&self, command: bool) -> Vec<String> {
         let mut caps = Vec::new();
         for (enabled, label) in [
             (self.modifiers.ctrl, "Ctrl"),
-            // A Mac's own names for the two keys, where its shortcuts are in use.
-            (
-                self.modifiers.alt,
-                if command_key() { "Option" } else { "Alt" },
-            ),
+            (self.modifiers.alt, if command { "Option" } else { "Alt" }),
             (self.modifiers.shift, "Shift"),
-            (
-                self.modifiers.logo,
-                if command_key() { "Cmd" } else { "Super" },
-            ),
+            (self.modifiers.logo, if command { "Cmd" } else { "Super" }),
         ] {
             if enabled {
                 caps.push(label.into());
@@ -403,7 +401,8 @@ pub fn defaults() -> KeymapDefault {
 /// (Ctrl+C, Ctrl+T, Ctrl+W); Command reaches no program, so copy, paste, find, new tab and
 /// close are the plain keys every Mac app uses. Splits and pane focus follow the Mac
 /// terminals: ⌘D and ⇧⌘D, and ⌥⌘ with an arrow. Tabs also turn on ⇧⌘[ and ⇧⌘], since a
-/// Mac keyboard has no Page Up. Control+Tab stays Control+Tab, as it is in Mac apps.
+/// Mac keyboard has no Page Up, and ⌘A selects the terminal's text, which on Control is the
+/// program's Ctrl+A. Control+Tab stays Control+Tab, as it is in Mac apps.
 pub fn defaults_on(command: bool) -> KeymapDefault {
     // `mod` is the platform's modifier; the second spelling, when there is one, is the Mac's.
     const ACTIONS: &[(&str, Option<&str>, &str)] = &[
@@ -458,6 +457,7 @@ pub fn defaults_on(command: bool) -> KeymapDefault {
         for (keys, action) in [
             ("cmd+shift+[", "client.tab.previous"),
             ("cmd+shift+]", "client.tab.next"),
+            ("cmd+a", "pane.select_all"),
         ] {
             bindings.push(Binding::new([canonical(keys.to_owned())], action));
         }
@@ -942,12 +942,12 @@ mod tests {
             actions.dedup();
             actions
         };
-        assert_eq!(
-            actions(&command),
-            actions(&control),
-            "nothing gained or lost"
-        );
-        assert_eq!(command.bindings.len(), control.bindings.len() + 2);
+        // Everything Control binds, and Select all, which Control leaves to the program.
+        let mut expected = actions(&control);
+        expected.push(("pane.select_all".into(), None));
+        expected.sort_by_key(|(action, args)| format!("{action} {args:?}"));
+        assert_eq!(actions(&command), expected);
+        assert_eq!(command.bindings.len(), control.bindings.len() + 3);
         let mut seen = std::collections::HashSet::new();
         for binding in &command.bindings {
             let keys = binding.keys.join(">");
@@ -984,10 +984,16 @@ mod tests {
             ("shift+cmd+]", "client.tab.next"),
             ("shift+cmd+[", "client.tab.previous"),
             ("cmd+=", "client.zoom.in"),
+            ("cmd+a", "pane.select_all"),
             ("ctrl+tab", "client.tab.next_global"),
         ] {
             assert!(bound(keys, action, None), "{keys} {action}");
         }
+        let palette = Chord::parse("shift+cmd+p").unwrap();
+        assert_eq!(palette.keycaps_on(true), ["Shift", "Cmd", "P"]);
+        assert_eq!(palette.keycaps_on(false), ["Shift", "Super", "P"]);
+        let focus = Chord::parse("alt+cmd+left").unwrap();
+        assert_eq!(focus.keycaps_on(true), ["Option", "Cmd", "Left"]);
         assert!(bound("cmd+d", "pane.split", Some("right")));
         assert!(bound("shift+cmd+d", "pane.split", Some("down")));
         assert!(bound("alt+cmd+left", "pane.focus", Some("left")));

@@ -623,7 +623,11 @@ pub fn key(s: &mut Workspace, event: &KeyEvent, tx: &mut Tx) -> bool {
     recorder.refused = match chord_of(input) {
         None => Some("That key has no name a shortcut can use."),
         Some(chord) if recorder.chords.is_empty() && !starts(&chord) => {
-            Some("Start with Ctrl, Alt or Super, or use a function key.")
+            Some(if rex_rune::keymap::command_key() {
+                "Start with Cmd, Ctrl or Option, or use a function key."
+            } else {
+                "Start with Ctrl, Alt or Super, or use a function key."
+            })
         }
         Some(_) if recorder.chords.len() == LONGEST => {
             Some("Four keys at most. Backspace takes one back.")

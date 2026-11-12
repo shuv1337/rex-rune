@@ -280,12 +280,28 @@ fn a_mac_plays_its_own_alert_sounds_with_afplay_when_no_linux_player_is_there() 
         );
         assert_eq!(select(&Tree(vec![file]), &paths, &[], sound), None);
     }
-    // A Linux player on PATH still comes first.
+    // A Linux player Homebrew put on PATH does not take the sound away: the Mac's own
+    // player comes first, and a player whose sound file is missing is passed over.
     let tree = Tree(vec![
+        "/opt/homebrew/bin/canberra-gtk-play".into(),
+        "/opt/homebrew/bin/paplay".into(),
         "/usr/bin/afplay".into(),
-        "/usr/bin/canberra-gtk-play".into(),
         "/System/Library/Sounds/Glass.aiff".into(),
     ]);
+    let paths = ["/opt/homebrew/bin".into(), "/usr/bin".into()];
     let chosen = select(&tree, &paths, &[], Sound::Done).unwrap();
-    assert_eq!(chosen.program, PathBuf::from("/usr/bin/canberra-gtk-play"));
+    assert_eq!(chosen.program, PathBuf::from("/usr/bin/afplay"));
+    let no_sound_file = Tree(vec!["/opt/homebrew/bin/paplay".into()]);
+    assert_eq!(select(&no_sound_file, &paths, &[], Sound::Done), None);
+    let with_canberra = Tree(vec![
+        "/opt/homebrew/bin/paplay".into(),
+        "/usr/bin/canberra-gtk-play".into(),
+    ]);
+    assert_eq!(
+        select(&with_canberra, &paths, &[], Sound::Done)
+            .unwrap()
+            .program,
+        PathBuf::from("/usr/bin/canberra-gtk-play"),
+        "a later player that can play is used"
+    );
 }

@@ -63,6 +63,21 @@ pub(super) fn select(
     data: &[PathBuf],
     sound: Sound,
 ) -> Option<Invocation> {
+    // macOS: its own player and the system's alert sounds. Neither exists anywhere else,
+    // so where both do this is a Mac, whatever Linux player Homebrew has put on PATH.
+    if let Some(program) = paths
+        .iter()
+        .map(|p| p.join("afplay"))
+        .find(|p| files.executable(p))
+    {
+        let file = Path::new("/System/Library/Sounds").join(format!("{}.aiff", sound.mac_name()));
+        if files.file(&file) {
+            return Some(Invocation {
+                program,
+                args: vec![file.into_os_string()],
+            });
+        }
+    }
     for name in ["canberra-gtk-play", "pw-play", "paplay"] {
         let Some(program) = paths
             .iter()
@@ -74,27 +89,22 @@ pub(super) fn select(
         let args = if name == "canberra-gtk-play" {
             vec!["-i".into(), sound.id().into()]
         } else {
-            let file = data
+            // A player without the sound file is no player: try the next.
+            let Some(file) = data
                 .iter()
                 .map(|p| {
                     p.join("sounds/freedesktop/stereo")
                         .join(format!("{}.oga", sound.id()))
                 })
-                .find(|p| files.file(p))?;
+                .find(|p| files.file(p))
+            else {
+                continue;
+            };
             vec![file.into_os_string()]
         };
         return Some(Invocation { program, args });
     }
-    // macOS: its own player and the system's alert sounds. Neither exists anywhere else.
-    let program = paths
-        .iter()
-        .map(|p| p.join("afplay"))
-        .find(|p| files.executable(p))?;
-    let file = Path::new("/System/Library/Sounds").join(format!("{}.aiff", sound.mac_name()));
-    files.file(&file).then(|| Invocation {
-        program,
-        args: vec![file.into_os_string()],
-    })
+    None
 }
 
 pub(super) trait Running {

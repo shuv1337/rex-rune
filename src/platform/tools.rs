@@ -37,13 +37,25 @@ pub fn on_path(name: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
 }
 
-/// What to run for `name`: the name itself when `PATH` has it, else the copy inside its
-/// app, else the name again, so that a missing tool fails as "not found" under its own name.
+/// Where `name` is when `PATH` does not have it: the user's own bin folder
+/// (`$XDG_BIN_HOME`, else `~/.local/bin`), which a desktop launch often leaves off `PATH`,
+/// then the copy inside its app.
+pub fn off_path(name: &str) -> Option<PathBuf> {
+    let user_bin = std::env::var_os("XDG_BIN_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| super::dirs::home().join(".local/bin"));
+    Some(user_bin.join(name))
+        .filter(|path| path.is_file())
+        .or_else(|| bundled(name))
+}
+
+/// What to run for `name`: the name itself when `PATH` has it, else [`off_path`], else the
+/// name again, so that a missing tool fails as "not found" under its own name.
 pub fn program(name: &str) -> PathBuf {
     if on_path(name) {
         return Path::new(name).into();
     }
-    bundled(name).unwrap_or_else(|| Path::new(name).into())
+    off_path(name).unwrap_or_else(|| Path::new(name).into())
 }
 
 #[cfg(test)]
@@ -62,9 +74,9 @@ mod tests {
             let program = program(name);
             if on_path(name) {
                 assert_eq!(program, Path::new(name));
-            } else if let Some(bundled) = bundled(name) {
-                assert!(bundled.is_absolute() && bundled.ends_with(program.file_name().unwrap()));
-                assert_eq!(program, bundled);
+            } else if let Some(found) = off_path(name) {
+                assert!(found.is_absolute() && found.is_file());
+                assert_eq!(program, found);
             } else {
                 assert_eq!(program, Path::new(name));
             }
