@@ -139,17 +139,7 @@ fn quote_arg(arg: &str) -> String {
 }
 
 fn local_rex() -> PathBuf {
-    if std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("rex").is_file()))
-    {
-        return "rex".into();
-    }
-    std::env::var_os("XDG_BIN_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin")))
-        .map(|dir| dir.join("rex"))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| "rex".into())
+    crate::platform::tools::program("rex")
 }
 
 async fn output(program: &OsStr, args: &[String]) -> Result<String> {

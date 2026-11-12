@@ -346,7 +346,8 @@ fn history_button(s: &Workspace, direction: isize) -> El {
     } else {
         ("settings-forward", &RIGHT, "Forward", "Right")
     };
-    let keys = spell(&[vec!["Alt".to_owned(), arrow.to_owned()]]);
+    let alt = super::platform::keys::alt_name();
+    let keys = spell(&[vec![alt.to_owned(), arrow.to_owned()]]);
     let button = row()
         .key(key)
         .role("button")

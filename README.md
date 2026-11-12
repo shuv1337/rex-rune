@@ -31,7 +31,7 @@ Releases are for Linux. The client also [builds from source on macOS](#building-
 - Box-drawing and block element characters (U+2500–U+259F) are drawn as shapes on whole device pixels, as Ghostty draws them, rather than from the font, so borders, tables and block graphics meet their neighbours without seams or overlaps at any font or display scale.
 - Inline Kitty graphics (RGB, RGBA and PNG), including image-bearing snapshots on reattach. Ghostty resolves placement, crop and paint order; the client caches decoded pixels and textures. Image storage is capped at 64 MiB per terminal. File, temporary-file and shared-memory image media are disabled: remote terminal output cannot read local files.
 - Synchronized output (mode 2026): while a program holds an update open (for up to a second, as in Ghostty) the pane keeps its last frame, so full-screen programs redrawing after a resize don't flash blank.
-- Links: Ctrl+click opens an `http`, `https`, `ftp` or `mailto` link with `xdg-open`, whether it is an OSC 8 hyperlink or a URL in the text (including one that soft-wraps across rows). Holding Ctrl over a link underlines it, shows a hand pointer and, after a moment, a tooltip naming its real target, so OSC 8 text cannot disguise where it goes. Ctrl+click works over programs that track the mouse too; clicks elsewhere still go to the program. Other schemes, `file://` among them, are never opened, since output may come from a remote host.
+- Links: Ctrl+click (⌘-click on macOS) opens an `http`, `https`, `ftp` or `mailto` link with `xdg-open` (`open` on macOS), whether it is an OSC 8 hyperlink or a URL in the text (including one that soft-wraps across rows). Holding Ctrl over a link underlines it, shows a hand pointer and, after a moment, a tooltip naming its real target, so OSC 8 text cannot disguise where it goes. Ctrl+click works over programs that track the mouse too; clicks elsewhere still go to the program. Other schemes, `file://` among them, are never opened, since output may come from a remote host.
 - **Insert path…** in Commands browses files and folders on the focused terminal's machine. Type a directory path, filter by its last component (start with `.` for hidden entries), use Up/Down to select and Tab on a folder to descend. Enter or a click pastes one POSIX-shell-quoted absolute path into the captured pane, without Enter or a trailing space; Escape returns to the terminal. Home paths display as `~` but insert as absolute paths. Names containing control characters, line separators or invisible formatting characters (bidirectional controls, zero-width space) are refused, so an invisible character such as a right-to-left override cannot disguise a name; look-alike letters are not detected. The path is quoted for a POSIX shell and goes to whatever program is in the foreground: it is not right inside an already-open quote, or for shells with other quoting rules (fish, csh). `pane.insert_path` is local-only and unbound by default; assign a removable binding in Settings → Shortcuts. Requires a server that supports `terminal.list_dir`; older-server refusals and other errors stay in the browser. The first listing offers up to ten recently used paths per saved host, shared across its sessions on this computer; editing the field hides them. Settings → Terminal → Show recently used paths is on by default; turning it off forgets them. The lists are kept as plain text in `workspace.json`. A recent path may no longer exist: choosing it does not check. [Browser checks](docs/parity-2026-11/M3.1-insert-path.md); [recent paths](docs/parity-2026-11/M3.1-recent-paths.md).
 - **Go to directory…** in Commands uses the same browser over folders only and types `cd` followed by the chosen folder (quoted for a POSIX shell, as an absolute path) into the captured pane. It never presses Enter: the client cannot see whether the prompt already holds text, so you run the line yourself. Recent folders share Insert path's per-host history; file recents are hidden here. Everything else is as for Insert path, including what is refused and that the text goes to whatever program is in the foreground. `pane.go_to_directory` is local-only and unbound by default. [Scope and checks](docs/parity-2026-11/M3.1-go-to-directory.md).
 - File downloads (API revision 13): **Download file…** in the pane menu and Commands saves a file from the terminal's machine into a folder on this one, over the Rex connection (also through SSH hosts). Nothing is overwritten, opened or run by itself. See [Downloading files](#downloading-files).
@@ -212,18 +212,21 @@ What differs from Linux today:
 
 | Area | On macOS |
 | --- | --- |
-| Shortcuts | The Linux defaults, on the Control key. Command is bound to nothing of Rex's; text fields take ⌘A, ⌘C and ⌘V |
-| Window | Borderless, without the close, minimize and zoom buttons; Rex's own close button and drag region work |
+| Shortcuts | On the Command key: see [Shortcuts on macOS](#shortcuts-on-macos) |
+| Window | A standard Mac window: the system's title bar with the session's title and the close, minimize and zoom buttons, edge resizing and full screen. Rex's toolbar is below the title bar and has no close button of its own. Drawing the toolbar in the title bar, beside the traffic lights, is not done yet |
 | Primary selection | macOS has none, so the setting is not shown |
 | Links and Show in folder | Opened with `open`; Show in folder selects the file in Finder |
+| Sounds | Played with `afplay` from the system's alert sounds: Ping when a program needs you, Basso for an error, Glass when one is done |
+| Tailnet machines in Add host | `tailscale` from `PATH`, else the one inside Tailscale.app |
+| Integrations and Start personal server | `rex` from `PATH` or `~/.local/bin`, else the one inside Rex.app or Rex Beta.app |
+| Ghostty theme names | Also read from Ghostty.app's own themes |
 | Notifications | Not available: Settings reports no notification service |
-| Sounds | Not available: no sound player is looked for on macOS |
-| Tailnet machines in Add host | Found only if `tailscale` is on `PATH`; the Tailscale app keeps its CLI inside the app bundle |
-| Integrations | `rex` is looked for on `PATH` and in `~/.local/bin`, not inside the Rex app |
-| Ghostty theme names | Resolve from `~/.config/ghostty/themes`, and from Ghostty's own only when `GHOSTTY_RESOURCES_DIR` is set |
+| Fonts | Through fontconfig, as above |
 | Downloads | The first save into `~/Downloads` can raise a macOS privacy prompt for the program that started the client; if it is refused, the download fails with a permission error |
 | Updates | Settings → Updates reports a source build; nothing is installed for you |
 | `ssh://` hosts, uploads, everything on the server | As on Linux |
+
+The window frame is the one part that has been started and measured but not looked at: this was built without screen access to the Mac. The window server reports a title bar's height above the requested content size and the session's title on it; how it looks has not been seen, and neither has full screen.
 
 CI builds the app and runs the unit and headless UI tests on macOS for every pull request.
 
@@ -371,7 +374,7 @@ Global tab navigation uses cached tab order without enabling extra prefetch: a s
 | Shift PageUp / PageDown, wheel | Scroll local history | `pane.scroll`, `{"lines":-20}` / `{"lines":20}` (wheel is pointer input) |
 | Ctrl + / Ctrl − / Ctrl 0 | Enlarge / shrink / reset the whole interface | `client.zoom.in` / `client.zoom.out` / `client.zoom.reset` |
 
-These are the client defaults; bound chords do not reach terminal programs, and every other key goes to the focused pane. Interface zoom changes in 10% steps (70–150%), is saved as `ui_scale`, and is independent of the terminal font size. `Ctrl =` and the numpad `+`/`−` also work. Commands lists the zoom actions too, and every other action here that needs no argument.
+These are the client defaults on Linux; [on macOS they are on the Command key](#shortcuts-on-macos). Bound chords do not reach terminal programs, and every other key goes to the focused pane. Interface zoom changes in 10% steps (70–150%), is saved as `ui_scale`, and is independent of the terminal font size. `Ctrl =` and the numpad `+`/`−` also work. Commands lists the zoom actions too, and every other action here that needs no argument.
 
 The following actions have no default key binding:
 
@@ -415,13 +418,37 @@ pane wider than it is tall, otherwise below it); `pane.focus` accepts `left`,
 `pane.send_key` takes a single supported chord, not a sequence; for example
 `{"key":"ctrl+b"}`.
 
+### Shortcuts on macOS
+
+On macOS the defaults are on Command (⌘), which terminal programs do not use, so Control keeps its terminal meanings (`Ctrl C`, `Ctrl T`, `Ctrl W`) and nothing needs Shift to stay clear of them. Each Linux default above is the same key with Command in Control's place, except these:
+
+| Shortcut on macOS | Linux default | Action |
+| --- | --- | --- |
+| ⌘T | Ctrl Shift T | New tab |
+| ⌘W | Ctrl Shift W | Close the focused pane, or the tab |
+| ⌘C / ⌘V | Ctrl Shift C / V | Copy / paste |
+| ⌘F | Ctrl Shift F | Search the terminal |
+| ⌘D / ⇧⌘D | Ctrl Shift D / Ctrl Alt D | Split right / down |
+| ⌥⌘ arrows | Ctrl Alt arrows | Focus an adjacent pane |
+| ⇧⌘[ / ⇧⌘] (and ⌘ Page Up / Down) | Ctrl PageUp / PageDown | Previous / next tab in the session |
+| ⌘A | none | Select the terminal's screen and scrollback (`pane.select_all`) |
+| Ctrl Tab / Ctrl Shift Tab | the same | Next / previous tab across sessions |
+| Shift PageUp / PageDown | the same | Scroll local history |
+
+So ⌘K switches sessions, ⇧⌘P opens Commands, ⌘, opens Settings and ⌘= / ⌘− / ⌘0 zoom.
+
+- **Unbound Command keys** go to the program as Super, for the few programs that read it. ⌘M and ⌘W are the exception when nothing is bound to them: they stay the window's Minimize and Close. With a popup or Settings open, ⌘W closes that, not the window. ⌘Q and ⌘H are the system's.
+- **Option** is not settled. The key is reported to Rex as Rune delivers it, with Alt held; whether a program then sees Alt with the key or the character macOS composes for it has not been checked.
+- **Links** open on ⌘-click, because macOS makes Control+click the secondary click.
+- **A `shortcuts.json` written on Linux** keeps its meaning: `ctrl+…` there is the Control key on macOS too, not Command. Write `cmd+…` for Command. In `shortcuts.json` and on the Shortcuts page Command is spelled `cmd`, and keycaps read Cmd and Option. The layer of built-in defaults is still named `linux` where a report names a binding's source, on every platform.
+
 ### Configuring shortcuts
 
 In **Settings → Shortcuts**, press a row’s keys to replace or remove them, or
 **Record shortcut** to give an unbound action a key. Type a chord or a sequence of
 up to four chords; **Enter** or **Save** saves, **Escape**, **Cancel** or a click
 outside cancels. **Backspace** takes back a chord; with none typed it removes the
-old binding, as the Remove button does. Start with Ctrl, Alt, Super, a function
+old binding, as the Remove button does. Start with Ctrl, Alt, Super (on macOS: Cmd, Ctrl, Option), a function
 key or Shift with a named key. Plain typing and IME composition are not recorded.
 Workspace shortcuts are captured, not run, while the recorder has the keyboard.
 Conflicts are warned about before saving, including overlapping sequences.
@@ -434,7 +461,7 @@ filter copies the shortcuts-file path or the recorded layer as JSON, and offers
 **Reset all…** with confirmation. The copied JSON is a **workspace.json fragment**,
 not a shortcuts.json file: it preserves named modes and action-scoped removals.
 Reset forgets only recordings, never edits either user or server configuration.
-**Change shortcuts…** in Commands opens this page; **Ctrl Enter** on a command
+**Change shortcuts…** in Commands opens this page; **Ctrl Enter** (⌘ Enter on macOS) on a command
 opens its recorder when that command has a valid binding target.
 
 For file-based overrides, edit `$XDG_CONFIG_HOME/rex-rune/shortcuts.json` (normally
@@ -456,7 +483,7 @@ uses defaults and appears in Settings → Shortcuts → Problems.
 }
 ```
 
-Layers run lowest to highest: **Linux defaults → each server’s Rex config → shortcuts.json → recorded shortcuts**.
+Layers run lowest to highest: **built-in defaults → each server’s Rex config → shortcuts.json → recorded shortcuts**.
 The app sends its defaults, override layers and action registry to `client.keymap`;
 `rex.bind`, `rex.unbind`, Lua-function sequences and config-file actions participate
 in the same resolution. The active host’s map is used—not a union of hosts.

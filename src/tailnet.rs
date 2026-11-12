@@ -172,7 +172,7 @@ pub fn parse_status(json: &str) -> Result<Vec<Machine>> {
 
 /// Ask the local Tailscale for the tailnet's machines, or words for the user.
 pub fn status() -> std::result::Result<Vec<Machine>, String> {
-    let output = std::process::Command::new("tailscale")
+    let output = std::process::Command::new(crate::platform::tools::program("tailscale"))
         .args(["status", "--json"])
         .stdin(std::process::Stdio::null())
         .output()

@@ -414,7 +414,7 @@ fn pane_card(
                         // Ctrl+click opens a link, even over a program that tracks the mouse.
                         t.pressed_link = None;
                         if button == "left"
-                            && mods.ctrl
+                            && super::platform::keys::primary(mods)
                             && let Some((_, link)) = t.link_at(d.x, d.y, cell)
                         {
                             t.clear_selection();
@@ -513,7 +513,7 @@ fn pane_card(
                         return;
                     }
                     // Holding Ctrl shows the link a click would open.
-                    let link = if tx.mods().ctrl {
+                    let link = if super::platform::keys::primary(tx.mods()) {
                         t.link_at(p.x, p.y, cell)
                     } else {
                         None

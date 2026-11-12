@@ -90,7 +90,7 @@ fn char_name(c: char) -> Option<String> {
 }
 
 pub fn mods(m: Mods) -> String {
-    let ctrl = m.ctrl || (m.cmd && !cfg!(target_os = "macos"));
+    let ctrl = super::platform::keys::control(m);
     [
         (m.shift, "shift"),
         (ctrl, "ctrl"),

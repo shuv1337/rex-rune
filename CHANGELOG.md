@@ -22,7 +22,9 @@
 
 ### Added
 
-- **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, shortcuts are still the Control-key defaults, and notifications and sounds are not available there yet. See [Building on macOS](README.md#building-on-macos).
+- **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, and notifications are not available there yet. See [Building on macOS](README.md#building-on-macos).
+
+- **macOS: Command shortcuts and the system's window.** The default shortcuts on macOS are on Command: ⌘K, ⌘T, ⌘W, ⌘C, ⌘V, ⌘F, ⌘D, ⇧⌘P and the rest, with Control left to the terminal. The window is a standard Mac window with the system's title bar, so its buttons close, minimize and zoom it, its edges resize it and it goes full screen; ⌘W closes an open popup before it closes the window. Links open on ⌘-click. Activity sounds play through `afplay`, and `tailscale` and `rex` are found inside their apps when they are not on `PATH`. Linux is unchanged. See [Shortcuts on macOS](README.md#shortcuts-on-macos).
 
 - **Pull-request CI on three platforms:** Linux runs formatting, Clippy and every test; macOS builds the app and runs the tests; Windows compiles the Ghostty VT library as a first probe.
 
