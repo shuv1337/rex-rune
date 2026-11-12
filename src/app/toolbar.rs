@@ -243,7 +243,12 @@ fn tab_track(s: &Workspace) -> El {
     if fill {
         names = names.grow(1.).min_w(floors.max(0.));
     }
-    let overflow = s.tab_strip.overflows();
+    // At minimum width, the two arrow slots would consume the active tab's remaining
+    // room beside live activity. Wheel/keyboard navigation and automatic reveal still work.
+    let crowded = s.viewport[0] < 1000.
+        && super::downloads_view::chip_label(s).is_some()
+        && s.activity_chip().is_some();
+    let overflow = s.tab_strip.overflows() && !crowded;
     let (fade, pos) = (s.tab_fade.clone(), s.tab_pos.clone());
     let mut strip = row()
         .key("tabs")
@@ -349,6 +354,46 @@ fn bar_button(
         )
 }
 
+/// Shared room policy for live status chips: short below 1000 pt or during a sequence,
+/// absent during a sequence in a narrow toolbar. Sidebar tabs leave room for full words
+/// unless activity also needs a chip: then the same compact policy protects the actions.
+pub fn compact_status(s: &Workspace) -> Option<bool> {
+    let pending = s.bindings.sequence.depth > 0;
+    let narrow = s.viewport[0] < 1000.;
+    let constrained = !s.sidebar_tabs() || s.activity_chip().is_some();
+    if constrained && narrow && pending {
+        return None;
+    }
+    Some(constrained && (narrow || pending))
+}
+
+fn activity_chip(s: &Workspace) -> Option<El> {
+    let compact = compact_status(s)?;
+    let summary = s.activity_chip()?;
+    let label = summary.label();
+    Some(chip_press(chip(
+        row()
+            .key("activity-chip")
+            .role("button")
+            .label(format!("Activity: {label}"))
+            .h(28.)
+            .px(8.)
+            .center_y()
+            .hover(white(0.08))
+            .help(format!(
+                "{label} · {}",
+                s.shortcut_help("Show activity", super::activity_list::ACTION)
+            ))
+            // The list's first field takes focus, just as it does from Commands.
+            .on_press(|s: &mut Workspace| s.show_activity())
+            .child(
+                text(if compact { summary.short() } else { label })
+                    .font(medium(11.5))
+                    .color(rgb(summary.tone())),
+            ),
+    )))
+}
+
 /// One chip while a transfer receives, `↓ build.log 42%` or `↓ 3 files`, and none otherwise,
 /// like the pending-sequence chip. When the bar is short of room it is `↓ 42%` (see
 /// `downloads_view::chip_label`). A press opens the Downloads popover under the chip.
@@ -426,13 +471,15 @@ pub fn sequence_chip(s: &Workspace) -> Option<El> {
 pub fn floating_status(s: &Workspace) -> Option<El> {
     let sequence = sequence_chip(s);
     let download = super::downloads_view::chip_label(s).is_some();
-    if sequence.is_none() && !download {
+    let activity = activity_chip(s);
+    if sequence.is_none() && !download && activity.is_none() {
         return None;
     }
     Some(
         row()
             .gap(8.)
             .children(sequence)
+            .children(activity)
             .children(download.then(|| download_chip(s))),
     )
 }
@@ -462,6 +509,7 @@ pub fn toolbar(s: &Workspace) -> El {
         .child(identity(s))
         .child(if s.sidebar_tabs() { el() } else { tab_track(s) })
         .child(sequence_chip(s).unwrap_or_else(el))
+        .children(activity_chip(s))
         .child(download_chip(s))
         // Always at least 48pt of window to drag, outside the tabs.
         .child(
