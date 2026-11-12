@@ -131,6 +131,9 @@ fn add_download(s: &mut Workspace) {
 #[test]
 fn hidden_controls_leave_no_hits_and_downloads_stay_usable() {
     let (mut rt, _host, sent) = drawn("single", ToolbarBehavior::Hidden);
+    // With no pane header either, the terminal has the toolbar's row.
+    rt.update(|s, _| s.settings.pane_header = rex_linux::settings::PaneHeader::Hidden);
+    settle(&mut rt);
     for key in [
         "close-app",
         "settings",
@@ -280,7 +283,11 @@ fn hidden_gives_the_toolbars_row_to_the_panes() {
     assert!(!has(&rt, "toolbar") && !has(&rt, "toolbar-band"));
     assert_eq!(rt.state.area, [0., 0., 1024., 700.], "all 52 pt of it");
     assert_eq!(rect(&rt, "pane:block:a"), [0., 0., 1024., 700.]);
-    assert_eq!(rect(&rt, "grid:block:a")[1], 8., "under its own padding");
+    assert_eq!(
+        rect(&rt, "grid:block:a")[1],
+        crate::app::theme::CARD_HEADER + 8.,
+        "under the pane's header and its own padding"
+    );
     // Resting on the top edge brings nothing out.
     rest_at(&mut rt, 300., 3.);
     assert!(!has(&rt, "toolbar"));
@@ -387,8 +394,9 @@ fn on_hover_floats_the_toolbar_over_the_top_edge_without_moving_a_terminal() {
 fn the_hover_edge_leaves_presses_to_the_terminal() {
     let (mut ws, _host) = tabbed_workspace("single");
     ws.settings.interface.toolbar = ToolbarBehavior::OnHover;
-    // No padding: the terminal's first row is under the edge.
+    // No padding and no pane header: the terminal's first row is under the edge.
     ws.settings.pane_padding = 0.;
+    ws.settings.pane_header = rex_linux::settings::PaneHeader::Hidden;
     let (sender, sent) = flume::unbounded();
     framed_terminal(&mut ws, "block:a", &sender, b"first line\r\nsecond");
     let mut rt = runtime(ws);

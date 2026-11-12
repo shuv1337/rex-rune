@@ -4,6 +4,8 @@
 
 ### Changed
 
+- **Pane header on a single pane:** a tab with one pane now has its header row in the default Comfortable density, as Rex for macOS does, so **Split right** and **Split down** are there before anything is split. The pane stays edge to edge; the row takes 30 pt from the top of the terminal. Zoom is dimmed as before, and the header's Close is dimmed on the last pane of a session (the pane menu, Commands and the tab's menu still close it). Compact density is unchanged, and Pane headers → On hover or Hidden give the old single-pane look. Reveal pane headers is unavailable where every pane already has a row.
+
 - **Activity elapsed time:** Activity rows show whole-minute, hour or day ages without ticking. A state this client watched begin shows its age (`4m`), and a same-state report does not restart it. Anything else is labeled `reported 4m`: a row read back on connect, or a first report from a pane not yet read, because the server's timestamp advances on every report and not only on a state change. A timestamp more than a minute ahead of this clock, or absurdly old, shows no time. The open list redraws locally once a minute, with no status reads or read receipts. See [meaning and checks](docs/parity-2026-11/M3.2-elapsed-time.md).
 
 - **Activity coverage:** after each connection, read every session's program status once, selected session first and the rest paced in the background, up to three reads at a time. Already-waiting tabs in unopened sessions now feed the Activity list, sidebar word and toolbar chip without notifications or read receipts. The list names reads in progress, failed reads and disconnected hosts. No polling or cap; see [measurements and limits](docs/parity-2026-11/M3.2-status-sweep.md).
