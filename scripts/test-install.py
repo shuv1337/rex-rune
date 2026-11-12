@@ -61,8 +61,8 @@ def main():
         (mini / "minisign").symlink_to(shutil.which("minisign"))
         env = {k: v for k, v in os.environ.items() if not k.startswith("XDG_")}
         env.update(HOME=str(home), PATH=str(tools))
-        installed = home / ".local/bin/rex-linux"
-        desktop = home / ".local/share/applications/dev.shuv.rex-linux.desktop"
+        installed = home / ".local/bin/rex-rune"
+        desktop = home / ".local/share/applications/dev.shuv.rex-rune.desktop"
         prod = root / "install.sh"
         prod.write_text(SOURCE)
 
@@ -89,12 +89,12 @@ def main():
             executable(tools / "getconf", "#!/bin/sh\necho 'glibc 2.39'\n")
         for verifier in (False, True):
             if compatible:
-                p = invoke(args=("--version", "0.5.1"), mini_sign=verifier, contains=f"Installed the Rex Linux desktop client (rex-linux 0.5.1) at {installed} and launcher {desktop}.")
-                assert p.stdout.count(f"Installed the Rex Linux desktop client (rex-linux 0.5.1) at {installed} and launcher {desktop}.") == 1
-                assert p.stdout.count("Installed the Rex Linux desktop client") == 1
+                p = invoke(args=("--version", "0.5.1"), mini_sign=verifier, contains=f"Installed the Rex Rune desktop client (rex-rune 0.5.1) at {installed} and launcher {desktop}.")
+                assert p.stdout.count(f"Installed the Rex Rune desktop client (rex-rune 0.5.1) at {installed} and launcher {desktop}.") == 1
+                assert p.stdout.count("Installed the Rex Rune desktop client") == 1
                 assert p.stdout.count("This does not install or change the Rex server (rex).") == 1
-                assert p.stdout.count(f"rex-linux needs a Rex server installed separately; see {REPO}#build-requirements.") == 1
-                assert checked([str(installed), "--version"]) == "rex-linux 0.5.1"
+                assert p.stdout.count(f"rex-rune needs a Rex server installed separately; see {REPO}#build-requirements.") == 1
+                assert checked([str(installed), "--version"]) == "rex-rune 0.5.1"
                 assert desktop.exists()
                 invoke(args=("--version", "0.5.1"), mini_sign=verifier, contains="already current")
                 invoke(args=("--uninstall",))
@@ -124,7 +124,7 @@ os.execv("/usr/bin/curl", ["curl", *args])
         arch = checked(["uname", "-m"])
         names = ["SHA256SUMS", "SHA256SUMS.minisig"]
         if compatible:
-            names.append(f"rex-linux-0.5.1-{arch}-linux-gnu.tar.gz")
+            names.append(f"rex-rune-0.5.1-{arch}-linux-gnu.tar.gz")
         for name in names:
             checked(["curl", "--proto", "=https", "-fsSL", f"{REPO}/releases/download/v0.5.1/{name}", "-o", str(real / name)])
         real_script = root / "real-assets.sh"
@@ -177,18 +177,18 @@ os.execv("/usr/bin/curl", ["curl", *args])
             executable(stubs / name, f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
         for version in ("0.5.1", "0.5.2"):
             (build / "Cargo.toml").write_text(f'[package]\nversion = "{version}"\n')
-            executable(build / "target/release/rex-linux", f"#!/bin/sh\necho 'rex-linux {version}'\n")
+            executable(build / "target/release/rex-rune", f"#!/bin/sh\necho 'rex-rune {version}'\n")
             checked(["python3", str(build / "scripts/package-release.py")], env={**env, "PATH": f"{stubs}:{tools}"})
             release = site / "releases/download" / f"v{version}"
             release.mkdir(parents=True)
-            for package in (build / "dist").glob(f"rex-linux-{version}-*.tar.gz"):
+            for package in (build / "dist").glob(f"rex-rune-{version}-*.tar.gz"):
                 shutil.copy2(package, release / package.name)
             package = next(release.glob("*.tar.gz"))
             (release / "SHA256SUMS").write_text(f"{hashlib.sha256(package.read_bytes()).hexdigest()}  {package.name}\n")
 
         def sign(version="0.5.2", key="ci", comment=None):
             path = site / "releases/download" / f"v{version}" / "SHA256SUMS"
-            checked(["minisign", "-S", "-s", str(keys / f"{key}.key"), "-m", str(path), "-t", comment or f"rex-linux v{version} SHA256SUMS"])
+            checked(["minisign", "-S", "-s", str(keys / f"{key}.key"), "-m", str(path), "-t", comment or f"rex-rune v{version} SHA256SUMS"])
 
         sign("0.5.1")
         sign()
@@ -196,7 +196,7 @@ os.execv("/usr/bin/curl", ["curl", *args])
         latest.parent.mkdir(parents=True)
         latest.symlink_to(site / "releases/download/v0.5.2", target_is_directory=True)
         # Sentinel preferences and unrelated files must survive uninstall.
-        preferences = home / ".config/rex-linux/workspace.json"
+        preferences = home / ".config/rex-rune/workspace.json"
         preferences.parent.mkdir(parents=True)
         preferences.write_text('{"keep":true}')
         unrelated = home / ".local/bin/not-rex"
@@ -212,15 +212,15 @@ os.execv("/usr/bin/curl", ["curl", *args])
         for shell in ("dash", "bash", "busybox"):
             for verifier in (False, True):
                 p = invoke(fixture, ("--version", "0.5.1"), shell=shell, mini_sign=verifier)
-                assert p.stdout.count(f"Installed the Rex Linux desktop client (rex-linux 0.5.1) at {installed} and launcher {desktop}.") == 1
-                assert p.stdout.count("Installed the Rex Linux desktop client") == 1
+                assert p.stdout.count(f"Installed the Rex Rune desktop client (rex-rune 0.5.1) at {installed} and launcher {desktop}.") == 1
+                assert p.stdout.count("Installed the Rex Rune desktop client") == 1
                 assert p.stdout.count("This does not install or change the Rex server (rex).") == 1
-                assert p.stdout.count(f"rex-linux needs a Rex server installed separately; see {url}#build-requirements.") == 1
-                p = invoke(fixture, ("--upgrade",), shell=shell, mini_sign=verifier, contains=f"Installed the Rex Linux desktop client (rex-linux 0.5.2) at {installed} and launcher {desktop}.")
-                assert p.stdout.count(f"Installed the Rex Linux desktop client (rex-linux 0.5.2) at {installed} and launcher {desktop}.") == 1
-                assert p.stdout.count("Installed the Rex Linux desktop client") == 1
+                assert p.stdout.count(f"rex-rune needs a Rex server installed separately; see {url}#build-requirements.") == 1
+                p = invoke(fixture, ("--upgrade",), shell=shell, mini_sign=verifier, contains=f"Installed the Rex Rune desktop client (rex-rune 0.5.2) at {installed} and launcher {desktop}.")
+                assert p.stdout.count(f"Installed the Rex Rune desktop client (rex-rune 0.5.2) at {installed} and launcher {desktop}.") == 1
+                assert p.stdout.count("Installed the Rex Rune desktop client") == 1
                 assert p.stdout.count("This does not install or change the Rex server (rex).") == 1
-                assert p.stdout.count(f"rex-linux needs a Rex server installed separately; see {url}#build-requirements.") == 1
+                assert p.stdout.count(f"rex-rune needs a Rex server installed separately; see {url}#build-requirements.") == 1
                 invoke(fixture, shell=shell, mini_sign=verifier, contains="already current")
                 latest.unlink()
                 latest.symlink_to(site / "releases/download/v0.5.1", target_is_directory=True)
@@ -249,11 +249,11 @@ os.execv("/usr/bin/curl", ["curl", *args])
         for verifier in (False, True):
             invoke(fixture, ok=False, mini_sign=verifier)
         sig.write_text(original)
-        sign(comment="rex-linux v0.5.3 SHA256SUMS")
+        sign(comment="rex-rune v0.5.3 SHA256SUMS")
         for verifier in (False, True):
             invoke(fixture, ("--version", "0.5.2"), ok=False, mini_sign=verifier)
         # Legacy unprehashed Ed signatures must be rejected identically.
-        checked(["minisign", "-S", "-l", "-s", str(keys / "ci.key"), "-m", str(release / "SHA256SUMS"), "-t", "rex-linux v0.5.2 SHA256SUMS"])
+        checked(["minisign", "-S", "-l", "-s", str(keys / "ci.key"), "-m", str(release / "SHA256SUMS"), "-t", "rex-rune v0.5.2 SHA256SUMS"])
         for verifier in (False, True):
             invoke(fixture, ok=False, mini_sign=verifier)
         sign(key="backup")
@@ -274,7 +274,7 @@ os.execv("/usr/bin/curl", ["curl", *args])
         print("PASS tampered packages/checksums/signatures/comments; backup, unknown, and opt-in tag keys", flush=True)
 
         # Existing packages and mismatching receipts refuse before network/install.
-        package_binary = Path("/usr/bin/rex-linux")
+        package_binary = Path("/usr/bin/rex-rune")
         assert not package_binary.exists()
         package_binary.write_text("package sentinel")
         try:
@@ -284,7 +284,7 @@ os.execv("/usr/bin/curl", ["curl", *args])
             assert package_binary.read_text() == "package sentinel"
         finally:
             package_binary.unlink()
-        receipt = home / ".local/share/rex-linux/install.json"
+        receipt = home / ".local/share/rex-rune/install.json"
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text('{"path":"/wrong","sha256":"wrong"}')
         invoke(fixture, ok=False, contains="receipt does not match")
@@ -299,9 +299,9 @@ os.execv("/usr/bin/curl", ["curl", *args])
         fake_rex = tools / "rex"
         executable(fake_rex, "#!/bin/sh\necho 'rex server'\n")
         try:
-            p = invoke(fixture, ("--force",), contains=f"Installed the Rex Linux desktop client (rex-linux 0.5.2) at {installed} and launcher {desktop}.")
-            assert p.stdout.count(f"Installed the Rex Linux desktop client (rex-linux 0.5.2) at {installed} and launcher {desktop}.") == 1
-            assert p.stdout.count("Installed the Rex Linux desktop client") == 1
+            p = invoke(fixture, ("--force",), contains=f"Installed the Rex Rune desktop client (rex-rune 0.5.2) at {installed} and launcher {desktop}.")
+            assert p.stdout.count(f"Installed the Rex Rune desktop client (rex-rune 0.5.2) at {installed} and launcher {desktop}.") == 1
+            assert p.stdout.count("Installed the Rex Rune desktop client") == 1
             assert p.stdout.count("This does not install or change the Rex server (rex).") == 1
             assert p.stdout.count(f"Using your Rex server at {fake_rex}.") == 1
         finally:

@@ -12,17 +12,17 @@ use std::{
 
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 1024 * 1024 * 1024;
-const DESKTOP: &str = "dev.shuv.rex-linux.desktop";
+const DESKTOP: &str = "dev.shuv.rex-rune.desktop";
 const RECOVERY_WAIT: Duration = Duration::from_secs(2);
 
 // Order is also the journal's stable file order. Keep destinations and modes together.
 const INSTALL_FILES: [(&str, u32); 6] = [
-    ("icons/hicolor/32x32/apps/dev.shuv.rex-linux.png", 0o644),
-    ("icons/hicolor/128x128/apps/dev.shuv.rex-linux.png", 0o644),
-    ("icons/hicolor/256x256/apps/dev.shuv.rex-linux.png", 0o644),
-    ("applications/dev.shuv.rex-linux.desktop", 0o644),
+    ("icons/hicolor/32x32/apps/dev.shuv.rex-rune.png", 0o644),
+    ("icons/hicolor/128x128/apps/dev.shuv.rex-rune.png", 0o644),
+    ("icons/hicolor/256x256/apps/dev.shuv.rex-rune.png", 0o644),
+    ("applications/dev.shuv.rex-rune.desktop", 0o644),
     ("", 0o755), // binary, outside the data directory
-    ("rex-linux/install.json", 0o600),
+    ("rex-rune/install.json", 0o600),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,13 +77,13 @@ impl InstallLayout {
             .unwrap_or_else(|| home.join(".local/bin"));
         Ok(Self {
             local: home.join(".local"),
-            binary: bin.join("rex-linux"),
+            binary: bin.join("rex-rune"),
             data: xdg_data_dir(),
         })
     }
 
     fn receipt(&self) -> PathBuf {
-        self.data.join("rex-linux/install.json")
+        self.data.join("rex-rune/install.json")
     }
 
     fn transaction(&self) -> PathBuf {
@@ -220,7 +220,7 @@ pub fn install(
     let mut layout = InstallLayout::current()?;
     // Resolve a symlinked HOME/bin directory, but retain the final component so
     // validate_paths still rejects a symlink in place of the installed file.
-    layout.binary = fs::canonicalize(layout.binary.parent().unwrap())?.join("rex-linux");
+    layout.binary = fs::canonicalize(layout.binary.parent().unwrap())?.join("rex-rune");
     ensure!(
         InstallChannel::detect() == InstallChannel::Tarball,
         "self-update requires a verified install.sh receipt (not a package or source build)"
@@ -292,7 +292,7 @@ fn install_with(
     progress(Progress::Extracting);
     let unpack = stage.path().join("unpack");
     fs::create_dir(&unpack)?;
-    let root = format!("rex-linux-{}-{target}", manifest.version);
+    let root = format!("rex-rune-{}-{target}", manifest.version);
     extract(&archive, &unpack, &root)?;
     prepare(layout, stage.path(), &unpack.join(root), &manifest.version)?;
     // Recheck immediately before changing the installation (another installer may have run).
@@ -381,7 +381,7 @@ fn download(
         .timeout_global(Some(Duration::from_secs(3600)))
         .timeout_per_read(Some(Duration::from_secs(30)))
         .timeout_connect(Some(Duration::from_secs(20)))
-        .user_agent("rex-linux")
+        .user_agent("rex-rune")
         .build()
         .into();
     let mut response = agent.get(url.as_str()).call().map_err(download_error)?;
@@ -500,19 +500,19 @@ fn extract(archive: &Path, destination: &Path, root: &str) -> Result<()> {
 }
 
 fn prepare(layout: &InstallLayout, stage: &Path, package: &Path, version: &str) -> Result<()> {
-    let binary = package.join("bin/rex-linux");
+    let binary = package.join("bin/rex-rune");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
     // No package scripts are executed. Check the verified binary can run before replacing anything.
     let output = binary_version(&binary, Duration::from_secs(10))?;
     ensure!(
         output.status.success()
-            && String::from_utf8_lossy(&output.stdout).trim() == format!("rex-linux {version}"),
+            && String::from_utf8_lossy(&output.stdout).trim() == format!("rex-rune {version}"),
         "new binary cannot run or reports the wrong version"
     );
     let mut sources: Vec<_> = [32, 128, 256]
         .map(|size| {
             package.join(format!(
-                "resources/icons/{size}x{size}/apps/dev.shuv.rex-linux.png"
+                "resources/icons/{size}x{size}/apps/dev.shuv.rex-rune.png"
             ))
         })
         .into();

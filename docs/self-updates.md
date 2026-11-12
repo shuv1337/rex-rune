@@ -14,7 +14,7 @@ to stderr); reopen Rex or repair with install.sh.
 ## Eligibility and trust
 
 - Only a release install whose schema-1 receipt matches the running binary and
-  version can update itself. Source, pacman (`rex-linux-bin`), deb, Nix and other
+  version can update itself. Source, pacman (`rex-rune-bin`), deb, Nix and other
   package channels keep their existing instructions. No sudo or root operations.
 - The binary, launcher, three icons and receipt must be user-writable regular
   files in existing directories under `~/.local`, on one filesystem. Custom
@@ -46,10 +46,10 @@ to stderr); reopen Rex or repair with install.sh.
 
 The file layout matches `scripts/install-desktop.sh --copy --receipt-version`:
 
-- `$XDG_BIN_HOME/rex-linux` (default `~/.local/bin/rex-linux`), mode 0755;
-- `$XDG_DATA_HOME/applications/dev.shuv.rex-linux.desktop`;
-- `$XDG_DATA_HOME/icons/hicolor/{32,128,256}x{32,128,256}/apps/dev.shuv.rex-linux.png`;
-- `$XDG_DATA_HOME/rex-linux/install.json`, mode 0600, containing schema, canonical
+- `$XDG_BIN_HOME/rex-rune` (default `~/.local/bin/rex-rune`), mode 0755;
+- `$XDG_DATA_HOME/applications/dev.shuv.rex-rune.desktop`;
+- `$XDG_DATA_HOME/icons/hicolor/{32,128,256}x{32,128,256}/apps/dev.shuv.rex-rune.png`;
+- `$XDG_DATA_HOME/rex-rune/install.json`, mode 0600, containing schema, canonical
   installed path, version and binary SHA-256. Data defaults to `~/.local/share`.
 
 `desktop-file-install` and `desktop-file-validate` are required, just as for the
@@ -107,7 +107,7 @@ bin="${XDG_BIN_HOME:-$HOME/.local/bin}"
   curl --proto '=https' --tlsv1.2 -fsSL \
     https://github.com/shuv1337/rex-rune/releases/latest/download/install.sh | sh
 ) 9>"$bin/.rex-update.lock"
-"$bin/rex-linux" --version
+"$bin/rex-rune" --version
 ```
 
 Use the original installation's `XDG_BIN_HOME` and `XDG_DATA_HOME` if customized
@@ -124,7 +124,7 @@ older release remains the shell installer's explicit `--version` operation.
 files. When enabled (`updates.install_automatically: true`), a successful scheduled
 or manual check can install an eligible release in the background and offer
 restart. It never restarts without a click. Automatic checks must also be on;
-`REX_LINUX_NO_UPDATE_CHECK=1` disables automatic installation too. The daily check
+`REX_RUNE_NO_UPDATE_CHECK=1` disables automatic installation too. The daily check
 cadence is unchanged. An installation error stays visible for manual retry; it
 does not create a rapid background retry loop. Checks and installation cannot run
 concurrently in one workspace. Across processes, the update-state lock covers only

@@ -46,7 +46,7 @@ jobs:
 
   build:
     env:
-      REX_LINUX_CHANNEL: official
+      REX_RUNE_CHANNEL: official
     permissions:
       contents: read
     strategy:
@@ -77,11 +77,11 @@ jobs:
           cargo test --locked --all-features
           cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features
       - name: Build
-        run: cargo build --locked --release --bin rex-linux
+        run: cargo build --locked --release --bin rex-rune
       - name: Package
         run: |
           python3 scripts/package-release.py --deb
-          desktop-file-validate resources/dev.shuv.rex-linux.desktop
+          desktop-file-validate resources/dev.shuv.rex-rune.desktop
       - name: Test packaged install without touching the runner's real home
         run: |
           mkdir -p "$RUNNER_TEMP/package-test"
@@ -92,17 +92,17 @@ jobs:
           export XDG_BIN_HOME="$HOME/.local/bin"
           mkdir -p "$HOME"
           bash "$package/install.sh"
-          cmp target/release/rex-linux "$XDG_BIN_HOME/rex-linux"
-          "$XDG_BIN_HOME/rex-linux" --version
-          desktop-file-validate "$XDG_DATA_HOME/applications/dev.shuv.rex-linux.desktop"
-          python3 -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["XDG_BIN_HOME"])/"rex-linux"; r=json.load(open(pathlib.Path(os.environ["XDG_DATA_HOME"])/"rex-linux/install.json")); assert r["path"] == str(p.resolve()) and r["sha256"] == hashlib.sha256(p.read_bytes()).hexdigest()'
+          cmp target/release/rex-rune "$XDG_BIN_HOME/rex-rune"
+          "$XDG_BIN_HOME/rex-rune" --version
+          desktop-file-validate "$XDG_DATA_HOME/applications/dev.shuv.rex-rune.desktop"
+          python3 -c 'import hashlib,json,os,pathlib; p=pathlib.Path(os.environ["XDG_BIN_HOME"])/"rex-rune"; r=json.load(open(pathlib.Path(os.environ["XDG_DATA_HOME"])/"rex-rune/install.json")); assert r["path"] == str(p.resolve()) and r["sha256"] == hashlib.sha256(p.read_bytes()).hexdigest()'
           bash "$package/scripts/install-desktop.sh" --uninstall
-          test ! -e "$XDG_BIN_HOME/rex-linux"
-          test ! -e "$XDG_DATA_HOME/rex-linux/install.json"
+          test ! -e "$XDG_BIN_HOME/rex-rune"
+          test ! -e "$XDG_DATA_HOME/rex-rune/install.json"
           dpkg-deb --info dist/*.deb
           sudo apt-get install -y ./dist/*.deb
-          /usr/bin/rex-linux --version
-          grep -qx channel=deb /usr/share/rex-linux/channel
+          /usr/bin/rex-rune --version
+          grep -qx channel=deb /usr/share/rex-rune/channel
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-${{ matrix.arch }}
@@ -307,7 +307,7 @@ jobs:
           ---
 
           **Downloads:** `x86_64` / `amd64` for Intel/AMD; `aarch64` / `arm64` for ARM64.
-          - **Debian/Ubuntu:** `sudo apt install ./rex-linux_*.deb` (choose your architecture).
+          - **Debian/Ubuntu:** `sudo apt install ./rex-rune_*.deb` (choose your architecture).
           - **User install/upgrade:** `curl --proto '=https' --tlsv1.2 -fsSL https://github.com/shuv1337/rex-rune/releases/latest/download/install.sh | sh`. Verifies the release before installing; needs `desktop-file-utils` and minisign or OpenSSL 3+.
           - **Manual tarball:** extract the matching `.tar.gz` and run `bash install.sh` inside it. No root needed; requires `desktop-file-utils`.
           - `install.sh` has its own detached signature, `install.sh.minisig`, and embeds both release public keys. Pipe-to-shell is trust on first use; retain a reviewed copy for later upgrades.
@@ -318,7 +318,7 @@ jobs:
 
           Requires an existing Rex server with API revision 10, 11, 12 or 13. Installing the client does not start, stop, or modify a Rex server.
           EOF
-          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Rex Linux ${GITHUB_REF_NAME#v}" --notes-file RELEASE-NOTES.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Rex Rune ${GITHUB_REF_NAME#v}" --notes-file RELEASE-NOTES.md
           gh release upload "$GITHUB_REF_NAME" ./*.tar.gz ./*.deb ./*.pkg.tar.zst ./*.pkg.tar.zst.sig SHA256SUMS SHA256SUMS.minisig latest.json latest.json.minisig install.sh install.sh.minisig
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
       - name: Rebuild signed repository from immutable releases

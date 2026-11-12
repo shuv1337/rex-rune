@@ -28,7 +28,7 @@ TARGETS = {"x86_64-linux-gnu": "amd64", "aarch64-linux-gnu": "arm64"}
 def fixtures(dist):
     packages = {}
     for target, arch in TARGETS.items():
-        for name in (f"rex-linux-{VERSION}-{target}.tar.gz", f"rex-linux_{VERSION}_{arch}.deb"):
+        for name in (f"rex-rune-{VERSION}-{target}.tar.gz", f"rex-rune_{VERSION}_{arch}.deb"):
             packages[name] = (name + "\nfixture package\n").encode()
             (dist / name).write_bytes(packages[name])
     (dist / "SHA256SUMS").write_text("".join(
@@ -62,7 +62,7 @@ class ManifestTests(unittest.TestCase):
         value = self.generate()
         self.assertEqual(set(value), {"schema", "product", "version", "tag", "published", "notes_url", "update_from", "targets"})
         self.assertEqual(value["schema"], 1)
-        self.assertEqual(value["product"], "rex-linux")
+        self.assertEqual(value["product"], "rex-rune")
         self.assertEqual(value["version"], VERSION)
         self.assertEqual(value["tag"], f"v{VERSION}")
         self.assertEqual(value["published"], PUBLISHED)
@@ -75,7 +75,7 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(set(entry["tarball"]), {"url", "size", "sha256"})
             self.assertEqual(set(entry["deb"]), {"name", "size", "sha256"})
             self.assertEqual(entry["min_glibc"], "2.39")
-            for kind, name in (("tarball", f"rex-linux-{VERSION}-{target}.tar.gz"), ("deb", f"rex-linux_{VERSION}_{arch}.deb")):
+            for kind, name in (("tarball", f"rex-rune-{VERSION}-{target}.tar.gz"), ("deb", f"rex-rune_{VERSION}_{arch}.deb")):
                 package = entry[kind]
                 self.assertEqual(package["size"], len(self.packages[name]))
                 self.assertEqual(package["sha256"], hashlib.sha256(self.packages[name]).hexdigest())
@@ -180,7 +180,7 @@ class SigningTests(unittest.TestCase):
                 result = self.run_sign()
                 self.assertEqual(result.returncode, 0, result.stderr)
                 for name in ("latest.json", "SHA256SUMS", "install.sh"):
-                    self.assertIn(f"trusted comment: rex-linux v{VERSION} {name}", (self.dist / f"{name}.minisig").read_text())
+                    self.assertIn(f"trusted comment: rex-rune v{VERSION} {name}", (self.dist / f"{name}.minisig").read_text())
                 self.assertEqual(self.run_sign("--verify-only").returncode, 0)
 
     def test_verify_only_needs_no_secrets_and_rejects_missing_signature(self):
@@ -207,7 +207,7 @@ class SigningTests(unittest.TestCase):
                 # A cryptographically valid signature must still bind the exact tag/file.
                 subprocess.run(
                     ["minisign", "-S", "-s", str(self.root / "release.key"),
-                     "-m", str(self.dist / name), "-t", f"rex-linux v0.4.2 {name}", "-q"],
+                     "-m", str(self.dist / name), "-t", f"rex-rune v0.4.2 {name}", "-q"],
                     input=self.password + "\n", text=True, check=True, capture_output=True,
                 )
                 result = self.run_sign("--verify-only")

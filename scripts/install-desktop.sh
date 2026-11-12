@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install a user launcher pointing to this checkout's release build (or a supplied binary).
-#   install-desktop.sh [--copy] [path/to/rex-linux]
+#   install-desktop.sh [--copy] [path/to/rex-rune]
 #   install-desktop.sh --uninstall
 # --copy installs the binary into $XDG_BIN_HOME (default ~/.local/bin) and points the
 # launcher there, so it keeps working if the checkout moves.
@@ -10,11 +10,11 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 bin_dir="${XDG_BIN_HOME:-$HOME/.local/bin}"
 applications="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
-desktop="$applications/dev.shuv.rex-linux.desktop"
-receipt="${XDG_DATA_HOME:-$HOME/.local/share}/rex-linux/install.json"
+desktop="$applications/dev.shuv.rex-rune.desktop"
+receipt="${XDG_DATA_HOME:-$HOME/.local/share}/rex-rune/install.json"
 
 usage() {
-    echo "Usage: $0 [--copy] [path/to/rex-linux] | --uninstall" >&2
+    echo "Usage: $0 [--copy] [path/to/rex-rune] | --uninstall" >&2
     exit 2
 }
 
@@ -45,12 +45,12 @@ copy=false
 case "${1:-}" in
     --uninstall)
         [[ $# -eq 1 ]] || usage
-        rm -f -- "$bin_dir/rex-linux" "$desktop" "$receipt"
+        rm -f -- "$bin_dir/rex-rune" "$desktop" "$receipt"
         for size in 32 128 256; do
-            rm -f -- "$icons/${size}x${size}/apps/dev.shuv.rex-linux.png"
+            rm -f -- "$icons/${size}x${size}/apps/dev.shuv.rex-rune.png"
         done
         refresh_caches
-        echo "Removed Rex Linux's launcher, icons and $bin_dir/rex-linux"
+        echo "Removed Rex Rune's launcher, icons and $bin_dir/rex-rune"
         exit 0
         ;;
     --copy)
@@ -67,10 +67,10 @@ if [[ "${1:-}" == --receipt-version ]]; then
     shift 2
 fi
 [[ $# -le 1 ]] || usage
-source_binary="$(realpath -m -- "${1:-$root/target/release/rex-linux}")"
+source_binary="$(realpath -m -- "${1:-$root/target/release/rex-rune}")"
 
 if [[ ! -x "$source_binary" ]]; then
-    echo "Build Rex Linux first: cargo build --locked --release --bin rex-linux" >&2
+    echo "Build Rex Rune first: cargo build --locked --release --bin rex-rune" >&2
     exit 1
 fi
 
@@ -78,7 +78,7 @@ fi
 rm -f -- "$receipt"
 binary="$source_binary"
 if $copy; then
-    binary="$bin_dir/rex-linux"
+    binary="$bin_dir/rex-rune"
     if [[ ! "$source_binary" -ef "$binary" ]]; then
         install -Dm755 "$source_binary" "$binary"
     fi
@@ -86,14 +86,14 @@ fi
 exec_value="$(desktop_exec_quote "$binary")"
 
 for size in 32 128 256; do
-    install -Dm644 "$root/resources/icons/${size}x${size}/apps/dev.shuv.rex-linux.png" \
-        "$icons/${size}x${size}/apps/dev.shuv.rex-linux.png"
+    install -Dm644 "$root/resources/icons/${size}x${size}/apps/dev.shuv.rex-rune.png" \
+        "$icons/${size}x${size}/apps/dev.shuv.rex-rune.png"
 done
 
 desktop-file-install --dir="$applications" \
     --set-key=Exec --set-value="$exec_value" \
     --set-key=TryExec --set-value="$binary" \
-    "$root/resources/dev.shuv.rex-linux.desktop"
+    "$root/resources/dev.shuv.rex-rune.desktop"
 desktop-file-validate "$desktop"
 refresh_caches
 if [[ -n "$receipt_version" ]]; then
@@ -120,21 +120,21 @@ if [[ -n "$receipt_version" ]]; then
     mv -f -- "$temp_receipt" "$receipt"
 fi
 if [[ "${REX_INSTALL_QUIET_SUMMARY:-}" != 1 ]]; then
-    version_label="rex-linux"
+    version_label="rex-rune"
     if [[ -n "$receipt_version" ]]; then
-        version_label="rex-linux $receipt_version"
-    elif version_out="$("$binary" --version 2>/dev/null)" && [[ "$version_out" == rex-linux\ * ]]; then
+        version_label="rex-rune $receipt_version"
+    elif version_out="$("$binary" --version 2>/dev/null)" && [[ "$version_out" == rex-rune\ * ]]; then
         version_label="$version_out"
     fi
     if $copy; then
-        echo "Installed the Rex Linux desktop client ($version_label) at $binary and launcher $desktop."
+        echo "Installed the Rex Rune desktop client ($version_label) at $binary and launcher $desktop."
     else
-        echo "Installed the Rex Linux desktop launcher $desktop for client ($version_label) at $binary."
+        echo "Installed the Rex Rune desktop launcher $desktop for client ($version_label) at $binary."
     fi
     echo "This does not install or change the Rex server (rex)."
     if rex_path="$(command -v rex 2>/dev/null)" && [[ -n "$rex_path" ]]; then
         echo "Using your Rex server at $rex_path."
     else
-        echo "rex-linux needs a Rex server installed separately; see https://github.com/shuv1337/rex-rune#build-requirements."
+        echo "rex-rune needs a Rex server installed separately; see https://github.com/shuv1337/rex-rune#build-requirements."
     fi
 fi

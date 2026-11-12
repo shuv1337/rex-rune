@@ -9,7 +9,7 @@ on revision 11. No server lifecycle operations were added to attachment.
 - Release: `0.1.0-preview.14`, commit
   `7e460d02f51573990bfcdc6c44a5606d11c7d47a` (Linux amd64).
 - Server build time: **2026-11-09 13:00:41 PST**.
-- Archive: `rex-linux-amd64.tar.gz`, from the preview channel's
+- Archive: `rex-rune-amd64.tar.gz`, from the preview channel's
   [release manifest](https://blob.superlogical.com/api/releases/rex/preview).
 - SHA-256: `36ece39653ecc4c1a95ae0ddf9a728f9a3df2ab663488b970f991b1378ff940a`.
 - Extracted directly under `~/.cache/agent-ws/rex-preview14/bin`; no installer was
@@ -80,14 +80,14 @@ The CLI's `rex server status --json` also includes this list.
   without disconnecting the host; replies are never retried.
 - Preserve `ssh -L` forwarding and make socket lookup explicitly
   `rex server status --autostart=false`. When no server is found, explain that
-  Rex Linux only attaches and suggest manually running
+  Rex Rune only attaches and suggest manually running
   `rex server install 'ssh://[user@]host[:port]'` on Linux. The hint preserves SSH
   aliases, optional user, port and bracketed IPv6; a custom socket can still be
   entered instead. The app does not run the suggested command.
 
 The shipped `rex skill show` guide says to inspect an app's actions before using
 `client.perform`, show refusal messages to the person, and never enable Remote
-Control on their behalf. Rex Linux has no Remote Control toggle: remote interface
+Control on their behalf. Rex Rune has no Remote Control toggle: remote interface
 execution is unimplemented, hence `not_supported`, not a pretend configurable
 `refused` state. Local shortcuts and queued actions returned by `client.action`
 continue to work normally. The app’s actions listed by `client.inspect` are
@@ -131,7 +131,7 @@ release binary was passed explicitly as `REX_BIN` to the UI scripts.
 - `cargo test --locked --all-features`: **287 passed, 2 ignored** (129 library,
   157 headless UI, 1 fixture). Ignored tests are the pre-existing CJK-font
   environment check and known restored/resized Ghostty search-order limitation.
-- `cargo build --locked --release --bin rex-linux`: **passed**.
+- `cargo build --locked --release --bin rex-rune`: **passed**.
 - `cargo fmt --all -- --check`: **passed**.
 - `cargo clippy --locked --all-targets --all-features -- -D warnings`: **passed**.
   The existing vendored Rune `unused_mut` dependency warning is still emitted;

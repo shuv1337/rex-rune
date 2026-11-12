@@ -33,7 +33,7 @@ def version(tag):
 
 
 def required_assets(tag):
-    names = {f'rex-linux-bin-{tag[1:]}-1-{a}.pkg.tar.zst{suffix}'
+    names = {f'rex-rune-bin-{tag[1:]}-1-{a}.pkg.tar.zst{suffix}'
              for a in ARCHES for suffix in ('', '.sig')}
     return names | {'SHA256SUMS', 'SHA256SUMS.minisig'}
 
@@ -79,7 +79,7 @@ def verify_release(directory, tag, keys, gpg_home):
     else:
         raise ValueError(f'{tag}: untrusted checksum signature')
     lines = (directory / 'SHA256SUMS.minisig').read_text().splitlines()
-    if len(lines) != 4 or lines[2] != f'trusted comment: rex-linux {tag} SHA256SUMS':
+    if len(lines) != 4 or lines[2] != f'trusted comment: rex-rune {tag} SHA256SUMS':
         raise ValueError(f'{tag}: signed checksums belong to another tag')
     checksums = {}
     for line in sums.read_text().splitlines():
@@ -88,13 +88,13 @@ def verify_release(directory, tag, keys, gpg_home):
             raise ValueError(f'{tag}: malformed or duplicate checksum')
         checksums[match[2]] = match[1]
     v = tag[1:]
-    expected = {f'rex-linux-{v}-{a}-linux-gnu.tar.gz' for a in ARCHES}
-    expected |= {f'rex-linux_{v}_{a}.deb' for a in ('amd64', 'arm64')}
-    expected |= {f'rex-linux-bin-{v}-1-{a}.pkg.tar.zst' for a in ARCHES}
+    expected = {f'rex-rune-{v}-{a}-linux-gnu.tar.gz' for a in ARCHES}
+    expected |= {f'rex-rune_{v}_{a}.deb' for a in ('amd64', 'arm64')}
+    expected |= {f'rex-rune-bin-{v}-1-{a}.pkg.tar.zst' for a in ARCHES}
     if set(checksums) != expected:
         raise ValueError(f'{tag}: expected exactly six package checksums')
     for a in ARCHES:
-        package = directory / f'rex-linux-bin-{v}-1-{a}.pkg.tar.zst'
+        package = directory / f'rex-rune-bin-{v}-1-{a}.pkg.tar.zst'
         with package.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         if digest != checksums[package.name]:
@@ -104,14 +104,14 @@ def verify_release(directory, tag, keys, gpg_home):
 
 
 def landing(site, certificate, tags):
-    shutil.copy2(certificate, site / 'rex-linux-archive-key.asc')
+    shutil.copy2(certificate, site / 'rex-rune-archive-key.asc')
     (site / 'CNAME').write_text('pkg.shuv.dev\n')
     (site / '.nojekyll').touch()
     (site / 'releases.json').write_text(json.dumps(tags, indent=2) + '\n')
     message = ('Available: ' + ', '.join(tags)) if tags else 'Repository pending the first pacman release. Do not add it to pacman.conf yet.'
     (site / 'index.html').write_text(f'''<!doctype html><html lang="en"><meta charset="utf-8">
-<title>Rex Linux packages</title><h1>Rex Linux packages</h1><p>{message}</p>
-<p><a href="rex-linux-archive-key.asc">OpenPGP public certificate</a></p>
+<title>Rex Rune packages</title><h1>Rex Rune packages</h1><p>{message}</p>
+<p><a href="rex-rune-archive-key.asc">OpenPGP public certificate</a></p>
 <p><a href="https://github.com/{REPO}/blob/master/docs/auto-update-operator-walkthrough.md">Setup, fingerprints and recovery</a></p>
 <p>Signed pacman repository: https://pkg.shuv.dev/arch/$arch. APT is not available yet.</p></html>\n''')
 
@@ -133,7 +133,7 @@ def build(site, keys, exclude, releases_dir=None, bootstrap=False, require_tag=N
     if site.exists():
         raise ValueError('site output must not already exist; never reuse a partial rebuild')
     site.mkdir(parents=True)
-    certificate = keys / 'rex-linux-archive-key.asc'
+    certificate = keys / 'rex-rune-archive-key.asc'
     if bootstrap:
         landing(site, certificate, [])
         return
@@ -163,17 +163,17 @@ def build(site, keys, exclude, releases_dir=None, bootstrap=False, require_tag=N
             for a in ARCHES:
                 target = site / 'arch' / a; target.mkdir(parents=True, exist_ok=True)
                 for suffix in ('', '.sig'):
-                    name = f'rex-linux-bin-{tag[1:]}-1-{a}.pkg.tar.zst{suffix}'
+                    name = f'rex-rune-bin-{tag[1:]}-1-{a}.pkg.tar.zst{suffix}'
                     shutil.copy2(directory / name, target / name)
         newest = selected[0][1][1:]
         for a in ARCHES:
             target = (site / 'arch' / a).resolve()
             subprocess.run(['docker', 'run', '--rm', '-v', f'{target}:/repo', '-w', '/repo',
-                            arch.ARCH_IMAGE, 'repo-add', '--include-sigs', 'rex-linux.db.tar.gz',
-                            f'rex-linux-bin-{newest}-1-{a}.pkg.tar.zst'], check=True)
+                            arch.ARCH_IMAGE, 'repo-add', '--include-sigs', 'rex-rune.db.tar.gz',
+                            f'rex-rune-bin-{newest}-1-{a}.pkg.tar.zst'], check=True)
             # Pages artifacts forbid symlinks. Canonical .db/.files and compressed names
             # are identical bytes, with detached signatures for both URL spellings.
-            for name in ('rex-linux.db', 'rex-linux.files'):
+            for name in ('rex-rune.db', 'rex-rune.files'):
                 path = target / name
                 if not path.is_symlink():
                     raise ValueError('repo-add did not produce its expected alias')

@@ -25,7 +25,7 @@ def package(dist, version):
     dist = dist.resolve()
     recipe = (ROOT / 'packaging/arch/PKGBUILD.in').read_text().replace('@VERSION@', version)
     for arch in ARCHES:
-        source = dist / f'rex-linux-{version}-{arch}-linux-gnu.tar.gz'
+        source = dist / f'rex-rune-{version}-{arch}-linux-gnu.tar.gz'
         with source.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         recipe = recipe.replace(f'@SHA256_{arch.upper()}@', digest)
@@ -36,7 +36,7 @@ def package(dist, version):
             stage = Path(tmp)
             stage.chmod(0o755)
             (stage / 'PKGBUILD').write_text(recipe)
-            source = dist / f'rex-linux-{version}-{arch}-linux-gnu.tar.gz'
+            source = dist / f'rex-rune-{version}-{arch}-linux-gnu.tar.gz'
             shutil.copy2(source, stage / source.name)
             subprocess.run([
                 'docker', 'run', '--rm', '--platform', 'linux/amd64',
@@ -51,11 +51,11 @@ def package(dist, version):
                     chown -R "$2:$3" /build
                 ''', 'bash', arch, str(os.getuid()), str(os.getgid()),
             ], check=True)
-            name = f'rex-linux-bin-{version}-1-{arch}.pkg.tar.zst'
+            name = f'rex-rune-bin-{version}-1-{arch}.pkg.tar.zst'
             built = stage / name
-            packaged = subprocess.check_output(['tar', '--zstd', '-xOf', str(built), 'usr/bin/rex-linux'])
+            packaged = subprocess.check_output(['tar', '--zstd', '-xOf', str(built), 'usr/bin/rex-rune'])
             with tarfile.open(source) as archive:
-                original = archive.extractfile(f'rex-linux-{version}-{arch}-linux-gnu/bin/rex-linux').read()
+                original = archive.extractfile(f'rex-rune-{version}-{arch}-linux-gnu/bin/rex-rune').read()
             if packaged != original:
                 raise ValueError(f'{arch}: makepkg changed the binary')
             shutil.copy2(built, dist / name)

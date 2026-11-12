@@ -29,19 +29,19 @@ def main():
     root = Path(__file__).resolve().parent.parent
     version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["version"]
     arch, deb_arch = {"x86_64": ("x86_64", "amd64"), "aarch64": ("aarch64", "arm64")}[platform.machine()]
-    binary = root / "target/release/rex-linux"
+    binary = root / "target/release/rex-rune"
     actual = run(str(binary), "--version")
-    if actual != f"rex-linux {version}":
-        raise SystemExit(f"Rebuild before packaging: {actual!r}, expected rex-linux {version}")
+    if actual != f"rex-rune {version}":
+        raise SystemExit(f"Rebuild before packaging: {actual!r}, expected rex-rune {version}")
     dist = root / "dist"
     dist.mkdir(exist_ok=True)
-    name = f"rex-linux-{version}-{arch}-linux-gnu"
+    name = f"rex-rune-{version}-{arch}-linux-gnu"
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH", run("git", "show", "-s", "--format=%ct", cwd=root)))
     metadata = json.loads(run("cargo", "metadata", "--locked", "--format-version=1", cwd=root))
     with tempfile.TemporaryDirectory(prefix="rex-package-", dir=dist) as temp:
         stage = Path(temp) / name
         (stage / "bin").mkdir(parents=True)
-        shutil.copy2(binary, stage / "bin/rex-linux")
+        shutil.copy2(binary, stage / "bin/rex-rune")
         shutil.copytree(root / "resources", stage / "resources")
         (stage / "scripts").mkdir()
         shutil.copy2(root / "scripts/install-desktop.sh", stage / "scripts/install-desktop.sh")
@@ -50,7 +50,7 @@ def main():
         (stage / "install.sh").write_text(
             '#!/usr/bin/env bash\nset -euo pipefail\n'
             'root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\n'
-            f'exec bash "$root/scripts/install-desktop.sh" --copy --receipt-version {version} "$root/bin/rex-linux"\n'
+            f'exec bash "$root/scripts/install-desktop.sh" --copy --receipt-version {version} "$root/bin/rex-rune"\n'
         )
         (stage / "install.sh").chmod(0o755)
         licenses = stage / "licenses"
@@ -96,36 +96,36 @@ def main():
         if args.deb:
             deb = Path(temp) / "deb"
             (deb / "usr/bin").mkdir(parents=True)
-            shutil.copy2(binary, deb / "usr/bin/rex-linux")
-            (deb / "usr/share/rex-linux").mkdir(parents=True)
-            (deb / "usr/share/rex-linux/channel").write_text("channel=deb\nhint=Install the latest .deb from GitHub Releases\n")
+            shutil.copy2(binary, deb / "usr/bin/rex-rune")
+            (deb / "usr/share/rex-rune").mkdir(parents=True)
+            (deb / "usr/share/rex-rune/channel").write_text("channel=deb\nhint=Install the latest .deb from GitHub Releases\n")
             (deb / "usr/share/applications").mkdir(parents=True)
-            shutil.copy2(root / "resources/dev.shuv.rex-linux.desktop", deb / "usr/share/applications")
+            shutil.copy2(root / "resources/dev.shuv.rex-rune.desktop", deb / "usr/share/applications")
             for size in (32, 128, 256):
                 icons = deb / f"usr/share/icons/hicolor/{size}x{size}/apps"
                 icons.mkdir(parents=True)
-                shutil.copy2(root / f"resources/icons/{size}x{size}/apps/dev.shuv.rex-linux.png", icons)
-            doc = deb / "usr/share/doc/rex-linux"
+                shutil.copy2(root / f"resources/icons/{size}x{size}/apps/dev.shuv.rex-rune.png", icons)
+            doc = deb / "usr/share/doc/rex-rune"
             shutil.copytree(licenses, doc / "licenses")
             for filename in ("LICENSE", "README.md", "CHANGELOG.md", "BUILD-INFO"):
                 shutil.copy2(stage / filename, doc / filename)
             (deb / "DEBIAN").mkdir()
             (deb / "debian").mkdir()
-            (deb / "debian/control").write_text("Source: rex-linux\n\nPackage: rex-linux\nArchitecture: any\nDescription: Rex client\n")
+            (deb / "debian/control").write_text("Source: rex-rune\n\nPackage: rex-rune\nArchitecture: any\nDescription: Rex client\n")
             # Resolve linked-library minimum versions on the actual build distro.
             shlibs = run("dpkg-shlibdeps", "--ignore-missing-info", "-O", f"-e{binary}", cwd=deb)
             shutil.rmtree(deb / "debian")
             depends = shlibs.removeprefix("shlibs:Depends=")
             depends += ", libfontconfig1, libwayland-client0, libwayland-cursor0, libwayland-egl1, libx11-6, libx11-xcb1, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, libxkbcommon-x11-0, libegl1, libgl1, libvulkan1, fontconfig, ca-certificates, xdg-utils"
             (deb / "DEBIAN/control").write_text(
-                f"Package: rex-linux\nVersion: {version}\nArchitecture: {deb_arch}\n"
+                f"Package: rex-rune\nVersion: {version}\nArchitecture: {deb_arch}\n"
                 "Maintainer: shuv1337 <shuv@shuv.dev>\nSection: utils\nPriority: optional\n"
                 f"Installed-Size: {sum(p.stat().st_size for p in (deb / 'usr').rglob('*') if p.is_file()) // 1024}\n"
                 f"Depends: {depends}\nHomepage: https://github.com/shuv1337/rex-rune\n"
                 "Description: Native Linux client for existing Rex terminal servers\n"
                 " Unofficial Rune-based client. Requires a Rex server with API revisions 10–13.\n"
             )
-            package = dist / f"rex-linux_{version}_{deb_arch}.deb"
+            package = dist / f"rex-rune_{version}_{deb_arch}.deb"
             run("dpkg-deb", "--root-owner-group", "--build", str(deb), str(package), env={**os.environ, "SOURCE_DATE_EPOCH": str(epoch)})
             print(package)
 

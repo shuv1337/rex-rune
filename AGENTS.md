@@ -1,11 +1,11 @@
 # Contributor and agent guide
 
-Rex Linux is a native Linux client for Rex terminal servers, written in Rust on Rune. See [README.md](README.md) for what it does and how to run it, [PRODUCT.md](PRODUCT.md) for product principles and [DESIGN.md](DESIGN.md) for the design system.
+Rex Rune is a native Linux client for Rex terminal servers, written in Rust on Rune. See [README.md](README.md) for what it does and how to run it, [PRODUCT.md](PRODUCT.md) for product principles and [DESIGN.md](DESIGN.md) for the design system.
 
 ## Build and test
 
 ```sh
-cargo build --locked --release --bin rex-linux          # the app
+cargo build --locked --release --bin rex-rune          # the app
 cargo test --locked --all-features                      # unit and headless UI tests
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -81,7 +81,7 @@ Some probes connect to the configured Rex server and create sessions there. Of t
 
 `vendor/rune`, `vendor/rexrs` and `vendor/ghostty-vt` are upstream snapshots plus small, documented patches, wired in through `[patch]` in `Cargo.toml`. Rules:
 
-- Keep each patch minimal and describe it in the vendor directory's README (`vendor/rune/README.md`, `vendor/rexrs/REX-LINUX.md`, `vendor/ghostty-vt/REX-LINUX.md`).
+- Keep each patch minimal and describe it in the vendor directory's README (`vendor/rune/README.md`, `vendor/rexrs/REX-RUNE.md`, `vendor/ghostty-vt/REX-RUNE.md`).
 - Do not mix unrelated edits into vendored code; changes that could go upstream should.
 - Preserve upstream license files and attribution. When bumping a pinned revision, update `Cargo.toml`, the vendored copy and its README together, then re-run the tests above.
 - The Nix package (`nix/package.nix`) pins fetched sources by hash. A Rune bump also means updating the `rune-kit` hash in `cargoLock.outputHashes`; a `ghostty-vt` bump also means updating the Ghostty source archive and the Zig dependency hash there.

@@ -6,7 +6,7 @@ use super::{
     theme::{accent, danger, muted, warning},
     workspace::Workspace,
 };
-use rex_linux::connection::activity::ProgramState;
+use rex_rune::connection::activity::ProgramState;
 use rune::{Icon, Tx};
 
 pub const ACTION: &str = "client.activity";

@@ -3,7 +3,7 @@ use super::{
     panel::{Entry, Intent, PaneTarget, PanelKind},
     workspace::Workspace,
 };
-use rex_linux::connection::{
+use rex_rune::connection::{
     HostCommand,
     directory::{Failure, Request},
 };

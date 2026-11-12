@@ -37,8 +37,8 @@ def verify(dist, keys, tag):
             raise ValueError(f"{name}: signature did not verify against either repository public key")
         # Minisign has authenticated the comment; also bind it to this tag and file.
         lines = (dist / f"{name}.minisig").read_text().splitlines()
-        if len(lines) != 4 or lines[2] != f"trusted comment: rex-linux {tag} {name}":
-            raise ValueError(f"{name}: trusted comment must be exactly 'rex-linux {tag} {name}'")
+        if len(lines) != 4 or lines[2] != f"trusted comment: rex-rune {tag} {name}":
+            raise ValueError(f"{name}: trusted comment must be exactly 'rex-rune {tag} {name}'")
 
     value = json.loads((dist / "latest.json").read_text())
     try:
@@ -81,7 +81,7 @@ def main():
                 for name in FILES:
                     result = subprocess.run(
                         ["minisign", "-S", "-s", str(key), "-m", str(args.dist / name),
-                         "-t", f"rex-linux {args.tag} {name}", "-q"],
+                         "-t", f"rex-rune {args.tag} {name}", "-q"],
                         input=password + "\n", text=True, capture_output=True,
                     )
                     if result.returncode != 0:

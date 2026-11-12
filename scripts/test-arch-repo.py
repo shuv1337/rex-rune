@@ -35,10 +35,10 @@ def run(*args, **kw):
 def fixture(dist, version):
     dist.mkdir()
     for a in arch.ARCHES:
-        name = f'rex-linux-{version}-{a}-linux-gnu'
+        name = f'rex-rune-{version}-{a}-linux-gnu'
         stage = dist / name; (stage / 'bin').mkdir(parents=True)
-        binary = stage / 'bin/rex-linux'
-        binary.write_text(f'#!/bin/sh\necho rex-linux {version}\n'); binary.chmod(0o755)
+        binary = stage / 'bin/rex-rune'
+        binary.write_text(f'#!/bin/sh\necho rex-rune {version}\n'); binary.chmod(0o755)
         shutil.copytree(ROOT / 'resources', stage / 'resources')
         shutil.copy2(ROOT / 'LICENSE', stage)
         (stage / 'licenses').mkdir(); (stage / 'licenses/fixture').touch()
@@ -47,7 +47,7 @@ def fixture(dist, version):
             tar.add(stage, arcname=name)
         shutil.rmtree(stage)
     for a in ('amd64', 'arm64'):
-        (dist / f'rex-linux_{version}_{a}.deb').write_text('fixture deb\n')
+        (dist / f'rex-rune_{version}_{a}.deb').write_text('fixture deb\n')
     arch.package(dist, version)
 
 
@@ -55,9 +55,9 @@ def release(tag, immutable=True, complete=True, prerelease=False, pacman=True):
     assets = [{'name': 'SHA256SUMS'}, {'name': 'SHA256SUMS.minisig'}]
     if pacman:
         for a in arch.ARCHES:
-            assets.append({'name': f'rex-linux-bin-{tag[1:]}-1-{a}.pkg.tar.zst'})
+            assets.append({'name': f'rex-rune-bin-{tag[1:]}-1-{a}.pkg.tar.zst'})
             if complete:
-                assets.append({'name': f'rex-linux-bin-{tag[1:]}-1-{a}.pkg.tar.zst.sig'})
+                assets.append({'name': f'rex-rune-bin-{tag[1:]}-1-{a}.pkg.tar.zst.sig'})
     return {'tag_name': tag, 'draft': False, 'prerelease': prerelease, 'immutable': immutable, 'assets': assets}
 
 
@@ -98,7 +98,7 @@ def main():
         run(*gpg, '--quick-generate-key', 'Rex fixture <fixture@example.invalid>', 'ed25519', 'cert', 'never', env=env)
         primary = next(l.split(':')[9] for l in run(*gpg, '--with-colons', '--list-keys', env=env).decode().splitlines() if l.startswith('fpr:'))
         run(*gpg, '--quick-add-key', primary, 'ed25519', 'sign', '3y', env=env)
-        (keys / 'rex-linux-archive-key.asc').write_bytes(run(*gpg, '--armor', '--export', primary, env=env))
+        (keys / 'rex-rune-archive-key.asc').write_bytes(run(*gpg, '--armor', '--export', primary, env=env))
         secret = run(*gpg, '--armor', '--export-secret-subkeys', primary, env=env).decode()
         sign_env = {**os.environ, 'PACKAGE_SIGNING_KEY': secret, 'PACKAGE_SIGNING_PASSPHRASE': password}
         run('minisign', '-G', '-W', '-p', str(keys / 'release.pub'), '-s', str(root / 'minisign.key'))
@@ -110,10 +110,10 @@ def main():
                 dist = releases / ('v' + v)
                 fixture(dist, v)
                 subprocess.run(['python3', str(SCRIPTS / 'sign-packages.py'), '--dist', str(dist),
-                                '--certificate', str(keys / 'rex-linux-archive-key.asc')], env=sign_env, check=True)
+                                '--certificate', str(keys / 'rex-rune-archive-key.asc')], env=sign_env, check=True)
                 packages = sorted(p for p in dist.iterdir() if p.name.endswith(('.tar.gz', '.deb', '.pkg.tar.zst')))
                 (dist / 'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in packages))
-                run('minisign', '-S', '-s', str(root / 'minisign.key'), '-m', str(dist / 'SHA256SUMS'), '-t', f'rex-linux v{v} SHA256SUMS')
+                run('minisign', '-S', '-s', str(root / 'minisign.key'), '-m', str(dist / 'SHA256SUMS'), '-t', f'rex-rune v{v} SHA256SUMS')
                 # Exercise the six-package manifest, too.
                 manifest = load('release-manifest').generate(dist, v, '0.4.2', '2026-11-10T12:00:00-08:00')
                 assert all('pacman' in entry for entry in manifest['targets'].values())
@@ -124,7 +124,7 @@ def main():
                 subprocess.run(['python3', str(SCRIPTS / 'build-repo-site.py'), '--site', str(root / label),
                                 '--keys-dir', str(keys), '--releases-dir', str(releases), '--exclude', exclude], env=sign_env, check=True)
             # Invalid upstream content must fail BEFORE creating any database.
-            damaged = releases / 'v99.0.1/rex-linux-bin-99.0.1-1-x86_64.pkg.tar.zst'
+            damaged = releases / 'v99.0.1/rex-rune-bin-99.0.1-1-x86_64.pkg.tar.zst'
             original = damaged.read_bytes(); damaged.write_bytes(original + b'tamper')
             result = subprocess.run(['python3', str(SCRIPTS / 'build-repo-site.py'), '--site', str(root / 'bad'),
                                      '--keys-dir', str(keys), '--releases-dir', str(releases)], env=sign_env, capture_output=True)
@@ -144,16 +144,16 @@ def main():
             consumer = root / 'consumer'; consumer.mkdir()
             for name in ('old', 'new'):
                 shutil.copytree(root / name, consumer / name)
-            shutil.copy2(keys / 'rex-linux-archive-key.asc', consumer / 'key.asc')
+            shutil.copy2(keys / 'rex-rune-archive-key.asc', consumer / 'key.asc')
             for name in ('bad-package', 'bad-database', 'bad-signature'):
                 shutil.copytree(consumer / 'new', consumer / name)
-            sig = consumer / 'bad-signature/arch/x86_64/rex-linux-bin-99.0.1-1-x86_64.pkg.tar.zst.sig'
+            sig = consumer / 'bad-signature/arch/x86_64/rex-rune-bin-99.0.1-1-x86_64.pkg.tar.zst.sig'
             sig_bytes = bytearray(sig.read_bytes()); sig_bytes[-1] ^= 1; sig.write_bytes(sig_bytes)
-            bad_package = consumer / 'bad-package/arch/x86_64/rex-linux-bin-99.0.1-1-x86_64.pkg.tar.zst'
+            bad_package = consumer / 'bad-package/arch/x86_64/rex-rune-bin-99.0.1-1-x86_64.pkg.tar.zst'
             data = bytearray(bad_package.read_bytes()); data[len(data) // 2] ^= 1
             bad_package.write_bytes(data)
             # A valid database's changed bytes must fail its detached signature.
-            with (consumer / 'bad-database/arch/x86_64/rex-linux.db').open('ab') as f: f.write(b'tamper')
+            with (consumer / 'bad-database/arch/x86_64/rex-rune.db').open('ab') as f: f.write(b'tamper')
             subprocess.run(['docker', 'run', '--rm', '-v', f'{consumer}:/fixtures:ro', arch.ARCH_IMAGE,
                             'bash', '-euc', '''
                 pacman-key --init
@@ -163,31 +163,31 @@ def main():
                 cp /etc/pacman.conf /tmp/base.conf
                 use_repo() {
                     cp /tmp/base.conf /etc/pacman.conf
-                    printf '\n[rex-linux]\nSigLevel = Required DatabaseRequired\nServer = file:///fixtures/%s/arch/$arch\n' "$1" >> /etc/pacman.conf
-                    rm -f /var/lib/pacman/sync/rex-linux.db*
+                    printf '\n[rex-rune]\nSigLevel = Required DatabaseRequired\nServer = file:///fixtures/%s/arch/$arch\n' "$1" >> /etc/pacman.conf
+                    rm -f /var/lib/pacman/sync/rex-rune.db*
                 }
                 use_repo old
-                pacman -Syu --noconfirm rex-linux-bin
-                test "$(rex-linux --version)" = 'rex-linux 99.0.0'
-                grep -qx channel=pacman /usr/share/rex-linux/channel
-                pacman -Qi rex-linux-bin | grep -E 'Validated By.*Signature'
+                pacman -Syu --noconfirm rex-rune-bin
+                test "$(rex-rune --version)" = 'rex-rune 99.0.0'
+                grep -qx channel=pacman /usr/share/rex-rune/channel
+                pacman -Qi rex-rune-bin | grep -E 'Validated By.*Signature'
                 use_repo new
                 pacman -Syu --noconfirm
-                test "$(rex-linux --version)" = 'rex-linux 99.0.1'
+                test "$(rex-rune --version)" = 'rex-rune 99.0.1'
                 # Remove package/cache so corruption cannot be masked by a cache hit.
-                pacman -R --noconfirm rex-linux-bin
-                rm -f /var/cache/pacman/pkg/rex-linux-bin-*
+                pacman -R --noconfirm rex-rune-bin
+                rm -f /var/cache/pacman/pkg/rex-rune-bin-*
                 use_repo bad-package
                 pacman -Sy --noconfirm
-                if pacman -S --noconfirm rex-linux-bin > /tmp/refusal 2>&1; then exit 1; fi
+                if pacman -S --noconfirm rex-rune-bin > /tmp/refusal 2>&1; then exit 1; fi
                 grep -Ei 'invalid|corrupt|signature|checksum' /tmp/refusal
                 # Isolate signature rejection as well, not only the database checksum.
-                if pacman-key --verify /fixtures/bad-package/arch/x86_64/rex-linux-bin-99.0.1-1-x86_64.pkg.tar.zst.sig > /tmp/refusal 2>&1; then exit 1; fi
+                if pacman-key --verify /fixtures/bad-package/arch/x86_64/rex-rune-bin-99.0.1-1-x86_64.pkg.tar.zst.sig > /tmp/refusal 2>&1; then exit 1; fi
                 grep -i 'BAD signature' /tmp/refusal
                 # Intact package, altered detached signature: pacman -U reads the .sig beside it.
-                if pacman -U --noconfirm /fixtures/bad-signature/arch/x86_64/rex-linux-bin-99.0.1-1-x86_64.pkg.tar.zst > /tmp/refusal 2>&1; then exit 1; fi
+                if pacman -U --noconfirm /fixtures/bad-signature/arch/x86_64/rex-rune-bin-99.0.1-1-x86_64.pkg.tar.zst > /tmp/refusal 2>&1; then exit 1; fi
                 grep -Ei 'signature|invalid|corrupt' /tmp/refusal
-                test -z "$(pacman -Qq rex-linux-bin 2>/dev/null)"
+                test -z "$(pacman -Qq rex-rune-bin 2>/dev/null)"
                 use_repo bad-database
                 if pacman -Sy --noconfirm > /tmp/refusal 2>&1; then exit 1; fi
                 grep -Ei 'signature|invalid|corrupt' /tmp/refusal

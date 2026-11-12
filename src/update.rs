@@ -108,7 +108,7 @@ impl ReleaseManifest {
             manifest.schema
         );
         ensure!(
-            manifest.product == "rex-linux",
+            manifest.product == "rex-rune",
             "unexpected product {:?}",
             manifest.product
         );
@@ -189,7 +189,7 @@ pub fn verify_and_parse_manifest(
         "signature exceeds {MAX_SIGNATURE_BYTES} bytes"
     );
     let parsed_sig = ParsedMinisig::parse(minisig_text)?;
-    let prefix = "rex-linux v";
+    let prefix = "rex-rune v";
     let suffix = " latest.json";
     let comment_version = parsed_sig
         .trusted_comment
@@ -197,7 +197,7 @@ pub fn verify_and_parse_manifest(
         .and_then(|s| s.strip_suffix(suffix))
         .with_context(|| {
             format!(
-                "trusted comment {:?} does not match 'rex-linux vX.Y.Z latest.json'",
+                "trusted comment {:?} does not match 'rex-rune vX.Y.Z latest.json'",
                 parsed_sig.trusted_comment
             )
         })?;
@@ -419,7 +419,7 @@ pub fn blake2b_512(input: &[u8]) -> [u8; 64] {
     out
 }
 
-/// How this `rex-linux` binary was installed.
+/// How this `rex-rune` binary was installed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstallChannel {
     Source,
@@ -487,7 +487,7 @@ impl InstallChannel {
         {
             return channel;
         }
-        let receipt_path = data_dir.join("rex-linux/install.json");
+        let receipt_path = data_dir.join("rex-rune/install.json");
         if let Some(exe) = &resolved_exe
             && verify_install_receipt(&receipt_path, exe)
         {
@@ -549,7 +549,7 @@ impl InstallChannel {
                 if let Some(hint) = custom_hint {
                     return ChannelGuidance {
                         summary: format!(
-                            "Rex Linux {version} is available. Run `{hint}` to update."
+                            "Rex Rune {version} is available. Run `{hint}` to update."
                         ),
                         detail: format!(
                             "Installed via pacman. Run `{hint}` in a terminal to upgrade."
@@ -560,36 +560,36 @@ impl InstallChannel {
                 if *omarchy {
                     ChannelGuidance {
                         summary: format!(
-                            "Rex Linux {version} is available. Run `omarchy update` (or `sudo pacman -Syu rex-linux-bin`)."
+                            "Rex Rune {version} is available. Run `omarchy update` (or `sudo pacman -Syu rex-rune-bin`)."
                         ),
-                        detail: "Installed via the signed Arch / Omarchy repository. Run `omarchy update` or `sudo pacman -Syu rex-linux-bin`.".into(),
+                        detail: "Installed via the signed Arch / Omarchy repository. Run `omarchy update` or `sudo pacman -Syu rex-rune-bin`.".into(),
                         command: Some("omarchy update".into()),
                     }
                 } else {
                     ChannelGuidance {
                         summary: format!(
-                            "Rex Linux {version} is available. Run `sudo pacman -Syu rex-linux-bin`."
+                            "Rex Rune {version} is available. Run `sudo pacman -Syu rex-rune-bin`."
                         ),
-                        detail: "Installed via pacman. Run `sudo pacman -Syu rex-linux-bin` (or `omarchy update` on Omarchy).".into(),
-                        command: Some("sudo pacman -Syu rex-linux-bin".into()),
+                        detail: "Installed via pacman. Run `sudo pacman -Syu rex-rune-bin` (or `omarchy update` on Omarchy).".into(),
+                        command: Some("sudo pacman -Syu rex-rune-bin".into()),
                     }
                 }
             }
             Self::Tarball => ChannelGuidance {
                 summary: format!(
-                    "Rex Linux {version} is available. Open Settings → Updates to install it."
+                    "Rex Rune {version} is available. Open Settings → Updates to install it."
                 ),
                 detail: "Installed with install.sh. Update now verifies and replaces the client, launcher and icons; restart when ready. Copy command is the terminal fallback.".into(),
                 command: Some(INSTALL_SCRIPT_COMMAND.into()),
             },
             Self::Deb { custom_hint } => {
-                let deb_name = format!("rex-linux_{version}_{deb_arch}.deb");
+                let deb_name = format!("rex-rune_{version}_{deb_arch}.deb");
                 let cmd = custom_hint
                     .clone()
                     .unwrap_or_else(|| format!("sudo apt install ./{deb_name}"));
                 ChannelGuidance {
                     summary: format!(
-                        "Rex Linux {version} is available. Download {deb_name} from GitHub Releases and install with `{cmd}` (or `sudo dpkg -i`)."
+                        "Rex Rune {version} is available. Download {deb_name} from GitHub Releases and install with `{cmd}` (or `sudo dpkg -i`)."
                     ),
                     detail: format!(
                         "Installed from a .deb package. Download {deb_name} from GitHub Releases and run `{cmd}` (or `sudo dpkg -i {deb_name}`)."
@@ -599,9 +599,9 @@ impl InstallChannel {
             }
             Self::Nix => ChannelGuidance {
                 summary: format!(
-                    "Rex Linux {version} is available. Run `nix flake update rex-rune` (or `nix profile upgrade rex-linux`)."
+                    "Rex Rune {version} is available. Run `nix flake update rex-rune` (or `nix profile upgrade rex-rune`)."
                 ),
-                detail: "Installed with Nix. Update your flake input with `nix flake update rex-rune` and rebuild, or run `nix profile upgrade rex-linux`.".into(),
+                detail: "Installed with Nix. Update your flake input with `nix flake update rex-rune` and rebuild, or run `nix profile upgrade rex-rune`.".into(),
                 command: Some("nix flake update rex-rune".into()),
             },
             Self::OtherPackage { channel, hint } => {
@@ -611,21 +611,21 @@ impl InstallChannel {
                     None => format!("Installed via {channel}. Upgrade with your system package manager."),
                 };
                 ChannelGuidance {
-                    summary: format!("Rex Linux {version} is available. {detail}"),
+                    summary: format!("Rex Rune {version} is available. {detail}"),
                     detail,
                     command: cmd,
                 }
             }
             Self::Source => ChannelGuidance {
                 summary: format!(
-                    "Rex Linux {version} is available. Pull the latest release tag and rebuild with cargo."
+                    "Rex Rune {version} is available. Pull the latest release tag and rebuild with cargo."
                 ),
-                detail: "Built from source; automatic update checks are off. Pull the repository and run `cargo build --locked --release --bin rex-linux`.".into(),
-                command: Some("git pull && cargo build --locked --release --bin rex-linux".into()),
+                detail: "Built from source; automatic update checks are off. Pull the repository and run `cargo build --locked --release --bin rex-rune`.".into(),
+                command: Some("git pull && cargo build --locked --release --bin rex-rune".into()),
             },
             Self::Unmanaged => ChannelGuidance {
                 summary: format!(
-                    "Rex Linux {version} is available on GitHub Releases."
+                    "Rex Rune {version} is available on GitHub Releases."
                 ),
                 detail: "No package marker or verified install receipt matches this binary. Self-update is unavailable; repair the install with install.sh or download the latest release from GitHub Releases.".into(),
                 command: None,
@@ -637,12 +637,12 @@ impl InstallChannel {
 fn find_channel_marker(resolved_exe: &Path) -> Option<PathBuf> {
     let bin_dir = resolved_exe.parent()?;
     let prefix = bin_dir.parent()?;
-    let relative = prefix.join("share/rex-linux/channel");
+    let relative = prefix.join("share/rex-rune/channel");
     if relative.is_file() {
         return Some(relative);
     }
-    if resolved_exe == Path::new("/usr/bin/rex-linux") {
-        let system = PathBuf::from("/usr/share/rex-linux/channel");
+    if resolved_exe == Path::new("/usr/bin/rex-rune") {
+        let system = PathBuf::from("/usr/share/rex-rune/channel");
         if system.is_file() {
             return Some(system);
         }
@@ -744,7 +744,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-/// Persistent update check state stored in `$XDG_STATE_HOME/rex-linux/update.json`.
+/// Persistent update check state stored in `$XDG_STATE_HOME/rex-rune/update.json`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateState {
@@ -760,7 +760,7 @@ pub struct UpdateState {
 
 impl UpdateState {
     pub fn default_path() -> PathBuf {
-        xdg_state_dir().join("rex-linux/update.json")
+        xdg_state_dir().join("rex-rune/update.json")
     }
 
     pub fn load(path: &Path) -> Self {
@@ -896,9 +896,9 @@ impl Default for CheckConfig {
     }
 }
 
-/// Whether `REX_LINUX_NO_UPDATE_CHECK=1` is set in the environment.
+/// Whether `REX_RUNE_NO_UPDATE_CHECK=1` is set in the environment.
 pub fn env_disabled() -> bool {
-    std::env::var_os("REX_LINUX_NO_UPDATE_CHECK")
+    std::env::var_os("REX_RUNE_NO_UPDATE_CHECK")
         .and_then(|v| v.into_string().ok())
         .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
 }
@@ -1054,7 +1054,7 @@ fn fetch_bytes(raw_url: &str, max_bytes: usize, allow_loopback_http: bool) -> Re
         .timeout_global(Some(HTTP_TIMEOUT))
         .https_only(!allow_loopback_http)
         .max_redirects(5)
-        .user_agent("rex-linux")
+        .user_agent("rex-rune")
         .build();
     let agent: ureq::Agent = config.into();
     let mut response = agent
@@ -1150,7 +1150,7 @@ pub fn run_cli_check(config: &CheckConfig) -> i32 {
     let channel = InstallChannel::detect();
     match check_for_updates(config, true) {
         Ok((CheckOutcome::UpToDate { version }, _)) => {
-            println!("Rex Linux {version} is up to date ({})", channel.id());
+            println!("Rex Rune {version} is up to date ({})", channel.id());
             0
         }
         Ok((
@@ -1161,7 +1161,7 @@ pub fn run_cli_check(config: &CheckConfig) -> i32 {
         )) => {
             let guidance = channel.cli_guidance(&version);
             println!(
-                "Rex Linux {version} is available (installed: {}, channel: {}). {} Release notes: {notes_url}",
+                "Rex Rune {version} is available (installed: {}, channel: {}). {} Release notes: {notes_url}",
                 config.current_version,
                 channel.id(),
                 guidance
@@ -1177,14 +1177,14 @@ pub fn run_cli_check(config: &CheckConfig) -> i32 {
             _,
         )) => {
             println!(
-                "Rex Linux {latest} is available (installed: {}, channel: {}), requires manual upgrade via {required_floor}+. Release notes: {notes_url}",
+                "Rex Rune {latest} is available (installed: {}, channel: {}), requires manual upgrade via {required_floor}+. Release notes: {notes_url}",
                 config.current_version,
                 channel.id()
             );
             10
         }
         Err(error) => {
-            eprintln!("rex-linux update check failed: {error:#}");
+            eprintln!("rex-rune update check failed: {error:#}");
             1
         }
     }
@@ -1253,7 +1253,7 @@ mod tests {
             let (key_id, pair, key) = test_keypair();
             let bytes = sample_manifest_json("0.8.0", "0.7.0");
             let signature =
-                sign_minisig(&key_id, &pair, &bytes, "rex-linux v0.8.0 latest.json", true);
+                sign_minisig(&key_id, &pair, &bytes, "rex-rune v0.8.0 latest.json", true);
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let state_path = path.clone();
@@ -1359,7 +1359,7 @@ mod tests {
         let sha = "a".repeat(64);
         serde_json::to_vec_pretty(&serde_json::json!({
             "schema": 1,
-            "product": "rex-linux",
+            "product": "rex-rune",
             "version": version,
             "tag": format!("v{version}"),
             "published": "2026-11-20T10:00:00Z",
@@ -1369,12 +1369,12 @@ mod tests {
                 "x86_64-linux-gnu": {
                     "min_glibc": "2.39",
                     "tarball": {
-                        "url": format!("{REPOSITORY}/releases/download/v{version}/rex-linux-{version}-x86_64-linux-gnu.tar.gz"),
+                        "url": format!("{REPOSITORY}/releases/download/v{version}/rex-rune-{version}-x86_64-linux-gnu.tar.gz"),
                         "size": 12345,
                         "sha256": sha
                     },
                     "deb": {
-                        "name": format!("rex-linux_{version}_amd64.deb"),
+                        "name": format!("rex-rune_{version}_amd64.deb"),
                         "size": 23456,
                         "sha256": sha
                     }
@@ -1382,12 +1382,12 @@ mod tests {
                 "aarch64-linux-gnu": {
                     "min_glibc": "2.39",
                     "tarball": {
-                        "url": format!("{REPOSITORY}/releases/download/v{version}/rex-linux-{version}-aarch64-linux-gnu.tar.gz"),
+                        "url": format!("{REPOSITORY}/releases/download/v{version}/rex-rune-{version}-aarch64-linux-gnu.tar.gz"),
                         "size": 12345,
                         "sha256": sha
                     },
                     "deb": {
-                        "name": format!("rex-linux_{version}_arm64.deb"),
+                        "name": format!("rex-rune_{version}_arm64.deb"),
                         "size": 23456,
                         "sha256": sha
                     }
@@ -1455,7 +1455,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-linux v0.6.1 latest.json",
+            "rex-rune v0.6.1 latest.json",
             true,
         );
 
@@ -1474,7 +1474,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-linux v0.6.0 latest.json",
+            "rex-rune v0.6.0 latest.json",
             true,
         );
         assert!(
@@ -1486,7 +1486,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-linux v0.6.1 SHA256SUMS",
+            "rex-rune v0.6.1 SHA256SUMS",
             true,
         );
         assert!(verify_and_parse_manifest(&manifest_bytes, &wrong_file_sig, &[&pub_text]).is_err());
@@ -1496,7 +1496,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-linux v0.6.1 latest.json",
+            "rex-rune v0.6.1 latest.json",
             false,
         );
         assert!(verify_and_parse_manifest(&manifest_bytes, &legacy_sig, &[&pub_text]).is_err());
@@ -1548,12 +1548,12 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("rex-channel-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         let bin_dir = temp.join("usr/bin");
-        let share_dir = temp.join("usr/share/rex-linux");
+        let share_dir = temp.join("usr/share/rex-rune");
         let data_dir = temp.join("data");
         fs::create_dir_all(&bin_dir).unwrap();
         fs::create_dir_all(&share_dir).unwrap();
-        fs::create_dir_all(data_dir.join("rex-linux")).unwrap();
-        let exe = bin_dir.join("rex-linux");
+        fs::create_dir_all(data_dir.join("rex-rune")).unwrap();
+        let exe = bin_dir.join("rex-rune");
         fs::write(&exe, b"#!/bin/sh\necho rex\n").unwrap();
 
         // Source and Nix build channels take priority and never consult markers.
@@ -1591,11 +1591,11 @@ mod tests {
         assert!(
             arch.guidance("0.6.1")
                 .summary
-                .contains("sudo pacman -Syu rex-linux-bin")
+                .contains("sudo pacman -Syu rex-rune-bin")
         );
         assert_eq!(
             arch.guidance("0.6.1").command.as_deref(),
-            Some("sudo pacman -Syu rex-linux-bin")
+            Some("sudo pacman -Syu rex-rune-bin")
         );
 
         let omarchy = InstallChannel::detect_with(
@@ -1644,7 +1644,7 @@ mod tests {
             "sha256": digest,
         });
         fs::write(
-            data_dir.join("rex-linux/install.json"),
+            data_dir.join("rex-rune/install.json"),
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
@@ -1673,7 +1673,7 @@ mod tests {
             &key_id,
             &pair,
             &manifest_bytes,
-            "rex-linux v0.6.1 latest.json",
+            "rex-rune v0.6.1 latest.json",
             true,
         );
 

@@ -44,7 +44,7 @@ fn untrusted_equal_older_and_unsupported_releases_never_download_or_modify_insta
             &id,
             &pair,
             &bytes,
-            &format!("rex-linux v{version} latest.json"),
+            &format!("rex-rune v{version} latest.json"),
             true,
         );
         if tamper {
@@ -80,7 +80,7 @@ fn untrusted_equal_older_and_unsupported_releases_never_download_or_modify_insta
 fn layout(temp: &Path) -> InstallLayout {
     let layout = InstallLayout {
         local: temp.join(".local"),
-        binary: temp.join(".local/bin/rex-linux"),
+        binary: temp.join(".local/bin/rex-rune"),
         data: temp.join(".local/share"),
     };
     for path in layout.destinations() {
@@ -287,7 +287,7 @@ fn manual_install_repair_supersedes_interrupted_update() {
     let layout = layout(temp.path());
     interrupt(&layout, 5, false);
     let repair = temp.path().join("repair-binary");
-    fs::write(&repair, b"#!/bin/sh\necho 'rex-linux 99.0.0'\n").unwrap();
+    fs::write(&repair, b"#!/bin/sh\necho 'rex-rune 99.0.0'\n").unwrap();
     fs::set_permissions(&repair, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(
         Command::new("bash")
@@ -672,16 +672,16 @@ fn signed_fixture_end_to_end() {
     let temp = tempfile::tempdir().unwrap();
     let layout = layout(temp.path());
     let target = format!("{}-linux-gnu", std::env::consts::ARCH);
-    let root = format!("rex-linux-99.0.0-{target}");
-    let binary = b"#!/bin/sh\necho 'rex-linux 99.0.0'\n";
-    let desktop = include_bytes!("../../../resources/dev.shuv.rex-linux.desktop");
+    let root = format!("rex-rune-99.0.0-{target}");
+    let binary = b"#!/bin/sh\necho 'rex-rune 99.0.0'\n";
+    let desktop = include_bytes!("../../../resources/dev.shuv.rex-rune.desktop");
     let mut names = vec![
-        format!("{root}/bin/rex-linux"),
+        format!("{root}/bin/rex-rune"),
         format!("{root}/resources/{DESKTOP}"),
     ];
     for size in [32, 128, 256] {
         names.push(format!(
-            "{root}/resources/icons/{size}x{size}/apps/dev.shuv.rex-linux.png"
+            "{root}/resources/icons/{size}x{size}/apps/dev.shuv.rex-rune.png"
         ));
     }
     let mut files = vec![
@@ -697,9 +697,9 @@ fn signed_fixture_end_to_end() {
         ),
     ];
     let icons: [&[u8]; 3] = [
-        include_bytes!("../../../resources/icons/32x32/apps/dev.shuv.rex-linux.png"),
-        include_bytes!("../../../resources/icons/128x128/apps/dev.shuv.rex-linux.png"),
-        include_bytes!("../../../resources/icons/256x256/apps/dev.shuv.rex-linux.png"),
+        include_bytes!("../../../resources/icons/32x32/apps/dev.shuv.rex-rune.png"),
+        include_bytes!("../../../resources/icons/128x128/apps/dev.shuv.rex-rune.png"),
+        include_bytes!("../../../resources/icons/256x256/apps/dev.shuv.rex-rune.png"),
     ];
     for (name, icon) in names[2..].iter().zip(icons) {
         files.push((name.as_str(), icon, tar::EntryType::Regular));
@@ -720,7 +720,7 @@ fn signed_fixture_end_to_end() {
         &id,
         &pair,
         &bytes,
-        "rex-linux v99.0.0 latest.json",
+        "rex-rune v99.0.0 latest.json",
         true,
     );
     let (base, server) = serve(vec![bytes, sig.into_bytes(), tarball]);
@@ -779,6 +779,6 @@ fn signed_fixture_end_to_end() {
             .output()
             .unwrap()
             .stdout,
-        b"rex-linux 99.0.0\n"
+        b"rex-rune 99.0.0\n"
     );
 }

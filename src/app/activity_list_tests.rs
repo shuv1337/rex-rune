@@ -6,7 +6,7 @@ use crate::app::{
     activity_list::{ACTION, COVERAGE},
     notify::NoteTarget,
 };
-use rex_linux::connection::activity::{BlockedKind, ProgramState, StatusRecord};
+use rex_rune::connection::activity::{BlockedKind, ProgramState, StatusRecord};
 use serde_json::{Value, json};
 
 pub(super) fn fixture() -> (Workspace, Vec<flume::Receiver<HostCommand>>) {
@@ -81,7 +81,7 @@ fn swept_status_is_visible_but_is_not_news_or_a_done_latch() {
         ws.unseen_bells.clear();
         ws.hosts[0].model.activity.clear();
         ws.track_activity(0);
-        let records = rex_linux::connection::activity::parse_status(&json!({"records":[{
+        let records = rex_rune::connection::activity::parse_status(&json!({"records":[{
             "id":"", "state":match state {
                 ProgramState::Blocked => "blocked", ProgramState::Error => "error", _ => "done"
             }
@@ -237,7 +237,7 @@ fn states_order_mute_hosts_sessions_and_filter() {
             .kind = kind;
         assert_eq!(ws.entries()[0].detail, word);
     }
-    ws.settings.muted_tabs.push(rex_linux::settings::MutedTab {
+    ws.settings.muted_tabs.push(rex_rune::settings::MutedTab {
         endpoint: ws.settings.hosts[0].endpoint.clone(),
         session: "s".into(),
         window: "blocked".into(),

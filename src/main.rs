@@ -2,14 +2,14 @@ use clap::Parser;
 mod app;
 
 fn main() -> anyhow::Result<()> {
-    let options = rex_linux::connection::Options::parse();
+    let options = rex_rune::connection::Options::parse();
     if options.check_update {
-        let code = rex_linux::update::run_cli_check(&rex_linux::update::CheckConfig::default());
+        let code = rex_rune::update::run_cli_check(&rex_rune::update::CheckConfig::default());
         std::process::exit(code);
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    use rex_linux::update::installer::Recovery;
-    let recovery_notice = match rex_linux::update::installer::recover_current_install() {
+    use rex_rune::update::installer::Recovery;
+    let recovery_notice = match rex_rune::update::installer::recover_current_install() {
         Ok(Recovery::Restored(binary)) => {
             // No workspace actions have run yet; preserve all launch arguments.
             Some(app::StartupNotice::Error(recovery_error(reexec(binary, &args))))

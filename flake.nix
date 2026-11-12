@@ -1,5 +1,5 @@
 {
-  description = "Rex Linux: native Rune client for existing Rex servers";
+  description = "Rex Rune: native Rune client for existing Rex servers";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -35,10 +35,10 @@
     {
       packages = forSystems (system: {
         default = packageFor system;
-        rex-linux = self.packages.${system}.default;
+        rex-rune = self.packages.${system}.default;
       });
       checks = forSystems (system: {
-        rex-linux = self.packages.${system}.default;
+        rex-rune = self.packages.${system}.default;
       });
       devShells = forSystems (
         system:

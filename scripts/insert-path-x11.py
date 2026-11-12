@@ -17,7 +17,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = Path.home() / ".cache/agent-ws/rex-m31-insert-path"
-BINARY = os.environ.get("REX_BIN", str(BASE / "target/release/rex-linux"))
+BINARY = os.environ.get("REX_BIN", str(BASE / "target/release/rex-rune"))
 BASE.mkdir(parents=True, exist_ok=True)
 work = Path(tempfile.mkdtemp(prefix="native-", dir=BASE))
 for tool in ("rex", "Xvfb", "openbox", "xdotool", "import", "magick", "tesseract"):

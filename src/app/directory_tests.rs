@@ -5,7 +5,7 @@ use crate::app::{
     actions,
     directory::{self, ACTION},
 };
-use rex_linux::connection::{
+use rex_rune::connection::{
     Command,
     directory::{Failure, Reply, Request},
 };
@@ -209,7 +209,7 @@ fn insert_path_is_never_remote_and_a_host_cannot_open_it() {
     let mut model = ws.hosts[0].model.clone();
     model
         .client_actions
-        .push(rex_linux::connection::actions::Queued {
+        .push(rex_rune::connection::actions::Queued {
             generation: ws.keymap_generation,
             session: Some("s".into()),
             block: Some("block:b".into()),
@@ -564,7 +564,7 @@ fn go_to_directory_is_never_remote_and_a_host_cannot_open_it() {
     let mut model = ws.hosts[0].model.clone();
     model
         .client_actions
-        .push(rex_linux::connection::actions::Queued {
+        .push(rex_rune::connection::actions::Queued {
             generation: ws.keymap_generation,
             session: Some("s".into()),
             block: Some("block:b".into()),

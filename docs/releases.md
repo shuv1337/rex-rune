@@ -6,9 +6,9 @@
 
 Complete the [owner setup](#owner-setup-before-the-first-signed-release) before the first signed tag. The owner approved CI custody: signing runs in `publish`, inside the protected `release` environment with shuv1337 as required reviewer. The isolated signing step can be replaced with [manual signing](#manual-or-offline-signing).
 
-1. Update the version in `Cargo.toml`, the `rex-linux` entry in `Cargo.lock`, and `nix/package.nix`; update `CHANGELOG.md` and installation examples as needed.
+1. Update the version in `Cargo.toml`, the `rex-rune` entry in `Cargo.lock`, and `nix/package.nix`; update `CHANGELOG.md` and installation examples as needed.
 2. Commit and push to `master`. Run **Binary release** manually in GitHub Actions to test without publishing. The `release-tools` job tests the manifest and signs/verifies fixture metadata using encrypted throwaway keys, deleted at test exit. The separate `manual-signing-test` job gathers real build artifacts, generates metadata, and signs/verifies it with an encrypted throwaway minisign key pair in `$RUNNER_TEMP`, then deletes the key pair. It has only `contents: read`, no environment, and no production secrets. **`publish` never runs on `workflow_dispatch`, even when run on a tag**. Manual runs do not create attestations or request environment approval.
-3. After checking the results, create and push an annotated tag matching the package version, for example `git tag -a v0.5.0 -m 'Rex Linux 0.5.0'` and `git push origin v0.5.0`. Only stable `vX.Y.Z` versions are supported by the manifest generator.
+3. After checking the results, create and push an annotated tag matching the package version, for example `git tag -a v0.5.0 -m 'Rex Rune 0.5.0'` and `git push origin v0.5.0`. Only stable `vX.Y.Z` versions are supported by the manifest generator.
 4. The tag workflow rebuilds all six packages (two tarballs, two `.deb`s, two pacman packages), then the separate `attest` job downloads and attests them using `actions/attest-build-provenance`. `publish` requires successful attestation. Inspect the triggering commit and workflow, then approve the `release` environment as its required reviewer. Builds have no signing secrets; `publish` alone receives them.
 5. `publish` gathers both architectures, writes `SHA256SUMS`, generates `latest.json`, and uploads both as the separate `unsigned-release-metadata` artifact **before signing**, so they remain available if signing fails. It also copies `packaging/install/install.sh` byte for byte into `dist/`, signs all three files (the two metadata files and installer), verifies each signature and exact trusted comment against the repository's public keys and candidate tag, and rechecks packages ↔ `SHA256SUMS` ↔ `latest.json` consistency. **A tag run fails closed** if either secret, either public-key file, or a valid signature is missing. Nothing is published on failure.
 6. Only after verification does the job create a draft and upload **all twelve assets** (six packages, two detached OpenPGP pacman signatures, `SHA256SUMS`, `SHA256SUMS.minisig`, `latest.json`, `latest.json.minisig`, `install.sh`, `install.sh.minisig`), then publish and mark latest. The same approved job rebuilds and signs the package repository; a separate Pages job deploys its public artifact. Check the assets and attestations. Never move published tags, replace assets, or retrofit signatures onto old releases.
@@ -18,9 +18,9 @@ The manifest is a release asset at:
 - `https://github.com/shuv1337/rex-rune/releases/latest/download/latest.json`
 - `https://github.com/shuv1337/rex-rune/releases/latest/download/latest.json.minisig`
 
-Its schema is `1`, product is `rex-linux`, and both `x86_64-linux-gnu` and `aarch64-linux-gnu` targets are mandatory. Each target has `min_glibc`, a version-specific tarball URL, Debian and pacman filenames, and sizes and SHA-256 digests for each package. The generator checks all six package hashes against `SHA256SUMS` (four for pre-0.5.3 legacy fixtures); missing, extra, duplicate, malformed or mismatched entries fail. Output is stable for fixed inputs. `published` records metadata generation time (before publication), using an RFC 3339 Pacific Time offset (PST/PDT); `--published` allows a fixed timestamp for reproducibility. There is **no expiry**.
+Its schema is `1`, product is `rex-rune`, and both `x86_64-linux-gnu` and `aarch64-linux-gnu` targets are mandatory. Each target has `min_glibc`, a version-specific tarball URL, Debian and pacman filenames, and sizes and SHA-256 digests for each package. The generator checks all six package hashes against `SHA256SUMS` (four for pre-0.5.3 legacy fixtures); missing, extra, duplicate, malformed or mismatched entries fail. Output is stable for fixed inputs. `published` records metadata generation time (before publication), using an RFC 3339 Pacific Time offset (PST/PDT); `--published` allows a fixed timestamp for reproducibility. There is **no expiry**.
 
-`update_from` is currently `0.4.2`, the current compatible tarball layout, not a claim that that version already has an updater. Raise the workflow's explicit floor only when an installation-layout change requires a manual reinstall. `min_glibc` defaults to `2.39`; change `--min-glibc` with any future build baseline change. Trusted signature comments name the tag and file, for example `rex-linux v0.5.0 latest.json`.
+`update_from` is currently `0.4.2`, the current compatible tarball layout, not a claim that that version already has an updater. Raise the workflow's explicit floor only when an installation-layout change requires a manual reinstall. `min_glibc` defaults to `2.39`; change `--min-glibc` with any future build baseline change. Trusted signature comments name the tag and file, for example `rex-rune v0.5.0 latest.json`.
 
 ## Owner setup before the first signed release
 
@@ -58,9 +58,9 @@ Setup reference for a fresh repository or deliberate rotation (do not overwrite 
    ```sh
    umask 077
    # On the trusted signing machine, in a private directory outside the repo:
-   minisign -G -p release.pub -s rex-linux-release.key
+   minisign -G -p release.pub -s rex-rune-release.key
    # On the offline backup machine:
-   minisign -G -p release-backup.pub -s rex-linux-release-backup.key
+   minisign -G -p release-backup.pub -s rex-rune-release-backup.key
    ```
 
 2. **Commit only the two public files**, as `packaging/keys/release.pub` and `packaging/keys/release-backup.pub`, in a reviewed change. Record both public-key values, minisign key IDs and SHA-256 fingerprints of the decoded 42-byte minisign public-key records in the public-key README, replacing the pending-setup wording; keep the README and this document's key IDs and fingerprints in sync. Never commit a throwaway test key as a trust root. The signing helper requires both public files and accepts signatures from either; the later client PR will embed both.
@@ -77,7 +77,7 @@ Setup reference for a fresh repository or deliberate rotation (do not overwrite 
 4. **Create these two environment secrets**, not repository-wide secrets. The key secret is the complete password-encrypted minisign secret-key file, not base64 wrapped. Supply the password interactively when `gh` prompts; never put it into shell history. Do not upload the offline key.
 
    ```sh
-   gh secret set RELEASE_MINISIGN_KEY --repo shuv1337/rex-rune --env release < /secure/path/rex-linux-release.key
+   gh secret set RELEASE_MINISIGN_KEY --repo shuv1337/rex-rune --env release < /secure/path/rex-rune-release.key
    gh secret set RELEASE_MINISIGN_PASSWORD --repo shuv1337/rex-rune --env release
    # Lists names, not secret values:
    gh secret list --repo shuv1337/rex-rune --env release
@@ -94,7 +94,7 @@ Setup reference for a fresh repository or deliberate rotation (do not overwrite 
 `arch-package` runs `scripts/package-arch.py` after both native builds. It renders
 `packaging/arch/PKGBUILD.in` with both real tarball hashes, invokes real `makepkg`
 in a digest-pinned Arch container, and compares executable bytes. No signing
-secret is present. The package is `rex-linux-bin`; no AUR push is configured.
+secret is present. The package is `rex-rune-bin`; no AUR push is configured.
 
 Inside the protected `publish` job, `sign-packages.py` imports only the signing
 subkey into a temporary GnuPG home. It refuses a secret primary, an uncommitted
@@ -111,11 +111,11 @@ modifies releases. Before the first pacman release, its explicit `bootstrap`
 mode on master serves only the certificate and a not-yet-available landing page.
 The walkthrough has the exact pacman setup and hosting health checks.
 
-Official builds embed `REX_LINUX_CHANNEL=official`, Nix builds `nix`, and source
-builds default to `source`. Every install method (pacman `rex-linux-bin`, `.deb`,
-Nix, tarball or `install.sh`) installs only the `rex-linux` desktop client, its
+Official builds embed `REX_RUNE_CHANNEL=official`, Nix builds `nix`, and source
+builds default to `source`. Every install method (pacman `rex-rune-bin`, `.deb`,
+Nix, tarball or `install.sh`) installs only the `rex-rune` desktop client, its
 `.desktop` launcher and icons, and never installs, replaces or shadows the `rex`
-server. Packages carry a `share/rex-linux/channel` marker.
+server. Packages carry a `share/rex-rune/channel` marker.
 Tarball installation writes the schema-1 path/version/SHA-256 receipt described
 in the walkthrough; source installation and uninstall invalidate it. The client
 reads these markers and receipts to show channel-specific upgrade guidance in
@@ -137,10 +137,10 @@ python3 scripts/test-arch-repo.py       # Docker, gpg, minisign, zstd; throwaway
 actionlint .github/workflows/release.yml
 ```
 
-To package locally after a native `cargo build --locked --release --bin rex-linux`, run `python3 scripts/package-release.py` (tarball) or add `--deb` (also requires `dpkg-dev`). Outputs go into ignored `dist/`. Packages include source commit/toolchain information, desktop integration, dependency license declarations, available license texts, font licenses, and icon provenance. Icon redistribution is authorized by the project owner; it is not covered by the project's MIT license.
+To package locally after a native `cargo build --locked --release --bin rex-rune`, run `python3 scripts/package-release.py` (tarball) or add `--deb` (also requires `dpkg-dev`). Outputs go into ignored `dist/`. Packages include source commit/toolchain information, desktop integration, dependency license declarations, available license texts, font licenses, and icon provenance. Icon redistribution is authorized by the project owner; it is not covered by the project's MIT license.
 
 The standalone installer is separately signed with trusted comment
-`rex-linux vX.Y.Z install.sh`, attested alongside the packages, and excluded from
+`rex-rune vX.Y.Z install.sh`, attested alongside the packages, and excluded from
 `SHA256SUMS` (which still lists exactly four packages). The `install-script` job
 must pass before either manual signing or publication; it never sees secrets.
 `scripts/test-release.py` pins both embedded keys to `packaging/keys/` and tests
@@ -178,8 +178,8 @@ For the offline alternative in plan question 6 (key custody), keep building, att
    tag=v0.5.0
    cp packaging/install/install.sh dist/install.sh
    for file in latest.json SHA256SUMS install.sh; do
-     minisign -S -s /secure/path/rex-linux-release-backup.key -m "dist/$file" \
-       -t "rex-linux $tag $file"
+     minisign -S -s /secure/path/rex-rune-release-backup.key -m "dist/$file" \
+       -t "rex-rune $tag $file"
    done
    # Same metadata verification gate as CI; requires all six packages but no secrets.
    python3 scripts/sign-release.py --tag "$tag" --verify-only
@@ -204,7 +204,7 @@ For the offline alternative in plan question 6 (key custody), keep building, att
 
    ```sh
    gh release create "$tag" --repo "$repo" --draft --verify-tag \
-     --title "Rex Linux ${tag#v}" --notes-file RELEASE-NOTES.md
+     --title "Rex Rune ${tag#v}" --notes-file RELEASE-NOTES.md
    gh release upload "$tag" --repo "$repo" \
      dist/*.tar.gz dist/*.deb dist/*.pkg.tar.zst dist/*.pkg.tar.zst.sig \
      dist/SHA256SUMS dist/SHA256SUMS.minisig \
