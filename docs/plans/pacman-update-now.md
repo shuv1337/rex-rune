@@ -38,8 +38,8 @@ This note compares the ways to get there and recommends one. It builds nothing.
   subkey) signs the packages and the repository database. The CI halves of both sit
   in the same protected `release` environment, behind one approval per release.
 
-Checked on shuvdev (Omarchy, pacman 7.1, polkit 128), read-only, by the author or the
-reviewer:
+Checked on shuvdev (Omarchy, pacman 7.1, polkit 128), read-only. The author checked
+the first five; the reviews checked the hook and the control-group file ownership:
 
 - The live 0.7.5 manifest has the `pacman` entry
   (`rex-linux-bin-0.7.5-1-x86_64.pkg.tar.zst`, 22,135,553 bytes), and the site serves
@@ -51,15 +51,16 @@ reviewer:
   Omarchy's shell carries its own polkit agent (`/usr/share/omarchy/shell/plugins/polkit`).
   That it is registered in a running desktop session, and what its dialog shows for a
   custom action, was **not** confirmed.
-- `pacman.conf` leaves `RemoteFileSigLevel` unset; pacman then uses `SigLevel`
-  (`Required`, `TrustedOnly`). `pacman-conf RemoteFileSigLevel` prints nothing in that
-  case, so a script cannot simply read the effective value.
+- `pacman-conf LocalFileSigLevel` is `PackageOptional`, so `pacman -U` of a local file
+  with no signature beside it installs.
 - pacman's keyring on this machine holds 188 public keys: Arch's packagers and the
   keys of the other repositories configured here.
 - `omarchy update` authorises with sudo once, takes a snapshot, refreshes keyrings,
   runs a full `pacman -Syu` and migrations, then updates AUR packages with yay. It
   runs pacman through `systemd-run --scope` so that pacman is not in the desktop
   session's control group.
+- In the user's part of the control-group tree, `cgroup.kill` and `cgroup.freeze` are
+  owned by the user.
 - Omarchy installs a pacman hook (`00-omarchy-update-guard`) that stops a direct
   `pacman -S…u…` and points at `omarchy update`. It lets `pacman -U` through. This
   means the alternative the client prints today on Omarchy, `sudo pacman -Syu
@@ -99,29 +100,53 @@ needs one run.
 What the helper does, in full:
 
 1. Takes one argument, a version, and accepts only `digits.digits.digits`.
-2. Moves itself out of the caller's control group into a system scope
-   (`systemd-run --scope`), ignores hang-up and broken-pipe signals, and takes a lock
-   so only one runs. See "Not being stopped half-way" below.
-3. Works out the architecture itself (`uname -m`), never from the caller.
-4. Reads the installed version from pacman and refuses unless the requested version
-   is strictly newer (`vercmp`). No downgrade, no reinstall.
-5. Downloads
+2. Replaces itself with `systemd-run --scope --unit rex-linux-update <helper>
+   <version>`. `systemd-run --scope` cannot move a running process; it starts the
+   command in a new system scope, and because the helper `exec`s it, the process is
+   the same one and `pkexec`'s caller still gets its exit status. The fixed scope name
+   means a second run cannot start while one exists. Before this point the caller can
+   still kill or freeze the helper, and nothing has been done yet. See "Not being
+   stopped half-way" below.
+3. Sends its own and pacman's output to the journal, not to the caller's pipes, so
+   nothing depends on the client still being there. Takes a lock under `/run/lock`,
+   opened without following symlinks.
+4. Works out the architecture itself (`uname -m`), never from the caller.
+5. Reads the installed version from pacman and refuses unless the requested version
+   is strictly newer (`vercmp`). Refuses if `rex-linux-bin` is listed in pacman's
+   `IgnorePkg`: an administrator pinned it.
+6. Downloads
    `https://pkg.shuv.dev/arch/<arch>/rex-linux-bin-<version>-1-<arch>.pkg.tar.zst` and
-   its `.sig` into a new directory only root can write: HTTPS only, no redirects, a
-   size cap, a time limit.
-6. Verifies the signature with `gpgv` against the shipped Rex certificate **only**.
-   This is the gate. It does not consult pacman's keyring.
-7. Asks pacman what installing that file would change, and refuses unless the one
-   package is `rex-linux-bin` with nothing added or removed. This keeps a one-package
-   update from pulling in dependencies from stale databases.
-8. Runs `pacman -U --noconfirm` on that file, without its `.sig` beside it, and
+   its `.sig` into a directory made with `mktemp -d` under a parent only root can
+   write (never a fixed name in `/tmp`). curl runs with `-q` first (so root's
+   `.curlrc` is not read), `--proto =https`, `--fail`, no redirects, `--max-filesize`
+   and a byte count of its own, and `--max-time`.
+7. Verifies the signature with `gpgv --keyring <absolute path>` against the shipped
+   Rex certificate **only**, and reads `--status-fd`, not the exit code: `gpgv` exits
+   0 for a signature by an expired or revoked key. It requires exactly one signature,
+   with `GOODSIG` and a `VALIDSIG` naming the Rex primary (`4BC4…0BAB`) and a signing
+   subkey of it, and refuses on `EXPKEYSIG`, `REVKEYSIG`, `BADSIG` or `ERRSIG`. This
+   is the gate. It does not consult pacman's keyring.
+8. Reads the package's own metadata from the verified file
+   (`pacman -U --print-format '%n %v %a'`) and refuses unless it is exactly
+   `rex-linux-bin`, `<version>-1` and this architecture, with nothing else added or
+   removed. A signature covers a file's bytes, not its name, so without this a validly
+   signed *older* Rex package served under the newer file name would pass step 7 and
+   pacman would downgrade to it. It also keeps a one-package update from pulling in
+   dependencies from stale databases.
+9. Runs `pacman -U --noconfirm` on that file, without its `.sig` beside it, and
    removes the directory.
 
 It takes no file path, no URL, no option and no environment from the caller (`pkexec`
 already replaces the environment with a minimal one), and it does not sync databases,
-so it cannot leave the system partly upgraded. Its exit codes avoid 126 and 127, which
-`pkexec` uses for a dismissed dialog and a refused authorisation, so the client can
-tell "you cancelled" from "the update failed" from "no agent answered".
+so it cannot leave the system partly upgraded. Its own exit codes avoid 126 and 127.
+`pkexec` exits 126 when the person dismissed the dialog, and 127 for everything else
+it cannot do (not authorised, no agent, any error), so the client can tell "you
+cancelled" from "the update failed", but cannot tell a missing agent from a refusal
+by the code alone.
+
+The client may also pass the package's SHA-256 from its verified manifest. The helper
+would treat it only as a further restriction (refuse on a mismatch): it can narrow
+what is installed and never widen it.
 
 The URL assumes the package release number is 1, as `PKGBUILD.in` fixes it and
 `scripts/build-repo-site.py` names the files. A rebuilt package (`-2`) would need the
@@ -139,8 +164,12 @@ Two variants:
   name for the promptless form). The unit gives a clean environment, its own control
   group and journal logging without the helper arranging them. Against it: the dialog
   carries systemd's generic "start unit" wording, not Rex's, and the client learns
-  the outcome by asking systemd afterwards instead of from an exit code. The helper's
-  steps 3 to 8 are the same either way, so this choice can be made at build time.
+  the outcome by asking systemd afterwards instead of from an exit code. A hybrid keeps
+  Rex's wording: `pkexec` runs a helper that only validates the version and then
+  starts the unit and waits for it, which removes the short window before step 2
+  altogether. How `systemctl start --wait` reports the result was not checked. The
+  helper's steps 4 to 9 are the same in every form, so this choice can be made at
+  build time.
 
 ### (b) An AUR `rex-linux-bin` package, for yay
 
@@ -205,10 +234,15 @@ the helper's checks are the whole boundary. What they can cause:
   site keeps five releases, so up to four of them can be newer than the installed
   one, and a release withdrawn for a fault could be chosen while the site still
   serves it; rebuilding the site with `repo.yml`'s `exclude` input removes it.
-- Nothing older: step 4 refuses.
-- Nothing signed by any other key: step 6 refuses.
-- No other package and no arbitrary file: steps 1, 3 and 7, and the fixed URL.
+- Nothing older: step 5 refuses an older request, and step 8 refuses a file that is not
+  the version requested.
+- Nothing signed by any other key: step 7 refuses.
+- No other package and no arbitrary file: steps 1, 4 and 8, and the fixed URL.
 - Nuisance: a download's worth of traffic and time holding the helper's lock.
+
+Under either form, the agent's dialog may show the command line, which is the
+caller's argument before the helper has validated it. The action's own message does
+not echo it; what Omarchy's agent displays has to be looked at.
 
 **Why the helper checks the signature itself.** `pacman -U <url>` verifies a package
 against pacman's whole keyring. That is every key the machine trusts (188 on shuvdev),
@@ -237,14 +271,22 @@ caller's control group, which the user's own service manager controls. So the us
 a compromised client, or simply closing Rex could kill pacman in the middle of
 extracting files, or freeze it while it holds pacman's database lock. This is reasoned
 from how control groups work and from Omarchy's own guard against the same thing, not
-reproduced here. Step 2 is the answer: the helper re-homes itself into a system scope
-before doing anything, as `omarchy update` does, and does not depend on the client
-still being there to read its output. The client's **Restart to finish** must wait
+reproduced here. Steps 2 and 3 are the answer: the helper restarts itself inside a
+system scope before doing anything, as `omarchy update` does for pacman, and writes to
+the journal so it does not depend on the client still being there. The client's **Restart to finish** must wait
 for the helper to exit.
 
 **What the helper does not defend against.** Someone who holds the Rex OpenPGP package
-key. They can already publish a package that `pacman -Syu` installs. The helper
-neither widens nor narrows that.
+key. They can already publish a package that `pacman -Syu` installs.
+
+**Revocation, an accepted gap unless decided otherwise.** The shipped certificate is
+a fixed file. If the CI signing subkey were compromised and revoked, pacman's keyring
+can learn that (`pacman-key --refresh-keys`) and `pacman -Syu` would then refuse its
+packages, but the helper would go on accepting them until a package with a corrected
+certificate was installed. The stricter rule, which costs one more check and no key
+import, is to also require that the signing subkey is currently valid in pacman's
+keyring: the intersection of "Rex's key" and "a key this machine still trusts". The
+build should take the stricter rule unless it proves impractical.
 
 **Excluded because unsafe:**
 
@@ -279,7 +321,7 @@ neither widens nor narrows that.
 
 - A one-package `pacman -U` of a third-party package whose dependencies are already
   satisfied does not conflict with `omarchy update`, which afterwards finds
-  `rex-linux-bin` current. Step 7 refuses when dependencies are not satisfied.
+  `rex-linux-bin` current. Step 8 refuses when dependencies are not satisfied.
 - It does bypass what `omarchy update` wraps around pacman: the snapshot, the keyring
   refresh and the migrations. For one application package that looks harmless, and
   Omarchy's own guard allows `-U`, but it is Omarchy's stated preference that updates
@@ -290,9 +332,9 @@ neither widens nor narrows that.
   instructions instead of appearing to hang.
 - The first release that carries the helper has to be installed the old way. After
   that, every pacman install has it.
-- The shipped certificate's signing subkey expires in 2029. A new subkey has to reach
-  machines in a package signed by the old one before then, or Update now stops
-  verifying and the instructions take over.
+- The shipped certificate's signing subkey expires in 2029. Step 7 refuses an expired
+  key, so a new subkey has to reach machines in a package signed by the old one
+  before then; otherwise Update now stops verifying and the instructions take over.
 
 ## Recommendation
 
@@ -314,8 +356,9 @@ Outline of the build, if approved, as small PRs in this order:
 2. The helper, policy and certificate in the package, with the helper tested as root
    in the existing Arch container (`scripts/test-arch-repo.py`): each refusal above, a
    real signed upgrade, a package signed by another key that pacman trusts, a
-   tampered package, an older version, an unknown version, a package that would pull
-   in a dependency. `pkaction` confirms the action is registered. No client change.
+   tampered package, an older signed package served under the newer name, signatures
+   by an expired and by a revoked subkey, an older version, an unknown version, a
+   pinned package, a package that would pull in a dependency. `pkaction` confirms the action is registered. No client change.
 3. The client: read the manifest's `pacman` entry; offer Update now on a pacman install
    only when the helper and `pkexec` exist; run it; show progress, failure reasons and
    Restart to finish; fall back to the instructions otherwise. Headless tests with a
@@ -346,10 +389,15 @@ These are not engineering judgments:
 
 - That Omarchy's polkit agent is registered in a desktop session, and what its dialog
   shows for a custom action.
-- The control-group behaviour under `pkexec` (reasoned, not reproduced), and that
-  `systemd-run --scope` from the helper fully removes it.
-- The exact pacman invocation for step 7, and pacman's `--noconfirm` defaults against
-  the current source.
+- The control-group behaviour under `pkexec` (the file ownership was checked; killing
+  a root process that way was not reproduced), and that restarting under
+  `systemd-run --scope` fully removes it.
+- The exact pacman invocation for step 8; pacman's `--noconfirm` defaults, its
+  downgrade behaviour with `-U`, and whether `-U` honours `IgnorePkg`, against the
+  current source.
+- `gpgv`'s status lines for this certificate. That `gpgv` exits 0 for expired and
+  revoked keys was reproduced by the reviewer with throwaway keys and is in its
+  manual.
 - The helper's download and `gpgv` check run as root in a system scope (the same
   check passed as an ordinary user for 0.7.5 x86_64 only).
 - Arch Linux ARM, and Arch without Omarchy.
