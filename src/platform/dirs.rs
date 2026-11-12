@@ -2,8 +2,8 @@
 //!
 //! | Folder | Linux and other Unix | macOS | Windows |
 //! | --- | --- | --- | --- |
-//! | settings | `$XDG_CONFIG_HOME/rex-rune` (`~/.config/rex-rune`) | `~/Library/Application Support/rex-rune` | `%APPDATA%\\rex-rune` (`<home>\\AppData\\Roaming\\rex-rune`) |
-//! | state | `$XDG_STATE_HOME/rex-rune` (`~/.local/state/rex-rune`) | `~/Library/Application Support/rex-rune` | `%LOCALAPPDATA%\\rex-rune` (`<home>\\AppData\\Local\\rex-rune`) |
+//! | settings | `$XDG_CONFIG_HOME/rex-rune` (`~/.config/rex-rune`) | `~/Library/Application Support/rex-rune` | `%APPDATA%\rex-rune` (`<home>\AppData\Roaming\rex-rune`) |
+//! | state | `$XDG_STATE_HOME/rex-rune` (`~/.local/state/rex-rune`) | `~/Library/Application Support/rex-rune` | `%LOCALAPPDATA%\rex-rune` (`<home>\AppData\Local\rex-rune`) |
 //! | runtime | `$XDG_RUNTIME_DIR/rex-rune`, else `<tmp>/rex-rune-<uid>` | `<tmp>/rex-rune-<uid>` | Unused (no SSH tunnels) |
 //! | home | `$HOME` | `$HOME` | `%USERPROFILE%` |
 //!
@@ -156,13 +156,15 @@ fn state_base() -> PathBuf {
 
 fn windows_base(value: Option<std::ffi::OsString>, kind: &str) -> PathBuf {
     value
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join("AppData").join(kind))
 }
 
 /// `$XDG_RUNTIME_DIR` where sessions have one: not on macOS or Windows.
+#[cfg(unix)]
 pub(super) fn xdg_runtime() -> Option<PathBuf> {
-    if cfg!(any(target_os = "macos", windows)) {
+    if cfg!(target_os = "macos") {
         return None;
     }
     std::env::var_os("XDG_RUNTIME_DIR")
@@ -227,6 +229,10 @@ mod tests {
             home().join("AppData/Roaming")
         );
         assert_eq!(windows_base(None, "Local"), home().join("AppData/Local"));
+        assert_eq!(
+            windows_base(Some("".into()), "Local"),
+            home().join("AppData/Local")
+        );
         assert_eq!(
             windows_base(Some("custom".into()), "Local"),
             PathBuf::from("custom")

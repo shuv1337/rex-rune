@@ -255,7 +255,8 @@ async fn connect(
     Ok(client)
 }
 
-#[cfg(test)]
+// socket2 exposes the keepalive time and interval getters only on Unix.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

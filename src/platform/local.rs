@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 /// The endpoint of this user's own server: `REX_SERVER` when set, else the socket the Rex
-/// server makes by default on this platform.
+/// server makes by default on Unix. Windows keeps a valid but unsupported placeholder.
 ///
 /// | Platform | Socket |
 /// | --- | --- |
@@ -13,8 +13,8 @@ pub fn default_endpoint() -> String {
     std::env::var("REX_SERVER").unwrap_or_else(|_| format!("unix://{}", default_socket().display()))
 }
 
-/// The socket of this user's own server, whatever `REX_SERVER` says: the one a probe that
-/// creates sessions must never be pointed at.
+/// The socket of this user's own server on Unix, whatever `REX_SERVER` says: the one a
+/// probe that creates sessions must never be pointed at. A placeholder on Windows.
 pub fn default_socket() -> PathBuf {
     #[cfg(windows)]
     {
@@ -82,9 +82,9 @@ pub async fn prepare_tunnel_directory(parent: &std::path::Path) -> anyhow::Resul
     }
 }
 
-#[cfg(unix)]
 /// Remove the socket directories of processes that are gone, which a crash or a kill leaves
 /// behind. Only `ssh-<pid>` directories whose process no longer exists are touched.
+#[cfg(unix)]
 fn sweep_stale_tunnels(directory: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
@@ -111,7 +111,11 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn unsupported_transports_explain_how_to_connect() {
-        let error = connect(&default_socket()).await.err().unwrap();
+        let error =
+            crate::transport::socket("unix:///rex/server.sock", "/api/control", "rex.json.v1")
+                .await
+                .err()
+                .unwrap();
         assert_eq!(
             error.to_string(),
             "Unix sockets are not available on Windows yet; add an https:// host"

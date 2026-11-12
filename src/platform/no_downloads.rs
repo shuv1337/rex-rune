@@ -107,6 +107,23 @@ mod tests {
         let missing = temp.path().join("missing");
         let error = Destination::open(&missing).unwrap_err();
         assert_eq!(
+            crate::platform::downloads::available()
+                .unwrap_err()
+                .to_string(),
+            error.to_string()
+        );
+        let mut transfer = crate::download::Transfer::new(
+            1,
+            "session".into(),
+            "block".into(),
+            "file".into(),
+            missing,
+            1,
+        );
+        let failure = crate::download::Failure::Destination(error.to_string());
+        transfer.apply(crate::download::Event::Failed(failure.clone()));
+        assert_eq!(transfer.state, crate::download::State::Failed(failure));
+        assert_eq!(
             error.to_string(),
             "Downloads are not available on Windows yet"
         );
