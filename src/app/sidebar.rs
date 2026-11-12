@@ -159,7 +159,6 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
         .continuous_corners()
         .cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
-        .help_when_truncated(format!("{} · {label}", s.settings.hosts[index].label))
         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
             s.select(index, target.clone(), tx);
             tx.blur();
@@ -207,6 +206,9 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                     muted()
                 }))
                 .truncate()
+                // On the name itself: a tooltip shows only for the text that was cut, and
+                // a word beside the name leaves it less room.
+                .help_when_truncated(format!("{} · {label}", s.settings.hosts[index].label))
                 .grow(1.)
                 .shrink(),
         );
