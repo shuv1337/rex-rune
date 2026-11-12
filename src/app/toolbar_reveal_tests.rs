@@ -376,6 +376,13 @@ fn a_lone_panes_floating_header_stays_clear_of_the_top_edge_too() {
                 grid,
                 "{case}: a floating header never moves the terminal"
             );
+            // Its surface still starts at the window's edge: no sliver of the terminal
+            // shows above the row.
+            assert_eq!(
+                rect(&rt, "pane-header-float"),
+                [0., 0., 1024., toolbar_reveal::EDGE + 30.],
+                "{case}"
+            );
             // Resting on its Close keeps the header, brings no toolbar out over it, and a
             // press there asks about the pane.
             let close = rect(&rt, "pane-close:block:a");
@@ -399,9 +406,64 @@ fn a_lone_panes_floating_header_stays_clear_of_the_top_edge_too() {
                 ),
                 "{case}: Close pane's confirmation"
             );
+            press(&mut rt, Key::Escape);
+            settle(&mut rt);
+            if toolbar == ToolbarBehavior::OnHover {
+                // The edge above the header still brings the toolbar out, over it.
+                rest_at(&mut rt, x, 3.);
+                assert!(has(&rt, "toolbar"), "{case}: the toolbar comes out");
+            }
             std::fs::remove_file(&rt.state.settings_path).ok();
         }
     }
+    // Compact density has no margins, so a split's top panes are at the window's top too:
+    // their headers, rows (Always) or floating (Reveal pane headers), keep the same room.
+    for header in [PaneHeader::Always, PaneHeader::Hidden] {
+        let (mut rt, _host, _sent) = drawn("split", ToolbarBehavior::OnHover);
+        rt.update(|s, _| {
+            s.settings.pane_density = rex_rune::settings::PaneDensity::Compact;
+            s.settings.pane_header = header;
+            if header == PaneHeader::Hidden {
+                s.toggle_pane_headers();
+            }
+        });
+        settle(&mut rt);
+        for block in ["block:b", "block:c"] {
+            assert_eq!(
+                rect(&rt, &format!("pane-header:{block}"))[1],
+                toolbar_reveal::EDGE,
+                "{header:?} {block}"
+            );
+        }
+        // The right pane's Close is the one under Close app.
+        let close = rect(&rt, "pane-close:block:c");
+        let (x, y) = (close[0] + 12., close[1] + 12.);
+        rest_at(&mut rt, x, y);
+        assert!(
+            !has(&rt, "toolbar"),
+            "{header:?}: no toolbar over Close pane"
+        );
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        settle(&mut rt);
+        assert!(rt.shell_request.is_none(), "{header:?}");
+        assert!(
+            matches!(
+                rt.state.panel.as_ref().map(|p| &p.kind),
+                Some(PanelKind::Confirm { method, .. }) if method == "block.close"
+            ),
+            "{header:?}"
+        );
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+    // Comfortable cards keep their own margin from the window's edge and get no more.
+    let (mut rt, _host, _sent) = drawn("split", ToolbarBehavior::OnHover);
+    settle(&mut rt);
+    let card = rect(&rt, "pane:block:b");
+    assert!(card[1] >= toolbar_reveal::EDGE, "{card:?}");
+    assert_eq!(rect(&rt, "pane-header:block:b")[1], card[1]);
+    assert!(!has(&rt, "pane-header-clear"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
     // With the toolbar in its own row the floating header is at the pane's top, as before.
     let (mut rt, _host, _sent) = drawn("single", ToolbarBehavior::Always);
     rt.update(|s, _| s.settings.pane_header = PaneHeader::OnHover);

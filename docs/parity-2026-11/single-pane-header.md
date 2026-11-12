@@ -175,3 +175,27 @@ as before. With the offset removed it fails on its first assertion. Capture
 `header-hover-single-no-toolbar` added to `pane_headers_draw_under_each_choice` and
 inspected.
 
+### Review of that fix (Cursor-pool Opus, on `b0bda2b`)
+
+Approved. It pointed out that the same hazard remained in **Compact density**, where
+panes have no margin: a lone pane with Pane headers → Always, and the top panes of a
+split or a zoomed pane with a floating header, all had their header at the window's top,
+the top-right pane's Close directly under Close app. That was older than both changes.
+
+So the rule is now the pane's position instead of its kind: `clearance(s, rect)` is the
+part of the 8 pt edge that the pane's top falls inside, while the toolbar has no row.
+A lone pane and Compact top panes get 8 pt; Comfortable cards, 10 pt down already, get
+none; nothing changes with the toolbar in its row. The test gained the Compact cases
+(header rows with Always, floating headers with Reveal pane headers, the right pane's
+Close pressed), an assertion that a Comfortable card gets no extra room, the floating
+surface's own rectangle (so a surface pinned 8 pt down, leaving a sliver of terminal
+above it, would fail), and that the edge above a floating header still brings the
+toolbar out.
+
+Costs, stated: on these panes a floating header covers 38 pt instead of 30 and its band
+is 44 pt, so resting on the terminal's second row brings it out; and in Compact with the
+toolbar hidden, the top panes' header rows take 8 pt more than the panes below them.
+
+After these changes: `cargo fmt --all -- --check`; `TMPDIR=/var/tmp cargo test --locked
+--all-features` **1050 passed, 0 failed, 6 ignored**; strict clippy.
+

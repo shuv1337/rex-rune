@@ -36,7 +36,7 @@
 
 ### Fixed
 
-- **A floating pane header under the toolbar's edge:** with Pane headers → On hover (or Reveal pane headers) and the toolbar hidden or shown on hover, a lone pane's floating header sat at the very top of the window, inside the edge that brings the toolbar out, so a click aimed at Close pane could land on Close app. Its row now sits 8 pt down, like the header row does.
+- **A floating pane header under the toolbar's edge:** with the toolbar hidden or shown on hover, a pane header at the very top of the window sat inside the edge that brings the toolbar out, so a click aimed at Close pane could land on Close app. That was a lone pane's floating header (Pane headers → On hover, or Reveal pane headers) and, in Compact density, the headers of a tab's top panes. Such a header's row now sits 8 pt down, as a lone pane's header row already did.
 
 - **Update instructions on Omarchy:** the update notice and Settings → Updates no longer offer `sudo pacman -Syu rex-linux-bin` as an alternative on Omarchy, where Omarchy's update guard refuses a direct system upgrade. They name `omarchy update` only. Arch without Omarchy is unchanged.
 

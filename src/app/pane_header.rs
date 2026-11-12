@@ -111,17 +111,19 @@ pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
     single(window) && s.settings.pane_header != PaneHeader::Always
 }
 
-/// Room kept above a lone pane's header, a row or a floating one, while the toolbar has no
-/// row of its own. The header is then the top of the window, and the toolbar's reveal edge
-/// (and the window's resize edge within it) must stay clear of its buttons: a pointer
-/// resting on Close would otherwise bring the toolbar out over it, with Close app where
-/// Close pane was.
-pub fn clearance(s: &Workspace, window: &Window) -> f32 {
-    if full_bleed(s, window) && s.settings.interface.toolbar != ToolbarBehavior::Always {
-        super::toolbar_reveal::EDGE
-    } else {
-        0.
+/// Room kept above the header, a row or a floating one, of a pane whose top is the top of
+/// the window: `rect` is the pane's, within the pane area. That happens only while the
+/// toolbar has no row of its own, for a lone pane and for the top panes of a Compact tab.
+/// The toolbar's reveal edge (and the window's resize edge within it) must stay clear of the
+/// header's buttons: a pointer resting on Close would otherwise bring the toolbar out over
+/// it, with Close app where Close pane was. A card keeps its own margin and needs none.
+pub fn clearance(s: &Workspace, rect: [f32; 4]) -> f32 {
+    // With the toolbar in its row nothing is at the window's top, whatever the area is
+    // known to be yet.
+    if s.settings.interface.toolbar == ToolbarBehavior::Always {
+        return 0.;
     }
+    (super::toolbar_reveal::EDGE - (s.area[1] + rect[1])).max(0.)
 }
 
 pub fn placement(s: &Workspace, window: &Window, block: &str) -> Placement {
