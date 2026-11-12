@@ -10,24 +10,13 @@ fn font(edit: impl FnOnce(&mut Typography)) -> Typography {
     font
 }
 
-/// What `measure` gives while no other test changes the fonts text is measured in, which
-/// are the process's: a width measured before such a change and one after don't compare.
-fn steady<T: PartialEq>(measure: impl Fn() -> T) -> T {
-    loop {
-        let (first, again) = (measure(), measure());
-        if first == again {
-            return first;
-        }
-    }
-}
-
 #[test]
 fn the_default_typography_is_the_cell_it_always_was() {
+    let _families = rune::text::with_families("Inter", "Inter");
     for size in [8., 13., 15., 22.5, 48.] {
-        let (m, plain, advance) = steady(|| {
-            let m = metrics_for(size, &Typography::default());
-            (m, metrics(size), rune::text::advance("M", m.style))
-        });
+        let m = metrics_for(size, &Typography::default());
+        let plain = metrics(size);
+        let advance = rune::text::advance("M", m.style);
         assert!(m == plain);
         let previous = TextStyle::new(size, 400.)
             .lh((size * 1.4).ceil())
@@ -46,14 +35,13 @@ fn the_default_typography_is_the_cell_it_always_was() {
 
 #[test]
 fn line_height_scales_the_rows_and_keeps_the_text_in_the_middle_of_them() {
-    let (plain, tall, short, most) = steady(|| {
-        (
-            metrics(15.),
-            metrics_for(15., &font(|f| f.line_height = 20)),
-            metrics_for(15., &font(|f| f.line_height = -20)),
-            metrics_for(15., &font(|f| f.line_height = 5000)),
-        )
-    });
+    let _families = rune::text::with_families("Inter", "Inter");
+    let (plain, tall, short, most) = (
+        metrics(15.),
+        metrics_for(15., &font(|f| f.line_height = 20)),
+        metrics_for(15., &font(|f| f.line_height = -20)),
+        metrics_for(15., &font(|f| f.line_height = 5000)),
+    );
     // 15 pt gives 21 pt rows; a fifth more is 25.2, in whole points.
     assert_eq!((plain.cell.1, tall.cell.1), (21., 26.));
     assert_eq!(tall.cell.0, plain.cell.0, "columns are as wide as before");
@@ -69,24 +57,20 @@ fn line_height_scales_the_rows_and_keeps_the_text_in_the_middle_of_them() {
 
 #[test]
 fn character_spacing_widens_the_cell_and_the_text_runs_alike() {
+    let _families = rune::text::with_families("Inter", "Inter");
     // One character repeated: a headless runtime sets the grid in a proportional font.
     const RUNS: [(&str, f32); 3] = [("M", 1.), ("MMMM", 4.), ("MMMMMMMMMMMMMMMMMMMMMMMMM", 25.)];
-    let (plain, wide, tight, tenth, runs) = steady(|| {
-        let wide = metrics_for(15., &font(|f| f.spacing = 2));
-        (
-            metrics(15.),
-            wide,
-            metrics_for(15., &font(|f| f.spacing = -1)),
-            metrics_for(
-                15.,
-                &font(|f| {
-                    f.spacing = 10;
-                    f.spacing_unit = SpacingUnit::Percent;
-                }),
-            ),
-            RUNS.map(|(text, _)| rune::text::advance(text, wide.style)),
-        )
-    });
+    let plain = metrics(15.);
+    let wide = metrics_for(15., &font(|f| f.spacing = 2));
+    let tight = metrics_for(15., &font(|f| f.spacing = -1));
+    let tenth = metrics_for(
+        15.,
+        &font(|f| {
+            f.spacing = 10;
+            f.spacing_unit = SpacingUnit::Percent;
+        }),
+    );
+    let runs = RUNS.map(|(text, _)| rune::text::advance(text, wide.style));
     assert!((wide.cell.0 - plain.cell.0 - 2.).abs() < 1e-4);
     assert_eq!(wide.cell.1, plain.cell.1, "rows are as tall as before");
     assert_eq!(wide.inset, 1., "half before the glyph, half after");

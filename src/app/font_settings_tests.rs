@@ -453,6 +453,7 @@ fn resizes(sent: &flume::Receiver<HostCommand>) -> Vec<(u16, u16, u16, u16)> {
 
 #[test]
 fn line_height_and_character_spacing_change_the_rows_and_columns_a_server_is_told() {
+    let _families = rune::text::with_families("Inter", "Inter");
     let (mut ws, _host) = tabbed_workspace("single");
     let (sender, sent) = flume::unbounded();
     framed_terminal(&mut ws, "block:a", &sender, b"$ ");
@@ -466,16 +467,18 @@ fn line_height_and_character_spacing_change_the_rows_and_columns_a_server_is_tol
     settle(&mut rt);
     let key = rt.state.term_key("block:a");
     let pane = rt.state.terminals[&key].rect;
-    // A size is whole cells of the pane, with the cell in whole points. (A cell's width is
-    // whatever font the test run measures in at that moment; its height is the size's.)
-    let whole_cells = |(cols, rows, cw, ch): (u16, u16, u16, u16)| {
-        let (cols, cw, ch) = (f32::from(cols), f32::from(cw), f32::from(ch));
-        f32::from(rows) == (pane[3] / ch).floor()
-            && ((pane[2] / cw).floor()..=(pane[2] / (cw - 1.)).floor()).contains(&cols)
+    // Rows/columns use the exact local cell; only the wire cell dimensions round up.
+    let expected_resize = |(cw, ch): (f32, f32)| {
+        (
+            (pane[2] / cw).floor() as u16,
+            (pane[3] / ch).floor() as u16,
+            cw.ceil() as u16,
+            ch.ceil() as u16,
+        )
     };
     let plain = *resizes(&sent).last().expect("the pane's size");
     assert_eq!(plain.3, 21);
-    assert!(whole_cells(plain), "{plain:?} in {pane:?}");
+    assert_eq!(plain, expected_resize(rt.state.metrics().cell));
 
     // +20%: four steps of the stepper.
     for _ in 0..4 {
@@ -487,7 +490,7 @@ fn line_height_and_character_spacing_change_the_rows_and_columns_a_server_is_tol
     assert_eq!(told.len(), 4, "one size for each step: {told:?}");
     let tall = told[3];
     assert_eq!(tall.3, 26, "the cell's new height in points");
-    assert!(whole_cells(tall), "{tall:?} in {pane:?}");
+    assert_eq!(tall, expected_resize(rt.state.metrics().cell));
     assert!(tall.1 < plain.1, "fewer rows: {plain:?} then {tall:?}");
     // The preview's three lines are three of the new rows.
     let sample = rect(&rt, "advanced-font-preview-sample");
@@ -499,23 +502,12 @@ fn line_height_and_character_spacing_change_the_rows_and_columns_a_server_is_tol
     let told = resizes(&sent);
     assert_eq!(told.len(), 2, "{told:?}");
     let wide = told[1];
-    assert!(whole_cells(wide), "{wide:?} in {pane:?}");
+    assert_eq!(wide, expected_resize(rt.state.metrics().cell));
     assert_eq!((wide.1, wide.3), (tall.1, tall.3), "the same rows");
     let font = rt.state.settings.terminal.font.clone();
     assert_eq!(font.spacing, 2);
-    let (before, after) = loop {
-        // Both measured in the same fonts (see `whole_cells`).
-        let measure = || {
-            (
-                term::metrics_for(15., &Typography::default()).cell.0,
-                term::metrics_for(15., &font).cell.0,
-            )
-        };
-        let (first, again) = (measure(), measure());
-        if first == again {
-            break first;
-        }
-    };
+    let before = term::metrics_for(15., &Typography::default()).cell.0;
+    let after = term::metrics_for(15., &font).cell.0;
     assert!((after - before - 2.).abs() < 1e-3);
     assert!((pane[2] / after).floor() < (pane[2] / before).floor());
 

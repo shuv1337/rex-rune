@@ -319,6 +319,7 @@ mod tests {
 
     #[test]
     fn named_family_samples_use_the_requested_bundled_face_not_chrome_fallback() {
+        let _families = rune::text::with_families("Inter", "Inter");
         let mut ts =
             rune::text::TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
         let sample = rune::text::Run::new("Aa 0O 1il");
@@ -365,6 +366,7 @@ mod tests {
 
     #[test]
     fn native_font_paths_shape_from_the_file_without_an_embedded_copy() {
+        let _families = rune::text::with_families("Inter", "Inter");
         const PLEX: &[u8] =
             include_bytes!("../../vendor/rune/crates/rune/assets/IBMPlexMono-Regular.ttf");
         let path = std::env::temp_dir().join(format!(
@@ -400,6 +402,7 @@ mod tests {
     #[test]
     #[ignore = "requires fontconfig and a CJK font; exercised by the Nix package check"]
     fn fontconfig_cjk_fallback_has_real_glyphs_and_keeps_ascii_metrics() {
+        let _families = rune::text::with_families("Inter", "Inter");
         let fonts = load("IBM Plex Mono", &[]);
         let mut ts =
             rune::text::TextSystem::new_with_paths(fonts.files, fonts.paths, fonts.families);
