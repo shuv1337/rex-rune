@@ -135,7 +135,8 @@ and are left:
 
 - With **Pane headers → On hover** and **Toolbar → Show on hover** together, a lone pane's
   floating header sits at the top of the window, so its Close is under the toolbar's
-  reveal edge, as the row was before the fix above.
+  reveal edge, as the row was before the fix above. **Fixed afterwards**; see the last
+  section.
 - With no toolbar row, the floating key-sequence or download chip at the top left covers
   the start of the header's name.
 
@@ -148,3 +149,29 @@ and are left:
 - With the toolbar Hidden or On hover, the lone pane's header is now the top row of the
   window, 38 pt in all. People who chose a hidden toolbar for the room may want Pane
   headers → Hidden as well; nothing sets that for them.
+
+## Afterwards: the floating header (after #100)
+
+The same hazard, older than #100: a lone pane's **floating** header (Pane headers → On
+hover, or Reveal pane headers) was pinned to the top of the pane, so with the toolbar on
+Show on hover its Close was inside the 8 pt edge that brings the toolbar out, with Close
+app sliding in over it.
+
+- `pane_header::clearance` now applies to a lone pane whenever the toolbar has no row,
+  whether its header is a row or floats.
+- `pane_header::floating` keeps its surface at the pane's edge and puts the header row
+  `clearance` down inside it, so nothing of the terminal shows between the window's edge
+  and the header.
+- `pane_header::reveal_band` is taller by the same amount, so the pointer on the
+  header's last row is still on the band that keeps it out.
+- A floating header still never moves or resizes the terminal.
+
+`a_lone_panes_floating_header_stays_clear_of_the_top_edge_too` covers On hover and
+Reveal pane headers, each with the toolbar on Show on hover and Hidden: the header's row
+at y 8, the grid unchanged, resting on Close keeps the header and brings out no toolbar,
+the header's last row keeps it, and a press on Close opens Close pane's confirmation and
+no window action; with the toolbar in its row the floating header is at the pane's top
+as before. With the offset removed it fails on its first assertion. Capture
+`header-hover-single-no-toolbar` added to `pane_headers_draw_under_each_choice` and
+inspected.
+

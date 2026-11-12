@@ -687,7 +687,10 @@ fn pane_card(
         None => c,
     };
     let c = if !headed && !searching && s.settings.pane_header == PaneHeader::OnHover {
-        c.child(pane_header::reveal_band(block))
+        c.child(pane_header::reveal_band(
+            block,
+            pane_header::clearance(s, window),
+        ))
     } else {
         c
     };
@@ -695,6 +698,7 @@ fn pane_card(
         c.child(pane_header::floating(
             header(s, window, block, rect[2], focused, m),
             !bleed,
+            pane_header::clearance(s, window),
         ))
     } else {
         c

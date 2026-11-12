@@ -348,6 +348,71 @@ fn a_lone_panes_header_stays_clear_of_the_top_edge_when_the_toolbar_has_no_row()
 }
 
 #[test]
+fn a_lone_panes_floating_header_stays_clear_of_the_top_edge_too() {
+    use rex_rune::settings::PaneHeader;
+    // A header that floats: brought out by the pointer (On hover), or by Reveal pane headers.
+    for (header, pinned) in [(PaneHeader::OnHover, false), (PaneHeader::Hidden, true)] {
+        for toolbar in [ToolbarBehavior::OnHover, ToolbarBehavior::Hidden] {
+            let (mut rt, _host, _sent) = drawn("single", toolbar);
+            rt.update(|s, _| s.settings.pane_header = header);
+            settle(&mut rt);
+            let grid = rect(&rt, "grid:block:a");
+            assert!(!has(&rt, "pane-header:block:a"), "{header:?} {toolbar:?}");
+            if pinned {
+                rt.update(|s, _| s.toggle_pane_headers());
+                settle(&mut rt);
+            } else {
+                // Under the toolbar's edge, inside the pane's own band.
+                rest_at(&mut rt, 500., 20.);
+            }
+            let case = format!("{header:?} {toolbar:?}");
+            assert_eq!(
+                rect(&rt, "pane-header:block:a"),
+                [0., toolbar_reveal::EDGE, 1024., 30.],
+                "{case}: floats under the edge that brings the toolbar out"
+            );
+            assert_eq!(
+                rect(&rt, "grid:block:a"),
+                grid,
+                "{case}: a floating header never moves the terminal"
+            );
+            // Resting on its Close keeps the header, brings no toolbar out over it, and a
+            // press there asks about the pane.
+            let close = rect(&rt, "pane-close:block:a");
+            assert!(close[1] >= toolbar_reveal::EDGE, "{case}: {close:?}");
+            let (x, y) = (close[0] + 12., close[1] + 12.);
+            rest_at(&mut rt, x, y);
+            assert!(has(&rt, "pane-header:block:a"), "{case}: the header stays");
+            assert!(!has(&rt, "toolbar") && !has(&rt, "toolbar-float"), "{case}");
+            // The lowest row of the header is still the header's: the band reaches under it.
+            rest_at(&mut rt, x, toolbar_reveal::EDGE + 29.);
+            assert!(has(&rt, "pane-header:block:a"), "{case}: to its last row");
+            rest_at(&mut rt, x, y);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            settle(&mut rt);
+            assert!(rt.shell_request.is_none(), "{case}: the window stays");
+            assert!(
+                matches!(
+                    rt.state.panel.as_ref().map(|p| &p.kind),
+                    Some(PanelKind::Confirm { method, .. }) if method == "block.close"
+                ),
+                "{case}: Close pane's confirmation"
+            );
+            std::fs::remove_file(&rt.state.settings_path).ok();
+        }
+    }
+    // With the toolbar in its own row the floating header is at the pane's top, as before.
+    let (mut rt, _host, _sent) = drawn("single", ToolbarBehavior::Always);
+    rt.update(|s, _| s.settings.pane_header = PaneHeader::OnHover);
+    settle(&mut rt);
+    let top = rt.state.area[1];
+    rest_at(&mut rt, 500., top + 20.);
+    assert_eq!(rect(&rt, "pane-header:block:a")[1], top);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn hidden_gives_the_toolbars_row_to_the_panes() {
     let (mut rt, _host, _sent) = drawn("single", ToolbarBehavior::Hidden);
     assert_eq!(toolbar_reveal::placement(&rt.state), Placement::None);
