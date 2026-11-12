@@ -196,6 +196,12 @@ Costs, stated: on these panes a floating header covers 38 pt instead of 30 and i
 is 44 pt, so resting on the terminal's second row brings it out; and in Compact with the
 toolbar hidden, the top panes' header rows take 8 pt more than the panes below them.
 
-After these changes: `cargo fmt --all -- --check`; `TMPDIR=/var/tmp cargo test --locked
---all-features` **1050 passed, 0 failed, 6 ignored**; strict clippy.
+A re-check of that found it ready to merge. From it: the rule reads only the pane area
+and not the Toolbar setting, so switching the toolbar to Always resizes a Compact top
+pane once and not twice; and the Compact test cases rest on the first row of Close, where
+the toolbar's edge used to be, instead of its centre.
+
+After these changes, merged with master at `7e957f0`: `cargo fmt --all -- --check`;
+`TMPDIR=/var/tmp cargo test --locked --all-features` **1057 passed, 0 failed, 6
+ignored**; strict clippy.
 

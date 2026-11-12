@@ -15,7 +15,7 @@ use super::{
 };
 use rex_rune::{
     layout,
-    settings::{PaneDensity, PaneHeader, interface::ToolbarBehavior},
+    settings::{PaneDensity, PaneHeader},
 };
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Icon, SpringPair, Transition, Tx, el, row, text};
@@ -118,11 +118,9 @@ pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
 /// header's buttons: a pointer resting on Close would otherwise bring the toolbar out over
 /// it, with Close app where Close pane was. A card keeps its own margin and needs none.
 pub fn clearance(s: &Workspace, rect: [f32; 4]) -> f32 {
-    // With the toolbar in its row nothing is at the window's top, whatever the area is
-    // known to be yet.
-    if s.settings.interface.toolbar == ToolbarBehavior::Always {
-        return 0.;
-    }
+    // The area alone decides, with no look at the Toolbar setting: the pane's rectangle
+    // comes from the same area, so both change in the same commit when the setting does,
+    // and the terminal is resized once, not twice.
     (super::toolbar_reveal::EDGE - (s.area[1] + rect[1])).max(0.)
 }
 

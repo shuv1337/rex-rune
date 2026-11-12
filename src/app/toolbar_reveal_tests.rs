@@ -435,9 +435,14 @@ fn a_lone_panes_floating_header_stays_clear_of_the_top_edge_too() {
                 "{header:?} {block}"
             );
         }
-        // The right pane's Close is the one under Close app.
+        if header == PaneHeader::Hidden {
+            assert!(has(&rt, "pane-header-float"), "these float");
+        }
+        // The right pane's Close is the one under Close app. Its very top row is below
+        // the edge, so resting there brings no toolbar out over it.
         let close = rect(&rt, "pane-close:block:c");
-        let (x, y) = (close[0] + 12., close[1] + 12.);
+        assert!(close[1] >= toolbar_reveal::EDGE, "{header:?}: {close:?}");
+        let (x, y) = (close[0] + 12., close[1] + 1.);
         rest_at(&mut rt, x, y);
         assert!(
             !has(&rt, "toolbar"),
