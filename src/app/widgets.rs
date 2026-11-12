@@ -121,6 +121,8 @@ pub struct Row<'a> {
     pub surface: &'a str,
     pub label: &'a str,
     pub detail: &'a str,
+    /// The detail is an activity word in this colour: it stays beside the row's actions.
+    pub tone: Option<u32>,
     /// The row's shortcut, drawn as keycaps in place of the detail text.
     pub keys: &'a [Vec<String>],
     pub height: f32,
@@ -186,6 +188,8 @@ pub fn list_row(
     });
     let detail = if let Some(activity) = r.activity {
         rgb(activity.tone)
+    } else if let Some(tone) = r.tone {
+        rgb(tone)
     } else if r.selected {
         rgb(ink()).alpha(0.75)
     } else {
@@ -265,13 +269,24 @@ pub fn list_row(
         label
     });
     match r.actions.filter(|_| r.selected) {
-        Some(actions) => e
-            .child(actions)
-            .child(el().pin(Some(0.), Some(0.), Some(0.), Some(0.))),
+        Some(actions) => {
+            // A hint gives way to the actions; an activity word is news and stays.
+            if r.tone.is_some() && !r.detail.is_empty() {
+                e = e.child(text(r.detail.to_owned()).font(medium(11.)).color(detail));
+            }
+            e.child(actions)
+                .child(el().pin(Some(0.), Some(0.), Some(0.), Some(0.)))
+        }
         None => e
             .child(match columns {
                 Some(columns) => columns,
-                None if r.keys.is_empty() => text(r.detail.to_owned()).font(ui(11.)).color(detail),
+                None if r.keys.is_empty() => text(r.detail.to_owned())
+                    .font(if r.tone.is_some() {
+                        medium(11.)
+                    } else {
+                        ui(11.)
+                    })
+                    .color(detail),
                 // An unavailable row's keys recede with its label.
                 None => {
                     keycaps(r.keys, r.selected)
