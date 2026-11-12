@@ -542,7 +542,7 @@ impl Workspace {
     pub(super) fn reset_shortcuts_words(&self) -> String {
         let count = self.settings.recorded_shortcuts.len();
         format!(
-            "The {} recorded in Settings {} forgotten. Every action goes back to its keys from shortcuts.json, the host's Rex configuration or the Linux defaults; shortcuts.json itself is not changed.",
+            "The {} recorded in Settings {} forgotten. Every action goes back to its keys from shortcuts.json, the host's Rex configuration or the built-in defaults; shortcuts.json itself is not changed.",
             if count == 1 {
                 "one change".to_owned()
             } else {
@@ -623,7 +623,11 @@ pub fn key(s: &mut Workspace, event: &KeyEvent, tx: &mut Tx) -> bool {
     recorder.refused = match chord_of(input) {
         None => Some("That key has no name a shortcut can use."),
         Some(chord) if recorder.chords.is_empty() && !starts(&chord) => {
-            Some("Start with Ctrl, Alt or Super, or use a function key.")
+            Some(if rex_rune::keymap::command_key() {
+                "Start with Cmd, Ctrl or Option, or use a function key."
+            } else {
+                "Start with Ctrl, Alt or Super, or use a function key."
+            })
         }
         Some(_) if recorder.chords.len() == LONGEST => {
             Some("Four keys at most. Backspace takes one back.")

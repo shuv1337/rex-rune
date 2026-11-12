@@ -526,22 +526,26 @@ pub fn toolbar(s: &Workspace) -> El {
                     false,
                     |s, tx| s.perform(Intent::Settings, tx),
                 ))
-                .child(
+                // The system's frame has its own close button.
+                .children(s.own_frame.then(|| {
                     el().key("toolbar-divider")
                         .w(1.)
                         .h(16.)
                         .mx(6.)
-                        .fill(white(0.1)),
-                )
-                .child(bar_button(
-                    "close-app",
-                    &CLOSE,
-                    "Close app",
-                    "Close app · server programs keep running",
-                    36. + MARGIN,
-                    true,
-                    |_, tx| tx.close_window(),
-                )),
+                        .fill(white(0.1))
+                }))
+                .children(s.own_frame.then(|| {
+                    bar_button(
+                        "close-app",
+                        &CLOSE,
+                        "Close app",
+                        "Close app · server programs keep running",
+                        36. + MARGIN,
+                        true,
+                        |_, tx| tx.close_window(),
+                    )
+                }))
+                .pr(if s.own_frame { 0. } else { MARGIN }),
         )
 }
 

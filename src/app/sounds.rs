@@ -31,6 +31,14 @@ impl Sound {
             Self::Done => "complete",
         }
     }
+    /// The macOS system sound nearest to each: `/System/Library/Sounds/<name>.aiff`.
+    fn mac_name(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Ping",
+            Self::Error => "Basso",
+            Self::Done => "Glass",
+        }
+    }
     pub fn for_state(state: ProgramState) -> Option<Self> {
         match state {
             ProgramState::Blocked => Some(Self::NeedsYou),

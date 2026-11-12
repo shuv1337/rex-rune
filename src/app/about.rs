@@ -199,11 +199,12 @@ pub fn debug_info(s: &Workspace) -> String {
     ));
     info.push_str(&format!(
         "Display server: {}\n",
-        display_server(
+        // A platform with one window system says so; Linux has two to tell apart.
+        super::platform::chrome::WINDOW_SYSTEM.unwrap_or_else(|| display_server(
             env("XDG_SESSION_TYPE").as_deref(),
             env("WAYLAND_DISPLAY").is_some(),
             env("DISPLAY").is_some(),
-        )
+        ))
     ));
     if let Some(desktop) = env("XDG_CURRENT_DESKTOP") {
         info.push_str(&format!("Desktop: {desktop}\n"));

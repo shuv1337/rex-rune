@@ -312,12 +312,17 @@ impl Chord {
     }
 
     pub fn keycaps(&self) -> Vec<String> {
+        self.keycaps_on(command_key())
+    }
+
+    /// [`Self::keycaps`] with a Mac's own names for two of the keys (`command`), or a PC's.
+    pub fn keycaps_on(&self, command: bool) -> Vec<String> {
         let mut caps = Vec::new();
         for (enabled, label) in [
             (self.modifiers.ctrl, "Ctrl"),
-            (self.modifiers.alt, "Alt"),
+            (self.modifiers.alt, if command { "Option" } else { "Alt" }),
             (self.modifiers.shift, "Shift"),
-            (self.modifiers.logo, "Super"),
+            (self.modifiers.logo, if command { "Cmd" } else { "Super" }),
         ] {
             if enabled {
                 caps.push(label.into());
@@ -367,62 +372,127 @@ pub fn display(keys: &[String]) -> String {
         .join(", ")
 }
 
+/// Whether this client's own shortcuts are on the Command key, as a Mac's are. Off until
+/// [`use_command_key`] is called.
+static COMMAND_KEY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Put this client's own shortcuts on the Command key. The app calls this once, at startup
+/// on macOS, before anything reads the defaults. Nothing else does, so tests and the probes
+/// see the Control-key defaults on every platform.
+pub fn use_command_key() {
+    COMMAND_KEY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`use_command_key`] was called.
+pub fn command_key() -> bool {
+    COMMAND_KEY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Built-in defaults are declared to Rex, never copied into the user's file.
 pub fn defaults() -> KeymapDefault {
-    let mut bindings = Vec::new();
-    for (keys, action) in [
-        ("ctrl+k", "session.switch"),
-        ("ctrl+shift+p", "client.palette.toggle"),
-        ("ctrl+,", "client.settings"),
-        ("ctrl+shift+b", "client.sidebar.toggle"),
-        ("ctrl+alt+shift+t", "client.toolbar.toggle"),
-        ("ctrl+shift+n", "session.new"),
-        ("ctrl+shift+t", "client.tab.new"),
-        ("ctrl+shift+w", "client.close"),
-        ("ctrl+tab", "client.tab.next_global"),
-        ("ctrl+shift+tab", "client.tab.previous_global"),
-        ("ctrl+pageup", "client.tab.previous"),
-        ("ctrl+pagedown", "client.tab.next"),
-        ("ctrl+shift+enter", "pane.zoom"),
-        ("ctrl+shift+space", "pane.actions"),
-        ("ctrl+shift+c", "pane.copy"),
-        ("ctrl+shift+v", "pane.paste"),
-        ("ctrl+shift+f", "client.search"),
-        ("ctrl+shift+up", "client.prompt.previous"),
-        ("ctrl+shift+down", "client.prompt.next"),
-        ("ctrl+shift+r", "pane.reconnect"),
+    defaults_on(command_key())
+}
+
+/// The built-in defaults for a platform whose shortcuts are on Control (Linux, Windows) or
+/// on Command (macOS).
+///
+/// The Command set is the Control set with Command in Control's place, except where a Mac
+/// has its own habit. Control needed Shift to stay clear of the keys a terminal reads
+/// (Ctrl+C, Ctrl+T, Ctrl+W); Command reaches no program, so copy, paste, find, new tab and
+/// close are the plain keys every Mac app uses. Splits and pane focus follow the Mac
+/// terminals: ⌘D and ⇧⌘D, and ⌥⌘ with an arrow. Tabs also turn on ⇧⌘[ and ⇧⌘], since a
+/// Mac keyboard has no Page Up, and ⌘A selects the terminal's text, which on Control is the
+/// program's Ctrl+A. Control+Tab stays Control+Tab, as it is in Mac apps.
+pub fn defaults_on(command: bool) -> KeymapDefault {
+    // `mod` is the platform's modifier; the second spelling, when there is one, is the Mac's.
+    const ACTIONS: &[(&str, Option<&str>, &str)] = &[
+        ("mod+k", None, "session.switch"),
+        ("mod+shift+p", None, "client.palette.toggle"),
+        ("mod+,", None, "client.settings"),
+        ("mod+shift+b", None, "client.sidebar.toggle"),
+        ("mod+alt+shift+t", None, "client.toolbar.toggle"),
+        ("mod+shift+n", None, "session.new"),
+        ("mod+shift+t", Some("cmd+t"), "client.tab.new"),
+        ("mod+shift+w", Some("cmd+w"), "client.close"),
+        ("ctrl+tab", None, "client.tab.next_global"),
+        ("ctrl+shift+tab", None, "client.tab.previous_global"),
+        ("mod+pageup", None, "client.tab.previous"),
+        ("mod+pagedown", None, "client.tab.next"),
+        ("mod+shift+enter", None, "pane.zoom"),
+        ("mod+shift+space", None, "pane.actions"),
+        ("mod+shift+c", Some("cmd+c"), "pane.copy"),
+        ("mod+shift+v", Some("cmd+v"), "pane.paste"),
+        ("mod+shift+f", Some("cmd+f"), "client.search"),
+        ("mod+shift+up", None, "client.prompt.previous"),
+        ("mod+shift+down", None, "client.prompt.next"),
+        ("mod+shift+r", None, "pane.reconnect"),
         // Of an action's bindings the last is the one Commands and menus show: the main
         // block's key, not the numpad's.
-        ("ctrl+[NumpadAdd]", "client.zoom.in"),
-        ("ctrl+=", "client.zoom.in"),
-        ("ctrl+shift+=", "client.zoom.in"),
-        ("ctrl++", "client.zoom.in"),
-        ("ctrl+[NumpadSubtract]", "client.zoom.out"),
-        ("ctrl+-", "client.zoom.out"),
-        ("ctrl+[Numpad0]", "client.zoom.reset"),
-        ("ctrl+0", "client.zoom.reset"),
-    ] {
-        bindings.push(Binding::new([keys], action));
+        ("mod+[NumpadAdd]", None, "client.zoom.in"),
+        ("mod+=", None, "client.zoom.in"),
+        ("mod+shift+=", None, "client.zoom.in"),
+        ("mod++", None, "client.zoom.in"),
+        ("mod+[NumpadSubtract]", None, "client.zoom.out"),
+        ("mod+-", None, "client.zoom.out"),
+        ("mod+[Numpad0]", None, "client.zoom.reset"),
+        ("mod+0", None, "client.zoom.reset"),
+    ];
+    let primary = if command { "cmd" } else { "ctrl" };
+    // Written in the canonical order of modifiers, which puts Command last.
+    let canonical = |keys: String| {
+        Chord::parse(&keys)
+            .map(|chord| chord.spelling())
+            .unwrap_or(keys)
+    };
+    let keys = |control: &str, mac: Option<&str>| match mac {
+        Some(mac) if command => canonical(mac.to_owned()),
+        _ => canonical(control.replacen("mod", primary, 1)),
+    };
+    let mut bindings = Vec::new();
+    for &(control, mac, action) in ACTIONS {
+        bindings.push(Binding::new([keys(control, mac)], action));
     }
-    for (keys, direction) in [("ctrl+shift+d", "right"), ("ctrl+alt+d", "down")] {
-        bindings.push(Binding::new([keys], "pane.split").args(json!({"direction": direction})));
+    if command {
+        // Listed after the Page keys, so these are the ones Commands and menus show.
+        for (keys, action) in [
+            ("cmd+shift+[", "client.tab.previous"),
+            ("cmd+shift+]", "client.tab.next"),
+            ("cmd+a", "pane.select_all"),
+        ] {
+            bindings.push(Binding::new([canonical(keys.to_owned())], action));
+        }
+    }
+    for (control, mac, direction) in [
+        ("mod+shift+d", Some("cmd+d"), "right"),
+        ("mod+alt+d", Some("cmd+shift+d"), "down"),
+    ] {
+        bindings.push(
+            Binding::new([keys(control, mac)], "pane.split").args(json!({"direction": direction})),
+        );
     }
     for direction in ["left", "right", "up", "down"] {
         bindings.push(
-            Binding::new([format!("ctrl+alt+{direction}")], "pane.focus")
-                .args(json!({"direction": direction})),
+            Binding::new(
+                [canonical(format!("{primary}+alt+{direction}"))],
+                "pane.focus",
+            )
+            .args(json!({"direction": direction})),
         );
     }
-    for (keys, direction) in [
-        ("ctrl+shift+pageup", "left"),
-        ("ctrl+shift+pagedown", "right"),
+    for (control, direction) in [
+        ("mod+shift+pageup", "left"),
+        ("mod+shift+pagedown", "right"),
     ] {
-        bindings
-            .push(Binding::new([keys], "client.tab.move").args(json!({"direction": direction})));
+        bindings.push(
+            Binding::new([keys(control, None)], "client.tab.move")
+                .args(json!({"direction": direction})),
+        );
     }
     for (keys, lines) in [("shift+pageup", -20), ("shift+pagedown", 20)] {
         bindings.push(Binding::new([keys], "pane.scroll").args(json!({"lines": lines})));
     }
+    // The layer's name is its source in every report and file: it stays what it was when
+    // the client was for Linux alone.
     KeymapDefault::new("linux").bindings(bindings)
 }
 
@@ -851,6 +921,92 @@ mod tests {
                     .any(|b| b.keys == [key] && b.action == action)
             );
         }
+    }
+
+    #[test]
+    fn the_command_defaults_bind_the_same_actions_on_the_command_key() {
+        let (control, command) = (defaults_on(false), defaults_on(true));
+        assert_eq!(
+            defaults().bindings,
+            control.bindings,
+            "Control until the app says so"
+        );
+        assert_eq!(command.name, control.name);
+        let actions = |layer: &KeymapDefault| {
+            let mut actions: Vec<_> = layer
+                .bindings
+                .iter()
+                .map(|b| (b.action.clone(), b.args.clone()))
+                .collect();
+            actions.sort_by_key(|(action, args)| format!("{action} {args:?}"));
+            actions.dedup();
+            actions
+        };
+        // Everything Control binds, and Select all, which Control leaves to the program.
+        let mut expected = actions(&control);
+        expected.push(("pane.select_all".into(), None));
+        expected.sort_by_key(|(action, args)| format!("{action} {args:?}"));
+        assert_eq!(actions(&command), expected);
+        assert_eq!(command.bindings.len(), control.bindings.len() + 3);
+        let mut seen = std::collections::HashSet::new();
+        for binding in &command.bindings {
+            let keys = binding.keys.join(">");
+            assert_eq!(
+                normalize(&keys).unwrap(),
+                binding.keys,
+                "{keys} is canonical"
+            );
+            assert!(seen.insert(keys.clone()), "{keys} is bound twice");
+            let chord = Chord::parse(&keys).unwrap();
+            let tab = matches!(chord.key, Key::Named("tab"));
+            let scroll = binding.action == "pane.scroll";
+            // Command everywhere Control was, except the two a Mac keeps on Control.
+            assert_eq!(chord.modifiers.logo, !tab && !scroll, "{keys}");
+            assert_eq!(chord.modifiers.ctrl, tab, "{keys}");
+        }
+        let bound = |keys: &str, action: &str, direction: Option<&str>| {
+            command.bindings.iter().any(|b| {
+                b.keys == [keys]
+                    && b.action == action
+                    && direction
+                        .is_none_or(|d| b.args.as_ref().is_some_and(|a| a["direction"] == d))
+            })
+        };
+        for (keys, action) in [
+            ("cmd+k", "session.switch"),
+            ("cmd+t", "client.tab.new"),
+            ("cmd+w", "client.close"),
+            ("cmd+c", "pane.copy"),
+            ("cmd+v", "pane.paste"),
+            ("cmd+f", "client.search"),
+            ("cmd+,", "client.settings"),
+            ("shift+cmd+p", "client.palette.toggle"),
+            ("shift+cmd+]", "client.tab.next"),
+            ("shift+cmd+[", "client.tab.previous"),
+            ("cmd+=", "client.zoom.in"),
+            ("cmd+a", "pane.select_all"),
+            ("ctrl+tab", "client.tab.next_global"),
+        ] {
+            assert!(bound(keys, action, None), "{keys} {action}");
+        }
+        let palette = Chord::parse("shift+cmd+p").unwrap();
+        assert_eq!(palette.keycaps_on(true), ["Shift", "Cmd", "P"]);
+        assert_eq!(palette.keycaps_on(false), ["Shift", "Super", "P"]);
+        let focus = Chord::parse("alt+cmd+left").unwrap();
+        assert_eq!(focus.keycaps_on(true), ["Option", "Cmd", "Left"]);
+        assert!(bound("cmd+d", "pane.split", Some("right")));
+        assert!(bound("shift+cmd+d", "pane.split", Some("down")));
+        assert!(bound("alt+cmd+left", "pane.focus", Some("left")));
+        // Menus show an action's last binding: the bracket keys a Mac keyboard has.
+        let last = |action: &str| {
+            command
+                .bindings
+                .iter()
+                .rev()
+                .find(|b| b.action == action)
+                .map(|b| b.keys.join(">"))
+        };
+        assert_eq!(last("client.tab.next").as_deref(), Some("shift+cmd+]"));
     }
 
     #[test]

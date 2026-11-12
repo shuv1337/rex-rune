@@ -282,15 +282,7 @@ impl Default for Integrations {
 }
 
 fn local_rex() -> Option<std::path::PathBuf> {
-    let directory = std::env::var_os("XDG_BIN_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|home| home.join(".local/bin"))
-        })?;
-    let path = directory.join("rex");
-    path.is_file().then_some(path)
+    rex_rune::platform::tools::off_path("rex")
 }
 
 fn rex_output(program: &std::ffi::OsStr, args: &[String]) -> std::io::Result<std::process::Output> {
