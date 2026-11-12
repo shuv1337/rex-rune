@@ -84,7 +84,6 @@ fn sound_uses_existing_visibility_mute_and_kind_rules_but_never_readback_or_work
     for case in [
         "working",
         "readback",
-        "readback-finish",
         "muted",
         "seen",
         "blocked-off",
@@ -100,11 +99,6 @@ fn sound_uses_existing_visibility_mute_and_kind_rules_but_never_readback_or_work
         match case {
             "working" => state = Working,
             "readback" => live = false,
-            "readback-finish" => {
-                set_activity(&mut ws, block, &[("", record(Working, true))]);
-                state = Done;
-                live = false;
-            }
             "muted" => ws.settings.muted_tabs.push(rex_linux::settings::MutedTab {
                 endpoint: ws.settings.hosts[0].endpoint.clone(),
                 session: "s".into(),
@@ -129,6 +123,40 @@ fn sound_uses_existing_visibility_mute_and_kind_rules_but_never_readback_or_work
         flush(&mut ws);
         assert!(ws.sounds.fake.player.lookups.is_empty(), "{case}");
         assert!(ws.sounds.fake.player.invocations.is_empty(), "{case}");
+    }
+}
+
+#[test]
+fn a_program_that_finishes_by_removing_its_record_is_heard_like_it_is_notified() {
+    // The usual way a program finishes: it was working (or waiting), and its status
+    // record goes away. The tab then has no record at all, and so nothing marked live.
+    for before in [Working, Blocked] {
+        let (mut ws, _) = tabbed_workspace("single");
+        ws.settings.notifications.play_sounds = true;
+        set_activity(&mut ws, "block:b", &[("", record(before, true))]);
+        flush(&mut ws);
+        ws.sounds.fake.player.lookups.clear();
+        ws.notification_outbox.sent.clear();
+        // Past the quiet second after the needs-you sound.
+        ws.sounds.fake.advance(Duration::from_secs(2));
+        set_activity(&mut ws, "block:b", &[]);
+        flush(&mut ws);
+        let sent = &ws.notification_outbox.sent;
+        assert_eq!(sent.len(), 1, "{before:?}: notified as Done");
+        assert!(sent[0].0.summary.ends_with("Done"), "{before:?}");
+        assert_eq!(
+            ws.sounds.fake.player.lookups,
+            [Sound::Done],
+            "{before:?}: and heard as Done, once"
+        );
+        // With the Finishes kind off, neither happens.
+        let (mut ws, _) = tabbed_workspace("single");
+        ws.settings.notifications.play_sounds = true;
+        ws.settings.notifications.done = false;
+        set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
+        set_activity(&mut ws, "block:b", &[]);
+        flush(&mut ws);
+        assert!(ws.sounds.fake.player.invocations.is_empty());
     }
 }
 

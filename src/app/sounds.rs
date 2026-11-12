@@ -14,6 +14,8 @@ mod tests;
 
 const GATHER: Duration = Duration::from_millis(100);
 const INTERVAL: Duration = Duration::from_secs(1);
+/// How long exit waits for the worker to stop its player and return.
+const EXIT_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Sound {
@@ -54,9 +56,9 @@ impl Health {
         match self {
             // What the switch does, until there is something to report about it.
             Self::Unchecked | Self::Available => {
-                "For tabs you aren't looking at, when one needs you, fails or finishes."
+                "For tabs you aren't looking at, for the kinds switched on below."
             }
-            Self::Missing => "Nothing that can play a sound was found on this computer.",
+            Self::Missing => "No sound player or sound files were found on this computer.",
             Self::Failed => "The last sound could not be played.",
             Self::TimedOut => "The last sound did not finish and was stopped.",
             Self::WorkerStopped => "Sounds could not be started.",
@@ -168,7 +170,17 @@ pub struct Shutdown(Arc<Shared>);
 impl Shutdown {
     pub fn finish(&self) {
         self.0.stop();
-        if let Some(thread) = self.0.thread.lock().unwrap().take() {
+        let Some(thread) = self.0.thread.lock().unwrap().take() else {
+            return;
+        };
+        // The worker stops a player within a poll and exits. Looking for one touches
+        // every `PATH` and data directory, though, and one of those on a hung mount must
+        // not keep the process alive after its window closed: wait briefly, then let go.
+        let until = Instant::now() + EXIT_WAIT;
+        while !thread.is_finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if thread.is_finished() {
             let _ = thread.join();
         }
     }

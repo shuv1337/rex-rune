@@ -359,10 +359,11 @@ impl Workspace {
             return;
         }
         let desktop = config.system_notifications;
-        // The same news, visibility, mute and event-kind decision feeds both channels.
-        // A read-back completion can satisfy the legacy `finished` rule, but is not audio news.
+        // The same news, visibility, mute and event-kind decision feeds both channels, so
+        // a sound is heard for exactly what a notification would be posted for. That
+        // includes the usual way a program finishes: its status record is removed, which
+        // leaves the tab with no record at all (and so nothing marked live).
         if config.play_sounds
-            && activity.live
             && let Some(sound) = super::sounds::Sound::for_state(state)
         {
             self.sound_request(super::sounds::Request::Event(sound));
