@@ -306,7 +306,12 @@ pub fn list_row(
                         col().items_end().child(state).child(
                             text(time.text.clone())
                                 .font(ui(11.))
-                                .color(rgb(muted()))
+                                // As the place line under the title does on the selection.
+                                .color(if r.selected {
+                                    rgb(ink()).alpha(0.75)
+                                } else {
+                                    rgb(muted())
+                                })
                                 .label(time.label.clone())
                                 .help(time.label.clone()),
                         )

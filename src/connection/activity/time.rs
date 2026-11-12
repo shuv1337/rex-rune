@@ -1,6 +1,11 @@
 //! Local age of a status, not a server uptime or a clock-skew estimate.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// How far ahead of this client's clock a report may claim to be and still count as now.
+const AHEAD: Duration = Duration::from_secs(60);
+/// The oldest report that is shown with an age.
+const OLDEST: Duration = Duration::from_secs(365 * 86400);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Age {
     pub observed: Instant,
@@ -19,9 +24,19 @@ impl Age {
     }
 
     pub fn read_back(value: &str, now: Instant, wall: SystemTime) -> Option<Self> {
-        Some(Self {
+        let at = timestamp(value)?;
+        let initial = match wall.duration_since(at) {
+            Ok(age) => age,
+            // Clocks differ a little: a report from the near future is from just now. One
+            // from further ahead means the clocks disagree, and then no age can be trusted:
+            // an old request must not be made to look fresh.
+            Err(ahead) if ahead.duration() <= AHEAD => Duration::ZERO,
+            Err(_) => return None,
+        };
+        // Nothing waits this long; it is a wrong clock or a made-up time.
+        (initial <= OLDEST).then_some(Self {
             observed: now,
-            initial: wall.duration_since(timestamp(value)?).unwrap_or_default(),
+            initial,
             reported: true,
         })
     }
@@ -99,8 +114,8 @@ fn timestamp(raw: &str) -> Option<SystemTime> {
         }
         let h = number(&zone[1..3])?;
         let m = number(&zone[4..6])?;
-        // RFC 3339 -00:00 means the local offset is unknown.
-        if h > 23 || m > 59 || zone == "-00:00" {
+        // `-00:00` is UTC with the local offset unknown: the instant is still known.
+        if h > 23 || m > 59 {
             return None;
         }
         (h * 3600 + m * 60) * if z[0] == b'-' { -1 } else { 1 }
@@ -131,23 +146,26 @@ mod tests {
         use crate::connection::activity::StatusRecord;
         use serde_json::json;
         let start = Instant::now();
+        // The client held an idle record and watched it turn to Working.
+        let idle = StatusRecord::parse(&json!({"state":"idle"}));
         let mut first = StatusRecord {
             live: true,
             ..StatusRecord::parse(&json!({"state":"working"}))
         };
-        first.observe_at(None, start);
+        first.observe_at(Some(&idle), false, start);
+        assert!(!first.age.unwrap().reported);
         let later = start + Duration::from_secs(240);
         let mut repeat = StatusRecord {
             live: true,
             ..StatusRecord::parse(&json!({"state":"working", "msg":"more", "progress":90}))
         };
-        repeat.observe_at(Some(&first), later);
+        repeat.observe_at(Some(&first), false, later);
         assert_eq!(repeat.age.unwrap().elapsed(later).as_secs(), 240);
         let mut changed = StatusRecord {
             live: true,
             ..StatusRecord::parse(&json!({"state":"blocked"}))
         };
-        changed.observe_at(Some(&repeat), later);
+        changed.observe_at(Some(&repeat), false, later);
         assert_eq!(changed.age.unwrap().elapsed(later), Duration::ZERO);
     }
 
@@ -173,7 +191,7 @@ mod tests {
                     wall,
                 )
             };
-            live.observe_at(Some(&old), now);
+            live.observe_at(Some(&old), false, now);
             let age = live.age.unwrap();
             assert_eq!(
                 age.elapsed(now).as_secs(),
@@ -181,16 +199,53 @@ mod tests {
             );
             assert_eq!(age.reported, state == "working");
         }
-        for value in [json!({"state":"working"}), json!({"updated_at":"bad"})] {
+        for value in [
+            json!({"state":"working"}),
+            json!({"updated_at":"bad"}),
+            json!({"updated_at":"2099-01-01T00:00:00Z"}),
+        ] {
             assert!(StatusRecord::parse_at(&value, now, wall).age.is_none());
         }
-        assert_eq!(
-            StatusRecord::parse_at(&json!({"updated_at":"2099-01-01T00:00:00Z"}), now, wall)
-                .age
-                .unwrap()
-                .elapsed(now),
-            Duration::ZERO
-        );
+    }
+
+    #[test]
+    fn a_state_the_client_did_not_watch_begin_never_gets_an_observed_clock() {
+        use crate::connection::activity::StatusRecord;
+        use serde_json::json;
+        let now = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(7200);
+        let live = |value: serde_json::Value| StatusRecord {
+            live: true,
+            ..StatusRecord::parse_at(&value, now, wall)
+        };
+        // A first report for a pane: the program may have been working for hours before
+        // this client connected, or before the status pass reached the pane.
+        let mut first = live(json!({"state":"working", "updated_at":"1970-01-01T01:59:00Z"}));
+        first.observe_at(None, false, now);
+        let age = first.age.expect("the report's own time");
+        assert!(age.reported, "qualified as a report, not an observed start");
+        assert_eq!(age.elapsed(now).as_secs(), 60);
+        // With no time on the report there is nothing honest to show.
+        let mut bare = live(json!({"state":"blocked"}));
+        bare.observe_at(None, false, now);
+        assert_eq!(bare.age, None);
+        // Once the pane's status has been read on this connection and this record was
+        // not there, its first report is a state the client watched begin.
+        let mut watched = live(json!({"state":"working", "updated_at":"1970-01-01T01:59:00Z"}));
+        watched.observe_at(None, true, now);
+        let age = watched.age.unwrap();
+        assert!(!age.reported);
+        assert_eq!(age.elapsed(now), Duration::ZERO);
+        // A same-state report over a read-back record that had no time is still only a
+        // report: it must not start an observed clock either.
+        let ageless = StatusRecord::parse_at(&json!({"state":"blocked"}), now, wall);
+        assert_eq!(ageless.age, None);
+        let mut repeat = live(json!({"state":"blocked", "updated_at":"1970-01-01T02:00:00Z"}));
+        repeat.observe_at(Some(&ageless), false, now);
+        assert!(repeat.age.unwrap().reported);
+        let mut bare_repeat = live(json!({"state":"blocked"}));
+        bare_repeat.observe_at(Some(&ageless), false, now);
+        assert_eq!(bare_repeat.age, None);
     }
 
     #[test]
@@ -219,6 +274,31 @@ mod tests {
     }
 
     #[test]
+    fn host_event_path_watches_a_first_report_only_for_a_pane_already_read() {
+        use crate::connection::{HostModel, activity::parse_block_event};
+        use serde_json::json;
+        let first_report = || {
+            parse_block_event(&json!({"creator_name":"com.superlogical.terminal",
+                "block_id":"pane", "name":"program_status_changed",
+                "payload":{"id":"", "record":{"state":"blocked"}}}))
+            .unwrap()
+        };
+        // Not yet read on this connection: the program may have been waiting for hours.
+        let mut model = HostModel::default();
+        let (block, event) = first_report();
+        model.apply_block_event("session", block, event);
+        assert!(model.activity["pane"][""].live);
+        assert_eq!(model.activity["pane"][""].age, None);
+        // Read and found without a record: the report is the state beginning.
+        let mut model = HostModel::default();
+        model.status_read.insert("pane".into());
+        let (block, event) = first_report();
+        model.apply_block_event("session", block, event);
+        let age = model.activity["pane"][""].age.expect("an observed start");
+        assert!(!age.reported);
+    }
+
+    #[test]
     fn read_back_clock_and_rfc3339() {
         let now = Instant::now();
         let wall = UNIX_EPOCH + Duration::from_secs(86400);
@@ -235,12 +315,39 @@ mod tests {
                 86400
             );
         }
+        // UTC with the local offset unknown is still a known instant.
         assert_eq!(
-            Age::read_back("2099-01-01T00:00:00Z", now, wall)
+            Age::read_back("1970-01-01T00:00:00-00:00", now, wall)
+                .unwrap()
+                .elapsed(now)
+                .as_secs(),
+            86400
+        );
+        // A little ahead of this clock is now; further ahead the clocks disagree and an
+        // old request must not look fresh. Absurdly old is not an age either.
+        assert_eq!(
+            Age::read_back("1970-01-02T00:01:00Z", now, wall)
                 .unwrap()
                 .elapsed(now),
             Duration::ZERO
         );
+        for unusable in [
+            "1970-01-02T00:01:01Z",
+            "2099-01-01T00:00:00Z",
+            "9999-12-31T23:59:59Z",
+        ] {
+            assert_eq!(Age::read_back(unusable, now, wall), None, "{unusable}");
+        }
+        let much_later = UNIX_EPOCH + Duration::from_secs(366 * 86400);
+        assert_eq!(
+            Age::read_back("1970-01-01T00:00:00Z", now, much_later),
+            None
+        );
+        assert_eq!(
+            Age::read_back("0001-01-01T00:00:00Z", now, much_later),
+            None
+        );
+        assert!(Age::read_back("1970-01-02T00:00:00Z", now, much_later).is_some());
         assert_eq!(
             timestamp("1970-01-01T00:00:00.123456789123Z"),
             Some(UNIX_EPOCH + Duration::from_nanos(123456789))
@@ -254,7 +361,6 @@ mod tests {
             "2024-01-01T00:00:00",
             "2024-01-01T00:00:00.Z",
             "2024-01-01T00:00:00+24:00",
-            "2024-01-01T00:00:00-00:00",
             "2024-01-01T00:00:00Zextra",
             "💥",
         ] {

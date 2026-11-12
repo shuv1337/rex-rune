@@ -93,6 +93,10 @@ async fn sweep_selected_first_server_order_once_and_selection_only_adds_metadata
                 .all(|r| !r.live)
         );
         assert!(m.terminals.is_empty(), "sweep does not attach data streams");
+        // Every pane the pass read is known as read, so its next report is watched.
+        let mut read: Vec<_> = m.status_read.iter().map(String::as_str).collect();
+        read.sort_unstable();
+        assert_eq!(read, ["b", "c", "d", "front"]);
     }
     host.commands
         .send(HostCommand::Select(OTHER.into()))
@@ -233,6 +237,11 @@ async fn sweep_new_panes_and_sessions_join_once_and_reconnect_restarts_one_pass(
     })
     .await;
     assert_eq!(host.model.lock().unwrap().activity.len(), 1);
+    // What was read belongs to its connection: only this connection's one read remains.
+    assert_eq!(
+        host.model.lock().unwrap().status_read,
+        std::collections::HashSet::from(["b".to_owned()])
+    );
     drop(host);
     server.await.unwrap();
 }

@@ -115,14 +115,22 @@ impl StatusRecord {
         }
     }
 
-    /// A live repeat updates its words/progress, not the state start. A read-back age
-    /// remains explicitly a last-report lower bound even after a same-state live report.
-    pub fn observe_at(&mut self, previous: Option<&Self>, now: Instant) {
+    /// The client's own clock starts only where it watched the state begin: a live report
+    /// that changes the state of a record it already held, or a first report for a pane
+    /// whose status it had already `read` on this connection and found without this
+    /// record. A live repeat keeps the earlier start, updating only words and progress. A
+    /// first report for a pane not yet read says nothing about when its state began (the
+    /// program may have been in it for hours before this client connected, or before the
+    /// status pass reached the pane), so it keeps the report's own time, qualified as a
+    /// report.
+    pub fn observe_at(&mut self, previous: Option<&Self>, read: bool, now: Instant) {
         if self.live {
-            self.age = previous
-                .filter(|p| p.state == self.state)
-                .and_then(|p| p.age)
-                .or_else(|| Some(time::Age::live(now)));
+            self.age = match previous {
+                Some(p) if p.state != self.state => Some(time::Age::live(now)),
+                Some(p) => p.age.or(self.age),
+                None if read => Some(time::Age::live(now)),
+                None => self.age,
+            };
         }
     }
 }

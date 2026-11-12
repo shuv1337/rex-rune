@@ -861,3 +861,112 @@ fn unknown_time_and_latch_without_done_record_have_no_time_element() {
             .is_some_and(|t| t == "now" || t.starts_with("reported "))
     }));
 }
+
+#[test]
+fn a_tab_that_left_a_state_and_returned_between_wakes_shows_the_records_younger_time() {
+    use rex_linux::connection::activity::time::Age;
+    use std::time::{Duration, Instant};
+    let (mut ws, _rx) = fixture();
+    let start = Instant::now();
+    let record = |ws: &mut Workspace, age| {
+        ws.hosts[0]
+            .model
+            .activity
+            .get_mut("blocked")
+            .unwrap()
+            .get_mut("")
+            .unwrap()
+            .age = age;
+    };
+    let time = |ws: &Workspace, now| {
+        ws.activity_entries_at("blocked", now)
+            .remove(0)
+            .activity
+            .unwrap()
+            .elapsed
+            .map(|e| e.text)
+    };
+    record(&mut ws, Some(Age::live(start)));
+    ws.track_activity_times_at(0, start);
+    let later = start + Duration::from_secs(40 * 60);
+    ws.track_activity_times_at(0, later);
+    assert_eq!(time(&ws, later).as_deref(), Some("40m"));
+    // Model wakes coalesce: the agent was answered, worked, and asked again before the
+    // app looked. The tab's state is unchanged, but the record's clock restarted.
+    record(&mut ws, Some(Age::live(later)));
+    ws.track_activity_times_at(0, later);
+    assert_eq!(
+        time(&ws, later).as_deref(),
+        Some("now"),
+        "a question asked seconds ago is not forty minutes old"
+    );
+    // And a record whose age is unknown leaves nothing to show, however old the tab's
+    // own clock is.
+    record(&mut ws, None);
+    ws.track_activity_times_at(0, later);
+    assert_eq!(time(&ws, later), None);
+}
+
+#[test]
+fn one_pane_with_an_unknown_age_keeps_its_tab_from_showing_a_siblings_time() {
+    use rex_linux::connection::activity::time::Age;
+    use std::time::{Duration, Instant};
+    let (mut ws, _rx) = fixture();
+    let start = Instant::now();
+    let now = start + Duration::from_secs(600);
+    let records = ws.hosts[0].model.activity.get_mut("front").unwrap();
+    records.get_mut("").unwrap().age = Some(Age::live(start));
+    ws.track_activity_times_at(0, now);
+    let time = |ws: &Workspace| {
+        ws.activity_entries_at("front", now)
+            .remove(0)
+            .activity
+            .unwrap()
+            .elapsed
+            .map(|e| e.text)
+    };
+    assert_eq!(time(&ws).as_deref(), Some("10m"));
+    // A second Working report in the same tab, with no usable time: it may be older.
+    ws.hosts[0].model.activity.get_mut("front").unwrap().insert(
+        "other".into(),
+        StatusRecord {
+            state: ProgramState::Working,
+            live: true,
+            age: None,
+            ..Default::default()
+        },
+    );
+    ws.track_activity_times_at(0, now);
+    assert_eq!(time(&ws), None);
+}
+
+#[test]
+fn the_app_poll_drives_the_refresh_only_while_the_list_is_open() {
+    use std::time::{Duration, Instant};
+    let (mut ws, rx) = fixture();
+    let mut tx = rune::Tx::default();
+    // The poll's own result folds in other timers, so the deadline is what is checked.
+    // Closed: nothing is armed, and another panel is not this one.
+    crate::app::poll(&mut ws, 0., &mut tx);
+    assert!(ws.panel.is_none());
+    ws.picker(false);
+    crate::app::poll(&mut ws, 0., &mut tx);
+    assert_eq!(ws.panel.as_ref().unwrap().activity_refresh, None);
+    // Open: the poll arms the deadline about a minute out.
+    ws.show_activity();
+    crate::app::poll(&mut ws, 0., &mut tx);
+    let armed = ws.panel.as_ref().unwrap().activity_refresh.expect("armed");
+    assert!(armed > Instant::now() + Duration::from_secs(50));
+    // Not due: the deadline stays where it is.
+    crate::app::poll(&mut ws, 0., &mut tx);
+    assert_eq!(ws.panel.as_ref().unwrap().activity_refresh, Some(armed));
+    // Due: the poll takes it and arms the next one.
+    let due = Instant::now() - Duration::from_secs(1);
+    ws.panel.as_mut().unwrap().activity_refresh = Some(due);
+    assert!(
+        crate::app::poll(&mut ws, 0., &mut tx),
+        "a redraw is asked for"
+    );
+    assert!(ws.panel.as_ref().unwrap().activity_refresh.unwrap() > Instant::now());
+    assert!(rx.iter().all(|rx| rx.is_empty()), "a redraw sends nothing");
+}

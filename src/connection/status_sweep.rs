@@ -71,15 +71,13 @@ pub(super) fn record(
     // Removed live while this read was out: the reply is older than the removal.
     records.retain(|(id, _)| !removed.contains(id));
     // Most panes report nothing: don't wake the app to tell it so.
-    if records.is_empty()
-        && !shared
-            .model
-            .lock()
-            .expect("host model")
-            .activity
-            .contains_key(block)
     {
-        return;
+        let mut model = shared.model.lock().expect("host model");
+        // What this pane had reported is now known, so its next report is watched.
+        model.status_read.insert(block.into());
+        if records.is_empty() && !model.activity.contains_key(block) {
+            return;
+        }
     }
     shared.update(|m| {
         if !m

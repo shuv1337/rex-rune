@@ -72,8 +72,11 @@ pub(super) fn elapsed(age: Age, state: ProgramState, now: Instant) -> Elapsed {
     }
 }
 
-/// Oldest known current record in the winning group. A completion latch without a
-/// matching Done record has no timestamp. Never let a progress change choose a new age.
+/// Oldest known current record in the winning group, or none when any record in that
+/// group has no known age: an exact-looking time from one pane must not stand for a tab
+/// whose other pane has been in the state for an unknown, perhaps longer, time. A
+/// completion latch without a matching Done record has no timestamp. Never let a progress
+/// change choose a new age.
 fn tab_age(
     model: &HostModel,
     session: &str,
@@ -94,7 +97,9 @@ fn tab_age(
         .filter_map(|b| model.activity.get(b.block_id.as_deref()?))
         .flat_map(|r| r.values())
         .filter(|r| r.state == state)
-        .filter_map(|r| r.age)
+        .map(|r| r.age)
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
         .max_by_key(|a| a.elapsed(now))
 }
 
@@ -121,7 +126,20 @@ impl Workspace {
                         .get(&key)
                         .filter(|t| t.epoch == model.activity_epoch);
                     let age = match previous {
-                        Some(p) if p.state == state => p.age.or(candidate),
+                        // The tab's own clock, unless its records say something younger:
+                        // model wakes coalesce, so a tab can leave a state and return to
+                        // it between two of them, and the records then know better. With
+                        // no known record age there is nothing to show.
+                        Some(p) if p.state == state => match (p.age, candidate) {
+                            (Some(kept), Some(record)) => {
+                                Some(if record.elapsed(now) < kept.elapsed(now) {
+                                    record
+                                } else {
+                                    kept
+                                })
+                            }
+                            (_, record) => record,
+                        },
                         Some(_) => candidate.map(|a| if a.reported { a } else { Age::live(now) }),
                         None => candidate,
                     };
