@@ -261,6 +261,7 @@ impl Workspace {
         {
             browser.pending = None;
             browser.rows.clear();
+            browser.recent_count = 0;
             browser.truncated = false;
             panel.error = Some(Failure::Disconnected.message().into());
             return;
@@ -412,16 +413,18 @@ impl Workspace {
             }
         };
         let row = row.clone();
-        // Go's typed row is explicitly a folder even when a prefix hasn't been listed.
-        let directory = browser.go
-            || row.directory
+        // A folder is one the server listed, or the listed folder itself.
+        let directory = row.directory
             || browser
                 .rows
                 .iter()
                 .skip(1 + browser.recent_count)
                 .any(|listed| listed.path == row.path && listed.directory);
+        // Go's typed row for a name that was never listed may not be a folder, or exist:
+        // it is typed as asked and not remembered as somewhere to go.
+        let remember = directory || !browser.go;
         self.close_panel(tx);
-        if self.paste_text(&target, text) && self.settings.terminal.show_recent_paths {
+        if self.paste_text(&target, text) && remember && self.settings.terminal.show_recent_paths {
             let endpoint = self.settings.hosts[target.host].endpoint.clone();
             self.settings.remember_path(&endpoint, row.path, directory);
             self.save();

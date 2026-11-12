@@ -909,7 +909,17 @@ fn recents_never_record_cancelled_refused_or_failed_sends() {
         open(&mut ws);
         reply(&mut ws, &request(&rx), Ok(response()));
         match failure {
-            "cancel" => ws.close_panel(&mut rune::Tx::default()),
+            // Looking and leaving is not using a path.
+            "cancel" => {
+                let mut rt = runtime(ws);
+                press(&mut rt, Key::Down);
+                press(&mut rt, Key::Escape);
+                assert!(rt.state.panel.is_none());
+                assert!(rt.state.settings.recent_paths.is_empty());
+                assert!(rx.is_empty());
+                assert!(!rt.state.settings_path.exists());
+                continue;
+            }
             "paused" => {
                 ws.terminals[&ws.term_key("block:b")]
                     .connection
@@ -1080,6 +1090,72 @@ fn recents_hide_on_edit_or_tab_and_absent_history_has_identical_rows() {
     answer.path = "/home/dev/old folder".into();
     reply(&mut rt.state, &r, Ok(answer.clone()));
     assert_eq!(browser_rows(&rt.state), directory::rows(&answer, ""));
+}
+
+#[test]
+fn recents_leave_the_typed_row_selected_so_a_bare_enter_is_unchanged() {
+    let _fonts = rune::text::with_families("Inter", "Inter");
+    let (mut ws, rx) = fixture();
+    remember(&mut ws, 0, "/home/dev/old folder", true);
+    open(&mut ws);
+    reply(&mut ws, &request(&rx), Ok(response()));
+    assert_eq!(ws.entries()[1].group, "Recent");
+    assert_eq!(ws.panel.as_ref().unwrap().selected, 0);
+    let mut rt = runtime(ws);
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        pasted(&rx),
+        "/home/dev",
+        "Enter at open inserts the typed path, as it does with no recents"
+    );
+    std::fs::remove_file(&rt.state.settings_path).unwrap();
+}
+
+#[test]
+fn go_does_not_remember_a_typed_name_that_was_never_listed() {
+    let (mut ws, rx) = fixture();
+    go(&mut ws);
+    reply(&mut ws, &request(&rx), Ok(response()));
+    edit(&mut ws, "~/fol");
+    reply(&mut ws, &request(&rx), Ok(response()));
+    ws.insert_path(0, &mut rune::Tx::default());
+    assert_eq!(pasted(&rx), "cd /home/dev/fol", "typed as asked");
+    assert!(
+        ws.settings.recent_paths.is_empty(),
+        "an unlisted name is not known to be a folder"
+    );
+    // The listed folder itself, and a listed child, are.
+    go(&mut ws);
+    reply(&mut ws, &request(&rx), Ok(response()));
+    ws.insert_path(0, &mut rune::Tx::default());
+    assert_eq!(pasted(&rx), "cd /home/dev");
+    let endpoint = ws.settings.hosts[0].endpoint.clone();
+    assert_eq!(
+        ws.settings.recent_paths[&endpoint]
+            .iter()
+            .map(|r| (r.path.as_str(), r.directory))
+            .collect::<Vec<_>>(),
+        [("/home/dev", true)]
+    );
+    std::fs::remove_file(&ws.settings_path).unwrap();
+}
+
+#[test]
+fn switching_recents_off_with_a_browser_open_removes_its_recent_rows() {
+    let (mut ws, rx) = fixture();
+    remember(&mut ws, 0, "/home/dev/old folder", true);
+    open(&mut ws);
+    reply(&mut ws, &request(&rx), Ok(response()));
+    assert_eq!(ws.entries()[1].group, "Recent");
+    ws.set_show_recent_paths(false);
+    assert_eq!(browser_rows(&ws), directory::rows(&response(), ""));
+    assert!(ws.entries().iter().all(|e| e.group.is_empty()));
+    assert_eq!(ws.panel.as_ref().unwrap().selected, 0);
+    // The second row is the listing's again, not the forgotten path.
+    ws.insert_path(1, &mut rune::Tx::default());
+    assert_eq!(pasted(&rx), "'/home/dev/a b'");
+    assert!(ws.settings.recent_paths.is_empty());
+    std::fs::remove_file(&ws.settings_path).unwrap();
 }
 
 #[test]
