@@ -254,3 +254,38 @@ fn failures_are_health_only_and_checks_never_spawn() {
     assert!(player.child.lock().unwrap().reaped);
     assert!(!player.child.lock().unwrap().killed);
 }
+
+#[test]
+fn a_mac_plays_its_own_alert_sounds_with_afplay_when_no_linux_player_is_there() {
+    let paths = ["/usr/bin".into()];
+    let sounds = [
+        (Sound::NeedsYou, "Ping"),
+        (Sound::Error, "Basso"),
+        (Sound::Done, "Glass"),
+    ];
+    for (sound, name) in sounds {
+        let file = PathBuf::from(format!("/System/Library/Sounds/{name}.aiff"));
+        let tree = Tree(vec!["/usr/bin/afplay".into(), file.clone()]);
+        assert_eq!(
+            select(&tree, &paths, &[], sound),
+            Some(Invocation {
+                program: "/usr/bin/afplay".into(),
+                args: vec![file.clone().into_os_string()],
+            })
+        );
+        // The player without the sound, or the sound without the player, is no player.
+        assert_eq!(
+            select(&Tree(vec!["/usr/bin/afplay".into()]), &paths, &[], sound),
+            None
+        );
+        assert_eq!(select(&Tree(vec![file]), &paths, &[], sound), None);
+    }
+    // A Linux player on PATH still comes first.
+    let tree = Tree(vec![
+        "/usr/bin/afplay".into(),
+        "/usr/bin/canberra-gtk-play".into(),
+        "/System/Library/Sounds/Glass.aiff".into(),
+    ]);
+    let chosen = select(&tree, &paths, &[], Sound::Done).unwrap();
+    assert_eq!(chosen.program, PathBuf::from("/usr/bin/canberra-gtk-play"));
+}

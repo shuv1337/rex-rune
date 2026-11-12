@@ -542,7 +542,7 @@ impl Workspace {
     pub(super) fn reset_shortcuts_words(&self) -> String {
         let count = self.settings.recorded_shortcuts.len();
         format!(
-            "The {} recorded in Settings {} forgotten. Every action goes back to its keys from shortcuts.json, the host's Rex configuration or the Linux defaults; shortcuts.json itself is not changed.",
+            "The {} recorded in Settings {} forgotten. Every action goes back to its keys from shortcuts.json, the host's Rex configuration or the built-in defaults; shortcuts.json itself is not changed.",
             if count == 1 {
                 "one change".to_owned()
             } else {

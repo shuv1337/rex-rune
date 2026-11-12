@@ -149,6 +149,8 @@ fn local_rex() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin")))
         .map(|dir| dir.join("rex"))
         .filter(|p| p.is_file())
+        // On macOS the Rex app carries the CLI.
+        .or_else(|| crate::platform::tools::bundled("rex"))
         .unwrap_or_else(|| "rex".into())
 }
 

@@ -38,7 +38,7 @@ const SERVER: &str = "Server";
 
 const HERE: &str = "Recorded here";
 const HELP: &str = "Press a row’s keys to replace or remove them, or Record shortcut to give it some. Filter by a name or a key, such as ctrl+k.";
-const LAYERS: &str = "Shortcuts recorded here override shortcuts.json, which overrides the host's Rex configuration and the Linux defaults. Keys in a named mode apply only while that mode is active; within each mode, bindings are listed in priority order.";
+const LAYERS: &str = "Shortcuts recorded here override shortcuts.json, which overrides the host's Rex configuration and the built-in defaults. Keys in a named mode apply only while that mode is active; within each mode, bindings are listed in priority order.";
 
 /// One action on the page.
 #[derive(Clone, Debug, PartialEq)]

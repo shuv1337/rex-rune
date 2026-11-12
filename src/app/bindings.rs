@@ -1,6 +1,6 @@
 //! Layout-aware matching and sequence/repeat state, adapted from Andrea Zito
 //! (nivox), 8037d78. Input is plain data: no Tx or workspace needed by the matcher.
-use rex_rune::keymap::{Chord, Key as BindingKey, Modifiers, Resolved};
+use rex_rune::keymap::{Chord, Key as BindingKey, Resolved};
 use rune::{Key, KeyEvent, PhysicalKeyCode as Code};
 
 #[derive(Clone, Copy)]
@@ -64,12 +64,7 @@ fn character(key: &Key) -> Option<char> {
 
 pub fn matches(chord: &Chord, input: Input<'_>) -> bool {
     let m = input.event.mods;
-    let mods = Modifiers {
-        ctrl: m.ctrl || m.cmd,
-        alt: m.alt,
-        shift: m.shift,
-        logo: m.logo,
-    };
+    let mods = super::platform::keys::modifiers(m);
     if chord.modifiers != mods {
         return false;
     }
@@ -133,12 +128,7 @@ pub fn chord_of(input: Input<'_>) -> Option<Chord> {
         return None;
     }
     let m = input.event.mods;
-    let modifiers = Modifiers {
-        ctrl: m.ctrl || m.cmd,
-        alt: m.alt,
-        shift: m.shift,
-        logo: m.logo,
-    };
+    let modifiers = super::platform::keys::modifiers(m);
     let typed = character(&input.event.key);
     let mut spellings: Vec<String> = Vec::new();
     match &input.event.key {

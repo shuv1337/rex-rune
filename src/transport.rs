@@ -233,7 +233,7 @@ async fn connect(
         .name(name)
         .version(env!("CARGO_PKG_VERSION"))
         .api_revisions(MIN_API_REVISION..=API_REVISION)
-        .platform("linux")
+        .platform(std::env::consts::OS)
         .kind(rexrs::ClientKind::App);
     if let Some(token) = reconnect {
         builder = builder.reconnect_token(token);

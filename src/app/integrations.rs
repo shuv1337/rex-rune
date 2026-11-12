@@ -290,7 +290,10 @@ fn local_rex() -> Option<std::path::PathBuf> {
                 .map(|home| home.join(".local/bin"))
         })?;
     let path = directory.join("rex");
-    path.is_file().then_some(path)
+    path.is_file()
+        .then_some(path)
+        // On macOS the Rex app carries the CLI.
+        .or_else(|| rex_rune::platform::tools::bundled("rex"))
 }
 
 fn rex_output(program: &std::ffi::OsStr, args: &[String]) -> std::io::Result<std::process::Output> {

@@ -13,8 +13,9 @@ use super::{
 use rex_rune::connection::Command;
 use rune::{Ime, Key, KeyEvent, PhysicalKeyCode as Code, Tx};
 
+/// The platform's shortcut modifier: Control, or Command on a Mac.
 fn ctrl(ev: &KeyEvent) -> bool {
-    ev.mods.ctrl || ev.mods.cmd
+    super::platform::keys::primary(ev.mods)
 }
 
 fn space(ev: &KeyEvent, tx: &Tx) -> bool {

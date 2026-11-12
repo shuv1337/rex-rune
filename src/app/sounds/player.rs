@@ -85,7 +85,16 @@ pub(super) fn select(
         };
         return Some(Invocation { program, args });
     }
-    None
+    // macOS: its own player and the system's alert sounds. Neither exists anywhere else.
+    let program = paths
+        .iter()
+        .map(|p| p.join("afplay"))
+        .find(|p| files.executable(p))?;
+    let file = Path::new("/System/Library/Sounds").join(format!("{}.aiff", sound.mac_name()));
+    files.file(&file).then(|| Invocation {
+        program,
+        args: vec![file.into_os_string()],
+    })
 }
 
 pub(super) trait Running {
