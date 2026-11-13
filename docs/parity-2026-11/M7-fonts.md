@@ -173,7 +173,12 @@ first launch after boot. The client's binary grows by about 2.5 MB on every plat
 - The symbols font is a fallback for all text Rune draws, the chrome included. It can
   supply a character that the system's emoji font would otherwise draw: its Octicons
   include ⚡ (U+26A1) and ♥ (U+2665).
-- SF Mono's italic comes from slanting the upright face, not from its italic file.
+- SF Mono's italic comes from slanting the upright face, not from its italic file. That
+  holds for the terminal grid; a picker or Settings sample of SF Mono, when another family
+  is in use, loads the family through Rune's own lookup and may draw from the italic file.
+- On macOS and Windows a family found in the system's list keeps the spelling it was asked
+  for (`--font menlo` reports `menlo`), where fontconfig on Linux reports the installed
+  name (`Menlo`).
 - Windows: the fonts tests run in CI, but no window has been opened on Windows, and the
   stand-ins and catalog have not been looked at there.
 - Linux: no change in behaviour; the Linux CI job is the only Linux run for this work.

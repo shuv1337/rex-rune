@@ -136,7 +136,10 @@ pub fn installed(ready: impl FnOnce() + Send + 'static) -> Option<&'static [Fami
                 ready();
             });
         if let Err(error) = spawned {
-            eprintln!("Could not list installed fonts: {error}");
+            eprintln!(
+                "Could not start reading installed fonts on a thread ({error}); reading them now."
+            );
+            read_installed();
         }
     });
     CATALOG.get().map(Vec::as_slice)

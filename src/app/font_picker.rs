@@ -119,12 +119,29 @@ impl Workspace {
         self.fonts.catalog.as_deref()
     }
 
-    /// The installed families have been read: list them in the open picker.
-    #[cfg_attr(test, allow(dead_code))]
-    fn font_catalog_read(&mut self) {
-        if self.font_catalog().is_some() && self.font_pick().is_some() {
+    /// The installed families have been read: list them in the open picker. A terminal
+    /// picker opened before they arrived could not know the saved family is proportional, so
+    /// it moves to All fonts now if it is.
+    pub(super) fn font_catalog_read(&mut self) {
+        if self.font_catalog().is_none() {
+            return;
+        }
+        let Some(pick) = self.font_pick() else { return };
+        if pick.purpose == FontPurpose::Terminal && pick.mono && self.saved_is_proportional() {
+            self.set_font_scope(false);
+        } else {
             self.list_fonts();
         }
+    }
+
+    /// Whether the saved terminal family is installed and isn't monospaced, once the
+    /// installed families are known.
+    fn saved_is_proportional(&mut self) -> bool {
+        let saved = self.settings.font_family.to_lowercase();
+        self.font_catalog()
+            .unwrap_or_default()
+            .iter()
+            .any(|f| f.lower == saved && !f.mono)
     }
 
     fn font_pick(&self) -> Option<FontPick> {
@@ -151,12 +168,7 @@ impl Workspace {
     /// opens on; a fallback's opens on All fonts, since fallbacks are mostly symbol, emoji
     /// and other scripts' fonts.
     pub(super) fn open_fonts(&mut self, purpose: FontPurpose) {
-        let saved = self.settings.font_family.to_lowercase();
-        let proportional = self
-            .font_catalog()
-            .unwrap_or_default()
-            .iter()
-            .any(|f| f.lower == saved && !f.mono);
+        let proportional = self.saved_is_proportional();
         let pick = FontPick {
             purpose,
             mono: purpose == FontPurpose::Terminal && !proportional,

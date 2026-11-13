@@ -216,7 +216,7 @@ fn fallbacks(s: &Workspace) -> El {
     };
     let mut notes = vec![
         footnote(format!(
-            "{pending} After the list come the bundled IBM Plex Mono and the system's own fallbacks for other scripts and symbols."
+            "{pending} After the list come the bundled IBM Plex Mono and Symbols Nerd Font, then the system's own fallbacks for other scripts and symbols."
         ))
         .key("fallback-note"),
     ];

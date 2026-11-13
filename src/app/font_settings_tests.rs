@@ -317,6 +317,25 @@ fn a_proportional_font_in_use_opens_the_picker_on_all_fonts() {
 }
 
 #[test]
+fn a_picker_opened_before_the_fonts_are_read_moves_to_all_fonts_for_a_proportional_font() {
+    // Nothing read yet: the picker can't tell, so it opens on Monospaced.
+    let mut rt = settings_on(TERMINAL, |ws| {
+        ws.settings.font_family = "Noto Sans".into();
+        ws.fonts.catalog = Some(Vec::new());
+    });
+    tap(&mut rt, "font-choose");
+    assert_eq!(pick(&rt).map(|p| p.mono), Some(true));
+    rt.state.fonts.catalog = Some(crate::app::fonts::catalog(
+        crate::app::font_picker::TEST_FAMILIES.iter().copied(),
+    ));
+    rt.state.font_catalog_read();
+    settle(&mut rt);
+    assert_eq!(pick(&rt).map(|p| p.mono), Some(false));
+    assert_eq!(listed(&rt), ALL);
+    assert_eq!(rt.state.panel.as_ref().unwrap().selected, 6);
+}
+
+#[test]
 fn a_long_list_builds_only_the_rows_near_the_window_and_reveals_the_font_in_use() {
     let mut rt = settings_on(TERMINAL, |ws| {
         ws.fonts.catalog = Some(
