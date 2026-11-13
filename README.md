@@ -266,15 +266,15 @@ cargo build --locked --bin rex-rune
 | --- | --- |
 | VT decoding and command-line startup | Linked and run in CI; no window or rendering check |
 | `https://`, `wss://`, `http://`, `ws://` hosts | The unchanged TCP and Rustls path compiles; real server attachment is untested |
-| Local host and `unix://` | Refused with a message suggesting an `https://` host. `REX_SERVER` overrides the default; otherwise Local keeps an unsupported `unix://` placeholder. Named pipes are not implemented |
+| Local host and `unix://` | Refused with a message suggesting an `https://` host. `REX_SERVER` overrides the default; otherwise Local keeps an unsupported `unix://` placeholder, which stays in the sidebar as disconnected and is retried every few seconds, also when you start with `--endpoint`. Named pipes are not implemented |
 | `ssh://` hosts | Refused before starting SSH; no loopback TCP forwarding |
-| Downloads | Refused before creating a file or requesting a download ticket |
+| Downloads | The code refuses one before it creates a file or asks the server for a ticket. That path has not run on Windows |
 | Uploads | Compile with portable random IDs; end-to-end uploads are untested |
-| Folders | Settings in `%APPDATA%\rex-rune`, state in `%LOCALAPPDATA%\rex-rune`, home from `USERPROFILE`. Missing AppData variables fall back to `<home>\AppData\Roaming` and `<home>\AppData\Local`. The default download folder is `<home>\Downloads`, though downloads are refused |
+| Folders | Settings in `%APPDATA%\rex-rune`, state in `%LOCALAPPDATA%\rex-rune`, home from `USERPROFILE`, else `HOMEDRIVE` with `HOMEPATH`. Missing AppData variables fall back to `<home>\AppData\Roaming` and `<home>\AppData\Local`. The default download folder is `<home>\Downloads`, though downloads are refused |
 | Fonts | Bundled IBM Plex Mono and Inter; native font discovery is not implemented |
 | Window chrome, input, clipboard and IME | Not tested on Windows |
 | Primary selection | Windows has none; the setting is not shown |
-| Notifications, sounds, opening links, Show in folder | Not available yet |
+| Notifications, sounds, opening links, Show in folder | Not available yet. Opening a link or a folder fails with the system's "program not found"; Settings reports no notification service and no sound player |
 | Updates | Source builds only; no installer or restart after an update |
 
 To try a host, run `rex-rune.exe --endpoint https://my-host.example.ts.net --session work` with an existing session. This is not a verified Windows attachment recipe.

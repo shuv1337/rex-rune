@@ -4,7 +4,7 @@
 //! | --- | --- | --- | --- |
 //! | settings | `$XDG_CONFIG_HOME/rex-rune` (`~/.config/rex-rune`) | `~/Library/Application Support/rex-rune` | `%APPDATA%\rex-rune` (`<home>\AppData\Roaming\rex-rune`) |
 //! | state | `$XDG_STATE_HOME/rex-rune` (`~/.local/state/rex-rune`) | `~/Library/Application Support/rex-rune` | `%LOCALAPPDATA%\rex-rune` (`<home>\AppData\Local\rex-rune`) |
-//! | runtime | `$XDG_RUNTIME_DIR/rex-rune`, else `<tmp>/rex-rune-<uid>` | `<tmp>/rex-rune-<uid>` | Unused (no SSH tunnels) |
+//! | runtime | `$XDG_RUNTIME_DIR/rex-rune`, else `<tmp>/rex-rune-<uid>` | `<tmp>/rex-rune-<uid>` | Never created (no SSH tunnels) |
 //! | home | `$HOME` | `$HOME` | `%USERPROFILE%` |
 //!
 //! Settings are `workspace.json` and `shortcuts.json`; state is `update.json` and
@@ -19,10 +19,28 @@ use std::path::PathBuf;
 /// The folder name this client uses under each base folder.
 pub const APP: &str = "rex-rune";
 
-/// The user's home folder, or an empty path when its environment variable is unset.
+/// The user's home folder, or an empty path when the environment names none. On Windows
+/// that is `USERPROFILE`, else `HOMEDRIVE` and `HOMEPATH` together, as Rune resolves it.
 pub fn home() -> PathBuf {
-    let variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    PathBuf::from(std::env::var_os(variable).unwrap_or_default())
+    if cfg!(windows) {
+        return windows_home(|name| std::env::var_os(name));
+    }
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+fn windows_home(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    if let Some(profile) = set("USERPROFILE") {
+        return PathBuf::from(profile);
+    }
+    match (set("HOMEDRIVE"), set("HOMEPATH")) {
+        (Some(drive), Some(path)) => {
+            let mut home = drive;
+            home.push(path);
+            PathBuf::from(home)
+        }
+        _ => PathBuf::new(),
+    }
 }
 
 /// Where the settings files live.
@@ -175,6 +193,36 @@ pub(super) fn xdg_runtime() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_home_is_the_profile_or_the_home_drive_and_path() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            }
+        };
+        let profile = windows_home(env(&[
+            ("USERPROFILE", r"C:\Users\me"),
+            ("HOMEDRIVE", "D:"),
+            ("HOMEPATH", r"\other"),
+        ]));
+        assert_eq!(profile, PathBuf::from(r"C:\Users\me"));
+        let drive = windows_home(env(&[
+            ("USERPROFILE", ""),
+            ("HOMEDRIVE", "D:"),
+            ("HOMEPATH", r"\Users\me"),
+        ]));
+        assert_eq!(drive, PathBuf::from(r"D:\Users\me"));
+        // Half of the pair is no home.
+        assert_eq!(windows_home(env(&[("HOMEDRIVE", "D:")])), PathBuf::new());
+        // On Windows itself the folders this client writes are absolute.
+        if cfg!(windows) {
+            assert!(config().is_absolute() && state().is_absolute());
+        }
+    }
 
     #[test]
     fn settings_and_state_are_named_for_the_client_under_the_platforms_folder() {

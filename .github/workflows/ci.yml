@@ -86,27 +86,38 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # ghostty-vt-sys downloads the Ghostty source itself, but through the system TLS stack,
-      # which rejects the host's certificate chain on this runner. Fetch the same pinned
-      # archive with curl, check it against the hash in the crate's GHOSTTY.lock, and hand
-      # the build script the extracted tree.
+      # which rejects the host's certificate chain on this runner. Fetch the archive the
+      # crate pins with curl, check it against the hash beside it, and hand the build script
+      # the extracted tree. Both are read from the crate's own GHOSTTY.lock, so a bump of
+      # ghostty-vt cannot leave this job building the old source.
       - name: Ghostty source
         shell: bash
         run: |
-          curl --proto '=https' --tlsv1.2 -fsSLo "$RUNNER_TEMP/ghostty.tar.gz" https://tip.files.ghostty.org/83fb95624b0439ee660c2679b43b38c8b63769cd/libghostty-vt-source.tar.gz
-          echo "ed57ae9b95581c88f2614e976c1d3f146c02d443a3c26139200eb9de6e645eb4  $RUNNER_TEMP/ghostty.tar.gz" | sha256sum -c -
+          lock="$(cargo metadata --locked --format-version 1 | python -c 'import json, pathlib, sys; packages = json.load(sys.stdin)["packages"]; crate = next(p for p in packages if p["name"] == "ghostty-vt-sys"); print(pathlib.Path(crate["manifest_path"]).with_name("GHOSTTY.lock").as_posix())')"
+          url="$(sed -n 's/^url = //p' "$lock" | tr -d '\r')"
+          sha256="$(sed -n 's/^sha256 = //p' "$lock" | tr -d '\r')"
+          test -n "$url" && test -n "$sha256"
+          curl --proto '=https' --tlsv1.2 -fsSLo "$RUNNER_TEMP/ghostty.tar.gz" "$url"
+          echo "$sha256  $RUNNER_TEMP/ghostty.tar.gz" | sha256sum -c -
           mkdir "$RUNNER_TEMP/ghostty"
           "$SYSTEMROOT/System32/tar.exe" -xzf "$(cygpath -w "$RUNNER_TEMP/ghostty.tar.gz")" -C "$(cygpath -w "$RUNNER_TEMP/ghostty")" --strip-components=1
           echo "GHOSTTY_SOURCE_DIR=$(cygpath -w "$RUNNER_TEMP/ghostty")" >> "$GITHUB_ENV"
       - name: Library and probes, without the UI
         run: cargo build --locked --no-default-features --bins
       - name: Link and run libghostty-vt
-        run: cargo test --locked --no-default-features --test cursor_policy --test prompt_navigation --test keymap_fixture
-      - name: Platform boundaries and random IDs
+        run: cargo test --locked --no-default-features --test cursor_policy --test prompt_navigation
+      - name: Keymap fixture
+        run: cargo test --locked --no-default-features --test keymap_fixture
+      # Everything in the library known to run here: Ghostty decoding, search and frames
+      # (terminal::), the platform boundary, upload ids and the update lock. One invocation,
+      # and a floor on how many ran, because a filter that matches nothing also passes.
+      - name: Library tests that run on Windows
         shell: bash
         run: |
-          cargo test --locked --no-default-features --lib platform::
-          cargo test --locked --no-default-features --lib upload::tests::
-          cargo test --locked --no-default-features --lib update::tests::update_state_lock
+          cargo test --locked --no-default-features --lib -- terminal:: platform:: upload::tests:: update::tests::update_state_lock 2>&1 | tee "$RUNNER_TEMP/lib-tests.log"
+          ran="$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/lib-tests.log" | head -n 1)"
+          echo "library tests run: ${ran:-0}"
+          test "${ran:-0}" -ge 25
       - name: Lint every target and feature
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Build the app

@@ -20,6 +20,8 @@ pub fn default_socket() -> PathBuf {
     {
         // A local Windows Rex server listens on a named pipe (W8). Keep a valid endpoint
         // for the default Local host until there is a pipe transport, and refuse at connect.
+        // It is saved in workspace.json as it is: when the pipe transport arrives, a saved
+        // Local host with exactly this endpoint is the one to point at the pipe.
         PathBuf::from("/rex/server.sock")
     }
     #[cfg(unix)]
