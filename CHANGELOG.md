@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
+
 ## 0.8.0 - 2026-11-12
 
 **Rex Linux is now Rex Rune.** Existing `install.sh` and in-app **Update now** users need no migration steps: update normally and restart. Pacman replaces `rex-linux-bin` with `rex-rune-bin` automatically on update; the repository configuration stays the same. For `.deb` installs, take **`rex-rune_*.deb`**, even if the old client's notice names `rex-linux_*.deb`. The new client keeps one launcher, moves settings and update state, and leaves `rex-linux` as a link to `rex-rune`.

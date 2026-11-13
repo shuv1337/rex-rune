@@ -1,4 +1,6 @@
 //! Cached Server facts, privacy, navigation and read-only behavior.
+#[path = "server_controls_tests.rs"]
+mod controls;
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::*;
 use crate::app::{panel::SettingsSection, server_page};

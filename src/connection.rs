@@ -237,6 +237,9 @@ pub struct ProtocolStats {
     pub data_connect_requests: u64,
 }
 
+/// What the person is told when the server took a stop request.
+const STOP_ACCEPTED: &str = "Server stop accepted. Rex Rune will not start it again.";
+
 #[derive(Clone, Default)]
 pub struct HostModel {
     /// A successful SSH lookup found no default server; setup may be offered, never run.
@@ -255,6 +258,8 @@ pub struct HostModel {
     /// This launch's downloads from the host, oldest first; see [`crate::download`].
     pub downloads: Vec<crate::download::Transfer>,
     pub connection_epoch: u64,
+    /// Last explicit stop outcome, kept on Server settings as well as in the host notice.
+    pub server_stop_result: Option<String>,
     pub protocol: ProtocolStats,
     pub sessions: Vec<session::Session>,
     pub selected: Option<String>,
@@ -445,6 +450,10 @@ impl HostModel {
 }
 
 pub enum HostCommand {
+    /// A person's confirmed, single attempt on this connection only. Never replayed.
+    StopServer {
+        epoch: u64,
+    },
     PerformReply {
         epoch: u64,
         call_id: String,
@@ -1459,6 +1468,11 @@ async fn run_host(
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
+                // A server is answering again, so "stop accepted" is no longer the news. A
+                // refusal or an unconfirmed stop stays: the person has not seen it resolved.
+                if m.server_stop_result.as_deref() == Some(STOP_ACCEPTED) {
+                    m.server_stop_result = None;
+                }
                 m.views.clear();
                 m.background_views.clear();
                 // Reports made while disconnected were missed; the per-connection pass refills them.
@@ -1658,6 +1672,35 @@ async fn run_host(
                         let Ok(command) = command else { control.close().await?; return Ok(true); };
                         if matches!(command, HostCommand::Shutdown) { control.close().await?; return Ok(true); }
                         if matches!(command, HostCommand::Reconnect) { return Ok(false); }
+                        if let HostCommand::StopServer { epoch } = command {
+                            if epoch != shared.model.lock().expect("host model").connection_epoch {
+                                shared.update(|m| m.notice = Some("Stop not sent: the connection changed. Review Stop server again.".into()));
+                                continue;
+                            }
+                            match request(&mut control, "server.stop", json!({})).await {
+                                Ok(_) => {
+                                    shared.update(|m| {
+                                        m.notice = Some(STOP_ACCEPTED.into());
+                                        m.server_stop_result = m.notice.clone();
+                                    });
+                                    // The API replies before shutdown and asks the caller to close.
+                                    let _ = control.close().await;
+                                    return Ok(false);
+                                }
+                                Err(error) => {
+                                    let api = error.downcast_ref::<rexrs::Error>().and_then(|e| e.api());
+                                    let message = api.map(|e| crate::download::display_text(&e.to_string()));
+                                    shared.update(|m| {
+                                        m.notice = Some(message.map_or_else(
+                                            || "Could not confirm server stop: the connection dropped or did not reply. Check the host before trying again. Nothing was retried.".into(),
+                                            |message| format!("Could not stop server: {message}. Nothing was retried.")));
+                                        m.server_stop_result = m.notice.clone();
+                                    });
+                                    if api.is_none() { return Err(error); }
+                                }
+                            }
+                            continue;
+                        }
                         if let HostCommand::Keymap(new) = command {
                             keymap::refresh(&mut control, shared, &new).await;
                             keymap = Some(new);
@@ -1786,6 +1829,15 @@ async fn run_host(
                 HostCommand::Download(request) => {
                     downloads::refuse(shared, *request, crate::download::Failure::Disconnected)
                 }
+                // Confirmed, but the connection failed before it was read: say so, since
+                // the dialog has already closed.
+                HostCommand::StopServer { .. } => shared.update(|m| {
+                    m.notice = Some(
+                        "Stop not sent: the connection dropped first. Check the host before trying again. Nothing was retried."
+                            .into(),
+                    );
+                    m.server_stop_result = m.notice.clone();
+                }),
                 _ => {}
             }
         }
@@ -2211,6 +2263,7 @@ async fn handle_command(
         HostCommand::ListDir(_)
         | HostCommand::Reconnect
         | HostCommand::Shutdown
+        | HostCommand::StopServer { .. }
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)
         | HostCommand::Identify
