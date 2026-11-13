@@ -32,7 +32,7 @@ maximized. The patch adds the following without changing existing behavior on ma
   the same way and, on macOS, on the full-screen notifications as well, so a full-screen window
   is not saved as the normal size. It sees full screen made by `Tx::toggle_full_screen`
   everywhere and the system's own on macOS and Wayland; on X11 winit reports only what the app
-  asked for, so the window manager's full screen is not seen. A change with no size change is
+  asked for, so the window manager entering or leaving full screen is not seen. A change with no size change is
   missed off macOS.
 - `Tx::minimize()` works on borderless windows off macOS (used by the spike only).
 - `El::window_resize(WindowEdge)` (winit `drag_resize_window`, started inside the press),

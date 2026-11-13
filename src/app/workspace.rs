@@ -93,7 +93,9 @@ pub struct Workspace {
     /// The traffic lights are hidden for full screen. Known only where Rex's title row is.
     pub full_screen: bool,
     /// The window says it is full screen (`Cx::window_full_screen`); read when it resizes or
-    /// its traffic lights move. On X11 only Rex's own full screen is seen.
+    /// its traffic lights move. On X11 the window manager entering or leaving full screen is
+    /// not seen: after it takes Rex out of a full screen Rex entered, this stays true until
+    /// Rex toggles it again.
     pub window_full_screen: bool,
     /// The title row's session button, where its list opens.
     pub title_session: [f32; 4],
