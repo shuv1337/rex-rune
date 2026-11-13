@@ -12,9 +12,18 @@
 /// compiled only where this is true; a module cannot be chosen by a constant.)
 pub const HAS_RELEASES: bool = cfg!(target_os = "linux");
 
+/// Capture Unix download permissions before starting threads. Windows has no POSIX umask.
+pub fn init() {
+    #[cfg(unix)]
+    process::umask();
+}
+
 pub mod dirs;
+pub mod downloads;
 pub mod fs;
 pub mod local;
 pub mod net;
+// Process identity is only needed by Unix tunnel and download cleanup.
+#[cfg(unix)]
 pub mod process;
 pub mod tools;

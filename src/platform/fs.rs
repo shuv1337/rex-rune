@@ -1,5 +1,7 @@
 //! File operations with no portable form.
-use std::{ffi::CStr, io, os::fd::RawFd};
+use std::io;
+#[cfg(unix)]
+use std::{ffi::CStr, os::fd::RawFd};
 
 /// Rename `from` to `to`, both names in the open directory `dir`, in one step and only if
 /// `to` does not exist. `EEXIST` when it does.
@@ -7,6 +9,7 @@ use std::{ffi::CStr, io, os::fd::RawFd};
 /// Linux has `renameat2(RENAME_NOREPLACE)` and macOS `renameatx_np(RENAME_EXCL)`. Where
 /// neither exists, or the filesystem does not support the flag, the error satisfies
 /// [`no_replace_unsupported`] and the caller links and unlinks instead.
+#[cfg(unix)]
 pub fn rename_no_replace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let result = {
@@ -40,6 +43,7 @@ pub fn rename_no_replace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
 
 /// Whether an error from [`rename_no_replace`] means the system, an old kernel or the
 /// filesystem does not know the operation, as opposed to the rename having failed.
+#[cfg(unix)]
 pub fn no_replace_unsupported(error: &io::Error) -> bool {
     // ENOTSUP and EOPNOTSUPP are one number on Linux and two on macOS.
     error.raw_os_error().is_some_and(|code| {
@@ -47,7 +51,43 @@ pub fn no_replace_unsupported(error: &io::Error) -> bool {
     })
 }
 
-#[cfg(test)]
+/// Verify the download probe's Unix file mode. The Windows probe refuses before this call.
+pub fn verify_download_mode(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode();
+        anyhow::ensure!(mode & 0o111 == 0, "saved with an executable bit: {mode:o}");
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let _ = path;
+        super::downloads::available()
+    }
+}
+
+/// Make the probe's symlink fixture only where the POSIX download store is supported.
+pub fn download_probe_symlink(
+    original: &std::path::Path,
+    link: &std::path::Path,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(original, link)
+    }
+    #[cfg(windows)]
+    {
+        let _ = (original, link);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Downloads are not available on Windows yet",
+        ))
+    }
+}
+
+// These tests use Unix directory descriptors.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{ffi::CString, os::fd::AsRawFd};

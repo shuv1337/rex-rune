@@ -3,6 +3,8 @@ use super::*;
 mod cwd_tests;
 #[path = "directory_tests.rs"]
 mod directory_tests;
+// These fixtures use the POSIX download store and Unix symbolic links.
+#[cfg(unix)]
 #[path = "download_tests.rs"]
 mod download_tests;
 #[path = "keymap_tests.rs"]
