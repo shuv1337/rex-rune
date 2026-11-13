@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 - 2026-11-13
+
+Fonts and program icons that come from the system, a Mac toolbar that is the title bar, Update now for pacman installs, server uptime and Stop server, and dialogs that press the focused button.
 
 ### Added
 
