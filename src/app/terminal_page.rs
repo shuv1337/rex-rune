@@ -291,8 +291,8 @@ fn selection(s: &Workspace, inks: &Inks) -> El {
 fn terminal_font(s: &Workspace) -> El {
     let saved = &s.settings.font_family;
     let (label, helper) = ("Terminal font", "Applies when you reopen the client.");
-    // The saved family is not installed: this launch asked for it and got the bundled font
-    // instead, or the families fontconfig knows, once read, have none of that name.
+    // The saved family is not installed: this launch asked for it and got a stand-in
+    // instead, or the installed families, once read, have none of that name.
     let missing = if s.terminal_family.is_none() && saved.eq_ignore_ascii_case(&s.launch_font) {
         true
     } else {
@@ -305,8 +305,14 @@ fn terminal_font(s: &Workspace) -> El {
         .child(text(label).font(ui(13.)).color(rgb(ink())));
     if missing {
         heading = heading.child(state_chip(
-            "font-missing", "Not installed", ChipTone::Attention,
-            "fontconfig has no family of this name. An unavailable primary uses bundled IBM Plex Mono on reopen.",
+            "font-missing",
+            "Not installed",
+            ChipTone::Attention,
+            &format!(
+                "{}. An unavailable primary uses {} on reopen.",
+                super::platform::fonts::NOT_FOUND,
+                super::fonts::stand_in_words()
+            ),
         ));
     }
     let title = col()
@@ -349,7 +355,10 @@ fn terminal_font(s: &Workspace) -> El {
 
 fn typography(s: &Workspace, inks: &Inks) -> El {
     let saved = &s.settings.font_family;
-    let active = s.terminal_family.unwrap_or("IBM Plex Mono (bundled)");
+    let active = s
+        .terminal_family
+        .or(s.stand_in_family)
+        .unwrap_or("IBM Plex Mono (bundled)");
     // The row's helper is one sentence. What terminals are drawn in now goes under the card,
     // and only while that isn't the family the row names.
     let drawn = if *saved != s.launch_saved_font {

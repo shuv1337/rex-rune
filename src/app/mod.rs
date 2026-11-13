@@ -354,6 +354,7 @@ pub fn run(
     });
     let handle = app.handle();
     let terminal = fonts.terminal;
+    let stand_in = fonts.stand_in;
     let restart = std::sync::Arc::new(std::sync::Mutex::new(None));
     let restart_request = restart.clone();
     let sounds = sounds::Sounds::default();
@@ -361,6 +362,7 @@ pub fn run(
     let mut app = app
         .init(move || {
             let mut workspace = Workspace::new(options, settings, path, handle, terminal);
+            workspace.stand_in_family = stand_in;
             workspace.restart = restart_request;
             workspace.sounds = sounds;
             match recovery_notice {

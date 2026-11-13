@@ -147,13 +147,9 @@ pub(super) fn register_cjk_fallbacks(collection: &mut Collection, loaded: &mut L
 /// and fontconfig on Linux. The lookup runs in a collection of its own, so the app's collection
 /// gains only the files of the families text asks for, and its own families still come first.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn installed_family_files(name: &str) -> Vec<std::path::PathBuf> {
-    use parley::fontique::{CollectionOptions, SourceKind};
-    thread_local! {
-        static SYSTEM: std::cell::RefCell<Option<Collection>> = const { std::cell::RefCell::new(None) };
-    }
-    SYSTEM.with_borrow_mut(|system| {
-        let system = system.get_or_insert_with(|| Collection::new(CollectionOptions { shared: false, system_fonts: true }));
+pub fn installed_family_files(name: &str) -> Vec<std::path::PathBuf> {
+    use parley::fontique::SourceKind;
+    with_system(|system| {
         let Some(family) = system.family_by_name(name) else { return Vec::new() };
         let mut files: Vec<std::path::PathBuf> = Vec::new();
         for font in family.fonts() {
@@ -168,7 +164,83 @@ pub(super) fn installed_family_files(name: &str) -> Vec<std::path::PathBuf> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(super) fn installed_family_files(_: &str) -> Vec<std::path::PathBuf> { Vec::new() }
+pub fn installed_family_files(_: &str) -> Vec<std::path::PathBuf> { Vec::new() }
+
+/// The platform's list of fonts for this thread, read the first time it is asked for.
+#[cfg(not(target_arch = "wasm32"))]
+fn with_system<R>(f: impl FnOnce(&mut Collection) -> R) -> R {
+    thread_local! {
+        static SYSTEM: std::cell::RefCell<Option<Collection>> = const { std::cell::RefCell::new(None) };
+    }
+    SYSTEM.with_borrow_mut(|system| f(system.get_or_insert_with(|| Collection::new(CollectionOptions { shared: false, system_fonts: true }))))
+}
+
+/// A family [`installed_families`] lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledFamily {
+    /// Its name, as [`installed_family_files`] and `Family::Named` take it.
+    pub name: String,
+    /// Every face is fixed-pitch: what a terminal's grid needs (see [`installed_families`]).
+    pub fixed_pitch: bool,
+}
+
+/// The families installed on this system, found as [`installed_family_files`] finds them, in
+/// no particular order. Names that start with a dot, which macOS keeps out of font menus,
+/// are left out. A face is fixed-pitch by fontconfig's rule: every character it maps has
+/// one advance, or two where one is twice the other (dual-width CJK terminal families), each
+/// within 1/33; a face that maps none is fixed-pitch when its `post` table says so. This
+/// reads every installed face, which can take a quarter of a second the first time after
+/// boot: call it off the UI thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn installed_families() -> Vec<InstalledFamily> {
+    with_system(|system| {
+        let mut ids: Vec<FamilyId> = system.family_ids().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut cache = SourceCache::default();
+        ids.into_iter()
+            .filter_map(|id| system.family(id))
+            .filter(|family| !family.name().starts_with('.'))
+            .map(|family| {
+                let fixed_pitch = !family.fonts().is_empty()
+                    && family.fonts().iter().all(|font| {
+                        font.load(Some(&mut cache))
+                            .and_then(|blob| skrifa::FontRef::from_index(blob.as_ref(), font.index()).ok().map(|font| fixed_pitch(&font)))
+                            .unwrap_or(false)
+                    });
+                InstalledFamily { name: family.name().to_owned(), fixed_pitch }
+            })
+            .collect()
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn installed_families() -> Vec<InstalledFamily> { Vec::new() }
+
+/// Whether `font` is fixed-pitch by fontconfig's rule (see [`installed_families`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn fixed_pitch(font: &skrifa::FontRef<'_>) -> bool {
+    use skrifa::MetadataProvider;
+    use skrifa::raw::TableProvider;
+    let near = |a: f32, b: f32| (a - b).abs() <= a.abs().max(b.abs()) / 33.;
+    let metrics = font.glyph_metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
+    let (mut one, mut two) = (None, None);
+    for (_, glyph) in font.charmap().mappings() {
+        let Some(advance) = metrics.advance_width(glyph).filter(|a| *a > 0.) else { continue };
+        match (one, two) {
+            (None, _) => one = Some(advance),
+            (Some(a), _) if near(a, advance) => {}
+            (_, None) => two = Some(advance),
+            (_, Some(b)) if near(b, advance) => {}
+            _ => return false,
+        }
+    }
+    match (one, two) {
+        (None, _) => font.post().is_ok_and(|post| post.is_fixed_pitch() != 0),
+        (Some(_), None) => true,
+        (Some(a), Some(b)) => near(a.min(b) * 2., a.max(b)),
+    }
+}
 
 /// Loads the installed families the CSS family list `list` names that the collection lacks,
 /// each looked up once (`tried`).

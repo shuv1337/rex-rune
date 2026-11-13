@@ -71,6 +71,17 @@ maximized. The patch adds the following without changing existing behavior on ma
   tests.
 - `Pixels::rgba()` (hidden) is public instead of test-only, so the app's tests can check that
   each program icon `TextSystem::color_icon` rasterizes actually paints something.
+- `text::installed_family_files(name)` is public (it was the private lookup behind
+  `Family::Named`), and `text::installed_families()` lists every installed family as an
+  `InstalledFamily { name, fixed_pitch }`, so an app can offer and resolve the system's fonts
+  where there is no fontconfig (Core Text on macOS, DirectWrite on Windows). Both read one
+  system collection per thread instead of building one per call. Names beginning with a dot
+  (macOS's hidden families) are left out of the list. A face is fixed-pitch by fontconfig's
+  rule: every character it maps advances one width, or two where one is twice the other, each
+  within 1/33; a face that maps none is fixed-pitch if its `post` table says so. A family is
+  fixed-pitch when all its faces are. Listing reads every installed face (35–60 ms with the
+  files cached, and the system scan alone took about 220 ms on a first read, on an Apple
+  silicon Mac with 325 families), so callers should run it off the UI thread.
 
 Spike: `examples/chrome_spike.rs` and `scripts/chrome-spike-x11.py`.
 

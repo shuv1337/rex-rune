@@ -30,6 +30,8 @@ mod header_fading_tests;
 mod menu_tests;
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
+#[path = "nerd_symbols_tests.rs"]
+mod nerd_symbols_tests;
 #[path = "notification_tests.rs"]
 mod notification_tests;
 #[path = "pane_ergonomics_tests.rs"]

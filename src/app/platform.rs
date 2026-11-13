@@ -6,6 +6,7 @@
 //! platform does not have says so through its interface, so the app can leave the feature
 //! out instead of offering something that does nothing.
 pub mod chrome;
+pub mod fonts;
 pub mod keys;
 pub mod open;
 pub mod selection;

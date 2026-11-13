@@ -1,4 +1,4 @@
-//! The font picker of Settings → Terminal: the families fontconfig knows, searched as you
+//! The font picker of Settings → Terminal: the installed families, searched as you
 //! type, as Monospaced or All fonts. It chooses the terminal font, where the current family
 //! is checked, and adds fallback fonts, where the families already used are.
 //!
@@ -40,7 +40,8 @@ pub struct FontPick {
 
 /// What the font settings keep beside the saved preferences.
 pub struct FontState {
-    /// The families a picker lists: read from fontconfig the first time one is needed.
+    /// The families a picker lists: read the first time one is needed, on a thread of its
+    /// own (`fonts::installed`); None until then.
     pub catalog: Option<Vec<Family>>,
     /// The catalog's families the open picker lists, in order: those of its scope that
     /// match its search.
@@ -75,12 +76,19 @@ impl FontState {
     }
 }
 
-/// The families the headless tests list in place of this machine's: `fc-list` output, as
-/// `fonts::parse_catalog` reads it.
+/// The families the headless tests list in place of this machine's, as the platform lists
+/// faces (family, fixed-pitch) for `fonts::catalog`.
 #[cfg(test)]
-pub const TEST_FAMILIES: &str = "Noto Sans\t\nHack Nerd Font Mono\t100\nNoto Color Emoji\t\n\
-    JetBrainsMono Nerd Font\t100\nNoto Sans CJK JP\t\nDejaVu Sans Mono\t100\n\
-    Symbols Nerd Font\t\nHack Nerd Font Mono\t100\n";
+pub const TEST_FAMILIES: &[(&str, bool)] = &[
+    ("Noto Sans", false),
+    ("Hack Nerd Font Mono", true),
+    ("Noto Color Emoji", false),
+    ("JetBrainsMono Nerd Font", true),
+    ("Noto Sans CJK JP", false),
+    ("DejaVu Sans Mono", true),
+    ("Symbols Nerd Font", false),
+    ("Hack Nerd Font Mono", true),
+];
 
 /// The picker's width, and the height of one of its rows with the gap under it.
 const WIDTH: f32 = 320.;
@@ -92,14 +100,48 @@ const SCOPE: f32 = 26.;
 const SAMPLE: f32 = 52.;
 
 impl Workspace {
-    /// The families a picker can list, read from fontconfig on first use.
-    pub fn font_catalog(&mut self) -> &[Family] {
-        #[cfg(not(test))]
-        let read = || fonts::installed().to_vec();
-        // Tests list the same families on every machine.
-        #[cfg(test)]
-        let read = || fonts::parse_catalog(TEST_FAMILIES);
-        self.fonts.catalog.get_or_insert_with(read)
+    /// The families a picker can list, once read. The first call starts reading them, and
+    /// an open picker lists them when they arrive.
+    pub fn font_catalog(&mut self) -> Option<&[Family]> {
+        if self.fonts.catalog.is_none() {
+            #[cfg(not(test))]
+            {
+                let handle = self.handle.clone();
+                let ready = move || handle.update(|s, _| s.font_catalog_read());
+                self.fonts.catalog = fonts::installed(ready).map(<[Family]>::to_vec);
+            }
+            // Tests list the same families on every machine, at once.
+            #[cfg(test)]
+            {
+                self.fonts.catalog = Some(fonts::catalog(TEST_FAMILIES.iter().copied()));
+            }
+        }
+        self.fonts.catalog.as_deref()
+    }
+
+    /// The installed families have been read: list them in the open picker. A terminal
+    /// picker opened before they arrived could not know the saved family is proportional, so
+    /// it moves to All fonts now if it is.
+    pub(super) fn font_catalog_read(&mut self) {
+        if self.font_catalog().is_none() {
+            return;
+        }
+        let Some(pick) = self.font_pick() else { return };
+        if pick.purpose == FontPurpose::Terminal && pick.mono && self.saved_is_proportional() {
+            self.set_font_scope(false);
+        } else {
+            self.list_fonts();
+        }
+    }
+
+    /// Whether the saved terminal family is installed and isn't monospaced, once the
+    /// installed families are known.
+    fn saved_is_proportional(&mut self) -> bool {
+        let saved = self.settings.font_family.to_lowercase();
+        self.font_catalog()
+            .unwrap_or_default()
+            .iter()
+            .any(|f| f.lower == saved && !f.mono)
     }
 
     fn font_pick(&self) -> Option<FontPick> {
@@ -126,11 +168,7 @@ impl Workspace {
     /// opens on; a fallback's opens on All fonts, since fallbacks are mostly symbol, emoji
     /// and other scripts' fonts.
     pub(super) fn open_fonts(&mut self, purpose: FontPurpose) {
-        let saved = self.settings.font_family.to_lowercase();
-        let proportional = self
-            .font_catalog()
-            .iter()
-            .any(|f| f.lower == saved && !f.mono);
+        let proportional = self.saved_is_proportional();
         let pick = FontPick {
             purpose,
             mono: purpose == FontPurpose::Terminal && !proportional,
@@ -473,6 +511,7 @@ pub fn popup(s: &Workspace, viewport: [f32; 2]) -> El {
 
     if count == 0 {
         let none = match (pick.mono, s.query().is_empty()) {
+            _ if s.fonts.catalog.is_none() => "Reading installed fonts…",
             (true, false) => "No monospaced fonts match. Tab lists all fonts.",
             (true, true) => "No monospaced fonts are installed. Tab lists all fonts.",
             (false, _) => "No fonts match.",
