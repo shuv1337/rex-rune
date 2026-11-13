@@ -426,6 +426,8 @@ fn install_with(
         .get(&target)
         .context("release does not support this architecture")?;
     check_glibc(&release_target.min_glibc)?;
+    // Only a release from before the rename has none, and none of those is newer than
+    // this client, so the check above has already refused it.
     let artifact = release_target.archive.as_ref().context(
         "this release was published before the rename to rex-rune and has nothing to install",
     )?;
