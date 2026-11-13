@@ -338,24 +338,25 @@ echo "PASS: the helper's own exit codes come back through the service and pkexec
 # for a signature on every local package file.
 sed -i 's/^\[options\]$/[options]\nLocalFileSigLevel = Required/' /etc/pacman.conf
 [ "$(pacman-conf LocalFileSigLevel | head -n 1)" = PackageRequired ] || fail 'LocalFileSigLevel was not set'
-mkdir -p /tmp/evil
-printf '#!/bin/sh\ntouch /tmp/evil/ran\n' > /tmp/evil/pacman; chmod 755 /tmp/evil/pacman
-for name in curl gpgv gpg systemd-run systemctl bsdtar; do cp /tmp/evil/pacman /tmp/evil/$name; done
-printf 'touch /tmp/evil/sourced\n' > /tmp/evil/env.sh
-printf 'insecure\nproxy = http://127.0.0.1:9\n' > /tmp/evil/.curlrc
-cat > /tmp/evil/caller.sh <<CALLER
+# (Not under /tmp: the container's is mounted noexec, and these must be runnable to prove anything.)
+mkdir -p /srv/evil
+printf '#!/bin/sh\ntouch /srv/evil/ran\n' > /srv/evil/pacman; chmod 755 /srv/evil/pacman
+for name in curl gpgv gpg systemd-run systemctl bsdtar; do cp /srv/evil/pacman /srv/evil/$name; done
+printf 'touch /srv/evil/sourced\n' > /srv/evil/env.sh
+printf 'insecure\nproxy = http://127.0.0.1:9\n' > /srv/evil/.curlrc
+cat > /srv/evil/caller.sh <<CALLER
 #!/bin/bash
 ulimit -f 1024
-export PATH="/tmp/evil:\$PATH" BASH_ENV=/tmp/evil/env.sh ENV=/tmp/evil/env.sh HOME=/tmp/evil CURL_HOME=/tmp/evil
-export GNUPGHOME=/tmp/evil https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9
-export IFS=. LD_LIBRARY_PATH=/tmp/evil
+export PATH="/srv/evil:\$PATH" BASH_ENV=/srv/evil/env.sh ENV=/srv/evil/env.sh HOME=/srv/evil CURL_HOME=/srv/evil
+export GNUPGHOME=/srv/evil https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9
+export IFS=. LD_LIBRARY_PATH=/srv/evil
 exec /usr/bin/env "$helper" 99.1.1
 CALLER
-chmod 755 /tmp/evil/caller.sh
+chmod 755 /srv/evil/caller.sh
 ln -sfn /fixtures/sites/good /srv/site
-/usr/bin/script -qec /tmp/evil/caller.sh /dev/null </dev/null >/tmp/out 2>&1; got=$?
+/usr/bin/script -qec /srv/evil/caller.sh /dev/null </dev/null >/tmp/out 2>&1; got=$?
 [ "$got" = 0 ] || fail "the upgrade from a hostile caller: exit $got: $(tr '\n' ' ' < /tmp/out | cut -c1-300)"
-[ ! -e /tmp/evil/ran ] && [ ! -e /tmp/evil/sourced ] || fail "the caller's environment was used"
+[ ! -e /srv/evil/ran ] && [ ! -e /srv/evil/sourced ] || fail "the caller's environment was used"
 now=99.1.1
 unchanged 'after the first upgrade'
 [ "$(stat -c %s /usr/share/rex-rune/ballast)" = 4194304 ] || fail "the caller's file-size limit cut a file short: $(stat -c %s /usr/share/rex-rune/ballast)"
@@ -365,8 +366,8 @@ expect 65 good 'the same version again' 99.1.1
 
 # The second upgrade, through pkexec, slowly, so that it can be looked at while it runs.
 ln -sfn /fixtures/sites/slow /srv/site
-printf '#!/bin/bash\nulimit -f 1024\nexec pkexec --disable-internal-agent %s 99.1.3\n' "$helper" > /tmp/evil/pkexec.sh; chmod 755 /tmp/evil/pkexec.sh
-/usr/bin/script -qec /tmp/evil/pkexec.sh /dev/null </dev/null >/dev/null 2>&1 & caller=$!
+printf '#!/bin/bash\nulimit -f 1024\nexec pkexec --disable-internal-agent %s 99.1.3\n' "$helper" > /srv/evil/pkexec.sh; chmod 755 /srv/evil/pkexec.sh
+/usr/bin/script -qec /srv/evil/pkexec.sh /dev/null </dev/null >/dev/null 2>&1 & caller=$!
 for _ in $(seq 100); do running && break; sleep .1; done
 running || fail 'the update did not start its service'
 main=$(systemctl show --property MainPID --value $unit)
