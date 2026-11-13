@@ -7,6 +7,7 @@ use crate::app::{
     notify::NoteTarget,
 };
 use rex_rune::connection::activity::{BlockedKind, ProgramState, StatusRecord};
+use rex_rune::settings::ActivityView;
 use serde_json::{Value, json};
 
 pub(super) fn fixture() -> (Workspace, Vec<flume::Receiver<HostCommand>>) {
@@ -191,6 +192,338 @@ fn target(ws: &Workspace, host: usize, sid: &str, tab: &str) -> NoteTarget {
         session: sid.into(),
         window: Some(tab.into()),
     }
+}
+
+fn row_targets(ws: &Workspace) -> Vec<NoteTarget> {
+    ws.entries()
+        .into_iter()
+        .map(|e| match e.action {
+            Intent::ActivityTab(t) => t,
+            _ => panic!("activity row"),
+        })
+        .collect()
+}
+
+#[test]
+fn session_groups_sort_by_urgency_then_host_session_and_tab_order() {
+    let (mut ws, _rx) = fixture();
+    // The last session on the second host is most pressing; the first sessions
+    // tie at Error, and the other session on the first host is only Working.
+    for host in &mut ws.hosts {
+        host.model
+            .activity
+            .get_mut("blocked")
+            .unwrap()
+            .get_mut("")
+            .unwrap()
+            .state = ProgramState::Error;
+    }
+    ws.hosts[1]
+        .model
+        .activity
+        .get_mut("build")
+        .unwrap()
+        .get_mut("")
+        .unwrap()
+        .state = ProgramState::Blocked;
+    ws.settings.activity_view = ActivityView::Session;
+    ws.show_activity();
+    let expected = [
+        (1, "other", "build"),
+        (0, "s", "blocked"),
+        (0, "s", "error"),
+        (0, "s", "done"),
+        (0, "s", "front"),
+        (1, "s", "blocked"),
+        (1, "s", "error"),
+        (1, "s", "done"),
+        (1, "s", "front"),
+        (0, "other", "build"),
+    ];
+    assert_eq!(
+        row_targets(&ws),
+        expected.map(|(h, s, t)| target(&ws, h, s, t))
+    );
+    let entries = ws.entries();
+    assert_eq!(entries[0].group, "other-label · test-1");
+    assert_eq!(entries[1].group, "s-label · test-0");
+    assert_eq!(entries[5].group, "s-label · test-1");
+    assert_eq!(entries[9].group, "other-label · test-0");
+    assert!(
+        entries
+            .iter()
+            .all(|e| e.activity.as_ref().unwrap().place.is_empty())
+    );
+    assert_eq!(entries[0].detail, "Needs input");
+    assert_eq!(entries[1].detail, "Error");
+    // Tied sessions on the same host retain server session order, not name order.
+    ws.hosts[0]
+        .model
+        .activity
+        .get_mut("build")
+        .unwrap()
+        .get_mut("")
+        .unwrap()
+        .state = ProgramState::Error;
+    assert_eq!(row_targets(&ws)[5], target(&ws, 0, "other", "build"));
+}
+
+#[test]
+fn both_views_filter_the_same_inventory_and_keep_priority_presentation() {
+    let (mut ws, _rx) = fixture();
+    ws.show_activity();
+    for query in [
+        "",
+        "needs you",
+        "needs approval",
+        "error",
+        "done",
+        "working",
+        "s-label",
+        "other",
+        "test-1",
+        "build",
+        "absent",
+    ] {
+        edit(&mut ws, query);
+        ws.settings.activity_view = ActivityView::Priority;
+        let priority = ws.entries();
+        ws.settings.activity_view = ActivityView::Session;
+        let session = ws.entries();
+        assert_eq!(priority.len(), session.len(), "{query}");
+        for p in &priority {
+            let e = session
+                .iter()
+                .find(|e| format!("{:?}", e.action) == format!("{:?}", p.action))
+                .unwrap();
+            assert_eq!(e.label, p.label);
+            assert_eq!(e.detail, p.detail);
+            assert_eq!(
+                e.activity.as_ref().unwrap().tone,
+                p.activity.as_ref().unwrap().tone
+            );
+            assert!(std::ptr::eq(
+                e.activity.as_ref().unwrap().icon,
+                p.activity.as_ref().unwrap().icon
+            ));
+            assert_eq!(e.group, p.activity.as_ref().unwrap().place);
+        }
+    }
+    // Pin all original fixture row presentation, not only the set of targets.
+    edit(&mut ws, "");
+    ws.settings.activity_view = ActivityView::Priority;
+    let rows = ws.entries();
+    let expected = [
+        ("Needs you", "blocked", "Needs approval", 0, "s"),
+        ("Needs you", "blocked", "Needs approval", 1, "s"),
+        ("Error", "error", "Error", 0, "s"),
+        ("Error", "error", "Error", 1, "s"),
+        ("Done", "done", "Done", 0, "s"),
+        ("Done", "done", "Done", 1, "s"),
+        ("Working", "front", "Working", 0, "s"),
+        ("Working", "build", "Working", 0, "other"),
+        ("Working", "front", "Working", 1, "s"),
+        ("Working", "build", "Working", 1, "other"),
+    ];
+    for (e, (group, label, detail, host, session)) in rows.iter().zip(expected) {
+        assert_eq!((&*e.group, &*e.label, &*e.detail), (group, label, detail));
+        assert!(
+            matches!(&e.action, Intent::ActivityTab(t) if *t == target(&ws, host, session, label))
+        );
+        assert_eq!(
+            e.activity.as_ref().unwrap().place,
+            format!("{session}-label · test-{host}")
+        );
+        assert!(e.activity.as_ref().unwrap().elapsed.is_none());
+        assert!(e.group_name.is_none() && e.group_key.is_none());
+    }
+}
+
+#[test]
+fn session_headings_keep_case_identity_and_leave_when_filtered_out() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let (mut ws, _rx) = fixture();
+    ws.settings.hosts[1].label = "test-0".into();
+    ws.settings.activity_view = ActivityView::Session;
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    let headings = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .filter(|e| e.role == "heading" && e.path.contains("group-heading:"))
+            .filter_map(|e| e.label)
+            .collect::<Vec<_>>()
+    };
+    let labels = headings(&rt);
+    assert_eq!(
+        labels.iter().filter(|s| *s == "s-label · test-0").count(),
+        2
+    );
+    rt.update(|s, _| edit(s, "build"));
+    settle(&mut rt);
+    let labels = headings(&rt);
+    assert_eq!(labels, ["other-label · test-0", "other-label · test-0"]);
+    rt.update(|s, _| edit(s, "absent"));
+    settle(&mut rt);
+    assert!(headings(&rt).is_empty());
+}
+
+#[test]
+fn session_selection_survives_a_production_host_wake() {
+    let (mut ws, _rx) = fixture();
+    ws.settings.activity_view = ActivityView::Session;
+    ws.show_activity();
+    let chosen = target(&ws, 1, "other", "build");
+    ws.restore_activity_selection(Some(chosen.clone()));
+    ws.track_activity(1);
+    let mut model = ws.hosts[1].model.clone();
+    model
+        .activity
+        .get_mut("build")
+        .unwrap()
+        .get_mut("")
+        .unwrap()
+        .state = ProgramState::Blocked;
+    *ws.hosts[1].connection.model.lock().unwrap() = model;
+    ws.sync(1, &mut rune::Tx::default());
+    assert_eq!(ws.activity_selection(), Some(chosen));
+    assert_eq!(ws.panel.as_ref().unwrap().selected, 8);
+}
+
+#[test]
+fn tab_switch_keeps_filter_selection_focus_elapsed_and_receipts_without_commands() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let (mut ws, rx) = fixture();
+    let (sender, terminal) = flume::unbounded();
+    framed_terminal(&mut ws, "front", &sender, b"$ ");
+    let chosen = target(&ws, 1, "s", "error");
+    ws.notified_tabs.insert(target(&ws, 1, "s", "done"));
+    ws.show_activity();
+    edit(&mut ws, "test");
+    ws.restore_activity_selection(Some(chosen.clone()));
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    for r in &rx {
+        r.drain();
+    }
+    terminal.drain();
+    let done = rt.state.unseen_done.clone();
+    let bells = rt.state.unseen_bells.clone();
+    let notes = rt.state.notified_tabs.clone();
+    let focus = focused(&rt);
+    press(&mut rt, Key::Tab);
+    assert_eq!(rt.state.settings.activity_view, ActivityView::Session);
+    assert_eq!(rt.state.activity_selection(), Some(chosen.clone()));
+    assert_eq!(rt.state.query(), "test");
+    assert_eq!(focused(&rt), focus);
+    rt.key(KeyEvent {
+        key: Key::Tab,
+        mods: Mods {
+            shift: true,
+            ..Default::default()
+        },
+    });
+    settle(&mut rt);
+    assert_eq!(rt.state.settings.activity_view, ActivityView::Priority);
+    assert_eq!(rt.state.activity_selection(), Some(chosen));
+    assert_eq!(rt.state.query(), "test");
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Tab);
+    press(&mut rt, Key::Text("x".into()));
+    assert_eq!(rt.state.query(), "testx");
+    press(&mut rt, Key::Escape);
+    assert_eq!(rt.state.unseen_done, done);
+    assert_eq!(rt.state.unseen_bells, bells);
+    assert_eq!(rt.state.notified_tabs, notes);
+    assert!(rx.iter().all(|r| r.is_empty()));
+    assert!(terminal.is_empty());
+    std::fs::remove_file(&rt.state.settings_path).unwrap();
+}
+
+#[test]
+fn activity_view_is_optional_local_and_remembered_across_opens_and_restarts() {
+    let old: Settings = serde_json::from_value(json!({"font_size":16})).unwrap();
+    assert_eq!(old.activity_view, ActivityView::Priority);
+    assert!(
+        serde_json::to_value(&old)
+            .unwrap()
+            .get("activity_view")
+            .is_none()
+    );
+    assert_eq!(Settings::default().activity_view, ActivityView::Priority);
+    let (mut ws, rx) = fixture();
+    ws.show_activity();
+    edit(&mut ws, "test-1");
+    let chosen = target(&ws, 1, "other", "build");
+    ws.restore_activity_selection(Some(chosen.clone()));
+    ws.set_activity_view(ActivityView::Session);
+    assert_eq!(ws.activity_selection(), Some(chosen));
+    assert_eq!(ws.query(), "test-1");
+    let saved = Settings::load(&ws.settings_path).unwrap();
+    assert_eq!(saved.activity_view, ActivityView::Session);
+    assert_eq!(
+        serde_json::to_value(saved).unwrap()["activity_view"],
+        "session"
+    );
+    ws.panel = None;
+    ws.show_activity();
+    assert_eq!(ws.entries()[0].group, "s-label · test-0");
+    let mut restarted = relaunch(&ws);
+    restarted.show_activity();
+    assert_eq!(restarted.settings.activity_view, ActivityView::Session);
+    ws.set_activity_view(ActivityView::Priority);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&ws.settings_path).unwrap()).unwrap();
+    assert!(saved.get("activity_view").is_none());
+    assert!(rx.iter().all(|r| r.is_empty()));
+    std::fs::remove_file(&ws.settings_path).unwrap();
+}
+
+#[test]
+fn activity_commands_and_chip_use_explicit_or_remembered_view() {
+    let (mut ws, rx) = fixture();
+    let mut tx = rune::Tx::default();
+    for (label, expected) in [
+        ("Show activity by session…", ActivityView::Session),
+        ("Show activity…", ActivityView::Session),
+        ("Show activity by priority…", ActivityView::Priority),
+        ("Show activity…", ActivityView::Priority),
+    ] {
+        ws.picker(false);
+        let row = ws.entries().into_iter().find(|e| e.label == label).unwrap();
+        ws.perform(row.action, &mut tx);
+        assert!(matches!(
+            ws.panel.as_ref().unwrap().kind,
+            PanelKind::Activity
+        ));
+        assert_eq!(ws.settings.activity_view, expected);
+    }
+    ws.set_activity_view(ActivityView::Session);
+    ws.hosts[0]
+        .model
+        .activity
+        .get_mut("front")
+        .unwrap()
+        .get_mut("")
+        .unwrap()
+        .state = ProgramState::Blocked;
+    ws.show_activity_elsewhere();
+    assert_eq!(ws.settings.activity_view, ActivityView::Session);
+    assert_eq!(
+        ws.activity_selection(),
+        Some(target(&ws, 0, "s", "blocked"))
+    );
+    let spec = actions::find(ACTION).unwrap();
+    for bad in [
+        json!({"view":"other"}),
+        json!({"view":null}),
+        json!({"view":"session", "extra":true}),
+    ] {
+        assert!(!spec.accepts(&bad));
+        assert!(!actions::run(&mut ws, ACTION, &bad, &mut tx));
+    }
+    assert!(rx.iter().all(|r| r.is_empty()));
+    std::fs::remove_file(&ws.settings_path).unwrap();
 }
 
 #[test]
@@ -606,6 +939,52 @@ fn draw(case: &str) {
         ws.hosts[0].model.views.get_mut("s").unwrap().windows[1].label =
             Some("An agent waiting for approval on a very long implementation title".into());
     }
+    if case == "session" || case == "priority" {
+        // Three sessions on two hosts; equal session names remain separate, and a
+        // long name must give way without displacing the row's trailing words/time.
+        ws.hosts[1].model.connected = true;
+        for h in 0..2 {
+            ws.hosts[h].model.activity_reading = false;
+            ws.hosts[h].model.sessions[0].label = "Orchard".into();
+            ws.hosts[h].model.activity.retain(|id, _| {
+                if h == 0 {
+                    matches!(id.as_str(), "front" | "blocked")
+                } else {
+                    id == "done"
+                }
+            });
+        }
+        ws.unseen_done.retain(|(host, _)| *host == ws.hosts[1].id);
+        ws.hosts[0].model.sessions[1].label =
+            "Infrastructure migration and integration verification for the next release".into();
+        ws.hosts[0].model.activity.insert(
+            "build".into(),
+            [(
+                String::new(),
+                StatusRecord {
+                    state: ProgramState::Error,
+                    app: Some("cargo".into()),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+        );
+        for host in &mut ws.hosts {
+            for records in host.model.activity.values_mut() {
+                records.get_mut("").unwrap().age =
+                    Some(rex_rune::connection::activity::time::Age {
+                        observed: std::time::Instant::now(),
+                        initial: std::time::Duration::from_secs(240),
+                        reported: false,
+                    });
+            }
+        }
+        ws.settings.activity_view = if case == "session" {
+            ActivityView::Session
+        } else {
+            ActivityView::Priority
+        };
+    }
     ws.show_activity();
     if case == "filtered" {
         edit(&mut ws, "blocked");
@@ -641,6 +1020,16 @@ fn activity_filtered_draw() {
 #[test]
 fn activity_empty_draw() {
     draw("empty");
+}
+
+#[test]
+fn activity_session_draw() {
+    draw("session");
+}
+
+#[test]
+fn activity_priority_draw() {
+    draw("priority");
 }
 
 #[test]

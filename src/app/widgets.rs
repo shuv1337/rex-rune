@@ -261,21 +261,24 @@ pub fn list_row(
         None if r.activity.is_some() => (label.w_full().shrink(), None),
         None => (label.grow(1.).shrink(), None),
     };
-    e = e.child(if let Some(activity) = r.activity {
-        col().grow(1.).shrink().min_w(0.).child(label).child(
-            text(activity.place.clone())
-                .font(ui(11.))
-                .color(if r.selected {
-                    rgb(ink()).alpha(0.75)
-                } else {
-                    rgb(muted())
-                })
-                .truncate()
-                .help_when_truncated(activity.place.clone()),
-        )
-    } else {
-        label
-    });
+    e =
+        e.child(if let Some(activity) = r.activity {
+            col().grow(1.).shrink().min_w(0.).child(label).children(
+                (!activity.place.is_empty()).then(|| {
+                    text(activity.place.clone())
+                        .font(ui(11.))
+                        .color(if r.selected {
+                            rgb(ink()).alpha(0.75)
+                        } else {
+                            rgb(muted())
+                        })
+                        .truncate()
+                        .help_when_truncated(activity.place.clone())
+                }),
+            )
+        } else {
+            label
+        });
     let has_actions = r.actions.is_some();
     match r.actions.filter(|_| r.selected) {
         Some(actions) => {

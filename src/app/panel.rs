@@ -461,6 +461,8 @@ pub struct Entry {
     pub detail: String,
     pub action: Intent,
     pub group: String,
+    /// Optional identity when different groups can have the same displayed name.
+    pub group_key: Option<String>,
     pub current: bool,
     pub followup: bool,
     pub enabled: bool,
@@ -494,6 +496,7 @@ impl Entry {
             label: label.into(),
             detail: detail.into(),
             group: group.into(),
+            group_key: None,
             followup: action.opens_followup(),
             action,
             current: false,

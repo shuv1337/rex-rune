@@ -491,6 +491,11 @@ impl Spec {
         if matches!(self.handler, Handler::Compatibility) {
             return super::compatibility::schema(self.name);
         }
+        if matches!(self.handler, Handler::Activity) {
+            return Some(
+                json!({"type":"object","properties":{"view":{"type":"string","enum":["priority","session"]}},"additionalProperties":false}),
+            );
+        }
         if matches!(self.handler, Handler::SelectSession) {
             return Some(
                 json!({"type":"object","properties":{"session_id":{"type":"string","minLength":1},"window_id":{"type":"string","minLength":1}},"required":["session_id"],"additionalProperties":false}),
@@ -547,6 +552,11 @@ impl Spec {
                     && object
                         .get("window_id")
                         .is_none_or(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+            }
+            Handler::Activity => {
+                object.is_empty()
+                    || object.len() == 1
+                        && matches!(args["view"].as_str(), Some("priority" | "session"))
             }
             Handler::Split => object.len() == 1 && split_way(args).is_some(),
             Handler::FocusPane => {
@@ -614,7 +624,16 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::ZoomOut => s.change_ui_scale(-1, tx),
         Handler::ZoomReset => s.change_ui_scale(0, tx),
         Handler::SwitchSession => s.picker(true),
-        Handler::Activity => s.show_activity(),
+        Handler::Activity => {
+            if let Some(view) = args["view"].as_str() {
+                s.set_activity_view(if view == "session" {
+                    rex_rune::settings::ActivityView::Session
+                } else {
+                    rex_rune::settings::ActivityView::Priority
+                });
+            }
+            s.show_activity();
+        }
         Handler::PairDevice => s.pair_device(),
         Handler::SelectSession => {
             let visit = s.session_visit(s.active, args);
@@ -864,6 +883,9 @@ pub fn binding_title(binding: &rexrs::api::client::Binding) -> String {
             .replace('_', " ")
     };
     match binding.action.as_str() {
+        "client.activity" if args["view"].as_str().is_some() => {
+            format!("Show activity by {}", args["view"].as_str().unwrap())
+        }
         "pane.split" => format!("Split {}", direction()),
         "pane.focus" => format!("Focus pane {}", direction()),
         "client.tab.move" => format!("Move tab {}", direction()),

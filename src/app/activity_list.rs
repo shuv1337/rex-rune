@@ -10,6 +10,7 @@ use rex_rune::connection::{
     HostModel,
     activity::{ProgramState, time::Age},
 };
+use rex_rune::settings::ActivityView;
 use rune::{Icon, Tx};
 use std::time::{Duration, Instant};
 
@@ -187,6 +188,25 @@ impl Workspace {
         );
     }
 
+    /// Only ordering and a local preference change. The filter and selected identity survive.
+    pub fn set_activity_view(&mut self, view: ActivityView) {
+        if self.settings.activity_view == view {
+            return;
+        }
+        let selected = self.activity_selection();
+        self.settings.activity_view = view;
+        self.restore_activity_selection(selected);
+        self.save();
+    }
+
+    pub fn toggle_activity_view(&mut self) {
+        self.set_activity_view(if self.settings.activity_view.is_priority() {
+            ActivityView::Session
+        } else {
+            ActivityView::Priority
+        });
+    }
+
     /// Opened from the toolbar chip, which counts tabs other than the one on screen: start
     /// on the first row that is one of them, not on the tab already in front.
     pub fn show_activity_elsewhere(&mut self) {
@@ -259,7 +279,9 @@ impl Workspace {
     }
 
     pub(super) fn activity_entries_at(&self, lower: &str, now: Instant) -> Vec<Entry> {
+        let by_session = self.settings.activity_view == ActivityView::Session;
         let mut entries = Vec::new();
+        let mut sessions = std::collections::HashMap::new();
         for (index, session, id, activity) in self.activity_tabs() {
             let (rank, group, word, tone) = match activity.state {
                 ProgramState::Blocked => (0, "Needs you", blocked_word(activity.kind), warning()),
@@ -286,9 +308,30 @@ impl Workspace {
                     window: Some(id.to_owned()),
                 }),
             );
+            // Names are presentation, not identity: even identically named sessions
+            // on identically named hosts must keep separate headings.
+            let session_order = if by_session {
+                let order = self.hosts[index]
+                    .model
+                    .sessions
+                    .iter()
+                    .position(|s| s.session_id == session)
+                    .expect("activity inventory session");
+                sessions
+                    .entry((index, order))
+                    .and_modify(|best: &mut u8| *best = (*best).min(rank))
+                    .or_insert(rank);
+                entry.group = place.clone();
+                entry.group_name = Some(place.clone());
+                entry.group_key = Some(format!("activity:{index}:{session}"));
+                order
+            } else {
+                0
+            };
             entry.activity = Some(Presentation {
                 icon: program_icon(activity.program.as_deref()),
-                place,
+                // The heading already supplies both parts; don't repeat them on every row.
+                place: if by_session { String::new() } else { place },
                 tone,
                 elapsed: {
                     let state = if rank == 2 {
@@ -308,10 +351,17 @@ impl Workspace {
                         .map(|age| elapsed(age, state, now))
                 },
             });
-            entries.push((rank, entry));
+            entries.push((rank, index, session_order, entry));
         }
-        entries.sort_by_key(|(rank, _)| *rank);
-        entries.into_iter().map(|(_, entry)| entry).collect()
+        // Stable sort keeps server tab order among equal priorities.
+        if by_session {
+            entries.sort_by_key(|(rank, host, session, _)| {
+                (sessions[&(*host, *session)], *host, *session, *rank)
+            });
+        } else {
+            entries.sort_by_key(|(rank, _, _, _)| *rank);
+        }
+        entries.into_iter().map(|(_, _, _, entry)| entry).collect()
     }
 
     pub fn activity_selection(&self) -> Option<NoteTarget> {

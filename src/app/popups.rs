@@ -288,7 +288,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     };
     let mut spans: Vec<(f32, f32, Hidden)> = Vec::new();
     let mut y = 0.;
-    let mut group = String::new();
+    let mut group_key = String::new();
     // Where the heading of the group being listed ends.
     let mut heading_bottom = 0.;
     let mut list_rows = 0;
@@ -297,9 +297,11 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let mut section = None;
     let grouped = s.query().is_empty();
     for (i, entry) in entries.iter().enumerate() {
-        if !entry.footer && entry.group != group {
+        let key = entry.group_key.as_ref().unwrap_or(&entry.group);
+        if !entry.footer && *key != group_key {
             section = None;
-            group = entry.group.clone();
+            let group = entry.group.clone();
+            group_key = key.clone();
             if !group.is_empty() {
                 let first = y == 0.;
                 list = list.child(
