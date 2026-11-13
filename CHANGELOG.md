@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
+
 ## 0.8.0 - 2026-11-12
 
 **Rex Linux is now Rex Rune.** Existing `install.sh` and in-app **Update now** users need no migration steps: update normally and restart. Pacman replaces `rex-linux-bin` with `rex-rune-bin` automatically on update; the repository configuration stays the same. For `.deb` installs, take **`rex-rune_*.deb`**, even if the old client's notice names `rex-linux_*.deb`. The new client keeps one launcher, moves settings and update state, and leaves `rex-linux` as a link to `rex-rune`.
@@ -27,8 +33,6 @@ This release also adds macOS and Windows source builds and the pane, activity, p
 ### Added
 
 - **Activity by session (partial M3.2):** see each project's tabs together under session and host headings, ordered by what needs attention first. The list shows the choice, **By priority** or **By session**, at the end of its filter row; press either, or Tab while filtering, and the selected tab and the filter are kept. Commands has a row for each view. The choice is remembered across launches, including when opening from the toolbar chip. Browsing remains local and marks nothing seen. See [ordering and checks](docs/parity-2026-11/M3.2-activity-by-session.md).
-
-- **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
 
 - **Pair device (partial M3.3):** Settings → Server and Commands can show a QR code of the connected host's sanitized, last-reported Tailscale HTTPS address. Local-only, no server requests; the exact address stays visible, and an overlong address falls back to text. Encoder matrices and rendered captures are independently checked; phone acceptance is not yet verified. See [checks and limits](docs/parity-2026-11/M3.3-pair-device.md).
 
