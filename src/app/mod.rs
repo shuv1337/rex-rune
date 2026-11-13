@@ -198,6 +198,10 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     if let Some(delay) = next_activity {
         tx.wake_after(delay);
     }
+    let (server_changed, next_server) = s.refresh_server_at(now);
+    if let Some(delay) = next_server {
+        tx.wake_after(delay);
+    }
     let remote_changed = s.poll_remote_navigation(now);
     let updates_changed = s.poll_updates(now, tx);
     let settings_changed = s.poll_settings(now, tx);
@@ -205,7 +209,8 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
         || remote_changed
         || updates_changed
         || settings_changed
-        || activity_changed;
+        || activity_changed
+        || server_changed;
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {

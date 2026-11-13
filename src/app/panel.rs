@@ -147,7 +147,8 @@ impl Intent {
                         | "pane.move_to_tab"
                         | "pane.close_others"
                         | super::commands::CLOSE_SESSION
-                        | super::commands::CHOOSE_THEME,
+                        | super::commands::CHOOSE_THEME
+                        | super::server_page::STOP,
                     _
                 )
                 | Intent::MovePaneTo(_)
@@ -388,6 +389,8 @@ pub struct Panel {
     pub reveal: bool,
     /// Activity-only local redraw deadline, discarded with the popup.
     pub activity_refresh: Option<std::time::Instant>,
+    pub server_refresh: Option<std::time::Instant>,
+    pub stop_server: Option<super::server_page::StopTarget>,
     pub error: Option<String>,
     pub target: Option<PaneTarget>,
     pub session: Option<SessionTarget>,
@@ -422,6 +425,8 @@ impl Panel {
             selected: 0,
             reveal: false,
             activity_refresh: None,
+            server_refresh: None,
+            stop_server: None,
             error: None,
             target: None,
             session: None,

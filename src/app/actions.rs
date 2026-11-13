@@ -35,6 +35,7 @@ enum Handler {
     SwitchSession,
     Activity,
     PairDevice,
+    StopServer,
     SelectSession,
     NewSession,
     Split,
@@ -114,6 +115,7 @@ specs! {
     "session.switch" => SwitchSession,
     super::activity_list::ACTION => Activity,
     super::pair_device::ACTION => PairDevice,
+    super::server_page::STOP => StopServer,
     SELECT_SESSION => SelectSession,
     "session.new" => NewSession,
     "pane.split" => Split,
@@ -248,8 +250,8 @@ impl Spec {
             Download => Remote::Never(
                 "Only the person at this computer can choose a file to download; nothing a host sends can start one.",
             ),
-            Palette | Settings | Search | SwitchSession | Activity | PairDevice | PaneActions
-            | Shortcuts => {
+            Palette | Settings | Search | SwitchSession | Activity | PairDevice | StopServer
+            | PaneActions | Shortcuts => {
                 Remote::Never("Only the person at this computer can open dialogs and popups.")
             }
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
@@ -304,7 +306,11 @@ impl Spec {
     pub fn requires_person(&self) -> bool {
         matches!(
             self.handler,
-            Handler::Download | Handler::InsertPath | Handler::GoToDirectory | Handler::PairDevice
+            Handler::Download
+                | Handler::InsertPath
+                | Handler::GoToDirectory
+                | Handler::PairDevice
+                | Handler::StopServer
         )
     }
     pub fn global(&self) -> bool {
@@ -369,6 +375,7 @@ impl Spec {
             Handler::SwitchSession => "Switch session",
             Handler::Activity => "Show activity",
             Handler::PairDevice => "Pair device…",
+            Handler::StopServer => "Stop server…",
             Handler::SelectSession => "Show session",
             Handler::NewSession => "New session",
             Handler::Split => "Split pane",
@@ -423,6 +430,7 @@ impl Spec {
             Handler::Palette
             | Handler::Settings
             | Handler::PairDevice
+            | Handler::StopServer
             | Handler::Sidebar
             | Handler::ZoomIn
             | Handler::ZoomOut
@@ -635,6 +643,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             s.show_activity();
         }
         Handler::PairDevice => s.pair_device(),
+        Handler::StopServer => s.stop_server(),
         Handler::SelectSession => {
             let visit = s.session_visit(s.active, args);
             match visit {

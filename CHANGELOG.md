@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
+
 - **Arch package: a root update helper, groundwork for Update now on pacman installs.** `rex-rune-bin` now installs `/usr/lib/rex-rune/rex-rune-update`, a polkit action for it (`dev.shuv.rex-rune.update`: an administrator's password every time, for a local active session only) and the package-signing certificate. The helper upgrades `rex-rune-bin` to one exact newer release from the Rex package site, and only if the package is signed by the Rex package key shipped in the package, that key is still valid and trusted in this machine's pacman keyring, the file is the package and version asked for, and nothing else would be installed or removed. It honours `IgnorePkg` and `IgnoreGroup`, and does its work as a systemd service so that nothing of the caller's (limits, terminal, environment) reaches pacman. The client does not call it yet; nothing changes in Settings → Updates. `polkit` is an optional dependency. See the [design note](docs/plans/pacman-update-now.md#as-built).
 
 ## 0.8.0 - 2026-11-12

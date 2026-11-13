@@ -1,4 +1,4 @@
-//! A view of the active host's existing identity cache. No requests, timers or server actions.
+//! Cached server facts, a page-local uptime clock, and an explicitly confirmed stop.
 use super::{
     settings_kit::{self as kit, button, card, footnote, page},
     theme::*,
@@ -8,7 +8,161 @@ use super::{
 use rex_rune::connection::server_info::Answer;
 use rune::{El, col, text};
 
+pub const STOP: &str = "host.stop_server";
 const MISSING: &str = "Not reported";
+
+#[derive(Clone, Debug)]
+pub struct StopTarget {
+    host: super::workspace::HostId,
+    epoch: u64,
+    endpoint: String,
+}
+
+pub(super) fn uptime(
+    model: &rex_rune::connection::HostModel,
+    now: std::time::SystemTime,
+) -> Option<String> {
+    if !model.connected {
+        return None;
+    }
+    let start = model
+        .server_info
+        .process
+        .reported()?
+        .started_at
+        .as_deref()?;
+    let seconds = rex_rune::connection::activity::time::reported_elapsed(start, now)?.as_secs();
+    Some(match seconds {
+        0..60 => "now".into(),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86400),
+    })
+}
+
+impl Workspace {
+    pub fn can_stop_server(&self) -> bool {
+        self.hosts
+            .get(self.active)
+            .is_some_and(|h| h.model.connected)
+            && self.settings.hosts.get(self.active).is_some_and(|h| {
+                h.endpoint.starts_with("unix://") || h.endpoint.starts_with("ssh://")
+            })
+    }
+
+    pub fn stop_server(&mut self) {
+        if !self.can_stop_server() {
+            return;
+        }
+        let host = &self.hosts[self.active];
+        let saved = &self.settings.hosts[self.active];
+        let target = StopTarget {
+            host: host.id,
+            epoch: host.model.connection_epoch,
+            endpoint: saved.endpoint.clone(),
+        };
+        let count = host
+            .model
+            .server_info
+            .process
+            .reported()
+            .and_then(|p| p.session_count);
+        let sessions = count.map_or_else(
+            || "The session count was not reported.".into(),
+            |n| format!("Last reported session count: {n}."),
+        );
+        let description = format!(
+            "Stop the server on {}? Every program running in its sessions ends. {sessions} Other clients are disconnected. Rex Rune will not start it again; a service manager on that machine may.",
+            saved.label
+        );
+        self.confirm(
+            "Stop server?",
+            "server.stop",
+            serde_json::json!({}),
+            &description,
+        );
+        self.panel.as_mut().unwrap().stop_server = Some(target);
+    }
+
+    pub(super) fn confirm_stop_server(&mut self, target: StopTarget) {
+        let current = self.can_stop_server()
+            && self.hosts[self.active].id == target.host
+            && self.hosts[self.active].model.connection_epoch == target.epoch
+            && self.settings.hosts[self.active].endpoint == target.endpoint;
+        if !current {
+            self.inform("Stop not sent: the host or connection changed. Review Stop server again.");
+            return;
+        }
+        self.send(
+            self.active,
+            rex_rune::connection::HostCommand::StopServer {
+                epoch: target.epoch,
+            },
+        );
+    }
+
+    pub(super) fn refresh_server_at(
+        &mut self,
+        now: std::time::Instant,
+    ) -> (bool, Option<std::time::Duration>) {
+        let visible = self.settings_page() == super::panel::SettingsSection::Server
+            && self
+                .panel
+                .as_ref()
+                .is_some_and(|p| matches!(p.kind, super::panel::PanelKind::Settings));
+        let Some(panel) = self.panel.as_mut() else {
+            return (false, None);
+        };
+        if !visible {
+            panel.server_refresh = None;
+            return (false, None);
+        }
+        let deadline = panel
+            .server_refresh
+            .get_or_insert(now + std::time::Duration::from_secs(60));
+        let changed = now >= *deadline;
+        if changed {
+            *deadline = now + std::time::Duration::from_secs(60);
+        }
+        (changed, Some(deadline.saturating_duration_since(now)))
+    }
+}
+
+fn controls(s: &Workspace) -> El {
+    let duration = uptime(&s.hosts[s.active].model, std::time::SystemTime::now());
+    let mut rows = Vec::new();
+    if let Some(duration) = duration {
+        rows.push(fact("Running for", duration, None));
+    }
+    rows.push(kit::setting(
+        "Stop server…",
+        if s.can_stop_server() {
+            "Ends every program in this server’s sessions."
+        } else if !s.hosts[s.active].model.connected {
+            "Available while this host is connected over its Unix socket or SSH."
+        } else {
+            "A server can be stopped only from its own machine or over SSH."
+        },
+        if s.can_stop_server() {
+            button("server-stop", "Stop server…", Pill::Danger, |s, _| {
+                s.stop_server()
+            })
+            .help(s.shortcut_help("Stop server…", STOP))
+        } else {
+            rune::el()
+        },
+    ));
+    let mut contents = vec![
+        card(rows),
+        footnote(
+            "Running time uses the last reported start time and this client’s clock, not live monitoring.",
+        ),
+    ];
+    if let Some(result) = &s.hosts[s.active].model.server_stop_result {
+        contents.push(footnote(format!("Last stop request: {result}")).key("server-stop-result"));
+    }
+    kit::section("Server controls", contents)
+}
 
 /// Preserve literal absolute Unix paths; strip credentials, query and fragment from URLs.
 /// Never link reported addresses. Unknown listener syntax is not echoed unfiltered.
@@ -300,6 +454,7 @@ pub fn section(s: &Workspace) -> El {
         } else {
             "Disconnected: last reported server facts only. They do not mean the server is running now. URLs omit credentials, queries and fragments; Unix paths and timestamps are as reported."
         }).key("server-freshness"),
+        controls(s),
         build,
         process_rows,
         listeners,

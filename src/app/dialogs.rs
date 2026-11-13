@@ -238,6 +238,13 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
     let panel = s.panel.as_ref()?;
     let body = match &panel.kind {
         PanelKind::Form(f) => form(s, f),
+        PanelKind::Confirm {
+            method,
+            description,
+            ..
+        } if method == "server.stop" => {
+            confirm_with(&panel.title, description, "Cancel", "Stop server")
+        }
         PanelKind::Confirm { description, .. } => confirm(&panel.title, description),
         PanelKind::Settings => return Some(super::settings_view::settings(s, viewport)),
         PanelKind::RemoveHost(host) => {
