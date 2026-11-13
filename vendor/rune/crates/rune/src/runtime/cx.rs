@@ -149,8 +149,9 @@ impl<S> Cx<S> {
         self.window_maximized
     }
     /// Whether the native window is full screen: macOS's own full screen, or the borderless one
-    /// `Tx::toggle_full_screen` makes elsewhere, whoever entered it. The view re-runs when it
-    /// changes; false headless. A `memo` closure that reads it needs it in its version.
+    /// `Tx::toggle_full_screen` makes elsewhere. On X11 only full screen the app asked for is
+    /// seen, not the window manager's. The view re-runs when it changes; false headless. A
+    /// `memo` closure that reads it needs it in its version.
     pub fn window_full_screen(&self) -> bool {
         self.window_full_screen
     }

@@ -29,8 +29,11 @@ maximized. The patch adds the following without changing existing behavior on ma
 
 - `Cx::window_maximized()`, refreshed on every `Resized`; the view re-runs when it changes.
 - `Cx::window_full_screen()` (winit's `fullscreen().is_some()`), refreshed on every `Resized` in
-  the same way, so a full-screen window, however it was entered, is not saved as the normal
-  size.
+  the same way and, on macOS, on the full-screen notifications as well, so a full-screen window
+  is not saved as the normal size. It sees full screen made by `Tx::toggle_full_screen`
+  everywhere and the system's own on macOS and Wayland; on X11 winit reports only what the app
+  asked for, so the window manager's full screen is not seen. A change with no size change is
+  missed off macOS.
 - `Tx::minimize()` works on borderless windows off macOS (used by the spike only).
 - `El::window_resize(WindowEdge)` (winit `drag_resize_window`, started inside the press),
   `WindowEdge`, `TitlebarAction::Resize` and `Cursor::ResizeEdge(WindowEdge)`.

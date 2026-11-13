@@ -589,6 +589,7 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         if let Some(l) = self.win.as_ref().filter(|l| l.native.full_screen.take()) {
             sync_chrome(&mut self.rt, l, self.chrome, self.titlebar);
+            self.rt.set_window_full_screen(l.window.fullscreen().is_some());
         }
         // The window procedure asks for this paint when a caption button's hover or
         // press changes.

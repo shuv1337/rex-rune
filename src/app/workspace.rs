@@ -92,8 +92,8 @@ pub struct Workspace {
     pub title_inset: f32,
     /// The traffic lights are hidden for full screen. Known only where Rex's title row is.
     pub full_screen: bool,
-    /// The window says it is full screen (`Cx::window_full_screen`), on every platform; read
-    /// when it resizes.
+    /// The window says it is full screen (`Cx::window_full_screen`); read when it resizes or
+    /// its traffic lights move. On X11 only Rex's own full screen is seen.
     pub window_full_screen: bool,
     /// The title row's session button, where its list opens.
     pub title_session: [f32; 4],

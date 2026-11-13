@@ -224,6 +224,37 @@ fn window_layout_remembers_window_points_not_interface_zoom() {
 }
 
 #[test]
+fn a_full_screen_window_keeps_no_size_and_has_no_resize_edges() {
+    let mut rt = runtime_at(workspace(), (1200., 800.));
+    let bands = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .iter()
+            .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("resize:")))
+            .count()
+    };
+    assert_eq!(bands(&rt), 7);
+    rt.set_window_full_screen(true);
+    rt.set_viewport((1920., 1080.), 1.);
+    for t in 1..5 {
+        rt.frame(f64::from(t));
+    }
+    assert!(rt.state.window_full_screen);
+    assert_eq!(
+        rt.state.resized, None,
+        "the screen's size is not the window's"
+    );
+    assert_eq!(bands(&rt), 0);
+    rt.set_window_full_screen(false);
+    rt.set_viewport((1100., 700.), 1.);
+    for t in 5..9 {
+        rt.frame(f64::from(t));
+    }
+    assert!(!rt.state.window_full_screen);
+    assert!(rt.state.resized.is_some(), "a normal size is kept again");
+    assert_eq!(bands(&rt), 7);
+}
+
+#[test]
 fn the_sidebar_opens_at_launch_as_it_was_left() {
     let mut ws = workspace();
     assert!(!ws.sidebar.is_open(), "closed on a first launch");
