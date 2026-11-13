@@ -1,6 +1,8 @@
 /target/
 /dist/
 /scripts/__pycache__/
+/resources/program-icons/.new/
+/src/app/program_icons/catalog.rs.new
 /tools/vptr/target/
 /mise.local.toml
 /.mise/lib/

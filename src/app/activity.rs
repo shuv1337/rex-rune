@@ -29,9 +29,9 @@ pub struct TabActivity {
     pub source: Option<String>,
     /// The focused block's program: the one reporting, else the foreground process.
     pub program: Option<String>,
-    /// The executable behind the focused block's foreground process, and its script, for its
-    /// icon.
+    /// The executable behind the focused block's foreground process, for its icon.
     pub executable: Option<String>,
+    /// The path of the focused block's foreground script, for its icon.
     pub script: Option<String>,
     /// The tab's OSC 9;4 progress: an error, else a pause, else progress, across its panes.
     pub progress: Option<TerminalProgress>,
