@@ -833,7 +833,7 @@ impl Workspace {
             Command::action(
                 "view.full_screen",
                 G,
-                if self.full_screen {
+                if self.in_full_screen() {
                     "Exit full screen"
                 } else {
                     "Enter full screen"

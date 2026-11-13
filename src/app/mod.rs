@@ -94,6 +94,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
     let maximized = cx.window_maximized();
+    let full_screen = cx.window_full_screen();
     let insets = cx.chrome_insets();
     if s.unified_title {
         // The title row grows with the interface zoom, and the traffic lights stay centred in it.
@@ -188,7 +189,9 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .w_full()
         .h_full()
         .fill(rgb(ground()))
-        .on_layout(move |s: &mut Workspace, r| s.window_resized([r[2], r[3]], maximized))
+        .on_layout(move |s: &mut Workspace, r| {
+            s.window_resized([r[2], r[3]], maximized, full_screen)
+        })
         .children(s.unified_title.then(|| {
             // The insets also change with no resize (full screen), and a rect that moves is
             // what reports them.

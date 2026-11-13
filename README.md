@@ -485,7 +485,7 @@ On macOS the defaults are on Command (⌘), which terminal programs do not use, 
 | ⌥⌘ arrows | Ctrl Alt arrows | Focus an adjacent pane |
 | ⇧⌘[ / ⇧⌘] (and ⌘ Page Up / Down) | Ctrl PageUp / PageDown | Previous / next tab in the session |
 | ⌘A | none | Select the terminal's screen and scrollback (`pane.select_all`) |
-| ⌃⌘F | none | Enter or leave full screen (`client.full_screen.toggle`) |
+| ⌃⌘F | none | Enter or leave full screen (`client.full_screen.toggle`). A debug build's View menu has the system's own Enter Full Screen item, which answers ⌃⌘F first, so there rebinding it changes nothing. Not yet pressed by hand |
 | Ctrl Tab / Ctrl Shift Tab | the same | Next / previous tab across sessions |
 | Shift PageUp / PageDown | the same | Scroll local history |
 

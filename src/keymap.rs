@@ -965,7 +965,8 @@ mod tests {
             let tab = matches!(chord.key, Key::Named("tab"));
             let scroll = binding.action == "pane.scroll";
             let full_screen = binding.action == "client.full_screen.toggle";
-            // Command everywhere Control was, except the two a Mac keeps on Control.
+            // Command everywhere Control was, except the two a Mac keeps on Control; full
+            // screen is on both, as on a Mac.
             assert_eq!(chord.modifiers.logo, !tab && !scroll, "{keys}");
             assert_eq!(chord.modifiers.ctrl, tab || full_screen, "{keys}");
         }

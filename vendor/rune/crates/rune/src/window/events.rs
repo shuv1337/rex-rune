@@ -275,6 +275,7 @@ impl<S: 'static> Host<S> {
             WindowEvent::Resized(size) => {
                 sync_chrome(rt, l, chrome, titlebar);
                 rt.set_window_maximized(l.window.is_maximized());
+                rt.set_window_full_screen(l.window.fullscreen().is_some());
                 let was_live = rt.live_visible();
                 rt.set_live_visible(self.life.uncovered() && size.width > 0 && size.height > 0 && !l.minimized());
                 // Restored where no occlusion event says so (Windows): as uncovering does, the

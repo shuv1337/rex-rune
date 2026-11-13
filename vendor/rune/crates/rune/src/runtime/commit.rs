@@ -57,6 +57,7 @@ pub(super) struct Measurement<'a, S: 'static> {
     pub(super) system_reduced_motion: bool,
     pub(super) titlebar_inset: f32,
     pub(super) window_maximized: bool,
+    pub(super) window_full_screen: bool,
     pub(super) chrome: crate::ChromeInsets,
     /// Caption buttons drawn over the view's root.
     pub(super) caption: Option<crate::titlebar::Caption>,

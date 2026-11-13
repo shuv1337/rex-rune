@@ -28,6 +28,9 @@ maximized. The patch adds the following without changing existing behavior on ma
 (maximizing is `Tx::toggle_maximized`, which Rune has):
 
 - `Cx::window_maximized()`, refreshed on every `Resized`; the view re-runs when it changes.
+- `Cx::window_full_screen()` (winit's `fullscreen().is_some()`), refreshed on every `Resized` in
+  the same way, so a full-screen window, however it was entered, is not saved as the normal
+  size.
 - `Tx::minimize()` works on borderless windows off macOS (used by the spike only).
 - `El::window_resize(WindowEdge)` (winit `drag_resize_window`, started inside the press),
   `WindowEdge`, `TitlebarAction::Resize` and `Cursor::ResizeEdge(WindowEdge)`.
