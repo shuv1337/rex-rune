@@ -46,6 +46,13 @@ fn shows_tabs(s: &Workspace) -> bool {
             .is_some_and(|v| v.windows.iter().filter(|t| t.window_id.is_some()).count() > 1)
 }
 
+/// Whether `title` ends with the whole of `path`, not only its last letters.
+pub(super) fn ends_in_path(title: &str, path: &str) -> bool {
+    title
+        .strip_suffix(path)
+        .is_some_and(|rest| rest.is_empty() || rest.ends_with(['/', ' ', ':']))
+}
+
 /// The focused pane as the window's title: its program's glyph, its name, and the directory
 /// its program is in where the name doesn't already say. `merged` is the lone pane whose
 /// header this row is, which also shows its activity word and progress here.
@@ -59,7 +66,7 @@ fn title(s: &Workspace, merged: bool) -> El {
     // shortened one.
     let dir = model
         .directory_of(&block)
-        .filter(|dir| !name.ends_with(dir.trim_start_matches("…/")));
+        .filter(|dir| !ends_in_path(&name, dir.trim_start_matches("…/")));
     let icons = tab_icons::icons_of(
         &[block_program(model, &block)],
         s.settings.interface.tab_icon_count.min(1),

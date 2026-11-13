@@ -212,17 +212,28 @@ fn without_a_toolbar_row_a_title_strip_keeps_the_traffic_lights_clear_until_full
 }
 
 #[test]
+fn a_title_hides_only_a_directory_it_ends_in() {
+    use super::super::title_row::ends_in_path;
+    assert!(ends_in_path("zsh ~/rex", "~/rex"));
+    assert!(ends_in_path("u@host:/tmp/home", "/tmp/home"));
+    assert!(ends_in_path("~", "~"));
+    assert!(!ends_in_path("vim mysrc", "src"));
+    assert!(!ends_in_path("/var/tmp/home", "/tmp/home"));
+    assert!(!ends_in_path("vim ~/rex/main.rs", "~/rex"));
+}
+
+#[test]
 fn a_window_in_full_screen_keeps_the_size_it_had() {
     let (mut rt, _rx) = unified(&["single"]);
     rt.update(|s, _| s.settings.window_size = Some([1024., 700.]));
     // The resize into full screen can come before the traffic lights go.
     rt.set_viewport((1512., 982.), 1.);
     settle(&mut rt);
+    assert!(rt.state.resized.is_some());
     rt.set_chrome_insets(lights(0.));
     settle(&mut rt);
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    settle(&mut rt);
     assert!(rt.state.full_screen);
+    assert!(rt.state.resized.is_none(), "nothing left to save");
     assert_eq!(rt.state.settings.window_size, Some([1024., 700.]));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
