@@ -1,6 +1,7 @@
 # In-app install.sh updates
 
-Settings → Updates offers **Update now** for the install.sh/tarball channel.
+Settings → Updates offers **Update now** for the install.sh/tarball channel. (A pacman
+install has its own, smaller path: see [Pacman installs](#pacman-installs).)
 **Copy command** remains a manual fallback. Progress and failures stay on that
 page; a successful install offers **Restart to finish**. Restart saves the
 workspace, closes the window, and waits for host shutdown (up to two seconds) so
@@ -165,6 +166,57 @@ the receipt, so the rename waits for a start that has it.
 
 Settings and update state are moved separately, for every install method: see
 [Renamed from Rex Linux](../README.md#renamed-from-rex-linux).
+
+## Pacman installs
+
+A pacman install cannot replace its own files: they are root's. The `rex-rune-bin`
+package therefore carries a small root helper and a polkit action for it, and
+Settings → Updates offers **Update now** when all of these hold:
+
+- the install is Rex's own pacman package (its channel marker names no other updater);
+- `/usr/lib/rex-rune/rex-rune-update` and `/usr/bin/pkexec` exist (the package from
+  the first release that ships the helper, and `polkit`);
+- a newer release has been verified, with no manual-upgrade floor.
+
+Otherwise the page shows the instructions it always has (`omarchy update` on Omarchy,
+`sudo pacman -Syu rex-rune-bin` elsewhere), and they stay on the page as the fallback
+either way. On Omarchy the text still recommends `omarchy update`, which updates Rex
+Rune with the rest of the system.
+
+**Update now** runs `pkexec --disable-internal-agent /usr/lib/rex-rune/rex-rune-update
+<version>` on a worker thread and waits. Your desktop's polkit agent asks for an
+administrator's password; nothing runs before that. The client passes the version and
+reads an exit code, and that is all it does: the helper downloads the package itself
+from the Rex package site, checks it against the Rex package key shipped in the
+package and against this computer's pacman keyring, refuses anything but a newer
+`rex-rune-bin`, and installs it as a systemd service so that closing Rex does not stop
+it half-way. [The design note](plans/pacman-update-now.md#as-built) has the reasoning
+and what was tested.
+
+![Update now offered on an Omarchy pacman install](images/pacman-update-available.png)
+
+![Waiting for the password and the update](images/pacman-update-waiting.png)
+
+Real-font captures of each state come from `pacman_update_draw`, run alone with
+`REX_TEST_SNAP_DIR` (and `REX_UPDATE_MINIMUM=1` for 640×480).
+
+What the page says afterwards:
+
+| Ending | Shown |
+| --- | --- |
+| Upgraded | **Restart to finish**, as for an install.sh update |
+| The dialog was closed | "Update cancelled. Nothing was installed."; **Update now** is back |
+| Not authorized, or no polkit agent running | Why, with the command to copy |
+| Any refusal by the helper (held back by `IgnorePkg`, another pacman running, a download or signature problem, a key this computer does not trust, other packages would change, pacman failed, no systemd) | The reason in a sentence, with the command to copy. `journalctl -t rex-rune-update` has the helper's own words |
+
+It never starts on its own: **Install updates automatically** applies to install.sh
+installs only, since a password dialog nobody asked for would be worse than a notice.
+The helper reports nothing until it ends, so the page shows one waiting line and no
+percentage.
+
+Not verified: the polkit dialog on a real desktop, and an upgrade against the
+production package site (that needs a release newer than an installed `rex-rune-bin`
+that has the helper). The headless tests never start `pkexec`.
 
 ## Automatic installation
 

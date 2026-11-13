@@ -2,11 +2,13 @@
 //! detection, and persistent update state. Metadata checks never download binaries.
 //! `installer` explicitly updates verified, user-writable install.sh installations, on Linux;
 //! other platforms get the same interface with nothing behind it.
+//! `pacman` asks a pacman install's own root helper to upgrade the package.
 #[cfg(target_os = "linux")]
 pub mod installer;
 #[cfg(not(target_os = "linux"))]
 #[path = "update/no_installer.rs"]
 pub mod installer;
+pub mod pacman;
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
 use ring::signature::{ED25519, UnparsedPublicKey};

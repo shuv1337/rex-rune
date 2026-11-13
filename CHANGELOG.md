@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Update now for pacman installs.** Settings → Updates offers **Update now** on an Arch or Omarchy install of `rex-rune-bin` that carries the package's update helper, with polkit's `pkexec` present. It asks for an administrator's password through your desktop's own dialog, upgrades that one package and offers **Restart to finish**; there is no command to paste. The instructions and **Copy command** stay as the fallback, and on Omarchy the text still recommends `omarchy update`. A closed dialog is not an error; any refusal says why. It never starts on its own. Not yet tried on a real desktop. See [pacman installs](docs/self-updates.md#pacman-installs).
+
 - **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
 
 ## 0.8.0 - 2026-11-12
