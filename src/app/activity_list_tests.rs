@@ -442,6 +442,63 @@ fn tab_switch_keeps_filter_selection_focus_elapsed_and_receipts_without_commands
 }
 
 #[test]
+fn the_switch_in_the_list_shows_the_view_and_a_press_changes_it_without_leaving_the_filter() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let (mut ws, rx) = fixture();
+    let chosen = target(&ws, 1, "s", "error");
+    ws.show_activity();
+    edit(&mut ws, "test");
+    ws.restore_activity_selection(Some(chosen.clone()));
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    for r in &rx {
+        r.drain();
+    }
+    let focus = focused(&rt);
+    let lit = |rt: &Runtime<Workspace>, key: &str| {
+        let cell = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .expect("the choice");
+        assert_eq!(cell.role, "radio");
+        cell.fill != rune::Color::TRANSPARENT
+    };
+    // Both choices are always there, with the current one marked.
+    assert!(lit(&rt, "activity-view-priority") && !lit(&rt, "activity-view-session"));
+    click(&mut rt, "activity-view-session");
+    settle(&mut rt);
+    assert_eq!(rt.state.settings.activity_view, ActivityView::Session);
+    assert!(!lit(&rt, "activity-view-priority") && lit(&rt, "activity-view-session"));
+    assert_eq!(
+        Settings::load(&rt.state.settings_path)
+            .unwrap()
+            .activity_view,
+        ActivityView::Session,
+        "remembered"
+    );
+    // The same tab is still selected, the filter and its focus are untouched, and typing
+    // goes on into the filter.
+    assert_eq!(rt.state.activity_selection(), Some(chosen.clone()));
+    assert_eq!(rt.state.query(), "test");
+    assert_eq!(focused(&rt), focus);
+    press(&mut rt, Key::Text("x".into()));
+    assert_eq!(rt.state.query(), "testx");
+    // Pressing the current choice changes nothing; the other one goes back.
+    click(&mut rt, "activity-view-session");
+    assert_eq!(rt.state.settings.activity_view, ActivityView::Session);
+    click(&mut rt, "activity-view-priority");
+    settle(&mut rt);
+    assert_eq!(rt.state.settings.activity_view, ActivityView::Priority);
+    assert!(
+        rx.iter().all(|r| r.is_empty()),
+        "a local choice sends nothing"
+    );
+    assert!(has(&rt, "activity-line"));
+    std::fs::remove_file(&rt.state.settings_path).unwrap();
+}
+
+#[test]
 fn activity_view_is_optional_local_and_remembered_across_opens_and_restarts() {
     let old: Settings = serde_json::from_value(json!({"font_size":16})).unwrap();
     assert_eq!(old.activity_view, ActivityView::Priority);
