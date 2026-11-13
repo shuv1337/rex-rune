@@ -251,7 +251,11 @@ impl ThemeDirs {
     /// `$XDG_CONFIG_HOME/ghostty/themes` (default `~/.config`), then
     /// `$GHOSTTY_RESOURCES_DIR/themes`, then `ghostty/themes` under each `$XDG_DATA_DIRS`.
     pub fn from_env() -> Self {
-        Self::from_vars(|key| std::env::var_os(key))
+        let mut dirs = Self::from_vars(|key| std::env::var_os(key));
+        // Last: an explicit `GHOSTTY_RESOURCES_DIR` and the data folders come first.
+        dirs.system
+            .extend(crate::platform::dirs::ghostty_app_themes());
+        dirs
     }
 
     fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {

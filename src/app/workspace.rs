@@ -80,6 +80,9 @@ pub struct Workspace {
     pub claimed: HashSet<(HostId, String)>,
     pub handle: AppHandle<Workspace>,
     pub window_focused: bool,
+    /// Whether Rex draws the window's frame (`platform::chrome`): its own close button and
+    /// resize bands. Headless tests draw it on every platform unless they turn it off.
+    pub own_frame: bool,
     /// The pane a file drag from another app is over.
     pub drop_hover: Option<String>,
     /// Pane headers brought out by the pointer or by Reveal pane headers.
@@ -249,6 +252,7 @@ impl Workspace {
             claimed: HashSet::new(),
             handle,
             window_focused: true,
+            own_frame: cfg!(test) || super::platform::chrome::OWN_FRAME,
             drop_hover: None,
             header_reveal: Default::default(),
             toolbar_reveal: Default::default(),

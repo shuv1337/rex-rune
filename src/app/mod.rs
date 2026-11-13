@@ -176,7 +176,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .child(root);
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
-    if !cx.window_maximized() {
+    if s.own_frame && !cx.window_maximized() {
         for edge in [
             WindowEdge::South,
             WindowEdge::West,
@@ -284,6 +284,8 @@ pub fn run(
     mut options: Options,
     recovery_notice: Option<StartupNotice>,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
+    // Before settings are read: they are resolved against this platform's defaults.
+    platform::keys::init();
     let (settings, path) = match &options.config {
         Some(path) => (Settings::load(path)?, path.clone()),
         None => Settings::load_default()?,
@@ -331,8 +333,9 @@ pub fn run(
             workspace
         })
         .args(rune_args)
+        .chrome(platform::chrome::FRAME)
         .window_options(rune::WindowOptions {
-            borderless: true,
+            borderless: platform::chrome::OWN_FRAME,
             min_size: Some((640., 480.)),
             ..Default::default()
         })

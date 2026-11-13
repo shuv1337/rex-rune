@@ -1,6 +1,6 @@
 //! Layout-aware matching and sequence/repeat state, adapted from Andrea Zito
 //! (nivox), 8037d78. Input is plain data: no Tx or workspace needed by the matcher.
-use rex_rune::keymap::{Chord, Key as BindingKey, Modifiers, Resolved};
+use rex_rune::keymap::{Chord, Key as BindingKey, Resolved};
 use rune::{Key, KeyEvent, PhysicalKeyCode as Code};
 
 #[derive(Clone, Copy)]
@@ -63,13 +63,13 @@ fn character(key: &Key) -> Option<char> {
 }
 
 pub fn matches(chord: &Chord, input: Input<'_>) -> bool {
+    matches_on(chord, input, rex_rune::keymap::command_key())
+}
+
+/// [`matches`] where shortcuts are on Command (a Mac) or on Control.
+pub fn matches_on(chord: &Chord, input: Input<'_>, command: bool) -> bool {
     let m = input.event.mods;
-    let mods = Modifiers {
-        ctrl: m.ctrl || m.cmd,
-        alt: m.alt,
-        shift: m.shift,
-        logo: m.logo,
-    };
+    let mods = super::platform::keys::modifiers_on(m, command);
     if chord.modifiers != mods {
         return false;
     }
@@ -129,16 +129,16 @@ pub fn matches(chord: &Chord, input: Input<'_>) -> bool {
 /// are; a key with neither by its physical code. None for a modifier on its own, a dead key
 /// and a key that has no spelling.
 pub fn chord_of(input: Input<'_>) -> Option<Chord> {
+    chord_of_on(input, rex_rune::keymap::command_key())
+}
+
+/// [`chord_of`] where shortcuts are on Command (a Mac) or on Control.
+pub fn chord_of_on(input: Input<'_>, command: bool) -> Option<Chord> {
     if matches!(input.event.key, Key::Modifier { .. } | Key::Dead(_)) {
         return None;
     }
     let m = input.event.mods;
-    let modifiers = Modifiers {
-        ctrl: m.ctrl || m.cmd,
-        alt: m.alt,
-        shift: m.shift,
-        logo: m.logo,
-    };
+    let modifiers = super::platform::keys::modifiers_on(m, command);
     let typed = character(&input.event.key);
     let mut spellings: Vec<String> = Vec::new();
     match &input.event.key {
@@ -181,7 +181,7 @@ pub fn chord_of(input: Input<'_>) -> Option<Chord> {
             chord.modifiers = modifiers;
             Some(chord)
         })
-        .find(|chord| matches(chord, input))
+        .find(|chord| matches_on(chord, input, command))
 }
 
 #[derive(Default)]

@@ -254,3 +254,54 @@ fn failures_are_health_only_and_checks_never_spawn() {
     assert!(player.child.lock().unwrap().reaped);
     assert!(!player.child.lock().unwrap().killed);
 }
+
+#[test]
+fn a_mac_plays_its_own_alert_sounds_with_afplay_when_no_linux_player_is_there() {
+    let paths = ["/usr/bin".into()];
+    let sounds = [
+        (Sound::NeedsYou, "Ping"),
+        (Sound::Error, "Basso"),
+        (Sound::Done, "Glass"),
+    ];
+    for (sound, name) in sounds {
+        let file = PathBuf::from(format!("/System/Library/Sounds/{name}.aiff"));
+        let tree = Tree(vec!["/usr/bin/afplay".into(), file.clone()]);
+        assert_eq!(
+            select(&tree, &paths, &[], sound),
+            Some(Invocation {
+                program: "/usr/bin/afplay".into(),
+                args: vec![file.clone().into_os_string()],
+            })
+        );
+        // The player without the sound, or the sound without the player, is no player.
+        assert_eq!(
+            select(&Tree(vec!["/usr/bin/afplay".into()]), &paths, &[], sound),
+            None
+        );
+        assert_eq!(select(&Tree(vec![file]), &paths, &[], sound), None);
+    }
+    // A Linux player Homebrew put on PATH does not take the sound away: the Mac's own
+    // player comes first, and a player whose sound file is missing is passed over.
+    let tree = Tree(vec![
+        "/opt/homebrew/bin/canberra-gtk-play".into(),
+        "/opt/homebrew/bin/paplay".into(),
+        "/usr/bin/afplay".into(),
+        "/System/Library/Sounds/Glass.aiff".into(),
+    ]);
+    let paths = ["/opt/homebrew/bin".into(), "/usr/bin".into()];
+    let chosen = select(&tree, &paths, &[], Sound::Done).unwrap();
+    assert_eq!(chosen.program, PathBuf::from("/usr/bin/afplay"));
+    let no_sound_file = Tree(vec!["/opt/homebrew/bin/paplay".into()]);
+    assert_eq!(select(&no_sound_file, &paths, &[], Sound::Done), None);
+    let with_canberra = Tree(vec![
+        "/opt/homebrew/bin/paplay".into(),
+        "/usr/bin/canberra-gtk-play".into(),
+    ]);
+    assert_eq!(
+        select(&with_canberra, &paths, &[], Sound::Done)
+            .unwrap()
+            .program,
+        PathBuf::from("/usr/bin/canberra-gtk-play"),
+        "a later player that can play is used"
+    );
+}

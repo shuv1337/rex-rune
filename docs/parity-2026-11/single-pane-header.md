@@ -135,7 +135,8 @@ and are left:
 
 - With **Pane headers → On hover** and **Toolbar → Show on hover** together, a lone pane's
   floating header sits at the top of the window, so its Close is under the toolbar's
-  reveal edge, as the row was before the fix above.
+  reveal edge, as the row was before the fix above. **Fixed afterwards**; see the last
+  section.
 - With no toolbar row, the floating key-sequence or download chip at the top left covers
   the start of the header's name.
 
@@ -148,3 +149,59 @@ and are left:
 - With the toolbar Hidden or On hover, the lone pane's header is now the top row of the
   window, 38 pt in all. People who chose a hidden toolbar for the room may want Pane
   headers → Hidden as well; nothing sets that for them.
+
+## Afterwards: the floating header (after #100)
+
+The same hazard, older than #100: a lone pane's **floating** header (Pane headers → On
+hover, or Reveal pane headers) was pinned to the top of the pane, so with the toolbar on
+Show on hover its Close was inside the 8 pt edge that brings the toolbar out, with Close
+app sliding in over it.
+
+- `pane_header::clearance` now applies to a lone pane whenever the toolbar has no row,
+  whether its header is a row or floats.
+- `pane_header::floating` keeps its surface at the pane's edge and puts the header row
+  `clearance` down inside it, so nothing of the terminal shows between the window's edge
+  and the header.
+- `pane_header::reveal_band` is taller by the same amount, so the pointer on the
+  header's last row is still on the band that keeps it out.
+- A floating header still never moves or resizes the terminal.
+
+`a_lone_panes_floating_header_stays_clear_of_the_top_edge_too` covers On hover and
+Reveal pane headers, each with the toolbar on Show on hover and Hidden: the header's row
+at y 8, the grid unchanged, resting on Close keeps the header and brings out no toolbar,
+the header's last row keeps it, and a press on Close opens Close pane's confirmation and
+no window action; with the toolbar in its row the floating header is at the pane's top
+as before. With the offset removed it fails on its first assertion. Capture
+`header-hover-single-no-toolbar` added to `pane_headers_draw_under_each_choice` and
+inspected.
+
+### Review of that fix (Cursor-pool Opus, on `b0bda2b`)
+
+Approved. It pointed out that the same hazard remained in **Compact density**, where
+panes have no margin: a lone pane with Pane headers → Always, and the top panes of a
+split or a zoomed pane with a floating header, all had their header at the window's top,
+the top-right pane's Close directly under Close app. That was older than both changes.
+
+So the rule is now the pane's position instead of its kind: `clearance(s, rect)` is the
+part of the 8 pt edge that the pane's top falls inside, while the toolbar has no row.
+A lone pane and Compact top panes get 8 pt; Comfortable cards, 10 pt down already, get
+none; nothing changes with the toolbar in its row. The test gained the Compact cases
+(header rows with Always, floating headers with Reveal pane headers, the right pane's
+Close pressed), an assertion that a Comfortable card gets no extra room, the floating
+surface's own rectangle (so a surface pinned 8 pt down, leaving a sliver of terminal
+above it, would fail), and that the edge above a floating header still brings the
+toolbar out.
+
+Costs, stated: on these panes a floating header covers 38 pt instead of 30 and its band
+is 44 pt, so resting on the terminal's second row brings it out; and in Compact with the
+toolbar hidden, the top panes' header rows take 8 pt more than the panes below them.
+
+A re-check of that found it ready to merge. From it: the rule reads only the pane area
+and not the Toolbar setting, so switching the toolbar to Always resizes a Compact top
+pane once and not twice; and the Compact test cases rest on the first row of Close, where
+the toolbar's edge used to be, instead of its centre.
+
+After these changes, merged with master at `7e957f0`: `cargo fmt --all -- --check`;
+`TMPDIR=/var/tmp cargo test --locked --all-features` **1057 passed, 0 failed, 6
+ignored**; strict clippy.
+

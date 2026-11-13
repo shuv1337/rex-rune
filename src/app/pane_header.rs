@@ -15,7 +15,7 @@ use super::{
 };
 use rex_rune::{
     layout,
-    settings::{PaneDensity, PaneHeader, interface::ToolbarBehavior},
+    settings::{PaneDensity, PaneHeader},
 };
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Icon, SpringPair, Transition, Tx, el, row, text};
@@ -111,19 +111,17 @@ pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
     single(window) && s.settings.pane_header != PaneHeader::Always
 }
 
-/// Room kept above a lone pane's header row while the toolbar has no row of its own. The
-/// header is then the top of the window, and the toolbar's reveal edge (and the window's
-/// resize edge within it) must stay clear of its buttons: a pointer resting on Close would
-/// otherwise bring the toolbar out over it, with Close app where Close pane was.
-pub fn clearance(s: &Workspace, window: &Window) -> f32 {
-    if full_bleed(s, window)
-        && rows(s, window)
-        && s.settings.interface.toolbar != ToolbarBehavior::Always
-    {
-        super::toolbar_reveal::EDGE
-    } else {
-        0.
-    }
+/// Room kept above the header, a row or a floating one, of a pane whose top is the top of
+/// the window: `rect` is the pane's, within the pane area. That happens only while the
+/// toolbar has no row of its own, for a lone pane and for the top panes of a Compact tab.
+/// The toolbar's reveal edge (and the window's resize edge within it) must stay clear of the
+/// header's buttons: a pointer resting on Close would otherwise bring the toolbar out over
+/// it, with Close app where Close pane was. A card keeps its own margin and needs none.
+pub fn clearance(s: &Workspace, rect: [f32; 4]) -> f32 {
+    // The area alone decides, with no look at the Toolbar setting: the pane's rectangle
+    // comes from the same area, so both change in the same commit when the setting does,
+    // and the terminal is resized once, not twice.
+    (super::toolbar_reveal::EDGE - (s.area[1] + rect[1])).max(0.)
 }
 
 pub fn placement(s: &Workspace, window: &Window, block: &str) -> Placement {
@@ -311,8 +309,9 @@ pub fn actions(s: &Workspace, window: &Window, block: &str, width: f32, lit: boo
 }
 
 /// A floating header's surface: the popover colour over the terminal, with a hairline below
-/// it. Inside a card it sits within the border and follows the card's top corners.
-pub fn floating(header: El, carded: bool) -> El {
+/// it. Inside a card it sits within the border and follows the card's top corners. On a
+/// pane with no card its row sits `top` down inside the surface (see [`clearance`]).
+pub fn floating(header: El, carded: bool, top: f32) -> El {
     let (edge, radius) = if carded {
         (1., CARD_RADIUS - 1.)
     } else {
@@ -320,6 +319,8 @@ pub fn floating(header: El, carded: bool) -> El {
     };
     el().key("pane-header-float")
         .pin(Some(edge), Some(edge), Some(edge), None)
+        // The surface still starts at the pane's edge; only what is in it moves down.
+        .pt(top)
         .corners([radius, radius, 0., 0.])
         .continuous_corners()
         .fill(rgb(popover()))
@@ -335,12 +336,13 @@ pub fn floating(header: El, carded: bool) -> El {
 
 /// The band along a pane's top edge that brings its On hover header out and keeps it while
 /// the pointer is on it. It takes no presses: until the header shows, the terminal under the
-/// band works as everywhere else.
-pub fn reveal_band(block: &str) -> El {
+/// band works as everywhere else. `top` is how far down the header floats, so the band
+/// still reaches under all of it.
+pub fn reveal_band(block: &str, top: f32) -> El {
     let id = block.to_owned();
     el().key(format!("pane-header-band:{block}"))
         .pin(Some(0.), Some(0.), Some(0.), None)
-        .h(REVEAL)
+        .h(REVEAL + top)
         .on_hover_change(move |s: &mut Workspace, inside: bool, _: &mut Tx| {
             if inside {
                 s.header_reveal.hover = Some(id.clone());

@@ -1478,7 +1478,11 @@ fn link_marks(
 ) -> Vec<El> {
     let (cw, ch) = m.cell;
     let cols = frame.cols as usize;
-    let help = format!("Ctrl+click to open {}", link.uri);
+    let help = format!(
+        "{}+click to open {}",
+        super::platform::keys::primary_name(),
+        link.uri
+    );
     let color = frame
         .cells
         .get(link.start / cols)

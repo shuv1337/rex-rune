@@ -100,6 +100,18 @@ pub fn legacy_bases() -> Vec<PathBuf> {
     }
 }
 
+/// Ghostty's own themes where they are not under a data folder: on macOS, inside the app.
+/// Empty elsewhere, and when Ghostty is not installed there.
+pub fn ghostty_app_themes() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    Some(PathBuf::from(
+        "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
+    ))
+    .filter(|themes| themes.is_dir())
+}
+
 fn application_support() -> PathBuf {
     home().join("Library/Application Support")
 }

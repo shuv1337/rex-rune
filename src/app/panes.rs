@@ -308,7 +308,7 @@ fn pane_card(
         };
     }
     let clear = if headed {
-        pane_header::clearance(s, window)
+        pane_header::clearance(s, rect)
     } else {
         0.
     };
@@ -414,7 +414,7 @@ fn pane_card(
                         // Ctrl+click opens a link, even over a program that tracks the mouse.
                         t.pressed_link = None;
                         if button == "left"
-                            && mods.ctrl
+                            && super::platform::keys::primary(mods)
                             && let Some((_, link)) = t.link_at(d.x, d.y, cell)
                         {
                             t.clear_selection();
@@ -513,7 +513,7 @@ fn pane_card(
                         return;
                     }
                     // Holding Ctrl shows the link a click would open.
-                    let link = if tx.mods().ctrl {
+                    let link = if super::platform::keys::primary(tx.mods()) {
                         t.link_at(p.x, p.y, cell)
                     } else {
                         None
@@ -687,7 +687,10 @@ fn pane_card(
         None => c,
     };
     let c = if !headed && !searching && s.settings.pane_header == PaneHeader::OnHover {
-        c.child(pane_header::reveal_band(block))
+        c.child(pane_header::reveal_band(
+            block,
+            pane_header::clearance(s, rect),
+        ))
     } else {
         c
     };
@@ -695,6 +698,7 @@ fn pane_card(
         c.child(pane_header::floating(
             header(s, window, block, rect[2], focused, m),
             !bleed,
+            pane_header::clearance(s, rect),
         ))
     } else {
         c
