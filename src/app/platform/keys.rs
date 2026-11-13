@@ -64,6 +64,19 @@ pub fn control(m: Mods) -> bool {
     m.ctrl || (m.cmd && !keymap::command_key())
 }
 
+/// Whether the Return key presses the button that has keyboard focus, as Linux and Windows
+/// dialogs do. There, a dialog's default button takes Return only while no button has focus,
+/// and Space presses a focused button at any time (Rune does both already). macOS keeps
+/// Return for the default button and Space for the focused one, so buttons add no Return
+/// handler there and Tab order stays as AppKit leaves it.
+pub const RETURN_PRESSES_FOCUSED: bool = !cfg!(target_os = "macos");
+
+/// Whether `ev` is the plain Return that presses a focused button where
+/// [`RETURN_PRESSES_FOCUSED`] holds: no modifier, as Rune's default button needs.
+pub fn return_presses_focused(ev: &rune::KeyEvent) -> bool {
+    RETURN_PRESSES_FOCUSED && ev.key == rune::Key::Enter && ev.mods == Mods::default()
+}
+
 /// A key the system's window menu owns where the window has the system's frame: Command
 /// with W closes the window and with M minimizes it, when the view does not take the key.
 /// `None` on a platform whose shortcuts are on Control, and for every other key.
@@ -238,6 +251,27 @@ mod tests {
         // On a Mac, Command is the primary modifier and Control is not.
         assert!(primary_on(command_k, true) && !primary_on(control_k, true));
         assert!(primary_on(linux_control_k, false));
+    }
+
+    #[test]
+    fn return_presses_a_focused_button_only_where_the_platform_does() {
+        let enter = rune::KeyEvent {
+            key: rune::Key::Enter,
+            mods: Mods::default(),
+        };
+        assert_eq!(return_presses_focused(&enter), !cfg!(target_os = "macos"));
+        // Space and modified Return are not the plain Return that presses a focused button.
+        assert!(!return_presses_focused(&rune::KeyEvent {
+            key: rune::Key::Text(" ".into()),
+            mods: Mods::default(),
+        }));
+        assert!(!return_presses_focused(&rune::KeyEvent {
+            key: rune::Key::Enter,
+            mods: Mods {
+                shift: true,
+                ..Mods::default()
+            },
+        }));
     }
 
     #[test]
