@@ -97,6 +97,8 @@ def main():
         (stage / "bin").mkdir(parents=True)
         shutil.copy2(binary, stage / "bin/rex-rune")
         shutil.copytree(root / "resources", stage / "resources")
+        # The pacman package's update helper checks packages against this certificate.
+        shutil.copy2(root / "packaging/keys/rex-linux-archive-key.asc", stage / "resources/pacman/archive-key.asc")
         (stage / "scripts").mkdir()
         shutil.copy2(root / "scripts/install-desktop.sh", stage / "scripts/install-desktop.sh")
         for filename in ("LICENSE", "README.md", "CHANGELOG.md"):

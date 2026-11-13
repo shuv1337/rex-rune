@@ -14,11 +14,27 @@ replaces=('rex-linux-bin')
 depends=('glibc>=2.39' 'gcc-libs' 'fontconfig' 'libxkbcommon' 'libxkbcommon-x11'
          'wayland' 'libx11' 'libxcb' 'libglvnd' 'vulkan-icd-loader'
          'xdg-utils' 'ca-certificates' 'hicolor-icon-theme')
+# The package works without it; with it, Settings can run the update helper below.
+optdepends=('polkit: Update now in Settings, without a terminal')
 options=('!strip' '!debug')
 source_x86_64=("https://github.com/shuv1337/rex-rune/releases/download/v${pkgver}/rex-rune-${pkgver}-x86_64-linux-gnu.tar.gz")
 source_aarch64=("https://github.com/shuv1337/rex-rune/releases/download/v${pkgver}/rex-rune-${pkgver}-aarch64-linux-gnu.tar.gz")
 sha256sums_x86_64=('@SHA256_X86_64@')
 sha256sums_aarch64=('@SHA256_AARCH64@')
+
+# The package-signing certificate, as the update helper reads it, and its primary key. Done
+# here and not in package(), which runs under fakeroot.
+build() {
+    cd "rex-rune-${pkgver}-${CARCH}-linux-gnu"
+    local gnupg
+    gnupg=$(mktemp -d)
+    gpg --homedir "$gnupg" --no-autostart --batch --show-keys --with-colons resources/pacman/archive-key.asc \
+        | awk -F: '$1 == "fpr" { print $10; exit }' > "$srcdir/archive-key.primary"
+    gpg --homedir "$gnupg" --no-autostart --batch --dearmor < resources/pacman/archive-key.asc > "$srcdir/archive-key.gpg"
+    rm -rf "$gnupg"
+    [[ $(< "$srcdir/archive-key.primary") =~ ^[0-9A-F]{40}$ ]]
+    [[ -s $srcdir/archive-key.gpg ]]
+}
 
 package() {
     cd "rex-rune-${pkgver}-${CARCH}-linux-gnu"
@@ -35,4 +51,15 @@ package() {
     install -Dm644 BUILD-INFO "$pkgdir/usr/share/doc/rex-rune/BUILD-INFO"
     install -dm755 "$pkgdir/usr/share/rex-rune"
     printf 'channel=pacman\nhint=sudo pacman -Syu\n' > "$pkgdir/usr/share/rex-rune/channel"
+    # "Update now" for this package: the one program polkit may run as root, the action
+    # that lets it, and the certificate it checks a downloaded package against. The
+    # certificate's primary key is written into the helper, so a signature must name it.
+    install -Dm755 resources/pacman/rex-rune-update "$pkgdir/usr/lib/rex-rune/rex-rune-update"
+    install -Dm644 resources/pacman/dev.shuv.rex-rune.update.policy \
+        "$pkgdir/usr/share/polkit-1/actions/dev.shuv.rex-rune.update.policy"
+    local primary
+    primary=$(< "$srcdir/archive-key.primary")
+    install -Dm644 "$srcdir/archive-key.gpg" "$pkgdir/usr/share/rex-rune/archive-key.gpg"
+    sed -i "s/@PRIMARY@/$primary/" "$pkgdir/usr/lib/rex-rune/rex-rune-update"
+    grep -qx "readonly PRIMARY='$primary'" "$pkgdir/usr/lib/rex-rune/rex-rune-update"
 }
