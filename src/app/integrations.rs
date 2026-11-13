@@ -9,7 +9,7 @@ use super::{
         state_chip,
     },
     theme::*,
-    widgets::{Pill, glyph, pill},
+    widgets::{Pill, pill, program_glyph},
     workspace::Workspace,
 };
 use rune::{El, Tx, col, row, text};
@@ -517,8 +517,8 @@ fn agent_row(s: &Workspace, harness: &Harness) -> El {
         .center_y()
         .grow(1.)
         .min_w(0.)
-        .child(glyph(
-            super::activity::program_icon(Some(&id)),
+        .child(program_glyph(
+            super::program_icons::program_icon(Some(&id), None),
             16.,
             rgb(muted()),
         ))

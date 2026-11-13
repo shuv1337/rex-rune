@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 3.0317) scale(.233209)"><defs>
+        <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="linearGradient-1">
+            <stop stop-color="#ffffff" offset="0" />
+            <stop stop-color="#ffffff" stop-opacity="0.698411458" offset=".2298" />
+            <stop stop-color="#ffffff" stop-opacity="0.649973958" offset=".7265" />
+            <stop stop-color="#ffffff" stop-opacity="0.4" offset=".9883" />
+        </linearGradient>
+        <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="linearGradient-2">
+            <stop stop-color="#ffffff" offset="0" />
+            <stop stop-color="#ffffff" stop-opacity="0.698411458" offset=".2298" />
+            <stop stop-color="#ffffff" stop-opacity="0.649973958" offset=".7265" />
+            <stop stop-color="#ffffff" stop-opacity="0.4" offset=".9883" />
+        </linearGradient>
+    </defs>
+    <g id="htop" stroke="none" fill="none" fill-rule="evenodd">
+        <path d="M4 37L4 11L14 11L14 15L10 15L10 33L14 33L14 37L4 37ZM130 37L130 11L120 11L120 15L124 15L124 33L120 33L120 37L130 37Z" id="Combined-Shape" fill="url(#linearGradient-1)" opacity="0.4" />
+        <path d="M4 67L4 41L14 41L14 45L10 45L10 63L14 63L14 67L4 67ZM130 67L130 41L120 41L120 45L124 45L124 63L120 63L120 67L130 67Z" id="Combined-Shape" fill="url(#linearGradient-1)" opacity="0.4" />
+        <path d="M4 97L4 71L14 71L14 75L10 75L10 93L14 93L14 97L4 97ZM130 97L130 71L120 71L120 75L124 75L124 93L120 93L120 97L130 97Z" id="Combined-Shape" fill="url(#linearGradient-1)" opacity="0.4" />
+        <path d="M16 41L22 41L22 67L16 67L16 41ZM28 41L34 41L34 67L28 67L28 41ZM40 41L46 41L46 67L40 67L40 41ZM52 41L58 41L58 67L52 67L52 41ZM64 41L70 41L70 67L64 67L64 41ZM76 41L82 41L82 67L76 67L76 41ZM88 41L94 41L94 67L88 67L88 41ZM100 41L106 41L106 67L100 67L100 41ZM112 41L118 41L118 67L112 67L112 41Z" id="Combined-Shape" fill="url(#linearGradient-2)" />
+        <path d="M16 71L22 71L22 97L16 97ZM28 71L34 71L34 97L28 97ZM40 71L46 71L46 97L40 97ZM88 71L94 71L94 97L88 97ZM100 71L106 71L106 97L100 97ZM112 71L118 71L118 97L112 97Z" id="Combined-Shape" fill="url(#linearGradient-2)" />
+        <path d="M16 11L22 11L22 37L16 37ZM28 11L34 11L34 37L28 37ZM40 11L46 11L46 37L40 37ZM88 11L94 11L94 37L88 37ZM100 11L106 11L106 37L100 37ZM112 11L118 11L118 37L112 37Z" id="Combined-Shape" fill="url(#linearGradient-2)" />
+    </g>
+</g></svg>

@@ -11,7 +11,7 @@
 //! The row moves the window, except on its controls, and a double-click on its empty space
 //! does what the system's setting for title bars says.
 use super::{
-    activity::{block_program, pane_activity, tab_progress},
+    activity::{PaneProgram, pane_activity, tab_progress},
     pane_header,
     panel::Intent,
     panes, tab_icons,
@@ -68,7 +68,7 @@ fn title(s: &Workspace, merged: bool) -> El {
         .directory_of(&block)
         .filter(|dir| !ends_in_path(&name, dir.trim_start_matches("…/")));
     let icons = tab_icons::icons_of(
-        &[block_program(model, &block)],
+        &[PaneProgram::of(model, &block)],
         s.settings.interface.tab_icon_count.min(1),
     );
     let lit = s.window_focused;

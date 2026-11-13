@@ -40,6 +40,8 @@ mod pane_header_tests;
 mod pane_verb_tests;
 #[path = "polish_tests.rs"]
 mod polish_tests;
+#[path = "program_icon_tests.rs"]
+mod program_icon_tests;
 #[path = "recorder_tests.rs"]
 mod recorder_tests;
 #[path = "remote_session_tests.rs"]
@@ -2109,7 +2111,7 @@ fn set_activity(
 
 #[test]
 fn a_tab_folds_its_records_by_priority_and_shows_its_program() {
-    use super::activity::{program_icon, tab_activity, tab_word};
+    use super::activity::{tab_activity, tab_word};
     use rex_rune::connection::activity::{BlockedKind, ProgramState::*};
     let (mut ws, _rx) = tabbed_workspace("single");
     let model = &mut ws.hosts[0].model;
@@ -2129,7 +2131,7 @@ fn a_tab_folds_its_records_by_priority_and_shows_its_program() {
     let single = tab_activity(model, &view.windows[0]);
     assert_eq!(single.state, Idle);
     assert_eq!(single.program.as_deref(), Some("nvim"));
-    assert!(std::ptr::eq(program_icon(Some("nvim")), &super::theme::VIM));
+    assert_eq!(single.icon().slug, "neovim");
     assert_eq!(tab_word(&single, false, false), None);
     assert_eq!(
         tab_word(&single, false, true).map(|word| word.0),
@@ -2145,10 +2147,7 @@ fn a_tab_folds_its_records_by_priority_and_shows_its_program() {
         tab_word(&split, false, false).map(|w| w.0).as_deref(),
         Some("Needs approval")
     );
-    assert!(std::ptr::eq(
-        program_icon(Some("bash")),
-        &super::theme::TERMINAL
-    ));
+    assert_eq!(split.icon().slug, "claude-code");
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
@@ -2270,7 +2269,7 @@ fn a_titled_pane_shows_its_title_but_renames_from_its_label() {
 
 #[test]
 fn each_pane_reports_its_own_activity_and_osc_7501_progress() {
-    use super::activity::{pane_activity, program_icon, tab_activity, tab_progress, tab_word};
+    use super::activity::{pane_activity, tab_activity, tab_progress, tab_word};
     use rex_rune::connection::activity::{BlockedKind, ProgramState::*, TerminalProgress::Set};
     let (mut ws, _rx) = tabbed_workspace("split");
     let model = &mut ws.hosts[0].model;
@@ -2329,11 +2328,6 @@ fn each_pane_reports_its_own_activity_and_osc_7501_progress() {
     let view = model.view().unwrap().clone();
     assert_eq!(bar(tab_activity(model, &view.windows[1])), Some(Some(25)));
     assert_eq!(word(tab_activity(model, &view.windows[1])), None);
-    assert!(std::ptr::eq(
-        program_icon(Some("claude-code")),
-        &super::theme::CLAUDE
-    ));
-    assert!(std::ptr::eq(program_icon(Some("omp")), &super::theme::PI));
     std::fs::remove_file(&ws.settings_path).ok();
 }
 

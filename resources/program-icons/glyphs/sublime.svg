@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.078125)"><defs>
+        <linearGradient x1="61.0643837%" y1="59.2195538%" x2="71.7711276%" y2="41.8549765%" id="linearGradient-1">
+            <stop stop-color="#000000" offset="0" />
+            <stop stop-color="#000000" stop-opacity="0.6" offset="1" />
+        </linearGradient>
+    </defs>
+    <g id="sublime" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
+        <g id="Graphic" transform="translate(7, 7)">
+            <g id="Sublimetext-Icon--Streamline-Svg-Logos" transform="translate(47.5041, 4.0208)">
+                <path d="M290.9 190.1C290.9 185.7 287.7 183.1 283.7 184.4L7.3 272C3.3 273.3 0 277.9 0 282.3L0 371.9C0 376.3 3.3 378.9 7.3 377.6L283.7 290C287.7 288.7 290.9 284.1 290.9 279.7L290.9 190.1Z" id="Path" fill="url(#linearGradient-1)" />
+                <path d="M283.7.3C287.7-.9 290.9 1.6 290.9 6L290.9 95.6C290.9 100 287.7 104.7 283.7 105.9L167.5 142.8L283.7 179.6C287.6 180.9 290.9 185.3 291 189.7L291 189.9L291 279.5C291 283.9 287.7 286.5 283.7 285.2L7.3 197.6C4.6 196.7 2.2 194.4 1 191.6C.4 190.6 0 189.3 0 187.9L0 98.3L0 97.7C0 96.2.4 94.9 1 94C2.2 91.2 4.6 88.8 7.3 88Z" id="Combined-Shape" fill="#000000" />
+            </g>
+        </g>
+    </g>
+</g></svg>

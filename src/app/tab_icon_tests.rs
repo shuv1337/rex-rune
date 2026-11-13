@@ -2,7 +2,7 @@
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::*;
 use crate::app::{
-    activity::{tab_activity, tab_programs},
+    activity::{PaneProgram, tab_activity, tab_programs},
     panel::SettingsSection,
     tab_icons::*,
 };
@@ -25,36 +25,47 @@ pub(super) fn element(rt: &Runtime<Workspace>, key: &str) -> rune::ElementInfo {
         .find(|e| !e.exiting && e.key.as_deref() == Some(key))
         .unwrap_or_else(|| panic!("missing {key}"))
 }
-fn names(programs: &[Option<String>], count: u8) -> Vec<&'static str> {
+fn names(programs: &[PaneProgram], count: u8) -> Vec<&'static str> {
     icons_of(programs, count)
         .into_iter()
-        .map(|i| i.icon.name)
+        .map(|i| i.icon.slug)
+        .collect()
+}
+fn named(names: &[Option<&str>]) -> Vec<PaneProgram> {
+    names
+        .iter()
+        .map(|name| PaneProgram {
+            name: name.map(str::to_owned),
+            executable: None,
+        })
         .collect()
 }
 #[test]
 fn resolved_glyph_dedup_cap_unknown_and_empty() {
-    let programs = [
-        "nvim", "vim", "bash", "unknown", "", "claude", "codex", "git", "cargo", "ssh",
-    ]
-    .map(|p| Some(p.to_owned()));
+    let programs = named(&[
+        Some("nvim"),
+        Some("nvim"),
+        Some("bash"),
+        Some("unknown"),
+        Some(""),
+        Some("claude"),
+        Some("codex"),
+        Some("git"),
+        Some("cargo"),
+        Some("ssh"),
+    ]);
     assert_eq!(
         names(&programs, 5),
-        [
-            "rex-vim",
-            "rex-terminal",
-            "rex-claude",
-            "rex-codex",
-            "rex-git"
-        ]
+        ["neovim", "shell", "claude-code", "codex", "git"]
     );
     for count in 0..=5 {
         assert_eq!(icons_of(&programs, count).len(), usize::from(count));
         assert_eq!(leading_width(usize::from(count)), f32::from(count) * 23.);
     }
     assert_eq!(icons_of(&programs, 255).len(), 5);
-    assert_eq!(names(&[], 1), ["rex-terminal"]);
+    assert_eq!(names(&[], 1), ["shell"]);
     assert!(icons_of(&[], 0).is_empty());
-    assert_eq!(names(&[None, Some("mystery".into())], 5), ["rex-terminal"]);
+    assert_eq!(names(&named(&[None, Some("mystery")]), 5), ["shell"]);
 }
 #[test]
 fn focused_first_server_order_and_exact_legacy_status_source() {
@@ -65,7 +76,7 @@ fn focused_first_server_order_and_exact_legacy_status_source() {
     let tab = model.views["s"].windows[1].clone();
     assert_eq!(
         tab_programs(model, &tab),
-        [Some("nvim".into()), Some("cargo".into())]
+        named(&[Some("nvim"), Some("cargo")])
     );
     model.activity.insert(
         "block:c".into(),
@@ -104,9 +115,9 @@ fn focused_first_server_order_and_exact_legacy_status_source() {
     assert_eq!(tab_activity(model, &tab).program.as_deref(), Some("codex"));
     assert_eq!(
         names(&tab_programs(model, &tab), 5),
-        ["rex-codex", "rex-claude"]
+        ["codex", "claude-code"]
     );
-    assert_eq!(names(&tab_programs(model, &tab), 1), ["rex-codex"]);
+    assert_eq!(names(&tab_programs(model, &tab), 1), ["codex"]);
     // Legacy: no app on the deciding record uses foreground, not a lower record's app.
     model
         .activity
@@ -116,26 +127,26 @@ fn focused_first_server_order_and_exact_legacy_status_source() {
         .unwrap()
         .app = None;
     assert_eq!(tab_activity(model, &tab).program.as_deref(), Some("nvim"));
-    assert_eq!(names(&tab_programs(model, &tab), 1), ["rex-vim"]);
+    assert_eq!(names(&tab_programs(model, &tab), 1), ["neovim"]);
     let mut tab = tab;
     tab.focused_block_id = Some("block:c".into());
     assert_eq!(
         names(&tab_programs(model, &tab), 5),
-        ["rex-claude", "rex-vim"]
+        ["claude-code", "neovim"]
     );
     for focus in [None, Some("missing".into())] {
         tab.focused_block_id = focus;
         assert_eq!(
-            tab_programs(model, &tab)[0],
+            tab_programs(model, &tab)[0].name,
             tab_activity(model, &tab).program
         );
         assert_eq!(
             names(&tab_programs(model, &tab), 5),
-            ["rex-vim", "rex-claude"]
+            ["neovim", "claude-code"]
         );
     }
     tab.layers.clear();
-    assert_eq!(names(&tab_programs(model, &tab), 5), ["rex-terminal"]);
+    assert_eq!(names(&tab_programs(model, &tab), 5), ["shell"]);
     std::fs::remove_file(&ws.settings_path).ok();
 }
 /// Five cached pane records on the inactive tab; no client-side layout mutation.
@@ -559,9 +570,10 @@ fn cached_updates_keep_pane_order_and_sidebar_status_whole() {
         m.views.get_mut("s").unwrap().windows[1].focused_block_id = Some("block:c".into());
     });
     settle(&mut rt);
+    // lazygit is Git Changes, not Git: the official set draws them differently.
     assert_eq!(
         helps(&rt),
-        ["claude", "zsh", "lazygit", "cargo"].map(|p| Some(p.into()))
+        ["claude", "zsh", "lazygit", "git", "cargo"].map(|p| Some(p.into()))
     );
     assert!(host.is_empty() && rt.state.claimed.is_empty());
     std::fs::remove_file(&rt.state.settings_path).ok();

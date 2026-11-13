@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 2.5497) scale(.065377)"><defs>
+        <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="linearGradient-1">
+            <stop stop-color="#ffffff" offset="0" />
+            <stop stop-color="#ffffff" stop-opacity="0.698931526" offset="1" />
+        </linearGradient>
+    </defs>
+    <g id="crush" stroke="none" fill="none" fill-rule="evenodd">
+        <g id="Graphic" transform="translate(44.235, 36.2081)">
+            <path d="M156.5 0L156.5 26.8L176.3 26.8L176.3 55L212.7 55L212.7 26.8L232.5 26.8L232.5 0L330.5 0L330.5 26.8L360.8 26.8L360.8 55L389 55L389 194.5L360.8 194.5L360.8 236.9L330.5 236.9L330.5 273.5L288.9 273.5L288.9 293.3L255 293.3L255 310.2L228.3 310.2L228.3 331.3L160.7 331.3L160.7 310.2L134 310.2L134 293.3L100.1 293.3L100.1 273.5L58.5 273.5L58.5 236.9L28.2 236.9L28.2 194.5L0 194.5L0 55L28.2 55L28.2 26.8L58.5 26.8L58.5 0L156.5 0ZM180.1 170L180.1 187.4L208.9 187.4L208.9 170L180.1 170ZM278.1 170L260.6 170L260.6 187.4L278.1 187.4L278.1 170ZM111.8 170.8L111.8 186.6L127.6 186.6L127.6 170.8L111.8 170.8ZM138.3 123.5L138.3 169.4L155.8 169.4L155.8 123.5L138.3 123.5ZM233.2 123.5L233.2 169.4L250.7 169.4L250.7 123.5L233.2 123.5Z" id="Combined-Shape" fill="url(#linearGradient-1)" />
+            <polygon id="Path" fill="#000000" opacity="0.7" points="111.8 186.6 127.6 186.6 127.6 170.8 111.8 170.8" />
+            <polygon id="Path" fill="#000000" opacity="0.7" points="278.1 187.4 260.6 187.4 260.6 170 278.1 170" />
+        </g>
+    </g>
+</g></svg>

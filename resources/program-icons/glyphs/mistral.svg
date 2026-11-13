@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.079719)"><defs>
+        <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="linearGradient-1">
+            <stop stop-color="#ffffff" stop-opacity="0.6" offset="0" />
+            <stop stop-color="#ffffff" stop-opacity="0.6" offset=".1985" />
+            <stop stop-color="#ffffff" stop-opacity="0.7" offset=".2027" />
+            <stop stop-color="#ffffff" stop-opacity="0.7" offset=".3985" />
+            <stop stop-color="#ffffff" stop-opacity="0.8" offset=".3999" />
+            <stop stop-color="#ffffff" stop-opacity="0.8" offset=".6019" />
+            <stop stop-color="#ffffff" stop-opacity="0.9" offset=".6022" />
+            <stop stop-color="#ffffff" stop-opacity="0.9" offset=".7985" />
+            <stop stop-color="#ffffff" offset=".8038" />
+            <stop stop-color="#ffffff" offset="1" />
+        </linearGradient>
+    </defs>
+    <g id="mistral" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
+        <g id="Group" transform="translate(0, 56)" fill="url(#linearGradient-1)">
+            <path d="M224 280L224 224L280 224L280 168L224 168L224 224L168 224L168 168L112 168L112 224L168 224L168 280L0 280L0 224L56 224L56 168L56 112L56 56L56 0L112 0L112 56L168 56L168 112L224 112L224 56L280 56L280 0L336 0L336 56L336 112L336 168L336 224L392 224L392 280L224 280Z" id="Combined-Shape" />
+        </g>
+    </g>
+</g></svg>

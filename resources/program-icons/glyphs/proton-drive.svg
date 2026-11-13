@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.079719)"><defs>
+        <linearGradient x1="25.2349426%" y1="60.6062741%" x2="70.3287082%" y2="21.3121178%" id="linearGradient-1">
+            <stop stop-color="#ffffff" offset="0" />
+            <stop stop-color="#ffffff" stop-opacity="0.803385417" offset="1" />
+        </linearGradient>
+        <linearGradient x1="16.8940011%" y1="29.1111989%" x2="73.4757223%" y2="54.7380445%" id="linearGradient-2">
+            <stop stop-color="#ffffff" stop-opacity="0.8" offset="0" />
+            <stop stop-color="#ffffff" stop-opacity="0.4" offset="1" />
+        </linearGradient>
+    </defs>
+    <g id="proton-drive" stroke="none" fill="none" fill-rule="evenodd">
+        <path d="M6.82 80.95L47.31 80.95C56.08 80.95 64.6 83.79 71.61 89.05L104.01 113.36C111.03 118.62 119.55 121.46 128.31 121.46L270.06 121.46C279.02 121.45 287.6 125.01 293.94 131.34C300.27 137.67 303.82 146.26 303.82 155.21L303.82 350.93L303.81 350.94L47.31 350.94C24.95 350.94 6.82 332.81 6.82 310.45L6.82 80.95Z" id="Combined-Shape" fill="url(#linearGradient-1)" />
+        <path d="M154.79 59.71C161.71 64.74 170.05 67.45 178.61 67.44L344.32 67.44C355.06 67.44 365.37 71.71 372.96 79.31C380.56 86.91 384.82 97.22 384.82 107.96L384.82 310.46C384.82 332.82 366.68 350.95 344.32 350.95L303.82 350.95L303.82 155.21C303.82 146.26 300.27 137.67 293.94 131.34C287.6 125.01 279.02 121.45 270.06 121.46L128.31 121.46C119.55 121.46 111.03 118.62 104.01 113.36L71.61 89.05C64.6 83.79 56.08 80.95 47.31 80.95L6.82 80.95C6.82 58.58 24.95 40.45 47.31 40.45L115.14 40.45C123.7 40.45 132.05 43.16 138.97 48.2L154.79 59.71Z" id="Path" fill="url(#linearGradient-2)" />
+    </g>
+</g></svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 3.0317) scale(.233209)"><g id="btop" stroke="none" fill="none" fill-rule="evenodd">
+        <path d="M95 70L99 70L99 89L90 89L90 108L42 108L42 101L86 101L86 82L95 82L95 70ZM56 63L75 63L75 70L60 70L60 82L56 82L56 63ZM95 32L99 32L99 51L90 51L90 63L86 63L86 44L95 44L95 32ZM56 25L75 25L75 32L60 32L60 44L56 44L56 25ZM90 13L90 25L86 25L86 13L90 13Z" id="Combined-Shape" fill-opacity="0.1" fill="#000000" />
+        <rect id="Rectangle" fill="#000000" x="38" y="6" width="48" height="19" />
+        <path d="M38 25L56 25L56 44L38 44ZM75 25L95 25L95 44L75 44Z" id="Combined-Shape" fill-opacity="0.8" fill="#000000" />
+        <rect id="Rectangle" fill-opacity="0.65" fill="#000000" x="38" y="44" width="48" height="19" />
+        <path d="M38 63L56 63L56 82L38 82ZM75 63L95 63L95 82L75 82Z" id="Combined-Shape" fill-opacity="0.5" fill="#000000" />
+        <rect id="Rectangle" fill-opacity="0.3" fill="#000000" x="38" y="82" width="48" height="19" />
+    </g>
+</g></svg>
