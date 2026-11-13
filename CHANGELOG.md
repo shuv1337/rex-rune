@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-11-12
+
+**Rex Linux is now Rex Rune.** Existing `install.sh` and in-app **Update now** users need no migration steps: update normally and restart. Pacman replaces `rex-linux-bin` with `rex-rune-bin` automatically on update; the repository configuration stays the same. For `.deb` installs, take **`rex-rune_*.deb`**, even if the old client's notice names `rex-linux_*.deb`. The new client keeps one launcher, moves settings and update state, and leaves `rex-linux` as a link to `rex-rune`.
+
+This release also adds macOS and Windows source builds and the pane, activity, path and pairing improvements below. Published binaries remain Linux-only; platform limitations are noted under each feature.
 
 ### Changed
 
