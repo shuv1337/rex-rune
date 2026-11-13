@@ -11,7 +11,7 @@
 //! The row moves the window, except on its controls, and a double-click on its empty space
 //! does what the system's setting for title bars says.
 use super::{
-    activity::{pane_activity, tab_programs, tab_progress},
+    activity::{block_program, pane_activity, tab_progress},
     pane_header,
     panel::Intent,
     panes, tab_icons,
@@ -51,7 +51,7 @@ fn shows_tabs(s: &Workspace) -> bool {
 /// header this row is, which also shows its activity word and progress here.
 fn title(s: &Workspace, merged: bool) -> El {
     let model = s.model();
-    let (Some(window), Some(block)) = (model.window(), s.focused_block()) else {
+    let Some(block) = s.focused_block().filter(|_| model.window().is_some()) else {
         return el();
     };
     let name = s.pane_name(&block);
@@ -59,10 +59,11 @@ fn title(s: &Workspace, merged: bool) -> El {
     // shortened one.
     let dir = model
         .directory_of(&block)
-        .filter(|dir| !name.contains(dir.trim_start_matches("…/")));
-    // The focused pane's program comes first.
-    let focused: Vec<_> = tab_programs(model, window).into_iter().take(1).collect();
-    let icons = tab_icons::icons_of(&focused, 1);
+        .filter(|dir| !name.ends_with(dir.trim_start_matches("…/")));
+    let icons = tab_icons::icons_of(
+        &[block_program(model, &block)],
+        s.settings.interface.tab_icon_count.min(1),
+    );
     let lit = s.window_focused;
     let menu_id = block.clone();
     let mut t = row()
@@ -257,7 +258,8 @@ fn pane_end(s: &Workspace, bar: El, divider: bool) -> El {
     ) else {
         return bar;
     };
-    bar.children(panes::strip(s, &block, s.viewport[0], &s.metrics()))
+    let width = s.viewport[0] / s.ui_scale();
+    bar.children(panes::strip(s, &block, width, &s.metrics()))
         .children(divider.then(|| {
             el().key("title-divider")
                 .w(1.)
@@ -265,13 +267,13 @@ fn pane_end(s: &Workspace, bar: El, divider: bool) -> El {
                 .mx(4.)
                 .fill(white(0.1))
         }))
-        .child(pane_header::actions(s, window, &block, s.viewport[0], true))
+        .child(pane_header::actions(s, window, &block, width, true))
 }
 
 /// The title strip while the toolbar has no row of its own: the traffic lights, the sidebar
 /// toggle and the focused pane's title, so the window can still be moved and named, the live
 /// status chips that float elsewhere, and a lone pane's buttons, as in the title row.
-pub fn strip(s: &Workspace) -> El {
+pub fn title_strip(s: &Workspace) -> El {
     let merged = s
         .model()
         .window()

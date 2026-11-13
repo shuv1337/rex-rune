@@ -226,7 +226,7 @@ What differs from Linux today:
 | Updates | Settings → Updates reports a source build; nothing is installed for you |
 | `ssh://` hosts, uploads, everything on the server | As on Linux |
 
-The title row has been looked at on a Mac (macOS 27, Apple silicon) with one pane, a split, two tabs, the smallest window, full screen, the toolbar hidden and the light system appearance. Moving the window by the row and double-clicking it are checked by the headless tests, not by hand. A window in full screen does not save its size, so the next start opens at the last windowed size.
+The title row has been looked at on a Mac (macOS 27, Apple silicon) with one pane, a split, two tabs, the smallest window, in and after full screen, with the toolbar hidden and under the light system appearance. Full screen was entered and left by the app, not with the green button or the menu bar that slides down over a full-screen window, and moving the window by the row and double-clicking it are checked by the headless tests, not by hand. While a list or dialog is open, a press on the row closes it rather than moving the window. A window in full screen does not save its size, so the next start opens at the last windowed size.
 
 CI builds the app and runs the unit and headless UI tests on macOS for every pull request.
 

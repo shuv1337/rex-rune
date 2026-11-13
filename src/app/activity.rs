@@ -97,7 +97,7 @@ pub fn pane_name(model: &HostModel, block: &session::LayerBlock, generated: bool
 
 /// A pane's legacy icon source: its deciding status record's app, else foreground process.
 /// Kept shared so count one is exactly the old TabActivity.program policy.
-fn block_program(model: &HostModel, block: &str) -> Option<String> {
+pub(super) fn block_program(model: &HostModel, block: &str) -> Option<String> {
     model
         .activity
         .get(block)

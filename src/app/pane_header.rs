@@ -111,11 +111,11 @@ pub fn rows(s: &Workspace, _window: &Window) -> bool {
 /// for it, and the pane would have a header row of its own. Its name is the window's title
 /// and its buttons end the row.
 pub fn in_title(s: &Workspace, window: &Window) -> bool {
-    use super::toolbar_reveal::{Placement, placement, strip};
+    use super::toolbar_reveal::{Placement, placement, shows_title_strip};
     s.unified_title
         && single(window)
-        && (placement(s) == Placement::Row || strip(s))
-        && (rows(s, window) || s.settings.pane_header == PaneHeader::Always)
+        && (placement(s) == Placement::Row || shows_title_strip(s))
+        && rows(s, window)
 }
 
 /// A tab with one pane, not zoomed, draws it edge to edge: no card or margin. Its header, if

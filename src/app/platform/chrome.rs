@@ -14,8 +14,8 @@ pub const OWN_FRAME: bool = !cfg!(target_os = "macos");
 /// lights at its leading end and no native title, as in Rex for macOS.
 pub const UNIFIED: bool = cfg!(target_os = "macos");
 
-/// The unified title row's height in points, before the interface zoom. Rex for macOS draws
-/// about 36 pt; two more keep a tab pill's track clear of the row's edges.
+/// The unified title row's height in points, before the interface zoom: tall enough for a
+/// tab pill's track to stay clear of the row's edges.
 pub const TITLE_ROW: f32 = 38.;
 
 /// The title bar Rex draws itself, where it does ([`UNIFIED`]): Rune hides the native one,

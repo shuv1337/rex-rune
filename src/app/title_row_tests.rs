@@ -3,11 +3,20 @@
 use super::pane_verb_tests::rect;
 use super::*;
 use rex_rune::{connection::titles::Place, settings::interface::ToolbarBehavior};
-use rune::TitlebarAction;
+use rune::{ChromeInsets, TitlebarAction};
 
 /// Where the traffic lights end in a window at rest.
 const LIGHTS: f32 = 76.;
 const ROW: f32 = crate::app::platform::chrome::TITLE_ROW;
+
+/// What a window reports with its traffic lights ending `leading` points in: 0 in full
+/// screen.
+fn lights(leading: f32) -> ChromeInsets {
+    let mut insets = ChromeInsets::default();
+    insets.leading = leading;
+    insets.height = ROW;
+    insets
+}
 
 fn settle(rt: &mut Runtime<Workspace>) {
     for _ in 0..3 {
@@ -32,7 +41,6 @@ fn unified_at(
 ) -> (Runtime<Workspace>, flume::Receiver<HostCommand>) {
     let (mut ws, rx) = tabbed_workspace(tabs[0]);
     ws.unified_title = true;
-    ws.title_inset = LIGHTS;
     let view = ws.hosts[0].model.views.get_mut("s").unwrap();
     view.windows
         .retain(|w| w.window_id.as_deref().is_some_and(|id| tabs.contains(&id)));
@@ -45,6 +53,7 @@ fn unified_at(
         },
     );
     let mut rt = runtime_at(ws, size);
+    rt.set_chrome_insets(lights(LIGHTS));
     settle(&mut rt);
     (rt, rx)
 }
@@ -111,19 +120,22 @@ fn several_tabs_show_their_pills_and_split_panes_keep_their_headers() {
         "each split pane names itself and shows whether it is focused"
     );
     assert!(!has(&rt, "title-divider"), "no pane's buttons in the row");
+    let title = text_of(&rt, "title-name");
+    assert!(title.is_some());
+    assert_eq!(
+        title,
+        text_of(&rt, "pane-name:block:b"),
+        "the title is the focused pane's"
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 
-    // In the smallest window the tabs scroll before the session's name gives way.
+    // In the smallest window the session keeps a few letters and the row still ends inside
+    // the window.
     let (rt, _rx) = unified_at(&["single", "split"], (640., 480.));
     let session = rect(&rt, "identity");
     assert!(session[2] >= 84., "{session:?}");
     let close = rect(&rt, "pane-close:block:a");
     assert!(close[0] + close[2] <= 640., "{close:?}");
-    assert_eq!(
-        text_of(&rt, "title-name"),
-        text_of(&rt, "pane-name:block:b"),
-        "the title is the focused pane's"
-    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -155,6 +167,15 @@ fn empty_title_space_moves_and_zooms_the_window_and_controls_do_not() {
     rt.frame(1. / 60.);
     assert!(rt.state.panel.is_some(), "the control did its own thing");
     std::fs::remove_file(&rt.state.settings_path).ok();
+
+    for key in ["identity", "pane-split-right:block:a"] {
+        let (mut rt, _rx) = unified(&["single"]);
+        assert_eq!(press(&mut rt, key), None, "{key}");
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+    let (mut rt, _rx) = unified(&["single", "split"]);
+    assert_eq!(press(&mut rt, "tab:split"), None, "a tab pill");
+    std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
 #[test]
@@ -177,11 +198,85 @@ fn without_a_toolbar_row_a_title_strip_keeps_the_traffic_lights_clear_until_full
     rt.update(|s, _| s.toolbar_reveal.pinned = false);
 
     // Full screen hides the traffic lights, and the panes take the window's top under
-    // their own header.
-    rt.update(|s, _| s.title_inset = 0.);
+    // their own header. The system says so with no resize.
+    rt.set_chrome_insets(lights(0.));
     settle(&mut rt);
     assert!(!has(&rt, "title-strip") && has(&rt, "pane-header:block:a"));
     assert!(rect(&rt, "pane:block:a")[1] < ROW);
+
+    // Leaving it brings them back, and the strip with them.
+    rt.set_chrome_insets(lights(LIGHTS));
+    settle(&mut rt);
+    assert!(has(&rt, "title-strip") && rect(&rt, "toggle-sidebar")[0] >= LIGHTS);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_window_in_full_screen_keeps_the_size_it_had() {
+    let (mut rt, _rx) = unified(&["single"]);
+    rt.update(|s, _| s.settings.window_size = Some([1024., 700.]));
+    // The resize into full screen can come before the traffic lights go.
+    rt.set_viewport((1512., 982.), 1.);
+    settle(&mut rt);
+    rt.set_chrome_insets(lights(0.));
+    settle(&mut rt);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    settle(&mut rt);
+    assert!(rt.state.full_screen);
+    assert_eq!(rt.state.settings.window_size, Some([1024., 700.]));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn switch_session_opens_under_the_session_button() {
+    let (mut rt, _rx) = unified(&["single"]);
+    rt.update(|s, _| s.picker(true));
+    settle(&mut rt);
+    let button = rect(&rt, "identity");
+    let list = rect(&rt, "menu-surface");
+    assert!(list[1] >= ROW - 4. && list[1] < ROW + 4., "{list:?}");
+    assert!(
+        (list[0] + list[2] - (button[0] + button[2])).abs() < 1.,
+        "{list:?} ends where {button:?} does"
+    );
+    press(&mut rt, Key::Escape);
+
+    // With no row drawn there is no button, and the list keeps to the window's end.
+    rt.update(|s, tx| s.set_toolbar(ToolbarBehavior::Hidden, tx));
+    rt.update(|s, _| s.picker(true));
+    settle(&mut rt);
+    let list = rect(&rt, "menu-surface");
+    assert!(
+        list[0] + list[2] <= 1024. - crate::app::theme::MARGIN + 1.,
+        "{list:?}"
+    );
+    assert!(list[0] > 512., "{list:?}");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_zoomed_pane_and_sidebar_tabs_keep_what_they_show() {
+    // A zoomed pane of several keeps its header, which says it is zoomed.
+    let (mut ws, _rx) = tabbed_workspace("split");
+    ws.unified_title = true;
+    let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+    for w in &mut view.windows {
+        if w.window_id.as_deref() == Some("split") {
+            w.zoomed_block_id = Some("block:b".into());
+        }
+    }
+    let mut rt = runtime_at(ws, (1024., 700.));
+    rt.set_chrome_insets(lights(LIGHTS));
+    settle(&mut rt);
+    assert!(has(&rt, "pane-header:block:b") && has(&rt, "pane-zoomed:block:b"));
+    assert!(!has(&rt, "title-divider"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
+    // Tabs in the sidebar leave the row to the focused pane's title.
+    let (mut rt, _rx) = unified(&["single", "split"]);
+    rt.update(|s, _| s.set_vertical_tabs(true));
+    settle(&mut rt);
+    assert!(has(&rt, "title-name") && !has(&rt, "tab-track"));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 

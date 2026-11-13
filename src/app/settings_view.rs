@@ -98,7 +98,12 @@ fn interface(s: &Workspace) -> El {
                 card([select_row(
                     "toolbar-behavior",
                     "Toolbar visibility",
-                    "Show on hover and Hidden give its row to the terminals.",
+                    if s.unified_title {
+                        "Show on hover and Hidden keep only a title strip beside the window's \
+                         buttons, and in full screen give its row to the terminals."
+                    } else {
+                        "Show on hover and Hidden give its row to the terminals."
+                    },
                     &["Always show", "Show on hover", "Hidden"],
                     TOOLBARS
                         .iter()

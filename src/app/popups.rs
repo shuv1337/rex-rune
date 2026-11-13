@@ -270,8 +270,12 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     };
     let (ax, ay) = panel.anchor.unwrap_or((
         if sessions && s.unified_title {
-            // Under the title row's session button, at the row's trailing end.
-            s.title_session[0] + s.title_session[2] - width
+            // Only a drawn title row has a session button to open under.
+            if super::toolbar_reveal::placement(s) == super::toolbar_reveal::Placement::None {
+                vw - width - MARGIN
+            } else {
+                s.title_session[0] + s.title_session[2] - width
+            }
         } else if sessions {
             MARGIN + 38.
         } else if pane {

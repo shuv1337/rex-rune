@@ -90,6 +90,9 @@ pub struct Workspace {
     /// What the traffic lights take of the title row's leading end, in window points: 0 in
     /// full screen, where they are hidden, and wherever Rex has no unified title row.
     pub title_inset: f32,
+    /// The window is in full screen, the screen's size and not one to keep. Known only where
+    /// Rex's title row is.
+    pub full_screen: bool,
     /// The title row's session button, where its list opens.
     pub title_session: [f32; 4],
     /// The pane a file drag from another app is over.
@@ -264,6 +267,7 @@ impl Workspace {
             own_frame: cfg!(test) || super::platform::chrome::OWN_FRAME,
             unified_title: !cfg!(test) && super::platform::chrome::UNIFIED,
             title_inset: 0.,
+            full_screen: false,
             title_session: [0.; 4],
             drop_hover: None,
             header_reveal: Default::default(),
@@ -941,7 +945,8 @@ impl Workspace {
     /// size alone and cancels any pending save from the preceding resize.
     pub fn window_resized(&mut self, size: [f32; 2], maximized: bool) {
         self.viewport = size;
-        if maximized || self.settings.window_size == Some(size.map(f32::round)) {
+        if maximized || self.full_screen || self.settings.window_size == Some(size.map(f32::round))
+        {
             self.resized = None;
             return;
         }
@@ -949,6 +954,17 @@ impl Workspace {
             self.handle.wake();
         }
         self.resized = Some(std::time::Instant::now());
+    }
+
+    /// Where the traffic lights end, `leading` window points in from the window's edge of a
+    /// title bar `height` tall: none in full screen.
+    pub fn traffic_lights(&mut self, leading: f32, height: f32) {
+        self.title_inset = leading;
+        self.full_screen = height > 0. && leading == 0.;
+        if self.full_screen {
+            // The resize into full screen can come a frame before the traffic lights go.
+            self.resized = None;
+        }
     }
 
     /// A drag writes preferences once, after the window has kept its size for a second.
