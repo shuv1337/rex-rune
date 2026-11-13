@@ -386,7 +386,15 @@ fn tab_fill_respects_toolbar_modes_and_sidebar_placement() {
                 assert!(has(&rt, "toolbar"));
                 assert_eq!(has(&rt, "tab-track"), !sidebar);
                 assert_eq!(rect(&rt, "pane:block:a"), pane);
-                assert!(host.is_empty() && rt.state.claimed.is_empty());
+                // Nothing the toolbar or tab fill did reaches the host. The fixture's host
+                // worker is a real thread that fails to connect at its own pace; when its
+                // update lands mid-test with the sidebar listing tabs, the sidebar asks for
+                // the sessions' layouts, which is not this test's subject.
+                assert!(
+                    host.try_iter()
+                        .all(|c| matches!(c, HostCommand::PrefetchViews(_)))
+                        && rt.state.claimed.is_empty()
+                );
                 if sidebar {
                     rt.update(|s, tx| s.perform(Intent::Sidebar, tx));
                     settle(&mut rt);
