@@ -34,6 +34,7 @@ impl<S: 'static> Host<S> {
         // What this frame would have run still runs, without drawing (`covered_step`). Misses
         // come at the retry's pace, not the display's.
         if !stepped { covered_step(&mut self.rt); }
+        l.sync_option(&self.rt);
         self.clipboard.flush(&mut self.rt);
         self.frame_reports.skipped();
     }
@@ -52,6 +53,7 @@ impl<S: 'static> Host<S> {
         if shown {
             self.rt.set_live_visible(false);
             covered_step(&mut self.rt);
+            if let Some(l) = self.win.as_mut() { l.sync_option(&self.rt); }
             self.clipboard.flush(&mut self.rt);
             self.frame_reports.skipped();
         }

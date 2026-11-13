@@ -66,6 +66,41 @@ impl SelectionColor {
     }
 }
 
+/// What a Mac's Option key does in a terminal, as Rex for macOS offers. Elsewhere Alt is
+/// always Alt. A value this version doesn't know reads as Automatic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionKey {
+    /// Option types the character it composes: ∫ for B, or @ for L on a German layout.
+    Characters,
+    /// Option is Alt (Meta): Option+B reaches the program as Alt+B.
+    Alt,
+    /// Alt on a U.S. layout, where Option is seldom needed for characters, and characters
+    /// on every other layout.
+    #[default]
+    #[serde(other)]
+    Automatic,
+}
+impl OptionKey {
+    /// In the order the control lists them.
+    pub const ALL: [OptionKey; 3] = [OptionKey::Automatic, OptionKey::Characters, OptionKey::Alt];
+    pub fn name(self) -> &'static str {
+        match self {
+            OptionKey::Automatic => "Automatic (by keyboard layout)",
+            OptionKey::Characters => "Composes characters",
+            OptionKey::Alt => "Acts as Alt",
+        }
+    }
+    /// Whether Option is Alt with the keyboard layout in use.
+    pub fn acts_as_alt(self, us_layout: bool) -> bool {
+        match self {
+            OptionKey::Automatic => us_layout,
+            OptionKey::Characters => false,
+            OptionKey::Alt => true,
+        }
+    }
+}
+
 /// The Terminal page's cursor, keyboard and selection settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -76,6 +111,8 @@ pub struct TerminalConfig {
     pub cursor_force: bool,
     /// Show the keys pressed so far of a multi-key shortcut in the toolbar.
     pub key_sequence_hints: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub option_key: OptionKey,
     /// Offer and remember paths used by the local path browser.
     #[serde(skip_serializing_if = "is_true")]
     pub show_recent_paths: bool,
@@ -91,6 +128,9 @@ pub struct TerminalConfig {
 fn is_true(value: &bool) -> bool {
     *value
 }
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
 
 impl Default for TerminalConfig {
     fn default() -> Self {
@@ -99,6 +139,7 @@ impl Default for TerminalConfig {
             cursor_style: CursorStyle::default(),
             cursor_force: false,
             key_sequence_hints: true,
+            option_key: OptionKey::default(),
             show_recent_paths: true,
             copy_on_selection: false,
             primary_selection: false,
@@ -194,6 +235,7 @@ mod tests {
                     cursor_style: style,
                     cursor_force: true,
                     key_sequence_hints: false,
+                    option_key: OptionKey::Alt,
                     show_recent_paths: false,
                     copy_on_selection: true,
                     primary_selection: true,
@@ -212,5 +254,34 @@ mod tests {
             }
         }
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn option_follows_the_layout_until_chosen_and_is_saved_only_when_chosen() {
+        let old: Settings = serde_json::from_str(r#"{"terminal": {}}"#).unwrap();
+        assert_eq!(old.terminal.option_key, OptionKey::Automatic);
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(saved["terminal"].get("option_key").is_none());
+        for (key, us, other) in [
+            (OptionKey::Automatic, true, false),
+            (OptionKey::Characters, false, false),
+            (OptionKey::Alt, true, true),
+        ] {
+            assert_eq!((key.acts_as_alt(true), key.acts_as_alt(false)), (us, other));
+        }
+        for (value, key) in [
+            ("characters", OptionKey::Characters),
+            ("alt", OptionKey::Alt),
+            ("left_alt", OptionKey::Automatic),
+        ] {
+            let read: Settings =
+                serde_json::from_value(serde_json::json!({"terminal": {"option_key": value}}))
+                    .unwrap();
+            assert_eq!(read.terminal.option_key, key);
+        }
+        let mut chosen = Settings::default();
+        chosen.terminal.option_key = OptionKey::Characters;
+        let saved = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(saved["terminal"]["option_key"], "characters");
     }
 }

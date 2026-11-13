@@ -348,6 +348,7 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
         Action::Press
     };
     let base = tx.key_base();
+    let composes = s.option_composes();
     let Some(term) = s.active_terminal_mut() else {
         return true;
     };
@@ -355,7 +356,10 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
         return true;
     }
     term.clear_selection();
-    if let Some(payload) = keys::payload(ev, code, base, action) {
+    if let Some(mut payload) = keys::payload(ev, code, base, action) {
+        if composes {
+            keys::option_composed(&mut payload, ev);
+        }
         term.send(if prefix.is_empty() {
             Command::Key(payload)
         } else {
@@ -394,10 +398,14 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if !s.forwarded.remove(&identity) {
         return consumed || s.panel.is_none();
     }
+    let composes = s.option_composes();
     if let Some(term) = s.active_terminal_mut()
         && term.status().live
-        && let Some(payload) = keys::payload(ev, code, base, Action::Release)
+        && let Some(mut payload) = keys::payload(ev, code, base, Action::Release)
     {
+        if composes {
+            keys::option_composed(&mut payload, ev);
+        }
         term.send(Command::Key(payload));
     }
     true

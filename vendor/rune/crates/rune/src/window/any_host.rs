@@ -209,6 +209,7 @@ impl<S: 'static> Host<S> {
                         w.timer_frame.stalled_again(now);
                     }
                     covered_step(&mut self.rt);
+                    if let Some(w) = &mut self.win { w.sync_option(&self.rt); }
                     self.clipboard.flush(&mut self.rt);
                     self.shell(event_loop);
                 } else {
@@ -232,6 +233,7 @@ impl<S: 'static> Host<S> {
                 }
             } else {
                 covered_step(&mut self.rt);
+                if let Some(w) = &mut self.win { w.sync_option(&self.rt); }
                 self.clipboard.flush(&mut self.rt);
                 self.shell(event_loop);
             }

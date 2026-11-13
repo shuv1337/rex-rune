@@ -91,6 +91,13 @@ pub(super) fn toggle_full_screen(window: &Window) {
     window.set_fullscreen((!full).then_some(winit::window::Fullscreen::Borderless(None)));
 }
 
+/// `Tx::set_option_as_alt`: both Option keys act as Alt, or neither does.
+#[cfg(target_os = "macos")]
+pub(super) fn option_as_alt(window: &Window, on: bool) {
+    use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
+    window.set_option_as_alt(if on { OptionAsAlt::Both } else { OptionAsAlt::None });
+}
+
 /// The window menu, where a custom titlebar (at `at`, the click's point in window points, else
 /// the pointer) or the keyboard opens it.
 pub(super) fn window_menu(window: &Window, menu: crate::runtime::WindowMenu, at: Option<(f32, f32)>) {
