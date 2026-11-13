@@ -190,6 +190,7 @@ fn require_api12(version: &str, location: &str) -> Result<()> {
 /// Call only after the person confirms. Every invocation authorizes one attempt, never a
 /// persistent auto-start setting. SSH config/aliases remain OpenSSH's responsibility.
 pub async fn start_personal(endpoint: &str) -> Result<Attachment, Failure> {
+    crate::platform::local::require_ssh()?;
     let target = Target::parse(endpoint)?.context("Setup requires an ssh:// host")?;
     start_with(&target, local_rex().as_os_str(), OsStr::new("ssh")).await
 }
@@ -223,7 +224,8 @@ async fn start_after_preflight(
     Ok(attachment(target, &status))
 }
 
-#[cfg(test)]
+// These fixtures execute Unix shell scripts with executable permissions.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

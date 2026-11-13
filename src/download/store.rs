@@ -6,7 +6,7 @@
 //! folder swapped for a symlink (or anything else) afterwards cannot redirect a write. The folder
 //! itself is opened without following a symlink in its last component. Components above it are
 //! resolved as the system resolves them: they are the user's own configuration.
-use super::name;
+use crate::download::name;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{

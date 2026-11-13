@@ -24,11 +24,13 @@
 
 - **Pair device (partial M3.3):** Settings → Server and Commands can show a QR code of the connected host's sanitized, last-reported Tailscale HTTPS address. Local-only, no server requests; the exact address stays visible, and an overlong address falls back to text. Encoder matrices and rendered captures are independently checked; phone acceptance is not yet verified. See [checks and limits](docs/parity-2026-11/M3.3-pair-device.md).
 
+- **Windows source builds (W1-W7).** MSVC CI builds the probes and app, links and runs Ghostty VT tests, and checks `--version` and `--help`. Settings and state use Windows profile folders; random IDs and updater locks are portable. Network WebSocket transports are unchanged. Unix sockets and SSH hosts are refused on Windows, which CI checks; downloads are refused by code that has not run there. No Windows UI or real server attachment has been tested. See [Building on Windows](README.md#building-on-windows).
+
 - **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, and notifications are not available there yet. See [Building on macOS](README.md#building-on-macos).
 
 - **macOS: Command shortcuts and the system's window.** The default shortcuts on macOS are on Command: ⌘K, ⌘T, ⌘W, ⌘C, ⌘V, ⌘F, ⌘D, ⇧⌘P and the rest, with Control left to the terminal. The window is a standard Mac window with the system's title bar, so its buttons close, minimize and zoom it, its edges resize it and it goes full screen; ⌘W closes an open popup before it closes the window. Links open on ⌘-click. Activity sounds play through `afplay`, and `tailscale` and `rex` are found inside their apps when they are not on `PATH`. Linux is unchanged. See [Shortcuts on macOS](README.md#shortcuts-on-macos).
 
-- **Pull-request CI on three platforms:** Linux runs formatting, Clippy and every test; macOS builds the app and runs the tests; Windows compiles the Ghostty VT library as a first probe.
+- **Pull-request CI on three platforms:** Linux runs formatting, Clippy and every test; macOS builds the app and runs the tests; Windows builds the probes and the app, lints them, and runs the tests that are known to run there.
 
 - **Activity sounds (partial M3.4):** optional sounds for unseen, unmuted tabs that need you, fail or finish, off by default and independent of desktop notifications. Bursts choose one most-pressing sound. Settings → Notifications offers Play and quiet playback health; uses installed freedesktop sound players, with no bundled audio. See [checks and limits](docs/parity-2026-11/M3.4-sounds.md).
 
