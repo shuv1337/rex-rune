@@ -2,7 +2,7 @@
 
 ## 0.9.0 - 2026-11-13
 
-Fonts and program icons that come from the system, a Mac toolbar that is the title bar, Update now for pacman installs, server uptime and Stop server, and dialogs that press the focused button.
+Fonts from the system's own list on macOS and Windows with Nerd Font symbols built in, Rex's own program icons, a Mac toolbar that is the title bar, Update now for pacman installs, server uptime and Stop server, and dialogs that press the focused button.
 
 ### Added
 
