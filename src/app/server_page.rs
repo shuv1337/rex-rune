@@ -79,6 +79,41 @@ fn address_row(key: &str, label: &str, address: Option<String>, fallback: &str) 
     fact(label, address.unwrap_or_else(|| fallback.into()), control)
 }
 
+/// Its own row, so it can be found by name and says why it is not offered: pairing shows
+/// only an address this server reports now, never one last heard from a host that has
+/// since dropped.
+fn pair_row(available: bool, reported: bool) -> El {
+    fact(
+        "Pair device",
+        if available {
+            "A QR code of the Tailscale address, for Rex on another device."
+        } else if reported {
+            "Available while this host is connected."
+        } else {
+            "Needs a Tailscale HTTPS address reported by this server."
+        },
+        available.then(|| {
+            button("server-pair", "Pair", Pill::Neutral, |s, _| s.pair_device())
+                .help("Show the address as a QR code")
+        }),
+    )
+}
+
+pub(super) fn tailscale_address(model: &rex_rune::connection::HostModel) -> Option<String> {
+    model
+        .server_info
+        .process
+        .reported()?
+        .tailscale
+        .as_ref()?
+        .https
+        .as_ref()
+        .filter(|h| h.state == "available")
+        .and_then(|h| h.url.as_deref())
+        .and_then(address)
+        .filter(|url| url.starts_with("https://"))
+}
+
 fn last_state(state: &str, connected: bool) -> String {
     if connected || state == MISSING {
         state.into()
@@ -230,11 +265,7 @@ pub fn section(s: &Workspace) -> El {
             "Pending"
         }
     });
-    let remote = https
-        .filter(|h| h.state == "available")
-        .and_then(|h| h.url.as_deref())
-        .and_then(address)
-        .filter(|url| url.starts_with("https://"));
+    let remote = tailscale_address(model);
     let tailscale = kit::section(
         "Server built-in Tailscale",
         [
@@ -252,9 +283,10 @@ pub fn section(s: &Workspace) -> El {
                 address_row(
                     "server-copy-tailnet",
                     "Tailscale address",
-                    remote,
+                    remote.clone(),
                     p_missing,
                 ),
+                pair_row(model.connected && remote.is_some(), remote.is_some()),
             ]),
             footnote(
                 "Last reported by this Rex server, not this client's local Tailscale. Missing data does not mean disabled.",

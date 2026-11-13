@@ -1810,6 +1810,7 @@ impl Workspace {
                     | PanelKind::RemoveHost(_)
                     | PanelKind::AgentChange { .. }
                     | PanelKind::StartSsh { .. }
+                    | PanelKind::PairDevice(_)
                     | PanelKind::Themes
                     | PanelKind::Fonts(_)
                     | PanelKind::Chromes

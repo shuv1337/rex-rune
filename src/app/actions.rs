@@ -34,6 +34,7 @@ enum Handler {
     ZoomReset,
     SwitchSession,
     Activity,
+    PairDevice,
     SelectSession,
     NewSession,
     Split,
@@ -112,6 +113,7 @@ specs! {
     "client.zoom.reset" => ZoomReset,
     "session.switch" => SwitchSession,
     super::activity_list::ACTION => Activity,
+    super::pair_device::ACTION => PairDevice,
     SELECT_SESSION => SelectSession,
     "session.new" => NewSession,
     "pane.split" => Split,
@@ -246,7 +248,8 @@ impl Spec {
             Download => Remote::Never(
                 "Only the person at this computer can choose a file to download; nothing a host sends can start one.",
             ),
-            Palette | Settings | Search | SwitchSession | Activity | PaneActions | Shortcuts => {
+            Palette | Settings | Search | SwitchSession | Activity | PairDevice | PaneActions
+            | Shortcuts => {
                 Remote::Never("Only the person at this computer can open dialogs and popups.")
             }
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
@@ -301,7 +304,7 @@ impl Spec {
     pub fn requires_person(&self) -> bool {
         matches!(
             self.handler,
-            Handler::Download | Handler::InsertPath | Handler::GoToDirectory
+            Handler::Download | Handler::InsertPath | Handler::GoToDirectory | Handler::PairDevice
         )
     }
     pub fn global(&self) -> bool {
@@ -365,6 +368,7 @@ impl Spec {
             Handler::ZoomReset => "Reset interface zoom",
             Handler::SwitchSession => "Switch session",
             Handler::Activity => "Show activity",
+            Handler::PairDevice => "Pair device…",
             Handler::SelectSession => "Show session",
             Handler::NewSession => "New session",
             Handler::Split => "Split pane",
@@ -418,6 +422,7 @@ impl Spec {
             Handler::Compatibility => super::compatibility::category(self.name),
             Handler::Palette
             | Handler::Settings
+            | Handler::PairDevice
             | Handler::Sidebar
             | Handler::ZoomIn
             | Handler::ZoomOut
@@ -610,6 +615,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::ZoomReset => s.change_ui_scale(0, tx),
         Handler::SwitchSession => s.picker(true),
         Handler::Activity => s.show_activity(),
+        Handler::PairDevice => s.pair_device(),
         Handler::SelectSession => {
             let visit = s.session_visit(s.active, args);
             match visit {

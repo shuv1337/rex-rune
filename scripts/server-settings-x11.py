@@ -2,7 +2,7 @@
 """M3.3 Server settings on two private Rex servers and private Xvfb.
 
 Requires built REX_BIN, Rex API 13, Xvfb, openbox, xdotool, ImageMagick,
-Tesseract and Pillow (the shared acceptance helper imports it). No native copy,
+Tesseract, zbarimg, dbus-daemon and Pillow (the shared acceptance helper imports it). No native copy,
 personal display/server/clipboard, or network Tailscale. Artifacts stay under
 ~/.cache/agent-ws. Observer API call counts are NOT client wire request counts.
 """
@@ -19,8 +19,10 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-rune"))
-work = Path(tempfile.mkdtemp(prefix="rex-server-settings-", dir=Path.home() / ".cache/agent-ws"))
-for tool in ("rex", "Xvfb", "openbox", "xdotool", "import", "magick", "tesseract"):
+evidence = Path.home() / ".cache/agent-ws/rex-m33-pair"
+evidence.mkdir(parents=True, exist_ok=True)
+work = Path(tempfile.mkdtemp(prefix="native-", dir=evidence))
+for tool in ("rex", "Xvfb", "openbox", "xdotool", "import", "magick", "tesseract", "zbarimg", "dbus-daemon"):
     assert shutil.which(tool), f"{tool} required"
 for name in ("home", "config", "state", "runtime", "cache", "captures"):
     (work / name).mkdir(mode=0o700)
@@ -31,7 +33,7 @@ endpoints = ["unix://" + str(work / f"server-{i}.sock") for i in range(2)]
 os.environ.update(HOME=str(work / "home"), XDG_CONFIG_HOME=str(work / "config"),
                   XDG_STATE_HOME=str(work / "state"), XDG_RUNTIME_DIR=str(work / "runtime"),
                   XDG_CACHE_HOME=str(work / "cache"), REX_BIN=BINARY,
-                  REX_CAPTURE_OUT=str(work / "captures"), REX_SERVER=endpoints[0])
+                  REX_CAPTURE_OUT=str(work / "captures"), REX_SERVER=endpoints[0], TMPDIR=str(work))
 spec = importlib.util.spec_from_file_location("accept", ROOT / "scripts/rune-acceptance-x11.py")
 accept = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(accept)
@@ -92,7 +94,20 @@ def terminal_size(index):
 
 servers, sessions, blocks, records = [], [], [], []
 desk = None
+bus = None
+pair_results = []
 try:
+    # No standard service directories: desktop portal activation must not inherit the
+    # owner's compositor environment, nor start unrelated daemons during this check.
+    bus_config = work / "bus.conf"
+    bus_config.write_text('<busconfig><type>session</type><listen>unix:tmpdir=' + str(work) +
+        '</listen><auth>EXTERNAL</auth><policy context="default">'
+        '<allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/>'
+        '</policy></busconfig>')
+    bus = subprocess.Popen(["dbus-daemon", "--config-file=" + str(bus_config), "--nofork", "--print-address"],
+                           stdout=subprocess.PIPE, text=True)
+    os.environ["DBUS_SESSION_BUS_ADDRESS"] = bus.stdout.readline().strip()
+    assert os.environ["DBUS_SESSION_BUS_ADDRESS"]
     print("Artifacts:", work, flush=True)
     for i in range(2):
         servers.append(subprocess.Popen([
@@ -151,6 +166,35 @@ try:
         search("Listeners")
         words = capture(f"host-{i}-listeners")
         assert "Listener 1" in words, words
+        search("pair")
+        words = capture(f"host-{i}-pair-row")
+        assert "Pair device" in words, words
+        https = (before.get("tailscale") or {}).get("https") or {}
+        if https.get("state") == "available" and str(https.get("url", "")).startswith("https://"):
+            # Only a genuine server report can open the product dialog. No injected facts.
+            import csv
+            import io
+            from urllib.parse import urlsplit, urlunsplit
+            parsed = urlsplit(https["url"])
+            # The code holds the bare origin when the address has no path, as the app's
+            # `pair_address` does; a path is kept.
+            path_part = "" if parsed.path in ("", "/") else parsed.path
+            expected = urlunsplit(("https", parsed.netloc.rsplit("@", 1)[-1], path_part, "", ""))
+            path = work / "captures" / f"host-{i}-pair-row.png"
+            tsv = subprocess.check_output(["tesseract", str(path), "stdout", "tsv"], text=True, stderr=subprocess.DEVNULL)
+            buttons = [r for r in csv.DictReader(io.StringIO(tsv), delimiter="\t") if r["text"] == "Pair"]
+            button = max(buttons, key=lambda r: int(r["left"]))
+            click(int(button["left"])+int(button["width"])//2, int(button["top"])+int(button["height"])//2)
+            desk.capture(window, f"host-{i}-pair-dialog")
+            decoded = subprocess.check_output(["zbarimg", "--quiet", "--raw", "--set", "*.binary=1",
+                str(work / "captures" / f"host-{i}-pair-dialog.png")])
+            assert decoded == expected.encode() + b"\n", decoded
+            desk.key("Escape")
+            pair_results.append({"host": label, "decoded": expected})
+        else:
+            assert "Not reported" in words, words
+            pair_results.append({"host": label, "dialog_decode": "not exercised: private server reports no available Tailscale HTTPS"})
+            print(f"PASS {label}: searchable Pair row; no available server HTTPS report, no Pair button/code. Native decoding NOT exercised.", flush=True)
         desk.key("Escape")  # Search -> section list, not out of Settings.
         click(180, 182)  # Interface, next group after Server.
         desk.key("alt+Left")
@@ -188,13 +232,19 @@ try:
     assert "Disconnected:" in words and "last reported" in words, words
     (work / "results.json").write_text(json.dumps({"records": records,
         "observer_api_calls": dict(counts), "client_wire_requests": "not intercepted",
+        "pair": pair_results,
         "native_clipboard": "not used", "pty_input_hex": [data.hex() for data in received]}, indent=2))
     print("PASS 640x480 current host and disconnected last-reported facts; both PTYs empty; no native clipboard", flush=True)
 finally:
     (work / "stop").touch()
     if desk:
         desk.close()
+        for process in [*desk.apps, desk.wm, desk.server]:
+            process.wait(timeout=5)
     for server in servers:
         if server.poll() is None:
             server.terminate()
             server.wait(timeout=5)
+    if bus is not None:
+        bus.terminate()
+        bus.wait(timeout=5)

@@ -27,6 +27,7 @@ mod notify;
 mod server_page;
 mod sounds;
 pub use notify::notify_restart_failure;
+mod pair_device;
 mod pane_header;
 mod pane_moves;
 mod pane_verbs;
@@ -139,6 +140,12 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         Some(panel) if panel.is_list() => Some(popups::list_popup(s, viewport)),
         Some(panel) if matches!(panel.kind, panel::PanelKind::Downloads) => {
             Some(downloads_view::popover(s, viewport))
+        }
+        Some(panel) if matches!(panel.kind, panel::PanelKind::PairDevice(_)) => {
+            let panel::PanelKind::PairDevice(d) = &panel.kind else {
+                unreachable!()
+            };
+            Some(pair_device::dialog(s, d, viewport, cx.env().scale * scale))
         }
         Some(_) => dialogs::dialog(s, viewport),
         None => None,

@@ -84,6 +84,7 @@ const IDS: &[&str] = &[
     "host.edit",
     "host.shell",
     "host.remote_control",
+    "host.pair_device",
     "host.reconnect",
     "host.collapse_others",
     "host.remove",
@@ -397,10 +398,11 @@ fn a_search_still_finds_sessions_and_tabs_after_the_commands() {
     let groups: Vec<&str> = entries.iter().map(|e| e.group.as_str()).collect();
     assert_eq!(
         groups,
-        ["Tabs · test-0 / s-label"],
-        "the tab named dev; no command says dev"
+        ["Commands", "Tabs · test-0 / s-label"],
+        "Pair device matches dev, followed by the tab named dev"
     );
-    assert!(matches!(&entries[0].action, Intent::Tab(id) if id == "split"));
+    assert_eq!(labels(&ws), ["Pair device…", "dev"]);
+    assert!(matches!(&entries[1].action, Intent::Tab(id) if id == "split"));
 
     // Commands come first when both match.
     search(&mut ws, "server");
