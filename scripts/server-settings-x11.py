@@ -176,7 +176,10 @@ try:
             import io
             from urllib.parse import urlsplit, urlunsplit
             parsed = urlsplit(https["url"])
-            expected = urlunsplit(("https", parsed.netloc.rsplit("@", 1)[-1], parsed.path or "/", "", ""))
+            # The code holds the bare origin when the address has no path, as the app's
+            # `pair_address` does; a path is kept.
+            path_part = "" if parsed.path in ("", "/") else parsed.path
+            expected = urlunsplit(("https", parsed.netloc.rsplit("@", 1)[-1], path_part, "", ""))
             path = work / "captures" / f"host-{i}-pair-row.png"
             tsv = subprocess.check_output(["tesseract", str(path), "stdout", "tsv"], text=True, stderr=subprocess.DEVNULL)
             buttons = [r for r in csv.DictReader(io.StringIO(tsv), delimiter="\t") if r["text"] == "Pair"]

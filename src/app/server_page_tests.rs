@@ -868,6 +868,27 @@ fn pair_largest_symbol_fits_both_sizes_and_keeps_black_white_in_every_theme() {
                 );
                 let unit = code[2] / 65.;
                 assert!((unit * scale - (unit * scale).round()).abs() < 0.001);
+                // What is drawn is the symbol: rebuild the matrix from the run elements
+                // alone and compare every module. A run one module off would scan as
+                // something else, or not at all.
+                let symbol = pair_data(&rt.state).symbol.clone().unwrap();
+                let mut drawn = vec![false; 57 * 57];
+                for run in &runs {
+                    let x = ((run.rect[0] - code[0]) / unit).round() as usize;
+                    let y = ((run.rect[1] - code[1]) / unit).round() as usize;
+                    let len = (run.rect[2] / unit).round() as usize;
+                    assert!((run.rect[3] - unit).abs() < 0.01, "one module tall");
+                    assert!(x >= 4 && y >= 4 && len >= 1, "{:?}", run.rect);
+                    for dx in 0..len {
+                        let at = (y - 4) * 57 + (x - 4 + dx);
+                        assert!(!std::mem::replace(&mut drawn[at], true), "runs overlap");
+                    }
+                }
+                for y in 0..57 {
+                    for x in 0..57 {
+                        assert_eq!(drawn[y * 57 + x], symbol.dark(x, y), "module {x},{y}");
+                    }
+                }
                 for run in runs {
                     assert_eq!(run.fill, rune::Color::BLACK);
                     assert!(

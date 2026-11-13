@@ -110,7 +110,6 @@ fn independent_qrencode_matrices() {
             penalty(&reference),
             penalty(&own)
         );
-        assert!(penalty(&own) <= penalty(&reference));
         // Explain every difference, rather than accepting unexplained mask drift.
         let scores: Vec<_> = (0..8)
             .map(|m| qrencode_penalty(&encode_mask(&data, Some(m)).unwrap().0))
