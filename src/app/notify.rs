@@ -481,6 +481,6 @@ mod tests {
         assert_eq!((width, height, stride), (128, 128, 128 * 4));
         assert_eq!((alpha, bits, channels), (true, 8, 4));
         assert_eq!(pixels.len(), (stride * height) as usize);
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        assert!(pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
     }
 }
