@@ -52,7 +52,6 @@ readonly SITE=https://pkg.shuv.dev/arch
 readonly KEYRING=/usr/share/rex-rune/archive-key.gpg
 # The primary key of the certificate in KEYRING, written in when the package is built.
 readonly PRIMARY='@PRIMARY@'
-readonly PACMAN_KEYRING=/etc/pacman.d/gnupg
 readonly UNIT=rex-rune-update.service
 # Where the service is, exactly: a unit of the system manager, not something of that name
 # in a user's own part of the tree.
@@ -118,8 +117,11 @@ if (( ! in_service )); then
     # The helper's own codes come back as they are. Anything else is systemd-run's or a
     # signal's: the unit already exists, or the service could not start or was stopped.
     (( code >= 64 && code <= 74 )) && exit "$code"
-    running && fail 67 'another update is running'
-    fail 74 'the update service did not start or did not finish'
+    # systemd-run's own failure is 1. With the unit there, another update got in first.
+    # (After any other ending the unit may be there too, and then it is this update,
+    # still going without its waiter.)
+    (( code == 1 )) && running && fail 67 'another update is running'
+    fail 74 'the update service did not start, or this stopped waiting for it'
 fi
 
 # `--in-service` grants nothing: what counts is where this process really is.
@@ -131,6 +133,10 @@ for tool in pacman pacman-conf vercmp curl gpgv gpg bsdtar stat logger uname sed
     command -v "$tool" >/dev/null || fail 74 "missing $tool"
 done
 find "$work" -mindepth 1 -delete || fail 74 'work directory not empty'
+# The keyring pacman itself reads, wherever pacman.conf puts it.
+PACMAN_KEYRING=$(pacman-conf GPGDir 2>/dev/null) || fail 74 'no pacman keyring'
+[[ $PACMAN_KEYRING == /* && -d $PACMAN_KEYRING ]] || fail 74 'no pacman keyring'
+readonly PACMAN_KEYRING
 
 case $(uname -m) in
     x86_64) readonly ARCH=x86_64 ;;

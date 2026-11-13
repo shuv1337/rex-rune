@@ -430,8 +430,8 @@ Where the helper differs from the steps above, and why:
   mode 0700) is the work directory; systemd makes it and removes it when the service
   ends, however it ends. The helper has no lock file, no `mktemp` and no cleanup trap.
 - **The second key check (the owner's call 3).** After `gpgv` against the shipped
-  certificate, the same signature is verified with `gpg --homedir /etc/pacman.d/gnupg`
-  and must be good, by the same subkey, and `TRUST_FULLY` or `TRUST_ULTIMATE`. This is
+  certificate, the same signature is verified with `gpg` against pacman's keyring
+  (`pacman-conf GPGDir`, so the one pacman itself reads) and must be good, by the same subkey, and `TRUST_FULLY` or `TRUST_ULTIMATE`. This is
   what lets a machine withdraw trust: a revocation that reached the pacman keyring, a
   removed key, or a key that was never locally signed all refuse. It never fetches or
   imports a key.
@@ -452,6 +452,15 @@ Where the helper differs from the steps above, and why:
 - **No SHA-256 from the client**, and nothing else from it: one argument, the version.
 - The environment is dropped apart from a fixed `PATH`; bash runs in privileged mode
   (`-p`); file name expansion is off; nothing is read from or written to the caller.
+
+A second review of this design found it safe to merge, and four small things, of which
+three are fixed: the keyring is the one `pacman.conf` names; a waiter killed after the
+service started no longer says "another update is running" about its own update; the
+test's privileged part also refuses `act` and self-hosted runners. The fourth is left:
+someone at the machine can power it off during any pacman run, this one included, and
+pacman does not survive `SIGTERM` mid-transaction. `systemd-inhibit` around the install
+would block that; it is not there because it adds a dependency on logind for a case
+that every `pacman -Syu` already has.
 
 What a caller can still choose: **which** newer Rex-signed release, not only the
 latest. The dialog's text is fixed and does not name the version. A compromised client
@@ -479,7 +488,8 @@ Only on a machine that is thrown away afterwards (CI's `pacman` job): the shippe
 helper as root, under systemd, against a private HTTPS `pkg.shuv.dev` with throwaway
 keys. Every refusal in the outline's step 2, plus: two Rex signatures in one file, the
 other architecture's package under this one's name, a same-named control group under
-`user.slice` claiming to be the service, an upgrade started from a hostile environment,
+`user.slice` claiming to be the service, the unit masked by an administrator, a file
+where the work directory goes, a pacman keyring elsewhere without the Rex key, an upgrade started from a hostile environment,
 terminal and a 1 MiB file-size limit (the package holds a 4 MiB file) on a machine
 with `LocalFileSigLevel = Required`, and an upgrade through `pkexec` during which the
 service is inspected (systemd's child, own session, no terminal, no limit or
@@ -490,8 +500,8 @@ mid-download with the update still finishing.
 a machine someone uses.** On 2026-11-12 the first version of this test did, on the
 owner's desktop: such a container shares the host's `/dev` and `/sys`, its udev
 re-triggered the host's devices, and the desktop session ended with its windows. The
-script now refuses that part unless it is in GitHub Actions or told it is in a
-disposable VM.
+script now refuses that part unless it is on one of GitHub's own runners (not `act`,
+not a self-hosted runner) or told it is in a disposable VM.
 
 Before the redesign, three of the helper's checks were removed one at a time to see
 the test fail: without the metadata check the older package was not refused as such,

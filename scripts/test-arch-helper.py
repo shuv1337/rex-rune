@@ -54,8 +54,13 @@ def run(*args, **kw):
 
 
 def disposable():
-    """Whether this machine may boot systemd in a privileged container."""
-    return os.environ.get('GITHUB_ACTIONS') == 'true' or os.environ.get('REX_HELPER_TEST_VM') == 'disposable'
+    """Whether this machine may boot systemd in a privileged container: one of GitHub's
+    own runners, or a VM someone has said is disposable. Not `act`, which says it is
+    GitHub Actions while using this machine's Docker, and not a self-hosted runner."""
+    if os.environ.get('REX_HELPER_TEST_VM') == 'disposable':
+        return True
+    return (os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+            and 'ACT' not in os.environ)
 
 
 def policy():
@@ -254,6 +259,18 @@ rmdir $imitation 2>/dev/null
 unchanged 'an imitation control group'
 echo 'PASS: claiming to be the service from a same-named control group under user.slice -> 64'
 
+# An administrator's off-switch, and a work directory that is not one.
+systemctl mask --runtime $unit >/dev/null 2>&1 || fail 'could not mask the unit'
+expect 74 good 'the unit masked by an administrator' 99.1.1
+systemctl unmask --runtime $unit >/dev/null 2>&1 || fail 'could not unmask the unit'
+touch /run/rex-rune-update
+ln -sfn /fixtures/sites/good /srv/site
+"$helper" 99.1.1 </dev/null >/dev/null 2>&1; got=$?
+rm -rf /run/rex-rune-update
+[ "$got" = 74 ] || fail "a file where the work directory goes: exit $got, expected 74"
+unchanged 'a file where the work directory goes'
+echo 'PASS: a file where the work directory goes -> 74'
+
 # Only an upgrade.
 expect 65 good 'the installed version' 99.1.0
 expect 65 good 'an older version' 99.0.9
@@ -299,6 +316,11 @@ ln -sfn /fixtures/sites/good /srv/site
 rm -f /var/lib/pacman/db.lck
 unchanged 'pacman database locked'
 echo 'PASS: pacman database locked -> 67'
+# A machine whose pacman keyring is somewhere else: that one is asked, not the usual place.
+mkdir -m 700 /srv/empty-keyring
+sed -i 's|^\[options\]$|[options]\nGPGDir = /srv/empty-keyring|' /etc/pacman.conf
+expect 70 good 'a pacman keyring elsewhere that does not have the Rex key' 99.1.1
+cp /tmp/pacman.conf /etc/pacman.conf
 # A subkey the package's own certificate still shows as good, revoked since: the pacman
 # keyring knows, and that is enough.
 pacman-key --add /fixtures/keys/rex-revoked.asc >/dev/null 2>&1 || fail 'import revocation'
