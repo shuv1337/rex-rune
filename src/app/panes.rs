@@ -89,20 +89,8 @@ fn header(
     m: &Metrics,
 ) -> El {
     let label = s.pane_name(block);
-    // The tab's words for this pane alone; Done and Bell stay with the tab, which they latch.
     let activity = pane_activity(s.model(), block);
-    let word = tab_word(&activity, false, false)
-        .filter(|_| s.settings.notifications.show_in_tabs)
-        .map(|(word, colour)| {
-            let w = text(word)
-                .key(format!("pane-word:{block}"))
-                .font(medium(11.))
-                .color(rgb(colour));
-            match activity.msg.clone() {
-                Some(msg) => w.help(msg),
-                None => w,
-            }
-        });
+    let word = pane_word(s, block, 11.);
     let id = block.to_owned();
     let menu_id = block.to_owned();
     let h = row()
@@ -172,8 +160,26 @@ fn header(
     h.child(pane_header::actions(s, window, block, width, focused))
 }
 
+/// The tab's words for this pane alone, at `size`; Done and Bell stay with the tab, which
+/// they latch.
+pub(super) fn pane_word(s: &Workspace, block: &str, size: f32) -> Option<El> {
+    let activity = pane_activity(s.model(), block);
+    tab_word(&activity, false, false)
+        .filter(|_| s.settings.notifications.show_in_tabs)
+        .map(|(word, colour)| {
+            let w = text(word)
+                .key(format!("pane-word:{block}"))
+                .font(medium(size))
+                .color(rgb(colour));
+            match activity.msg.clone() {
+                Some(msg) => w.help(msg),
+                None => w,
+            }
+        })
+}
+
 /// The exception strip for a pane that is reconnecting, with its Retry action.
-fn strip(s: &Workspace, block: &str, width: f32, m: &Metrics) -> Option<El> {
+pub(super) fn strip(s: &Workspace, block: &str, width: f32, m: &Metrics) -> Option<El> {
     let key = s.term_key(block);
     let t = s.terminals.get(&key);
     let status = t.map(|t| t.status());

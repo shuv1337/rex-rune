@@ -68,6 +68,8 @@ mod tab_icon_tests;
 mod tab_tests;
 #[path = "terminal_settings_tests.rs"]
 mod terminal_settings_tests;
+#[path = "title_row_tests.rs"]
+mod title_row_tests;
 #[path = "titles_tests.rs"]
 mod titles_tests;
 #[path = "toolbar_reveal_tests.rs"]

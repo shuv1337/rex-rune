@@ -370,7 +370,7 @@ pub fn popover(s: &Workspace, viewport: [f32; 2]) -> El {
             .role("dialog")
             .label("Downloads")
             .w(width)
-            .max_h(vh - TOOLBAR - 16.)
+            .max_h(vh - super::toolbar_reveal::bar_height(s) - 16.)
             .padding(5.)
             .gap(1.)
             .preserve_focus_on_press(true),
@@ -409,7 +409,7 @@ pub fn popover(s: &Workspace, viewport: [f32; 2]) -> El {
     };
     overlay()
         .modal_tx(true, |s: &mut Workspace, tx: &mut Tx| s.close_panel(tx))
-        .child(surface.absolute(x, TOOLBAR - 4.))
+        .child(surface.absolute(x, super::toolbar_reveal::bar_height(s) - 4.))
 }
 
 /// What the toolbar chip says while transfers are running.

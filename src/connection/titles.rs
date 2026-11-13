@@ -133,14 +133,17 @@ impl HostModel {
     /// alone while the server can't read a directory. None while it names no program.
     pub fn generated_title(&self, block: &str) -> Option<String> {
         let program = self.programs.get(block)?;
-        let place = self.places.get(block);
-        Some(match place.and_then(|p| p.cwd.as_deref()) {
-            Some(cwd) => format!(
-                "{program} - {}",
-                directory(cwd, place.and_then(|p| p.home.as_deref()))
-            ),
+        Some(match self.directory_of(block) {
+            Some(dir) => format!("{program} - {dir}"),
             None => program.clone(),
         })
+    }
+
+    /// The directory `block`'s foreground program is in, as a title shows it (`~/rex`). None
+    /// while the server hasn't said.
+    pub fn directory_of(&self, block: &str) -> Option<String> {
+        let place = self.places.get(block)?;
+        Some(directory(place.cwd.as_deref()?, place.home.as_deref()))
     }
 
     /// What `block` is called while it has no name of its own. With `generated` off that is

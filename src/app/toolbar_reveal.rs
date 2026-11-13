@@ -57,28 +57,48 @@ pub fn can_reveal(s: &Workspace) -> bool {
     s.settings.interface.toolbar != ToolbarBehavior::Always
 }
 
-/// The height the toolbar's row takes from the panes: nothing unless it is always shown.
-pub fn row_height(s: &Workspace) -> f32 {
-    if placement(s) == Placement::Row {
+/// The toolbar's height: its own 52 pt row, or the shorter title row where it is the
+/// window's title bar.
+pub fn bar_height(s: &Workspace) -> f32 {
+    if s.unified_title {
+        super::platform::chrome::TITLE_ROW
+    } else {
         TOOLBAR
+    }
+}
+
+/// Whether the window's top keeps a bare title strip while the toolbar has no row: where the
+/// toolbar is the title bar, the traffic lights need a row of their own, except in full
+/// screen, where the system hides them.
+pub fn strip(s: &Workspace) -> bool {
+    s.unified_title && s.title_inset > 0. && placement(s) != Placement::Row
+}
+
+/// The height the toolbar's row takes from the panes: nothing unless it is always shown, or
+/// the title strip that stands in for it.
+pub fn row_height(s: &Workspace) -> f32 {
+    if placement(s) == Placement::Row || strip(s) {
+        bar_height(s)
     } else {
         0.
     }
 }
 
-/// The height the toolbar covers at the window's top now, in its row or floating.
+/// The height the toolbar covers at the window's top now, in its row, floating, or as the
+/// title strip.
 pub fn shown_height(s: &Workspace) -> f32 {
-    if placement(s) == Placement::None {
+    if placement(s) == Placement::None && !strip(s) {
         0.
     } else {
-        TOOLBAR
+        bar_height(s)
     }
 }
 
 /// The space pane cards and the sidebar keep from the window's top edge: none under the
-/// toolbar's row, which is their margin, and the outer margin where they start at the edge.
+/// toolbar's row or the title strip, which is their margin, and the outer margin where they
+/// start at the edge.
 pub fn top_margin(s: &Workspace) -> f32 {
-    if placement(s) == Placement::Row {
+    if placement(s) == Placement::Row || strip(s) {
         0.
     } else {
         MARGIN
@@ -106,10 +126,10 @@ impl Workspace {
 
 /// A floating toolbar's surface: the popover colour over the panes with a hairline under it,
 /// sliding in from the window's top edge.
-pub fn floating(toolbar: El) -> El {
+pub fn floating(s: &Workspace, toolbar: El) -> El {
     el().key("toolbar-float")
         .pin(Some(0.), Some(0.), Some(0.), None)
-        .h(TOOLBAR)
+        .h(bar_height(s))
         .fill(rgb(popover()))
         .box_shadow(shadow(0., 8., 24., black(0.4)))
         .transition(
@@ -129,8 +149,10 @@ pub fn floating(toolbar: El) -> El {
 /// while the pointer is on the toolbar. It takes no presses: until the toolbar shows, what
 /// is under the band works as everywhere else.
 pub fn band(s: &Workspace) -> El {
-    let height = if placement(s) == Placement::Floating {
-        TOOLBAR
+    // The title strip is the edge where there is one, so a pointer resting on it brings the
+    // toolbar out over it.
+    let height = if placement(s) == Placement::Floating || strip(s) {
+        bar_height(s)
     } else {
         EDGE
     };

@@ -4,18 +4,31 @@
 /// button, drag region and resize bands.
 ///
 /// It does on Linux, where an app-drawn frame is the norm and a tiling compositor gives
-/// none. macOS keeps the system's title bar. A borderless window there has no close,
-/// minimize or zoom button and cannot be resized by its edges (winit cannot start an edge
-/// resize on macOS), and the system's own frame brings all of that, with full screen and
-/// window tiling, behaving as it does in every Mac app. Drawing Rex's toolbar in the title
-/// bar beside the traffic lights (Rune's `Titlebar`) is the better look and needs checking
-/// by eye.
+/// none. macOS keeps the system's frame: its traffic lights, edge resizing, full screen and
+/// window tiling, behaving as they do in every Mac app. A borderless window there has no
+/// close, minimize or zoom button and cannot be resized by its edges (winit cannot start an
+/// edge resize on macOS).
 pub const OWN_FRAME: bool = !cfg!(target_os = "macos");
 
-/// The frame to ask Rune for. Its default on macOS is a transparent title bar with the
-/// content, and so Rex's toolbar, running under the traffic lights. This asks for the
-/// standard one: an opaque title bar that shows the title, with the content below it.
-/// Other platforms keep their frame either way.
+/// Whether Rex's toolbar is the window's title bar ([`TITLEBAR`]): one row with the traffic
+/// lights at its leading end and no native title, as in Rex for macOS.
+pub const UNIFIED: bool = cfg!(target_os = "macos");
+
+/// The unified title row's height in points, before the interface zoom. Rex for macOS draws
+/// about 36 pt; two more keep a tab pill's track clear of the row's edges.
+pub const TITLE_ROW: f32 = 38.;
+
+/// The title bar Rex draws itself, where it does ([`UNIFIED`]): Rune hides the native one,
+/// runs the content under a transparent title bar and centres the traffic lights in the row.
+pub const TITLEBAR: Option<rune::Titlebar> = if UNIFIED {
+    Some(rune::Titlebar::new(TITLE_ROW))
+} else {
+    None
+};
+
+/// The frame to ask Rune for: on macOS a standard titled window, which [`TITLEBAR`] then
+/// replaces with a transparent title bar over the content. Other platforms keep their frame
+/// either way.
 pub const FRAME: rune::Chrome = rune::Chrome {
     full_size_content: false,
     ..rune::Chrome::DEFAULT

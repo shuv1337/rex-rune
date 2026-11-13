@@ -71,6 +71,8 @@ pub enum Placement {
     Row,
     /// Over the terminal's top edge.
     Floating,
+    /// In the window's title row ([`in_title`]): the pane draws none of its own.
+    Title,
 }
 
 /// One pane and nothing zoomed.
@@ -104,11 +106,23 @@ pub fn rows(s: &Workspace, _window: &Window) -> bool {
     }
 }
 
+/// Whether the lone pane of `window` has its header in the window's title row, as in Rex for
+/// macOS: where the toolbar is the title bar and has its row, or the title strip stands in
+/// for it, and the pane would have a header row of its own. Its name is the window's title
+/// and its buttons end the row.
+pub fn in_title(s: &Workspace, window: &Window) -> bool {
+    use super::toolbar_reveal::{Placement, placement, strip};
+    s.unified_title
+        && single(window)
+        && (placement(s) == Placement::Row || strip(s))
+        && (rows(s, window) || s.settings.pane_header == PaneHeader::Always)
+}
+
 /// A tab with one pane, not zoomed, draws it edge to edge: no card or margin. Its header, if
-/// it has one, is a row across the top of it. With headers always shown it is a card like any
-/// other.
+/// it has one, is a row across the top of it, or the window's title row. With headers always
+/// shown it is otherwise a card like any other.
 pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
-    single(window) && s.settings.pane_header != PaneHeader::Always
+    single(window) && (s.settings.pane_header != PaneHeader::Always || in_title(s, window))
 }
 
 /// Room kept above the header, a row or a floating one, of a pane whose top is the top of
@@ -125,7 +139,9 @@ pub fn clearance(s: &Workspace, rect: [f32; 4]) -> f32 {
 }
 
 pub fn placement(s: &Workspace, window: &Window, block: &str) -> Placement {
-    if rows(s, window) {
+    if in_title(s, window) {
+        Placement::Title
+    } else if rows(s, window) {
         Placement::Row
     } else if s.header_reveal.pinned
         || s.settings.pane_header == PaneHeader::OnHover

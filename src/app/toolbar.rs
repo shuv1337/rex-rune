@@ -17,7 +17,7 @@ const IDENTITY_MIN: f32 = 120.;
 const IDENTITY_MAX: f32 = 210.;
 
 /// A chip's press: consume it (chips never drag the window) and keep the terminal focused.
-fn chip_press(e: El) -> El {
+pub(super) fn chip_press(e: El) -> El {
     e.cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
         .tab_index(-1)
@@ -25,7 +25,7 @@ fn chip_press(e: El) -> El {
 
 /// The host line under the session's name: trouble always, and otherwise the host only while
 /// a second host is connected, when the session's name alone could be either's.
-fn identity_detail(s: &Workspace) -> Option<(String, u32)> {
+pub(super) fn identity_detail(s: &Workspace) -> Option<(String, u32)> {
     let host = &s.settings.hosts[s.active].label;
     if !s.model().connected {
         Some((format!("{host} · Reconnecting"), warning()))
@@ -107,9 +107,10 @@ fn fill_floor(icons: usize, word: Option<&str>, quiet: bool) -> f32 {
     .max(96.)
 }
 
-/// The session's tabs on their track. With no tab to show (no session on screen, or one whose
-/// view hasn't arrived) there is no track: an empty one would be a sliver of chip.
-fn tab_track(s: &Workspace) -> El {
+/// The session's tabs on their track, `track` tall with `pill` tall tabs. With no tab to show
+/// (no session on screen, or one whose view hasn't arrived) there is no track: an empty one
+/// would be a sliver of chip.
+pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
     let model = s.model();
     let tabs = model
         .view()
@@ -122,7 +123,7 @@ fn tab_track(s: &Workspace) -> El {
     let mut floors = -2.;
     let mut names = row()
         .key("tab-names")
-        .h(28.)
+        .h(pill)
         .gap(2.)
         .on_layout(|s: &mut Workspace, r| s.tab_strip.content = r[2]);
     if let Some(view) = model.view() {
@@ -249,7 +250,7 @@ fn tab_track(s: &Workspace) -> El {
         .key("tabs")
         .min_w(0.)
         .shrink()
-        .h(28.)
+        .h(pill)
         .scroll_x()
         .scroll_edge_fade(16.)
         .on_layout(|s: &mut Workspace, r| s.tab_strip.viewport = r[2])
@@ -265,7 +266,7 @@ fn tab_track(s: &Workspace) -> El {
         .child(names);
     let mut track = row()
         .key("tab-track")
-        .h(34.)
+        .h(track)
         .px(3.)
         .gap(2.)
         .center_y()
@@ -352,7 +353,7 @@ fn bar_button(
 /// One chip while a tab out of sight waits on the person, or failing that has errored:
 /// `3 need you`, `1 error`. A press opens the Activity list. It is drawn only in the
 /// toolbar, never floated over the terminal: a tab can wait for hours.
-fn activity_chip(s: &Workspace) -> Option<El> {
+pub(super) fn activity_chip(s: &Workspace) -> Option<El> {
     let summary = s.activity_chip_shown()?;
     let label = summary.label();
     Some(chip_press(chip(
@@ -377,7 +378,7 @@ fn activity_chip(s: &Workspace) -> Option<El> {
 /// One chip while a transfer receives, `↓ build.log 42%` or `↓ 3 files`, and none otherwise,
 /// like the pending-sequence chip. When the bar is short of room it is `↓ 42%` (see
 /// `downloads_view::chip_label`). A press opens the Downloads popover under the chip.
-fn download_chip(s: &Workspace) -> El {
+pub(super) fn download_chip(s: &Workspace) -> El {
     let Some(text_of) = super::downloads_view::chip_label(s) else {
         return el();
     };
@@ -485,7 +486,11 @@ pub fn toolbar(s: &Workspace) -> El {
             |s, tx| s.perform(Intent::Sidebar, tx),
         ))
         .child(identity(s))
-        .child(if s.sidebar_tabs() { el() } else { tab_track(s) })
+        .child(if s.sidebar_tabs() {
+            el()
+        } else {
+            tab_track(s, 34., 28.)
+        })
         .child(sequence_chip(s).unwrap_or_else(el))
         .children(activity_chip(s))
         .child(download_chip(s))
