@@ -258,7 +258,7 @@ pub async fn receive(
         }
     };
     // The server frees its file when this socket closes.
-    drop(partial);
+    partial.discard();
     drop(socket);
     Outcome::Failed(failure)
 }

@@ -3,7 +3,6 @@ use super::{Health, Sound};
 use std::{
     ffi::OsString,
     io,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -157,8 +156,7 @@ pub(super) fn attempt(
 pub(super) struct System;
 impl Files for System {
     fn executable(&self, path: &Path) -> bool {
-        path.metadata()
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        crate::app::platform::sound_player_executable(path)
     }
     fn file(&self, path: &Path) -> bool {
         path.is_file()

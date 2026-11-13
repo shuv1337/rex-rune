@@ -16,7 +16,6 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Read,
-    os::unix::io::AsRawFd,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -490,12 +489,19 @@ impl InstallChannel {
         let exe = std::env::current_exe().ok();
         let data_dir = xdg_data_dir();
         let os_release = fs::read_to_string("/etc/os-release").ok();
-        Self::detect_with(
+        let mut channel = Self::detect_with(
             crate::BUILD_CHANNEL,
             exe.as_deref(),
             &data_dir,
             os_release.as_deref(),
-        )
+        );
+        // `/etc/os-release` does not name Omarchy on every Omarchy system. What matters for
+        // the instructions is what is installed: its updater, and the pacman hook that
+        // refuses a direct `pacman -Syu`.
+        if let Self::Pacman { omarchy, .. } = &mut channel {
+            *omarchy = *omarchy || omarchy_installed(Path::new("/"));
+        }
+        channel
     }
 
     pub fn detect_with(
@@ -720,6 +726,18 @@ fn parse_channel_marker(marker_path: &Path, os_release: Option<&str>) -> Option<
         "nix" => InstallChannel::Nix,
         _ => InstallChannel::OtherPackage { channel, hint },
     })
+}
+
+/// Whether Omarchy's own files are under `root`: the pacman hook that refuses a direct system
+/// upgrade and points at `omarchy update`, or that command itself.
+pub fn omarchy_installed(root: &Path) -> bool {
+    [
+        "usr/share/libalpm/hooks/00-omarchy-update-guard.hook",
+        "usr/share/omarchy/bin/omarchy-update",
+        "usr/bin/omarchy-update",
+    ]
+    .iter()
+    .any(|path| root.join(path).is_file())
 }
 
 pub fn is_omarchy(os_release: Option<&str>) -> bool {
@@ -1147,16 +1165,14 @@ impl FileLock {
             .truncate(false)
             .open(path)
             .ok()?;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 { Some(Self { file }) } else { None }
+        file.try_lock().ok()?;
+        Some(Self { file })
     }
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        unsafe {
-            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.file.unlock();
     }
 }
 
@@ -1736,6 +1752,25 @@ mod tests {
             omarchy.guidance("0.6.1").command.as_deref(),
             Some("omarchy update")
         );
+
+        // An Omarchy system whose os-release only says Arch is known by what is installed:
+        // the hook that refuses `pacman -Syu`, or Omarchy's updater.
+        let root = temp.join("root");
+        assert!(!omarchy_installed(&root));
+        for marker in [
+            "usr/share/libalpm/hooks/00-omarchy-update-guard.hook",
+            "usr/share/omarchy/bin/omarchy-update",
+            "usr/bin/omarchy-update",
+        ] {
+            let root = temp.join(marker.replace('/', "-"));
+            let file = root.join(marker);
+            // A folder of that name is not the file.
+            fs::create_dir_all(&file).unwrap();
+            assert!(!omarchy_installed(&root), "a folder is not it: {marker}");
+            fs::remove_dir(&file).unwrap();
+            fs::write(&file, "").unwrap();
+            assert!(omarchy_installed(&root), "{marker}");
+        }
 
         // Deb marker
         fs::write(

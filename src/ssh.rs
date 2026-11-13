@@ -193,27 +193,6 @@ fn tunnels_directory() -> PathBuf {
     crate::platform::dirs::runtime()
 }
 
-/// Remove the socket directories of processes that are gone, which a crash or a kill leaves
-/// behind. Only `ssh-<pid>` directories whose process no longer exists are touched.
-fn sweep_stale_tunnels(directory: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix("ssh-"))
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if pid != std::process::id() && !crate::platform::process::exists(pid) {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
-}
-
 /// Finds the Rex socket on the other machine, trying in order: the path `rex server status`
 /// reports, the login user's own server in the runtime directory (Linux) or under
 /// Application Support (macOS), then a shared server's `/run/rex/server.sock` or FreeBSD's
@@ -252,21 +231,11 @@ impl Tunnel {
     /// Find the Rex socket on `target`, then forward it to a local socket and wait until the
     /// local end accepts connections.
     pub async fn open(target: &Target) -> Result<Tunnel> {
+        crate::platform::local::require_ssh()?;
         let remote = resolve(target).await?;
         let local = target.local_socket();
         if let Some(parent) = local.parent() {
-            // Every process's folder, then this one's: each ours alone, or no tunnel.
-            for directory in [parent.parent().unwrap_or(parent), parent] {
-                crate::platform::dirs::private(directory).with_context(|| {
-                    format!(
-                        "{} is not a private folder for the tunnel",
-                        directory.display()
-                    )
-                })?;
-            }
-            if let Some(all) = parent.parent() {
-                sweep_stale_tunnels(all);
-            }
+            crate::platform::local::prepare_tunnel_directory(parent).await?;
         }
         // Only this process's own earlier forward of the endpoint can be here.
         let _ = tokio::fs::remove_file(&local).await;
@@ -299,7 +268,7 @@ impl Tunnel {
             if let Some(status) = tunnel.child.try_wait()? {
                 bail!("{}", tunnel.exit_message(status));
             }
-            if tokio::net::UnixStream::connect(&tunnel.local).await.is_ok() {
+            if crate::platform::local::connect(&tunnel.local).await.is_ok() {
                 return Ok(tunnel);
             }
             ensure!(
@@ -478,7 +447,8 @@ async fn resolve(target: &Target) -> Result<String> {
     }
 }
 
-#[cfg(test)]
+// Tunnel fixtures execute Unix shells and depend on Unix socket paths.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -583,25 +553,6 @@ mod tests {
             own.as_str(),
             "another instance forwarding the same endpoint uses another directory"
         );
-    }
-
-    #[test]
-    fn stale_tunnel_directories_of_gone_processes_are_swept() {
-        let root = std::env::temp_dir().join(format!("rex-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        // Linux pids never exceed 4194304, so this process is gone.
-        let gone = root.join("ssh-4194305");
-        let own = root.join(format!("ssh-{}", std::process::id()));
-        let other = root.join("notes");
-        for d in [&gone, &own, &other] {
-            std::fs::create_dir_all(d).unwrap();
-            std::fs::write(d.join("x.sock"), b"").unwrap();
-        }
-        sweep_stale_tunnels(&root);
-        assert!(!gone.exists(), "a gone process's directory is removed");
-        assert!(own.exists(), "this process's directory stays");
-        assert!(other.exists(), "anything else is left alone");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
