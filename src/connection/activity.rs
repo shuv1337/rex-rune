@@ -138,8 +138,26 @@ impl StatusRecord {
 /// The name to show for a foreground process: the basename of the first of `script`,
 /// `argv0` and `name` that is present, without a login shell's leading `-`.
 pub fn program_name(foreground: &Value) -> Option<String> {
-    ["script", "argv0", "name"]
-        .iter()
+    basename_of(foreground, &["script", "argv0", "name"])
+}
+
+/// The executable running a foreground process, for its icon when its name has none (a
+/// script's interpreter): the basename of `name`, else `argv0`.
+pub fn executable_name(foreground: &Value) -> Option<String> {
+    basename_of(foreground, &["name", "argv0"])
+}
+
+/// A foreground script's path as the server gave it, with `/` between its parts, for the
+/// icons of scripts known by where they live (`copilot/npm-loader.js`).
+pub fn script_path(foreground: &Value) -> Option<String> {
+    foreground["script"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace('\\', "/"))
+}
+
+fn basename_of(foreground: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
         .filter_map(|key| foreground[*key].as_str())
         .find(|s| !s.is_empty())
         .map(|s| s.rsplit('/').next().unwrap_or(s).trim_start_matches('-'))
@@ -160,6 +178,10 @@ pub enum BlockEvent {
     /// server couldn't tell.
     Process {
         name: Option<String>,
+        /// The executable behind `name`: a script's interpreter, else the same program.
+        executable: Option<String>,
+        /// The script `name` was taken from, as a whole path.
+        script: Option<String>,
         pids: Vec<u64>,
         /// Foreground directory and the terminal's own shell, for display-only titles.
         place: Place,
@@ -236,6 +258,8 @@ pub fn parse_process(body: &Value) -> BlockEvent {
         .collect();
     BlockEvent::Process {
         name: program_name(foreground),
+        executable: executable_name(foreground),
+        script: script_path(foreground),
         pids,
         place: Place::parse(body),
     }

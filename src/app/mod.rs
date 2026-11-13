@@ -35,6 +35,7 @@ mod panel;
 mod panes;
 pub(crate) mod platform;
 mod popups;
+mod program_icons;
 mod recorder;
 mod remote;
 mod select_copy;

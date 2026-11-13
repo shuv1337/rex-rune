@@ -277,6 +277,11 @@ pub struct HostModel {
     pub activity: HashMap<String, BTreeMap<String, StatusRecord>>,
     /// Each terminal block's foreground program, when the server named one.
     pub programs: HashMap<String, String>,
+    /// The executable behind each block's foreground program (a script's interpreter), for
+    /// its icon only.
+    pub executables: HashMap<String, String>,
+    /// The path of each block's foreground script, for its icon only.
+    pub scripts: HashMap<String, String>,
     /// Each terminal block's foreground process and its ancestors, by pid.
     pub foreground: HashMap<String, Vec<u64>>,
     /// Each terminal block's title, as a program last set it, and the pid that set it.
@@ -357,7 +362,13 @@ impl HostModel {
                     }
                 }
             }
-            BlockEvent::Process { name, pids, place } => {
+            BlockEvent::Process {
+                name,
+                executable,
+                script,
+                pids,
+                place,
+            } => {
                 self.set_place(&block, place);
                 // A progress report belongs to the program in the foreground; one that ends
                 // without clearing its report (a crash, a kill) must not leave it on the tab.
@@ -372,6 +383,14 @@ impl HostModel {
                 match name {
                     Some(name) => self.programs.insert(block.clone(), name),
                     None => self.programs.remove(&block),
+                };
+                match executable {
+                    Some(executable) => self.executables.insert(block.clone(), executable),
+                    None => self.executables.remove(&block),
+                };
+                match script {
+                    Some(script) => self.scripts.insert(block.clone(), script),
+                    None => self.scripts.remove(&block),
                 };
                 if left || self.programs.get(&block) != was.as_ref() {
                     self.progress.remove(&block);
@@ -417,6 +436,8 @@ impl HostModel {
     fn forget_block(&mut self, block: &str) {
         self.activity.remove(block);
         self.programs.remove(block);
+        self.executables.remove(block);
+        self.scripts.remove(block);
         self.foreground.remove(block);
         self.titles.remove(block);
         self.places.remove(block);
@@ -1479,6 +1500,8 @@ async fn run_host(
                 m.activity.clear();
                 m.status_read.clear();
                 m.programs.clear();
+                m.executables.clear();
+                m.scripts.clear();
                 m.foreground.clear();
                 m.titles.clear();
                 m.places.clear();

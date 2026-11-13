@@ -452,6 +452,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                     key: format!("entry:{i}"),
                     surface: surface_id,
                     activity: entry.activity.as_ref(),
+                    program: entry.program,
                     label: &entry.label,
                     detail: &entry.detail,
                     tone: entry.tone,

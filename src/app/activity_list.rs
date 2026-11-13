@@ -1,8 +1,9 @@
 //! A read-only index of already-known tab activity. No queries or subscriptions.
 use super::{
-    activity::{TabActivity, blocked_word, program_icon, tab_activity},
+    activity::{TabActivity, blocked_word, tab_activity},
     notify::NoteTarget,
     panel::{Entry, Intent, PanelKind},
+    program_icons::ProgramIcon,
     theme::{accent, danger, muted, warning},
     workspace::Workspace,
 };
@@ -11,7 +12,7 @@ use rex_rune::connection::{
     activity::{ProgramState, time::Age},
 };
 use rex_rune::settings::ActivityView;
-use rune::{Icon, Tx};
+use rune::Tx;
 use std::time::{Duration, Instant};
 
 pub const ACTION: &str = "client.activity";
@@ -19,7 +20,7 @@ pub const COVERAGE: &str = "Reading activity…";
 pub const INCOMPLETE: &str = "Some activity could not be read.";
 
 pub struct Presentation {
-    pub icon: &'static Icon,
+    pub icon: &'static ProgramIcon,
     pub place: String,
     pub tone: u32,
     pub elapsed: Option<Elapsed>,
@@ -329,7 +330,7 @@ impl Workspace {
                 0
             };
             entry.activity = Some(Presentation {
-                icon: program_icon(activity.program.as_deref()),
+                icon: activity.icon(),
                 // The heading already supplies both parts; don't repeat them on every row.
                 place: if by_session { String::new() } else { place },
                 tone,

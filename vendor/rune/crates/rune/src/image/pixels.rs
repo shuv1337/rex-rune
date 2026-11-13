@@ -122,8 +122,9 @@ impl Pixels {
         (self.id, frame.generation)
     }
 
-    #[cfg(test)]
-    pub(crate) fn rgba(&self) -> Vec<u8> {
+    /// A copy of the pixels, RGBA row by row, for an app's tests of what it rasterizes.
+    #[doc(hidden)]
+    pub fn rgba(&self) -> Vec<u8> {
         self.frame.lock().unwrap().rgba.clone()
     }
 }

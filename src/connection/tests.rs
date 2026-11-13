@@ -545,6 +545,8 @@ fn unknown_states_kinds_and_events_stay_quiet() {
             "b".into(),
             BlockEvent::Process {
                 name: None,
+                executable: None,
+                script: None,
                 pids: Vec::new(),
                 place: Default::default()
             }
@@ -608,6 +610,8 @@ fn progress_reports_set_and_clear_a_blocks_progress() {
     // the shell comes back, the report goes with it; the same program keeps it.
     let process = |name: Option<&str>| activity::BlockEvent::Process {
         name: name.map(str::to_owned),
+        executable: name.map(str::to_owned),
+        script: None,
         pids: name.map(|_| vec![7]).unwrap_or_default(),
         place: Default::default(),
     };
@@ -646,6 +650,8 @@ fn progress_goes_when_another_process_of_the_same_name_takes_the_foreground() {
     let mut model = HostModel::default();
     let python = |pids: Vec<u64>| activity::BlockEvent::Process {
         name: Some("python".into()),
+        executable: Some("python".into()),
+        script: None,
         pids,
         place: Default::default(),
     };
@@ -671,6 +677,8 @@ fn progress_goes_with_the_process_not_just_its_name() {
     let mut model = HostModel::default();
     let python = |pids: &[u64]| BlockEvent::Process {
         name: Some("python".into()),
+        executable: Some("python".into()),
+        script: None,
         pids: pids.to_vec(),
         place: Default::default(),
     };
@@ -714,6 +722,48 @@ fn program_names_prefer_the_script_and_drop_login_dashes() {
     );
     assert_eq!(name(json!({"name":"nvim"})).as_deref(), Some("nvim"));
     assert_eq!(name(Value::Null), None);
+}
+
+#[test]
+fn a_scripts_executable_is_its_interpreter() {
+    let executable = |v: Value| activity::executable_name(&v);
+    assert_eq!(
+        executable(json!({"name":"node","script":"/home/u/.bun/bin/sq","argv0":"node"})).as_deref(),
+        Some("node")
+    );
+    assert_eq!(
+        executable(json!({"argv0":"/usr/bin/python3.12","script":"/u/tool"})).as_deref(),
+        Some("python3.12")
+    );
+    assert_eq!(
+        executable(json!({"name":"zsh","argv0":"-zsh"})).as_deref(),
+        Some("zsh")
+    );
+    assert_eq!(executable(Value::Null), None);
+
+    let mut model = HostModel::default();
+    let event = activity::parse_process(&json!({
+        "foreground": {"pid": 9, "name": "node", "argv0": "node", "script": "/u/bin/sq"}
+    }));
+    model.apply_block_event("s", "b".into(), event);
+    assert_eq!(model.programs["b"], "sq");
+    assert_eq!(model.executables["b"], "node");
+    assert_eq!(model.scripts["b"], "/u/bin/sq");
+    model.apply_block_event(
+        "s",
+        "b".into(),
+        activity::parse_process(&json!({"foreground": {}})),
+    );
+    assert!(
+        !model.executables.contains_key("b") && !model.scripts.contains_key("b"),
+        "the shell has no foreground"
+    );
+    let script = |v: Value| activity::script_path(&v);
+    assert_eq!(
+        script(json!({"script":"C:\\npm\\copilot\\npm-loader.js"})).as_deref(),
+        Some("C:/npm/copilot/npm-loader.js")
+    );
+    assert_eq!(script(json!({"script":"", "name":"zsh"})), None);
 }
 
 const OTHER: &str = "session:00000000-0000-0000-0000-000000000002";

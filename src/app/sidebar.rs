@@ -8,7 +8,7 @@ use super::{
     tab_icons,
     tabs::{TabAction, muted_mark, target_ring},
     theme::*,
-    widgets::{chrome_button, glyph},
+    widgets::{SESSION_TILE, chrome_button, glyph, program_tile},
     workspace::Workspace,
 };
 use rex_rune::connection::HostCommand;
@@ -185,11 +185,7 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
         .child(if s.settings.vertical_tabs {
             el()
         } else {
-            glyph(
-                &TERMINAL,
-                14.,
-                rgb(if selected { accent() } else { muted() }),
-            )
+            program_tile(s.session_icon(index, id), SESSION_TILE)
         })
         .child(
             text(label.to_owned())

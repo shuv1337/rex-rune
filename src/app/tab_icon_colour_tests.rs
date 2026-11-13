@@ -2,7 +2,12 @@
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::tab_icon_tests::{element, five_programs, settle};
 use super::*;
-use crate::app::{activity::tab_programs, tab_icons::*, theme::*};
+use crate::app::{
+    activity::{PaneProgram, tab_programs},
+    program_icons::{all, program_icon, shell},
+    tab_icons::*,
+    theme::*,
+};
 use rex_rune::settings::{ChromeTheme, interface::TabIconColor};
 
 const MODES: [TabIconColor; 4] = [
@@ -56,30 +61,34 @@ fn complete_colour_truth_table_and_focused_dedup_fallback_counts() {
         for count in [0, 1, 5] {
             let icons = icons_of(&tab_programs(model, &tab), count);
             let first = if focus == Some("block:e") {
-                "rex-git"
+                "git"
             } else {
-                "rex-terminal"
+                "shell"
             };
             assert_eq!(
-                icons.first().map(|i| i.icon.name),
+                icons.first().map(|i| i.icon.slug),
                 (count > 0).then_some(first)
             );
-            let names: std::collections::HashSet<_> = icons.iter().map(|i| i.icon.name).collect();
+            let names: std::collections::HashSet<_> = icons.iter().map(|i| i.icon.slug).collect();
             assert_eq!(names.len(), icons.len());
             assert_eq!(icons.len(), if count == 5 { 4 } else { usize::from(count) });
         }
     }
+    let named = |name: Option<&str>| PaneProgram {
+        name: name.map(str::to_owned),
+        executable: None,
+        script: None,
+    };
     for programs in [
         vec![],
-        vec![None],
-        vec![Some("mystery".into()), Some("zsh".into())],
+        vec![named(None)],
+        vec![named(Some("mystery")), named(Some("zsh"))],
     ] {
         for count in [0, 1, 5] {
             let icons = icons_of(&programs, count);
             assert_eq!(icons.len(), usize::from(count > 0));
             if count > 0 {
-                assert_eq!(icons[0].icon.name, "rex-terminal");
-                assert_eq!(tint(icons[0].icon), 0xa1edac);
+                assert!(std::ptr::eq(icons[0].icon, shell()));
             }
         }
     }
@@ -171,9 +180,9 @@ fn modes_change_only_real_glyph_colours_not_geometry_content_or_channels() {
                             assert_eq!(has(&rt, &key), count > 0);
                             for (i, icon) in icons.iter().enumerate() {
                                 let expected = match mode {
-                                    TabIconColor::Always => tint(icon.icon),
-                                    TabIconColor::ActiveTab if active => tint(icon.icon),
-                                    TabIconColor::ActivePane if active && i == 0 => tint(icon.icon),
+                                    TabIconColor::Always => icon.icon.tint,
+                                    TabIconColor::ActiveTab if active => icon.icon.tint,
+                                    TabIconColor::ActivePane if active && i == 0 => icon.icon.tint,
                                     _ => {
                                         if active {
                                             ink()
@@ -247,7 +256,7 @@ fn sidebar_on_screen_requires_host_session_and_window_not_colliding_ids() {
                         TabIconColor::Never => false,
                     };
                     let color = if colored {
-                        tint(crate::app::activity::program_icon(Some(name)))
+                        program_icon(Some(name), None, None).tint
                     } else if active {
                         ink()
                     } else {
@@ -360,7 +369,7 @@ fn colour_search_anchored_keyboard_save_relaunch_and_inert_count_preview() {
                         let e = element(&rt, &key);
                         assert_eq!(e.rect, e.visible, "{size:?} {key}");
                         let expected = if in_color(mode, active, j == 0) {
-                            tint(crate::app::activity::program_icon(Some(name)))
+                            program_icon(Some(name), None, None).tint
                         } else if active {
                             ink()
                         } else {
@@ -417,15 +426,14 @@ fn glyph_tints_contrast_on_supported_tab_and_preview_surfaces() {
         ] {
             for (state, alpha) in [("plain", 0.), ("hover", 0.05), ("selected", 0.11)] {
                 let background = over(base, alpha);
-                for program in [
-                    "claude", "codex", "opencode", "pi", "nvim", "git", "cargo", "ssh", "zsh",
-                ] {
-                    let foreground = rgb(tint(crate::app::activity::program_icon(Some(program))));
+                for icon in all() {
+                    let foreground = rgb(icon.tint);
                     let contrast = (luminance(foreground) + 0.05) / (luminance(background) + 0.05);
                     assert!(
                         contrast >= 3.,
-                        "{} {surface} {state} {program}: {contrast}",
-                        chrome.name()
+                        "{} {surface} {state} {}: {contrast}",
+                        chrome.name(),
+                        icon.slug
                     );
                 }
             }

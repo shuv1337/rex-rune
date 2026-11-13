@@ -488,6 +488,8 @@ pub struct Entry {
     pub group_create: Option<(Intent, String)>,
     /// The colour `detail` is drawn in when it is an activity word and not a plain hint.
     pub tone: Option<u32>,
+    /// A session's program, drawn as its tile before the label.
+    pub program: Option<&'static super::program_icons::ProgramIcon>,
 }
 impl Entry {
     pub fn new(
@@ -514,6 +516,7 @@ impl Entry {
             group_icon: None,
             group_create: None,
             tone: None,
+            program: None,
         }
     }
 
@@ -923,6 +926,7 @@ impl Workspace {
                     }
                     e.current = self.active == index
                         && host.model.selected.as_ref() == Some(&session.session_id);
+                    e.program = Some(self.session_icon(index, &session.session_id));
                     // As in the sidebar: the session on screen speaks through its tabs; any
                     // other says the most pressing thing one of its tabs would.
                     if sessions_only

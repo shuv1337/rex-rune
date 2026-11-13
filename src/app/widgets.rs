@@ -1,10 +1,28 @@
 //! Building blocks on the Midnight tokens: chrome icon buttons, pill buttons, list rows with a
 //! sliding highlight, scroll thumbs and hint lines.
-use super::{keycaps::keycaps, theme::*, workspace::Workspace};
+use super::{keycaps::keycaps, program_icons::ProgramIcon, theme::*, workspace::Workspace};
 use rune::{Color, Cursor, El, Icon, Live, LiveText, ScrollPos, Tx, col, el, icon, row, text};
 
 pub fn glyph(i: &'static Icon, size: f32, color: Color) -> El {
     icon(i, size).color(color)
+}
+
+/// A program's glyph in one colour, in a `slot`-point square: the set's glyphs fill their
+/// square, where Rex's own icons leave a margin, so it is drawn a little smaller.
+pub fn program_glyph(program: &'static ProgramIcon, slot: f32, color: Color) -> El {
+    el().size(slot, slot).center().child(
+        icon(&program.glyph, (slot * 0.87).round())
+            .color(color)
+            .icon_one_color(),
+    )
+}
+
+/// The tile before a session's name in the sidebar and the switcher.
+pub const SESSION_TILE: f32 = 18.;
+
+/// A program's tile in its own colours, `size` points wide.
+pub fn program_tile(program: &'static ProgramIcon, size: f32) -> El {
+    icon(&program.tile, size)
 }
 
 /// Official artwork, shared by the identity chip and empty state. Keep the same
@@ -116,6 +134,8 @@ pub fn pill(
 
 pub struct Row<'a> {
     pub activity: Option<&'a super::activity_list::Presentation>,
+    /// A session's program, drawn as its tile before the label.
+    pub program: Option<&'static ProgramIcon>,
     pub key: String,
     /// The surface's own highlight id, so it slides within one list only.
     pub surface: &'a str,
@@ -242,8 +262,11 @@ pub fn list_row(
             el()
         }));
     }
+    if let Some(program) = r.program {
+        e = e.child(program_tile(program, SESSION_TILE));
+    }
     if let Some(activity) = r.activity {
-        e = e.child(glyph(activity.icon, 15., rgb(muted())));
+        e = e.child(program_glyph(activity.icon, 15., rgb(muted())));
     }
     let label = text(r.label.to_owned())
         .font(if r.selected { medium(13.) } else { ui(13.) })
