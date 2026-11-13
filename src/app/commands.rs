@@ -742,6 +742,14 @@ impl Workspace {
             // It folds the sidebar's list, so there is nothing to see with the sidebar closed.
             .enabled(self.sidebar.is_open() && self.other_hosts_expanded())
             .keywords("sessions sidebar fold"),
+            Command::action(
+                "host.stop_server",
+                G,
+                "Stop server…",
+                super::server_page::STOP,
+            )
+            .enabled(self.can_stop_server())
+            .destructive(),
             Command::new(
                 "host.remove",
                 G,

@@ -571,7 +571,11 @@ impl Workspace {
         for queued in client_actions {
             // File dialogs need this person's own key or click, whatever a host returns.
             if super::actions::find(&queued.action.action).is_some_and(|s| s.requires_person()) {
-                self.inform("Returned client action skipped: a host cannot start a download or open the path browser.");
+                self.inform(if queued.action.action == super::server_page::STOP {
+                    "Returned client action skipped: only the person at this computer can stop a server."
+                } else {
+                    "Returned client action skipped: a host cannot start a download or open the path browser."
+                });
                 continue;
             }
             // Focus events following the reply may legitimately move to another pane.
@@ -1760,7 +1764,10 @@ impl Workspace {
         panel.back = self
             .panel
             .take()
-            .filter(|p| matches!(p.kind, PanelKind::Picker(true)))
+            .filter(|p| {
+                matches!(p.kind, PanelKind::Picker(true))
+                    || method == "server.stop" && matches!(p.kind, PanelKind::Settings)
+            })
             .map(|mut p| {
                 p.rename = None;
                 Box::new(p)
@@ -2112,6 +2119,14 @@ impl Workspace {
             PanelKind::Confirm {
                 method, payload, ..
             } => {
+                if method == "server.stop" {
+                    let target = self.panel.as_ref().and_then(|p| p.stop_server.clone());
+                    self.cancel_panel(tx);
+                    if let Some(target) = target {
+                        self.confirm_stop_server(target);
+                    }
+                    return;
+                }
                 let target = self.panel.as_ref().and_then(|p| p.target.clone());
                 let session = self.panel.as_ref().and_then(|p| p.session.clone());
                 let tab = self.panel.as_ref().and_then(|p| p.tab.clone());

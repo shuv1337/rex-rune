@@ -11,6 +11,8 @@ mod keymap_tests;
 mod navigation_tests;
 #[path = "perform_tests.rs"]
 mod perform_tests;
+#[path = "server_controls_tests.rs"]
+mod server_controls_tests;
 #[path = "server_info_tests.rs"]
 mod server_info_tests;
 #[path = "status_sweep_tests.rs"]

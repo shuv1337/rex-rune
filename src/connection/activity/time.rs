@@ -1,4 +1,4 @@
-//! Local age of a status, not a server uptime or a clock-skew estimate.
+//! Local status ages and shared bounded RFC 3339 elapsed time; not a clock-skew estimate.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How far ahead of this client's clock a report may claim to be and still count as now.
@@ -24,17 +24,8 @@ impl Age {
     }
 
     pub fn read_back(value: &str, now: Instant, wall: SystemTime) -> Option<Self> {
-        let at = timestamp(value)?;
-        let initial = match wall.duration_since(at) {
-            Ok(age) => age,
-            // Clocks differ a little: a report from the near future is from just now. One
-            // from further ahead means the clocks disagree, and then no age can be trusted:
-            // an old request must not be made to look fresh.
-            Err(ahead) if ahead.duration() <= AHEAD => Duration::ZERO,
-            Err(_) => return None,
-        };
-        // Nothing waits this long; it is a wrong clock or a made-up time.
-        (initial <= OLDEST).then_some(Self {
+        let initial = reported_elapsed(value, wall)?;
+        Some(Self {
             observed: now,
             initial,
             reported: true,
@@ -47,8 +38,19 @@ impl Age {
     }
 }
 
-/// RFC 3339 without a new dependency. Server settings intentionally keep timestamps as
-/// strings, so there is no parser there to share. Validate before civil-date conversion;
+/// Elapsed time from a server's clock to this client's. Shared by Activity and Server.
+/// A minute of future skew counts as now; more skew or over a year is unknown.
+pub fn reported_elapsed(value: &str, wall: SystemTime) -> Option<Duration> {
+    let at = timestamp(value)?;
+    let age = match wall.duration_since(at) {
+        Ok(age) => age,
+        Err(ahead) if ahead.duration() <= AHEAD => Duration::ZERO,
+        Err(_) => return None,
+    };
+    (age <= OLDEST).then_some(age)
+}
+
+/// RFC 3339 without a new dependency. Validate before civil-date conversion;
 /// reject leap seconds (unknown age), and truncate sub-nanosecond precision.
 fn timestamp(raw: &str) -> Option<SystemTime> {
     let b = raw.as_bytes();

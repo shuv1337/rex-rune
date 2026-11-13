@@ -87,6 +87,7 @@ const IDS: &[&str] = &[
     "host.pair_device",
     "host.reconnect",
     "host.collapse_others",
+    "host.stop_server",
     "host.remove",
     "view.sidebar",
     "view.tab_position",
@@ -407,8 +408,8 @@ fn a_search_still_finds_sessions_and_tabs_after_the_commands() {
     // Commands come first when both match.
     search(&mut ws, "server");
     let groups: Vec<String> = ws.entries().into_iter().map(|e| e.group).collect();
-    assert_eq!(groups, ["Commands", "Tabs · test-0 / s-label"]);
-    assert_eq!(labels(&ws), ["Add host…", "server"]);
+    assert_eq!(groups, ["Commands", "Commands", "Tabs · test-0 / s-label"]);
+    assert_eq!(labels(&ws), ["Stop server…", "Add host…", "server"]);
     std::fs::remove_file(&ws.settings_path).ok();
 }
 

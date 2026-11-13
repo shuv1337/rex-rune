@@ -22,6 +22,8 @@
 
 ### Added
 
+- **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
+
 - **Pair device (partial M3.3):** Settings → Server and Commands can show a QR code of the connected host's sanitized, last-reported Tailscale HTTPS address. Local-only, no server requests; the exact address stays visible, and an overlong address falls back to text. Encoder matrices and rendered captures are independently checked; phone acceptance is not yet verified. See [checks and limits](docs/parity-2026-11/M3.3-pair-device.md).
 
 - **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, and notifications are not available there yet. See [Building on macOS](README.md#building-on-macos).

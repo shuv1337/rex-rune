@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""M3.3 Server settings on two private Rex servers and private Xvfb.
+"""M3.3 Server settings and confirmed Stop on two private Rex servers/private Xvfb.
 
 Requires built REX_BIN, Rex API 13, Xvfb, openbox, xdotool, ImageMagick,
 Tesseract, zbarimg, dbus-daemon and Pillow (the shared acceptance helper imports it). No native copy,
 personal display/server/clipboard, or network Tailscale. Artifacts stay under
 ~/.cache/agent-ws. Observer API call counts are NOT client wire request counts.
 """
+import argparse
 import collections
 import importlib.util
 import json
@@ -17,9 +18,13 @@ import subprocess
 import tempfile
 import time
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--controls-only", action="store_true", help="run Stop/uptime acceptance without the older build/process OCR tour")
+controls_only = parser.parse_args().controls_only
+
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-rune"))
-evidence = Path.home() / ".cache/agent-ws/rex-m33-pair"
+evidence = Path.home() / ".cache/agent-ws/rex-m33-controls"
 evidence.mkdir(parents=True, exist_ok=True)
 work = Path(tempfile.mkdtemp(prefix="native-", dir=evidence))
 for tool in ("rex", "Xvfb", "openbox", "xdotool", "import", "magick", "tesseract", "zbarimg", "dbus-daemon"):
@@ -40,7 +45,17 @@ spec.loader.exec_module(accept)
 counts = collections.Counter()
 
 
+def private_endpoint(endpoint):
+    if not endpoint.startswith("unix://"):
+        raise RuntimeError("only an owned private Unix endpoint is allowed")
+    path = Path(endpoint.removeprefix("unix://")).resolve()
+    if not path.is_relative_to(work.resolve()):
+        raise RuntimeError("endpoint must be inside this run's scratch directory")
+
+
 def api(index, method, **payload):
+    private_endpoint(endpoints[index])
+    assert method != "server.stop", "Stop must come from the confirmed UI, not the observer"
     counts[f"{index}:{method}"] += 1
     return json.loads(subprocess.check_output([
         "rex", "--autostart=false", "--server", endpoints[index], "api", "call", method,
@@ -62,7 +77,7 @@ def click(x, y):
     time.sleep(.3)
 
 
-def capture(name):
+def capture(name, page=True):
     desk.capture(window, name)
     # OCR the actual page, enlarged so small version punctuation remains distinguishable.
     # Keep the original capture too; no fuzzy text matching or assertion retries.
@@ -70,6 +85,8 @@ def capture(name):
     width, height = int(geometry["WIDTH"]), int(geometry["HEIGHT"])
     panel_width = min(816, width * .92)
     left = round((width - panel_width) / 2 + min(204, panel_width * .3) + 1)
+    if not page:
+        left = 0
     ocr = work / "captures" / f"{name}-ocr.png"
     subprocess.run(["magick", str(work / "captures" / f"{name}.png"),
                     "-crop", f"{width-left}x{height-64}+{left}+64", "-resize", "300%",
@@ -110,6 +127,7 @@ try:
     assert os.environ["DBUS_SESSION_BUS_ADDRESS"]
     print("Artifacts:", work, flush=True)
     for i in range(2):
+        private_endpoint(endpoints[i])
         servers.append(subprocess.Popen([
             "rex", "server", "run", "--listen", endpoints[i], "--restore=false", "--config", "/dev/null",
             "--state-dir", str(work / f"rex-state-{i}")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
@@ -140,8 +158,19 @@ try:
             ["Alpha private", "Beta private"], endpoints)],
         "sessions": dict(zip(endpoints, sessions))}))
     desk = accept.Desktop()
+    # Record and refuse every Rex CLI invocation by the client. Observer calls use the
+    # original PATH. Attachment/stop need only the socket, never a server-starting CLI.
+    rex_calls = work / "client-rex-calls"
+    rex_stub = Path(desk.stub) / "rex"
+    rex_stub.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + str(rex_calls) + "\nexit 1\n")
+    rex_stub.chmod(0o755)
     app, window = desk.launch(sessions[0], config, size="1024x700", log=(work / "client.log").open("w"))
-    for i, label in enumerate(["Alpha private", "Beta private"]):
+    if controls_only:
+        desk.key("ctrl+k")
+        desk.type("Beta terminal")
+        desk.key("Return")
+        time.sleep(1.)
+    for i, label in ([] if controls_only else enumerate(["Alpha private", "Beta private"])):
         if i:
             desk.key("ctrl+k")
             desk.type("Beta terminal")
@@ -223,16 +252,92 @@ try:
     wait(lambda: all((work / f"input-{i}").exists() for i in range(2)), "recorders did not finish")
     received = [(work / f"input-{i}").read_bytes() for i in range(2)]
     assert received == [b"", b""], received
-    servers[1].terminate()
-    servers[1].wait(timeout=5)
-    time.sleep(.8)
+    # All pointers and keys still go to this run's private Xvfb. Never copy.
+    # Refuse a non-private target before any destructive UI activation.
+    private_endpoint(endpoints[1])
+    desk.x("windowsize", window, 1024, 700)
+    time.sleep(.5)
+    desk.key("ctrl+comma")
+    search("Running for")
+    words = capture("controls-uptime")
+    assert re.search(r"Running for\s+(now|[0-9]+[mhd])\b", words), words
+    status_before_stop = api(1, "server.status")
+    view_before_stop = api(1, "session.view", session_id=sessions[1])
+
+    def press_button(word, name):
+        # Locate the danger-coloured control inside the fixed 1024x700 page/button
+        # region. OCR drops tinted button glyphs unpredictably; never guess a word.
+        # Cancellation is the neutral control immediately left of this danger button.
+        from PIL import Image
+        desk.capture(window, name)
+        im = Image.open(work / "captures" / f"{name}.png").convert("RGB")
+        box = (785, 110, 905, 670) if "row" in name else (550, 300, 770, 450)
+        pixels = []
+        for y in range(box[1], box[3]):
+            for x in range(box[0], box[2]):
+                r, g, b = im.getpixel((x, y))
+                if r > 90 and r > g * 1.3 and r > b * 1.1:
+                    pixels.append((x, y))
+        assert pixels, "no destructive control in the expected private-window region"
+        left, right = min(x for x, y in pixels), max(x for x, y in pixels)
+        top, bottom = min(y for x, y in pixels), max(y for x, y in pixels)
+        assert 70 <= right - left <= 120 and 20 <= bottom - top <= 40
+        click(left - 45 if word == "Cancel" else (left + right) // 2, (top + bottom) // 2)
+
+    search("Stop server")
+    press_button("Stop", "controls-stop-row")
+    words = " ".join(capture("controls-confirm-cancel", page=False).split())
+    for phrase in ("Beta private", "Every program", "Other clients", "will not start it again"):
+        assert phrase in words, words
+    press_button("Cancel", "controls-cancel-button")
+    assert servers[1].poll() is None, "Cancel stopped the server"
+    assert api(1, "server.status")["session_count"] == status_before_stop["session_count"]
+    assert api(1, "session.view", session_id=sessions[1]) == view_before_stop
+    press_button("Stop", "controls-stop-row-again")
+    desk.key("Escape")
+    assert servers[1].poll() is None, "Escape stopped the server"
+    assert api(1, "session.view", session_id=sessions[1]) == view_before_stop
+    press_button("Stop", "controls-stop-row-final")
+    press_button("server", "controls-confirm-stop")  # the destructive button, right of Cancel
+    wait(lambda: servers[1].poll() is not None, "confirmed private server did not exit")
+    # Observe beyond the maximum reconnect interval. Ordinary reconnect must not start Rex.
+    time.sleep(10)
+    assert not Path(endpoints[1].removeprefix("unix://")).exists()
+    private_rex = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            env = (proc / "environ").read_bytes().split(b"\0")
+            cmd = (proc / "cmdline").read_bytes().split(b"\0")
+            if f"HOME={work / 'home'}".encode() in env and b"server" in cmd and (b"run" in cmd or b"start" in cmd):
+                private_rex.append(int(proc.name))
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            pass
+    assert private_rex == [servers[0].pid], private_rex
+    assert not rex_calls.exists(), "the client attempted to invoke Rex CLI"
+    assert api(0, "server.status")["session_count"] == 1, "other host changed"
+    desk.key("Escape", "Escape")
+    desk.x("windowsize", window, 640, 480)
+    time.sleep(.5)
     desk.key("ctrl+comma")
     search("Server")
     words = capture("minimum-disconnected")
+    assert re.search(r"Connection\s+disconnected\b", words), words
+    search("Running for")
+    words = capture("controls-no-uptime")
+    assert not re.search(r"Running for\s+(now|[0-9]+[mhd])\b", words), words
+    search("Server")
+    words = capture("minimum-disconnected-final")
+    print("PASS uptime; Cancel/Escape preserve private sessions; confirmed Stop exits Beta; disconnected; no replacement server; Alpha unchanged", flush=True)
     assert "Disconnected:" in words and "last reported" in words, words
-    (work / "results.json").write_text(json.dumps({"records": records,
+    (work / "results.json").write_text(json.dumps({"controls_only": controls_only, "records": records,
         "observer_api_calls": dict(counts), "client_wire_requests": "not intercepted",
         "pair": pair_results,
+        "stop": {"pid": servers[1].pid, "exit": servers[1].returncode,
+                 "remaining_private_servers": private_rex, "cancel_sessions_unchanged": True,
+                 "escape_sessions_unchanged": True, "client_rex_cli_invocations": 0,
+                 "no_replacement_after_seconds": 10},
         "native_clipboard": "not used", "pty_input_hex": [data.hex() for data in received]}, indent=2))
     print("PASS 640x480 current host and disconnected last-reported facts; both PTYs empty; no native clipboard", flush=True)
 finally:
