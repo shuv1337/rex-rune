@@ -663,7 +663,8 @@ impl Camera {
         Some(Self { dir, gpu, painter })
     }
 
-    pub(super) fn snap(&mut self, rt: &mut Runtime<Workspace>, name: &str) {
+    /// Writes the picture, and returns its RGBA rows for a test to measure.
+    pub(super) fn snap(&mut self, rt: &mut Runtime<Workspace>, name: &str) -> Vec<u8> {
         let (w, h) = (
             (rt.viewport.0 * rt.env.scale).round() as u32,
             (rt.viewport.1 * rt.env.scale).round() as u32,
@@ -679,7 +680,9 @@ impl Camera {
         target.copy(&mut encoder);
         queue.submit([encoder.finish()]);
         let path = self.dir.join(format!("{name}.png"));
-        rune::render::write_png(&path, w, h, &target.read(device)).unwrap();
+        let pixels = target.read(device);
+        rune::render::write_png(&path, w, h, &pixels).unwrap();
+        pixels
     }
 }
 

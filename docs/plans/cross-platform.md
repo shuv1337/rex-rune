@@ -1,6 +1,6 @@
 # Cross-platform Rex: how far from a macOS and a Windows source build
 
-Exploratory study, written 2026-11-12 (PST) against `master` at `20f64b4` (Rex Linux 0.7.5, Rune at `d70929a`, `ghostty-vt` 0.8.0 on Ghostty `83fb956`). Status: **findings and a proposed order of work; nothing here is implemented.** Signing, notarization and publishing are out of scope.
+Exploratory study, written 2026-11-12 (PST) against `master` at `20f64b4` (Rex Linux 0.7.5, Rune at `d70929a`, `ghostty-vt` 0.8.0 on Ghostty `83fb956`). Status: **findings and a proposed order of work.** Items marked **Done** below have been implemented since; the others are not tracked here. Signing, notarization and publishing are out of scope.
 
 The question: Rex ships for Linux only. Rune is built for cross-platform apps. What would it take for someone to clone the repository on macOS, then on Windows, follow documented steps, run `cargo build`, and get a client that connects to a Rex server and runs terminal sessions?
 
@@ -85,7 +85,7 @@ What Rune does not offer, so Rex must supply per platform:
 - **Desktop notifications.** There is no notification module.
 - **Showing a file in the file manager.** `Tx::open_url` takes only `http:`, `https:` and `mailto:` links.
 - **The primary selection.** That is an X11 and Wayland idea; macOS and Windows have none.
-- **A public list of installed font families.** `installed_family_files` is private to the text module (`src/text/system_fonts.rs:150`).
+- **A public list of installed font families.** `installed_family_files` is private to the text module (`src/text/system_fonts.rs:150`). **Done (M7):** the vendored Rune makes it public and adds `installed_families()`, which says which families are fixed-pitch.
 
 ## 3. Where Rex is tied to Linux
 
@@ -114,7 +114,7 @@ The source has almost no platform gates today: one `#[cfg(unix)]` (`src/ssh.rs:2
 | Updater: lock | `src/update.rs:1116` (`flock`) | Works | Compile error. `std::fs::File::try_lock` replaces it on every platform |
 | Updater: installer | `src/update/installer.rs` (receipt, `~/.local` layout, `desktop-file-install` at `:537`, glibc check at `:307`) | glibc call is a compile error. Otherwise inert: a source build is channel `Source` and never installs | 16 compile errors; inert for the same reason |
 | Restart after update | `src/main.rs:53-54` (`exec`) | Works | Compile error |
-| Fonts | `src/app/fonts.rs:61` (`fc-match`), `:146` (`fc-list`) | Works only if Homebrew's fontconfig is on `PATH`, which an app started from Finder does not have. Without it, only the bundled IBM Plex Mono and Inter | No fontconfig: bundled fonts only |
+| Fonts | `src/app/fonts.rs:61` (`fc-match`), `:146` (`fc-list`) | Works only if Homebrew's fontconfig is on `PATH`, which an app started from Finder does not have. Without it, only the bundled IBM Plex Mono and Inter. **Done (M7):** Core Text through Rune, behind `src/app/platform/fonts.rs` | No fontconfig: bundled fonts only. **Done in code (W11, shared with M7):** DirectWrite through the same path; its tests run in Windows CI, the window has not been looked at |
 | Notifications | `src/app/notify.rs:181,294` (D-Bus) | Compiles. No session bus, so Settings reports the service unavailable | Same |
 | Show in folder | `src/app/downloads.rs:747` (`xdg-open`), `:767-781` (`FileManager1`) | Compiles, then fails | Same |
 | Open a link | `src/app/workspace.rs:822` (`xdg-open`) | Compiles, then fails | Same |
@@ -173,7 +173,7 @@ Build requirements met along the way:
 ### What did not
 
 - **The default host is offline**, because the default endpoint is the Linux runtime path.
-- **Prompt glyphs drew as boxes** when fontconfig was not on `PATH`: the saved Nerd Font could not be found and IBM Plex Mono has no such glyphs. With `/opt/homebrew/bin` on `PATH`, `--font Menlo` resolved. `SF Mono` is not visible to fontconfig at all.
+- **Prompt glyphs drew as boxes** when fontconfig was not on `PATH`: the saved Nerd Font could not be found and IBM Plex Mono has no such glyphs. With `/opt/homebrew/bin` on `PATH`, `--font Menlo` resolved. `SF Mono` is not visible to fontconfig at all. **Done (M7):** with `PATH=/usr/bin:/bin` the picker lists Menlo, SF Mono and the installed Nerd Fonts, a missing family draws in SF Mono, and the bundled Symbols Nerd Font draws prompt glyphs ([record](../parity-2026-11/M7-fonts.md)).
 - **The window has no close, minimize or zoom buttons** (the accessibility API reports none). Rex's own × and drag region are drawn, and the accessibility API could resize the window. Nothing was clicked or dragged by hand. Rex's resize bands call `drag_resize_window`, which winit answers with "not supported" on macOS, so resizing by an edge may not work.
 - **Notifications** report unavailable, and "Show in folder" and opening links fail, as the table says.
 
@@ -202,7 +202,7 @@ In dependency order. All of it is Rex code.
 | M4 | Build documentation: Rust 1.96, Zig 0.17.x, Xcode tools, `brew install fontconfig` as the interim font step, and how to name the socket | S | Yes |
 | M5 | CI: a macOS job that checks and builds (section 7) | S | Yes, or it will break again within a week |
 | M6 | Tests: gate the installer tests to Linux, fix the path fixtures | S to M | For CI to run tests, not for the build |
-| M7 | Fonts without fontconfig: list and resolve families through fontique (Core Text). Either a direct dependency or a small Rune patch to expose its lookup | M | No. Bundled fonts and the Homebrew route work. Needed before anyone starts it from Finder |
+| M7 | Fonts without fontconfig: list and resolve families through fontique (Core Text). Either a direct dependency or a small Rune patch to expose its lookup. **Done:** a small Rune patch, SF Mono then Menlo for a missing family, and a bundled Symbols Nerd Font ([record](../parity-2026-11/M7-fonts.md)) | M | No. Bundled fonts and the Homebrew route work. Needed before anyone starts it from Finder |
 | M8 | Window chrome: a Rune `Titlebar` with traffic lights on macOS in place of the borderless window | M | Probably. Depends on whether edge resizing works today, which needs a hands-on check |
 | M9 | Mac shortcuts: stop folding Command into Ctrl on macOS, add ⌘ defaults (⌘T, ⌘W, ⌘C, ⌘V, ⌘K), decide what Option sends | M | No. Control-key defaults work |
 | M10 | Open links and "Show in folder" through `open` and `open -R` | S | No |
@@ -251,7 +251,7 @@ None of this was run. It follows from the code.
 - **Paths.** With `HOME` unset, settings, update state and download records resolve to paths relative to the working folder.
 - **Random ids.** `/dev/urandom` does not exist, so every upload and download fails at its first step.
 - **Downloads.** The store's safety argument rests on directory descriptors and `O_NOFOLLOW`. Windows needs its own version (a directory handle, reparse-point checks, `CREATE_NEW`, a move that does not replace), and the name sanitizer must also reject Windows' reserved characters and device names. Until then downloads should be off on Windows, not half working.
-- **Fonts.** No fontconfig, so only the bundled families; Nerd Font glyphs draw as boxes.
+- **Fonts.** No fontconfig, so only the bundled families; Nerd Font glyphs draw as boxes. **Shared part done (M7):** families are listed and resolved through DirectWrite by the code macOS runs, with Cascadia Mono, then Consolas, for a missing family, and the bundled Symbols Nerd Font draws prompt glyphs. The Windows CI job runs the font tests, including a DirectWrite listing and lookup of Consolas; the client's window has not been looked at on Windows.
 - **Notifications.** D-Bus is absent. Toasts need the WinRT API and, for an unpackaged program, a registered application id.
 - **Links and folders.** `xdg-open` does not exist.
 - **The updater.** Inert in a source build. "Restart to update" has nothing to restart into.
@@ -274,7 +274,7 @@ Ordered by dependency. W1 comes first because it can end the effort early.
 | W8 | Named-pipe transport and default endpoint for a local server | S to M | Rex | Only for a server on the same PC |
 | W9 | `ssh://` hosts: choose loopback TCP or a Unix socket, then test on a real machine | M | Rex | For most people, yes: it is the common way to reach a Linux box |
 | W10 | Download store for Windows, with Windows name rules | M | Rex | No |
-| W11 | Fonts through fontique (DirectWrite); shared with M7 | M | Rex, perhaps a small Rune patch | No, but boxes for prompt glyphs will be the first complaint |
+| W11 | Fonts through fontique (DirectWrite); shared with M7. **Shared part done with M7**; what is left is running it on Windows and checking the stand-ins and catalog there | M | Rex, perhaps a small Rune patch | No, but boxes for prompt glyphs will be the first complaint |
 | W12 | Window chrome on Rune's `Titlebar`; shared design with M8 | M | Rex | Unknown until it runs |
 | W13 | Links, "Show in folder", notifications | S, S, M | Rex | No |
 | W14 | Tests and probes on Windows | M to L | Rex | No |
@@ -301,7 +301,7 @@ Today the Linux calls are spread through the files that use them. Gating each ca
 | --- | --- |
 | `notify` | The D-Bus back end. The seam exists: `trait Backend` at `src/app/notify/worker.rs:55` |
 | `open` | Links, folders and "Show in folder": `workspace.rs:822`, `downloads.rs:747-792` |
-| `fonts` | Listing and resolving families: `fonts.rs:54-87,143-155` |
+| `fonts` | Listing and resolving families: `fonts.rs:54-87,143-155`. **Done (M7):** `src/app/platform/fonts.rs` |
 | `selection` | The primary selection: `select_copy.rs:133-210`. Absent off Linux, and its setting hidden there |
 | `chrome` | The window options and resize bands: `mod.rs:69-84,315-319` |
 

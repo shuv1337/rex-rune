@@ -1232,9 +1232,39 @@ fn a_terminal_font_that_is_not_installed_says_so_on_its_own_row() {
     settle(&mut rt);
     assert_eq!(rt.state.settings.font_family, "Hack Nerd Font Mono");
     assert!(!has(&rt, "font-missing"));
-    // One fontconfig has no family for, saved in the file, does.
+    // One the installed families do not have, saved in the file, does.
     rt.update(|s, _| s.settings.font_family = "Gone Mono".into());
     settle(&mut rt);
     assert!(has(&rt, "font-missing"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_missing_terminal_font_names_the_platform_family_drawn_in_its_place() {
+    // Where the platform has a monospaced family of its own (macOS, Windows), the grid uses
+    // it, and Settings says which instead of the bundled font.
+    let mut rt = settings_on(TERMINAL, |ws| ws.stand_in_family = Some("Menlo"));
+    assert!(has(&rt, "font-missing"));
+    assert_eq!(
+        element(&rt, "font-drawn").text.as_deref(),
+        Some("JetBrainsMono Nerd Font isn't installed, so terminals use Menlo.")
+    );
+    let chip = element(&rt, "font-missing");
+    let why = chip.help.as_deref().unwrap_or_default();
+    assert!(
+        why.contains(crate::app::platform::fonts::NOT_FOUND)
+            && why.contains(&crate::app::fonts::stand_in_words()),
+        "{why}"
+    );
+    tap(&mut rt, "font-choose");
+    type_text(&mut rt, "hack");
+    press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert_eq!(
+        element(&rt, "font-drawn").text.as_deref(),
+        Some(
+            "Hack Nerd Font Mono is saved and applies when you reopen the client. Until then terminals use Menlo."
+        )
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

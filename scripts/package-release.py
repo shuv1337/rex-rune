@@ -96,7 +96,8 @@ def main():
         stage = Path(temp) / name
         (stage / "bin").mkdir(parents=True)
         shutil.copy2(binary, stage / "bin/rex-rune")
-        shutil.copytree(root / "resources", stage / "resources")
+        # The binary embeds the symbols font; its license and provenance go under licenses/.
+        shutil.copytree(root / "resources", stage / "resources", ignore=shutil.ignore_patterns("*.ttf"))
         # The pacman package's update helper checks packages against this certificate.
         shutil.copy2(root / "packaging/keys/rex-linux-archive-key.asc", stage / "resources/pacman/archive-key.asc")
         (stage / "scripts").mkdir()
@@ -127,6 +128,7 @@ def main():
             index.append({"name": package["name"], "version": package["version"], "license": package["license"], "source": package["source"]})
         shutil.copytree(root / "vendor/rune/crates/rune/assets", licenses / "rune-assets", ignore=shutil.ignore_patterns("*.ttf", "*.otf", "*.png", "*.svg"))
         shutil.copy2(root / "vendor/rune/LICENSE", licenses / "Rune-LICENSE")
+        shutil.copytree(root / "resources/fonts", licenses / "symbols-nerd-font", ignore=shutil.ignore_patterns("*.ttf"))
         # Ghostty is fetched by the build script, rather than appearing in Cargo metadata.
         shutil.copy2(root / "resources/icons/README.md", licenses / "ICON-PROVENANCE.md")
         (licenses / "dependencies.json").write_text(json.dumps(index, indent=2) + "\n")

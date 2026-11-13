@@ -129,3 +129,12 @@ jobs:
           target/debug/rex-rune.exe --help > /dev/null
       - name: App platform boundary
         run: cargo test --locked --bin rex-rune app::platform::tests
+      # The font stack, the bundled symbols font, and DirectWrite's list and lookup. A floor
+      # on how many ran, as above.
+      - name: Fonts through DirectWrite
+        shell: bash
+        run: |
+          cargo test --locked --bin rex-rune -- app::fonts:: app::platform::fonts:: 2>&1 | tee "$RUNNER_TEMP/font-tests.log"
+          ran="$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/font-tests.log" | head -n 1)"
+          echo "font tests run: ${ran:-0}"
+          test "${ran:-0}" -ge 12

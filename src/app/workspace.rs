@@ -120,6 +120,9 @@ pub struct Workspace {
     pub sidebar: rune_kit::PaneState,
     /// The resolved terminal family, or None when the requested one isn't installed.
     pub terminal_family: Option<&'static str>,
+    /// The platform's monospaced family the grid uses instead when that is None
+    /// (`fonts::Fonts::stand_in`); None as well leaves bundled IBM Plex Mono.
+    pub stand_in_family: Option<&'static str>,
     /// The family this launch asked for, after `--font`.
     pub launch_font: String,
     /// The saved family when the client started, to tell a pending font change from the
@@ -293,6 +296,7 @@ impl Workspace {
             resized: None,
             sidebar,
             terminal_family,
+            stand_in_family: None,
             launch_font,
             launch_saved_font,
             fonts,

@@ -163,7 +163,7 @@ fn fallback_row(s: &Workspace, index: usize, family: &str, count: usize) -> El {
             &format!("fallback-missing:{index}"),
             "Not installed",
             ChipTone::Attention,
-            "fontconfig has no family of this name, so it is skipped.",
+            &format!("{}, so it is skipped.", super::platform::fonts::NOT_FOUND),
         ));
     }
     line.child(
@@ -283,8 +283,8 @@ impl Workspace {
         }
     }
 
-    /// Show the Advanced font settings page, with the families fontconfig knows read, so a
-    /// fallback that isn't installed says so.
+    /// Show the Advanced font settings page, reading the installed families, so a fallback
+    /// that isn't installed says so once they are read.
     pub fn open_advanced_fonts(&mut self, tx: &mut Tx) {
         self.font_catalog();
         self.open_sub_page(SubPage::AdvancedFont, tx);

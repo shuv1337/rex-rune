@@ -115,6 +115,7 @@ use atlas::{MAX_OVERFLOW_PAGES, MAX_STEADY_PAGES};
 pub(crate) use glyph_emit::GLIDE_PHASES;
 use line_break::break_lines_with_blocks;
 use span::PILL_BOX;
+pub use system_fonts::{InstalledFamily, installed_families, installed_family_files};
 use system_fonts::{
     LoadedFiles, SYMBOL_FAMILIES, SYMBOL_FONT_FILES, family_list, load_families, load_files, load_installed, load_system_mono, named_list, names_system_mono,
     register_cjk_fallbacks, register_script_fallbacks,
