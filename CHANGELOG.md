@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Arch package: a root update helper, groundwork for Update now on pacman installs.** `rex-rune-bin` now installs `/usr/lib/rex-rune/rex-rune-update`, a polkit action for it (`dev.shuv.rex-rune.update`: an administrator's password every time, for a local active session only) and the package-signing certificate. The helper upgrades `rex-rune-bin` to one exact newer release from the Rex package site, and only if the package is signed by the Rex package key shipped in the package, that key is still valid and trusted in this machine's pacman keyring, the file is the package and version asked for, and nothing else would be installed or removed. It honours `IgnorePkg` and `IgnoreGroup`, and does its work as a systemd service so that nothing of the caller's (limits, terminal, environment) reaches pacman. The client does not call it yet; nothing changes in Settings → Updates. `polkit` is an optional dependency. See the [design note](docs/plans/pacman-update-now.md#as-built).
+
 ## 0.8.0 - 2026-11-12
 
 **Rex Linux is now Rex Rune.** Existing `install.sh` and in-app **Update now** users need no migration steps: update normally and restart. Pacman replaces `rex-linux-bin` with `rex-rune-bin` automatically on update; the repository configuration stays the same. For `.deb` installs, take **`rex-rune_*.deb`**, even if the old client's notice names `rex-linux_*.deb`. The new client keeps one launcher, moves settings and update state, and leaves `rex-linux` as a link to `rex-rune`.
@@ -25,8 +31,6 @@ This release also adds macOS and Windows source builds and the pane, activity, p
 - **Activity list:** the filter also matches a row's state (`error`, `needs`, `working`); opening the list from the toolbar chip starts on the first tab that is not the one in front; and while a saved host is not connected the list's one line says so, so an empty list beside a host that is down does not read as all clear.
 
 ### Added
-
-- **Arch package: a root update helper, groundwork for Update now on pacman installs.** `rex-rune-bin` now installs `/usr/lib/rex-rune/rex-rune-update`, a polkit action for it (`dev.shuv.rex-rune.update`: an administrator's password every time, for a local active session only) and the package-signing certificate. The helper upgrades `rex-rune-bin` to one exact newer release from the Rex package site, and only if the package is signed by the Rex package key shipped in the package, that key is still valid and trusted in this machine's pacman keyring, the file is the package and version asked for, and nothing else would be installed or removed. It honours `IgnorePkg`. The client does not call it yet; nothing changes in Settings → Updates. `polkit` is an optional dependency. See the [design note](docs/plans/pacman-update-now.md#as-built).
 
 - **Activity by session (partial M3.2):** see each project's tabs together under session and host headings, ordered by what needs attention first. The list shows the choice, **By priority** or **By session**, at the end of its filter row; press either, or Tab while filtering, and the selected tab and the filter are kept. Commands has a row for each view. The choice is remembered across launches, including when opening from the toolbar chip. Browsing remains local and marks nothing seen. See [ordering and checks](docs/parity-2026-11/M3.2-activity-by-session.md).
 

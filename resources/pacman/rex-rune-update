@@ -12,6 +12,12 @@
 # here. What it can do, in full: download one named file from one host, check it, and hand
 # that file to pacman. docs/plans/pacman-update-now.md has the reasoning.
 #
+# It runs twice. The process pkexec starts is still the caller's in every way that is not
+# an argument: its resource limits, its terminal, its session and its control group. So
+# that process only checks the version and asks systemd to run this same file as a
+# service (rex-rune-update.service), then waits for it. The service is started by systemd,
+# with nothing of the caller's, and does the work. Without systemd there is no update.
+#
 # Exit codes (the client turns them into sentences; 126 and 127 are pkexec's own):
 #   0   upgraded
 #   64  not a version, or wrong arguments
@@ -24,7 +30,8 @@
 #   71  the file is not the package and version asked for
 #   72  installing it would change other packages
 #   73  pacman refused or failed
-#   74  this system cannot run the helper (architecture, missing tool)
+#   74  this system cannot run the helper (no systemd, architecture, missing tool), or the
+#       update service did not start or did not finish
 
 set -u
 # Privileged mode (-p above) already ignores BASH_ENV and functions from the environment.
@@ -46,8 +53,13 @@ readonly KEYRING=/usr/share/rex-rune/archive-key.gpg
 # The primary key of the certificate in KEYRING, written in when the package is built.
 readonly PRIMARY='@PRIMARY@'
 readonly PACMAN_KEYRING=/etc/pacman.d/gnupg
-readonly UNIT=rex-rune-update
-readonly LOCK=/run/rex-rune-update.lock
+readonly UNIT=rex-rune-update.service
+# Where the service is, exactly: a unit of the system manager, not something of that name
+# in a user's own part of the tree.
+readonly CGROUP="0::/system.slice/$UNIT"
+# The service's own directory under /run, made by systemd for it and removed with it.
+readonly RUNTIME=rex-rune-update
+readonly WORK=/run/$RUNTIME
 readonly MAX_PACKAGE=$((256 * 1024 * 1024))
 readonly MAX_SIGNATURE=4096
 readonly SELF=/usr/lib/rex-rune/rex-rune-update
@@ -64,9 +76,9 @@ trap '' HUP PIPE
 # No file name expansion anywhere: nothing read below is ever a pattern.
 set -f
 
-in_scope=0
-if [[ $# -eq 2 && $1 == --in-scope ]]; then
-    in_scope=1
+in_service=0
+if [[ $# -eq 2 && $1 == --in-service ]]; then
+    in_service=1
     shift
 fi
 [[ $# -eq 1 ]] || fail 64 'expected one argument'
@@ -74,33 +86,51 @@ readonly VERSION=$1
 [[ $VERSION =~ ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$ ]] \
     || fail 64 'not a version'
 
-for tool in pacman pacman-conf vercmp curl gpgv gpg bsdtar mktemp stat logger flock uname; do
-    command -v "$tool" >/dev/null || fail 74 "missing $tool"
-done
+[[ -d /run/systemd/system && ! -L /run/systemd/system ]] || fail 74 'no systemd'
 
-# A program started through pkexec is still in the caller's control group, which the user's
-# own service manager may kill or freeze, with pacman in the middle of replacing files. So
-# with systemd, do the work in a system scope of its own; the fixed unit name also means a
-# second update cannot start while one runs. This first process only waits and passes the
-# exit code on: if it is killed, the update in the scope still finishes.
-if [[ -d /run/systemd/system && ! -L /run/systemd/system ]]; then
-    if (( ! in_scope )); then
-        command -v systemd-run >/dev/null || fail 74 'missing systemd-run'
-        systemd-run --scope --quiet --collect --unit "$UNIT" -- "$SELF" --in-scope "$VERSION"
-        code=$?
-        # The helper's own codes come back as they are. Anything else is systemd-run's:
-        # most likely the unit exists because an update is already running.
-        (( code == 0 || (code >= 64 && code <= 74) )) && exit "$code"
-        fail 67 'could not start the update scope'
+# Whether an update is running (or starting, or ending) right now.
+running() {
+    case $(systemctl is-active "$UNIT" 2>/dev/null) in
+        active | activating | deactivating | reloading) return 0 ;;
+    esac
+    return 1
+}
+
+if (( ! in_service )); then
+    for tool in systemd-run systemctl pacman logger; do
+        command -v "$tool" >/dev/null || fail 74 "missing $tool"
+    done
+    running && fail 67 'another update is running'
+    # The unit name is the lock: systemd will not start a second one. systemd-run waits and
+    # passes the service's exit code on; if this process is killed, the service still
+    # finishes.
+    systemd-run --quiet --wait --collect --no-ask-password --service-type=exec \
+        --unit "$UNIT" --description 'Rex Rune update' \
+        --property "RuntimeDirectory=$RUNTIME" --property RuntimeDirectoryMode=0700 \
+        -- "$SELF" --in-service "$VERSION"
+    code=$?
+    if (( code == 0 )); then
+        # Believe pacman, not an exit code.
+        [[ $(pacman -Q "$PACKAGE" 2>/dev/null) == "$PACKAGE $VERSION-1" ]] \
+            || fail 74 'the update service ended without installing'
+        exit 0
     fi
-    # `--in-scope` is only a note to self: what counts is where this process really is.
-    grep -q "/${UNIT}\.scope\$" /proc/self/cgroup || fail 64 'not in the update scope'
-elif (( in_scope )); then
-    fail 64 'no scope to be in'
+    # The helper's own codes come back as they are. Anything else is systemd-run's or a
+    # signal's: the unit already exists, or the service could not start or was stopped.
+    (( code >= 64 && code <= 74 )) && exit "$code"
+    running && fail 67 'another update is running'
+    fail 74 'the update service did not start or did not finish'
 fi
 
-exec 9>>"$LOCK" || fail 67 'no lock file'
-flock -n 9 || fail 67 'another update is running'
+# `--in-service` grants nothing: what counts is where this process really is.
+grep -qxF -- "$CGROUP" /proc/self/cgroup || fail 64 'not the update service'
+[[ -d $WORK && ! -L $WORK && -O $WORK ]] || fail 74 'no work directory'
+readonly work=$WORK
+
+for tool in pacman pacman-conf vercmp curl gpgv gpg bsdtar stat logger uname sed grep find tail tr cut rm; do
+    command -v "$tool" >/dev/null || fail 74 "missing $tool"
+done
+find "$work" -mindepth 1 -delete || fail 74 'work directory not empty'
 
 case $(uname -m) in
     x86_64) readonly ARCH=x86_64 ;;
@@ -121,11 +151,6 @@ while IFS= read -r held; do
     # shellcheck disable=SC2053  # a pattern match is the point
     [[ -n $held && $PACKAGE == $held ]] && fail 66 'held back by IgnorePkg'
 done < <(pacman-conf IgnorePkg 2>/dev/null)
-
-work=$(mktemp -d /run/rex-rune-update.XXXXXXXX) || fail 74 'no work directory'
-readonly work
-cleanup() { rm -rf -- "$work"; }
-trap cleanup EXIT
 
 readonly FILE="$PACKAGE-$WANTED-$ARCH.pkg.tar.zst"
 readonly URL="$SITE/$ARCH/$FILE"
@@ -197,6 +222,13 @@ info=$(bsdtar -xOf "$work/$FILE" .PKGINFO 2>/dev/null) || fail 71 'no package in
 field() { sed -n "s/^$1 = //p" <<<"$info"; }
 [[ $(field pkgname) == "$PACKAGE" && $(field pkgver) == "$WANTED" && $(field arch) == "$ARCH" ]] \
     || fail 71 'not the package and version asked for'
+# A package held back through one of its groups is held back too.
+while IFS= read -r group; do
+    while IFS= read -r held; do
+        # shellcheck disable=SC2053  # a pattern match is the point
+        [[ -n $held && -n $group && $group == $held ]] && fail 66 'held back by IgnoreGroup'
+    done < <(pacman-conf IgnoreGroup 2>/dev/null)
+done < <(field group)
 
 # What pacman would do with it: this one package, and nothing pulled in or removed. A lock
 # held by another pacman shows here first.
@@ -205,10 +237,10 @@ plan=$(pacman -U --print --print-format '%n %v' -- "$work/$FILE" 2>/dev/null) ||
 [[ $plan == "$PACKAGE $WANTED" ]] || fail 72 'other packages would change'
 
 say "installing $PACKAGE $WANTED over $INSTALLED (signed by $SIGNER)"
-# Without its .sig beside it, so pacman has no signature to ask about and no key to offer to
-# import; the two checks above are stricter than its own. --noconfirm answers no to removing
-# a conflicting package, so a conflict stops here.
-rm -f -- "$work/$FILE.sig"
+# The .sig stays beside it: pacman checks it once more against its keyring (which the
+# second check above already found to trust this key, so there is no key for it to offer
+# to import), and a machine with LocalFileSigLevel = Required gets the signature it asks
+# for. --noconfirm answers no to removing a conflicting package, so a conflict stops here.
 if ! pacman -U --noconfirm --noprogressbar -- "$work/$FILE" >"$work/pacman.log" 2>&1; then
     say "pacman: $(tail -n 5 "$work/pacman.log" | tr '\n' ' ' | cut -c1-400)"
     fail 73 'pacman failed'

@@ -160,7 +160,8 @@ python3 scripts/test-bridge.py dist/rex-linux-*.tar.gz --binary target/release/r
 # The 0.7.5 updater installing this build, then the first start (a few minutes; see the script).
 bash scripts/bridge-e2e.sh
 python3 scripts/test-arch-repo.py       # Docker, gpg, minisign, zstd; throwaway keys only
-# The package's root update helper, as root in two containers (one boots systemd, --privileged).
+# The package's root update helper. On a workstation this runs only its unprivileged part;
+# the rest boots systemd in a --privileged container and runs in CI. Never force it locally.
 python3 scripts/test-arch-helper.py     # Docker, gpg, openssl, zstd; throwaway keys only
 # If installed (also runs ShellCheck when available):
 actionlint .github/workflows/release.yml
