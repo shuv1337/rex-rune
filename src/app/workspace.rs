@@ -90,9 +90,13 @@ pub struct Workspace {
     /// What the traffic lights take of the title row's leading end, in window points: 0 in
     /// full screen, where they are hidden, and wherever Rex has no unified title row.
     pub title_inset: f32,
-    /// The window is in full screen, the screen's size and not one to keep. Known only where
-    /// Rex's title row is.
+    /// The traffic lights are hidden for full screen. Known only where Rex's title row is.
     pub full_screen: bool,
+    /// The window says it is full screen (`Cx::window_full_screen`); read when it resizes or
+    /// its traffic lights move. On X11 the window manager entering or leaving full screen is
+    /// not seen: after it takes Rex out of a full screen Rex entered, this stays true until
+    /// Rex toggles it again.
+    pub window_full_screen: bool,
     /// The title row's session button, where its list opens.
     pub title_session: [f32; 4],
     /// The pane a file drag from another app is over.
@@ -268,6 +272,7 @@ impl Workspace {
             unified_title: !cfg!(test) && super::platform::chrome::UNIFIED,
             title_inset: 0.,
             full_screen: false,
+            window_full_screen: false,
             title_session: [0.; 4],
             drop_hover: None,
             header_reveal: Default::default(),
@@ -941,11 +946,14 @@ impl Workspace {
         self.hosts[host].model.notice = None;
     }
 
-    /// Keep window points, not zoomed content points. Maximizing leaves the saved normal
-    /// size alone and cancels any pending save from the preceding resize.
-    pub fn window_resized(&mut self, size: [f32; 2], maximized: bool) {
+    /// Keep window points, not zoomed content points. Maximizing or full screen leaves the
+    /// saved normal size alone and cancels any pending save from the preceding resize.
+    pub fn window_resized(&mut self, size: [f32; 2], maximized: bool, full_screen: bool) {
         self.viewport = size;
-        if maximized || self.full_screen || self.settings.window_size == Some(size.map(f32::round))
+        self.window_full_screen = full_screen;
+        if maximized
+            || self.in_full_screen()
+            || self.settings.window_size == Some(size.map(f32::round))
         {
             self.resized = None;
             return;
@@ -965,6 +973,11 @@ impl Workspace {
             // The resize into full screen can come a frame before the traffic lights go.
             self.resized = None;
         }
+    }
+
+    /// Whether the window is full screen, as the window or its traffic lights say.
+    pub fn in_full_screen(&self) -> bool {
+        self.full_screen || self.window_full_screen
     }
 
     /// A drag writes preferences once, after the window has kept its size for a second.

@@ -58,6 +58,7 @@ impl<S: 'static> Runtime<S> {
             // The window's controls are in its points; the view's are over the zoom.
             titlebar_inset: self.titlebar_inset / self.zoom.k,
             window_maximized: self.window_maximized,
+            window_full_screen: self.window_full_screen,
             chrome: self.titlebar.insets.zoomed(self.zoom.k),
             caption: self.titlebar.caption,
             system_accent: self.system_accent,
@@ -376,6 +377,7 @@ impl<S: 'static> Measurement<'_, S> {
             env: this.env,
             titlebar_inset: this.titlebar_inset,
             window_maximized: this.window_maximized,
+            window_full_screen: this.window_full_screen,
             chrome: this.chrome,
             caption_color: None,
             titlebar: Default::default(),

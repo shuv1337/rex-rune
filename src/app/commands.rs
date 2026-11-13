@@ -831,6 +831,17 @@ impl Workspace {
             .enabled(super::toolbar_reveal::can_reveal(self))
             .keywords("show hidden hover window"),
             Command::action(
+                "view.full_screen",
+                G,
+                if self.in_full_screen() {
+                    "Exit full screen"
+                } else {
+                    "Enter full screen"
+                },
+                super::actions::FULL_SCREEN,
+            )
+            .keywords("fullscreen maximize window"),
+            Command::action(
                 "view.pane_headers",
                 G,
                 if self.header_reveal.pinned {

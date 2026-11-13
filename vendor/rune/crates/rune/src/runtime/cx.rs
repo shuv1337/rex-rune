@@ -51,6 +51,7 @@ pub struct Cx<S> {
     pub(super) env: Env,
     pub(super) titlebar_inset: f32,
     pub(super) window_maximized: bool,
+    pub(super) window_full_screen: bool,
     pub(super) chrome: crate::ChromeInsets,
     /// `Cx::caption_color`, read once the view returns.
     pub(super) caption_color: Option<Color>,
@@ -79,7 +80,7 @@ impl<S> Cx<S> {
     /// does for a sub-view (a plugin's panel) that panicked partway.
     pub fn retype<T>(&self) -> Cx<T> {
         Cx {
-            env: self.env, titlebar_inset: self.titlebar_inset, window_maximized: self.window_maximized, chrome: self.chrome, caption_color: self.caption_color,
+            env: self.env, titlebar_inset: self.titlebar_inset, window_maximized: self.window_maximized, window_full_screen: self.window_full_screen, chrome: self.chrome, caption_color: self.caption_color,
             defaults: self.defaults.clone(),
             titlebar: self.titlebar,
             system_accent: self.system_accent,
@@ -146,6 +147,13 @@ impl<S> Cx<S> {
     /// it needs it in its version.
     pub fn window_maximized(&self) -> bool {
         self.window_maximized
+    }
+    /// Whether the native window is full screen: macOS's own full screen, or the borderless one
+    /// `Tx::toggle_full_screen` makes elsewhere. On X11 only full screen the app asked for is
+    /// seen, not the window manager's. The view re-runs when it changes; false headless. A
+    /// `memo` closure that reads it needs it in its version.
+    pub fn window_full_screen(&self) -> bool {
+        self.window_full_screen
     }
     /// What the window's own controls take of a titlebar the app draws (`App::titlebar`):
     /// the macOS traffic lights at the leading edge, the Windows caption buttons at the

@@ -275,6 +275,7 @@ impl<S: 'static> Host<S> {
             WindowEvent::Resized(size) => {
                 sync_chrome(rt, l, chrome, titlebar);
                 rt.set_window_maximized(l.window.is_maximized());
+                rt.set_window_full_screen(l.window.fullscreen().is_some());
                 let was_live = rt.live_visible();
                 rt.set_live_visible(self.life.uncovered() && size.width > 0 && size.height > 0 && !l.minimized());
                 // Restored where no occlusion event says so (Windows): as uncovering does, the
@@ -588,6 +589,7 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         if let Some(l) = self.win.as_ref().filter(|l| l.native.full_screen.take()) {
             sync_chrome(&mut self.rt, l, self.chrome, self.titlebar);
+            self.rt.set_window_full_screen(l.window.fullscreen().is_some());
         }
         // The window procedure asks for this paint when a caption button's hover or
         // press changes.

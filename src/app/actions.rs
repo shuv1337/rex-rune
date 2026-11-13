@@ -12,6 +12,7 @@ pub const PREVIOUS_GLOBAL: &str = "client.tab.previous_global";
 pub const HISTORY_BACK: &str = "client.history.back";
 pub const HISTORY_FORWARD: &str = "client.history.forward";
 pub const DOWNLOAD: &str = "pane.download";
+pub const FULL_SCREEN: &str = "client.full_screen.toggle";
 
 #[derive(Clone, Copy)]
 enum Handler {
@@ -20,6 +21,7 @@ enum Handler {
     Settings,
     Shortcuts,
     Sidebar,
+    FullScreen,
     Close,
     Search,
     NewTab,
@@ -100,6 +102,7 @@ specs! {
     "client.settings" => Settings,
     super::recorder::EDIT => Shortcuts,
     "client.sidebar.toggle" => Sidebar,
+    FULL_SCREEN => FullScreen,
     "client.close" => Close,
     SEARCH => Search,
     "client.tab.new" => NewTab,
@@ -269,6 +272,9 @@ impl Spec {
                 "Only the person at this computer can clear or reset terminals from here.",
             ),
             Toolbar => Remote::Never("Only the person at this computer can reveal the toolbar."),
+            FullScreen => {
+                Remote::Never("Only the person at this computer can make the window full screen.")
+            }
             PaneHeaders => {
                 Remote::Never("Only the person at this computer can show or hide pane headers.")
             }
@@ -360,6 +366,7 @@ impl Spec {
             Handler::Settings => "Settings",
             Handler::Shortcuts => "Change shortcuts",
             Handler::Sidebar => "Toggle sidebar",
+            Handler::FullScreen => "Toggle full screen",
             Handler::Close => "Close pane or tab",
             Handler::Search => "Search terminal",
             Handler::NewTab => "New tab",
@@ -432,6 +439,7 @@ impl Spec {
             | Handler::PairDevice
             | Handler::StopServer
             | Handler::Sidebar
+            | Handler::FullScreen
             | Handler::ZoomIn
             | Handler::ZoomOut
             | Handler::ZoomReset
@@ -617,6 +625,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::Sidebar => s.perform(Intent::Sidebar, tx),
         Handler::PaneHeaders => s.toggle_pane_headers(),
         Handler::Toolbar => s.toggle_toolbar(),
+        Handler::FullScreen => tx.toggle_full_screen(),
         Handler::Close => s.close_focused(tx),
         Handler::Search => s.open_search(),
         Handler::FindNext => s.find_step(true),

@@ -95,6 +95,7 @@ const IDS: &[&str] = &[
     "view.tab_position",
     "view.pane_density",
     "view.toolbar",
+    "view.full_screen",
     "view.pane_headers",
     "view.terminal_theme",
     "view.interface_theme",
@@ -376,7 +377,7 @@ fn a_search_is_one_list_with_the_best_match_first() {
     search(&mut ws, "quit");
     assert_eq!(labels(&ws), ["Close app"]);
     search(&mut ws, "view");
-    assert_eq!(labels(&ws).len(), 13, "every View command");
+    assert_eq!(labels(&ws).len(), 14, "every View command");
     // A shortcut is found as typed, not by its letters.
     search(&mut ws, "ctrl shift d");
     // The exact D shortcut ranks ahead of the Down prefix.
@@ -668,6 +669,22 @@ fn view_commands_name_the_change_they_make() {
     assert_eq!(relaunch(&ws).settings.pane_density, PaneDensity::Compact);
     choose(&mut ws, "view.pane_density");
     assert_eq!(ws.settings.pane_density, PaneDensity::Comfortable);
+
+    assert_eq!(label(&ws, "view.full_screen"), "Enter full screen");
+    ws.traffic_lights(0., 38.);
+    assert_eq!(label(&ws, "view.full_screen"), "Exit full screen");
+    ws.traffic_lights(76., 38.);
+    assert_eq!(label(&ws, "view.full_screen"), "Enter full screen");
+    // A window with no traffic lights says so itself.
+    ws.window_resized([1920., 1080.], false, true);
+    assert_eq!(label(&ws, "view.full_screen"), "Exit full screen");
+    ws.window_resized([1024., 700.], false, false);
+    assert_eq!(label(&ws, "view.full_screen"), "Enter full screen");
+    let full_screen = crate::app::actions::find(crate::app::actions::FULL_SCREEN).unwrap();
+    assert!(matches!(
+        full_screen.remote(),
+        crate::app::actions::Remote::Never(_)
+    ));
 
     // A zoom step that would change nothing is disabled, as the font steps are.
     let zoom = |ws: &Workspace| {

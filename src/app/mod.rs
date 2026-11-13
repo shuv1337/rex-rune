@@ -94,6 +94,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
     let maximized = cx.window_maximized();
+    let full_screen = cx.window_full_screen();
     let insets = cx.chrome_insets();
     if s.unified_title {
         // The title row grows with the interface zoom, and the traffic lights stay centred in it.
@@ -188,7 +189,9 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .w_full()
         .h_full()
         .fill(rgb(ground()))
-        .on_layout(move |s: &mut Workspace, r| s.window_resized([r[2], r[3]], maximized))
+        .on_layout(move |s: &mut Workspace, r| {
+            s.window_resized([r[2], r[3]], maximized, full_screen)
+        })
         .children(s.unified_title.then(|| {
             // The insets also change with no resize (full screen), and a rect that moves is
             // what reports them.
@@ -196,12 +199,15 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                 .absolute(0., 0.)
                 .size(insets.leading, insets.height)
                 .inert()
-                .on_layout(|s: &mut Workspace, r| s.traffic_lights(r[2], r[3]))
+                .on_layout(move |s: &mut Workspace, r| {
+                    s.window_full_screen = full_screen;
+                    s.traffic_lights(r[2], r[3])
+                })
         }))
         .child(root);
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
-    if s.own_frame && !cx.window_maximized() {
+    if s.own_frame && !maximized && !full_screen {
         for edge in [
             WindowEdge::South,
             WindowEdge::West,

@@ -46,6 +46,15 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
+    /// What [`Cx::window_full_screen`] reports. Native windows set it on every resize, and on
+    /// macOS when the window has entered or left full screen; a change re-runs the view.
+    pub fn set_window_full_screen(&mut self, full_screen: bool) {
+        if full_screen != self.window_full_screen {
+            self.window_full_screen = full_screen;
+            self.dirty = true;
+        }
+    }
+
     /// What [`Cx::accent`] and [`Cx::focus_color`] report, and the colour of default focus
     /// rings. Native windows set it from [`system_accent`](crate::system_accent) and again when
     /// the user picks another accent; a change re-runs the view. Headless runs keep

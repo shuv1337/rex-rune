@@ -208,6 +208,21 @@ fn a_window_maximized_change_rebuilds_the_view() {
 }
 
 #[test]
+fn a_window_full_screen_change_rebuilds_the_view() {
+    fn view(_: &(), cx: &mut Cx<()>) -> El {
+        crate::row().size(300.0, 40.0).child(el().key("glyph").w(if cx.window_full_screen() { 20.0 } else { 10.0 }))
+    }
+    let width = |rt: &Runtime<()>| rt.presented("glyph").unwrap().0[2];
+    let mut rt = Runtime::new((), view, (300.0, 40.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert_eq!(width(&rt), 10.0, "not full screen by default");
+    rt.set_window_full_screen(true);
+    rt.frame(0.1);
+    rt.frame(5.0);
+    assert_eq!(width(&rt), 20.0);
+}
+
+#[test]
 fn a_titlebar_inset_change_rebuilds_the_view() {
     fn view(_: &(), cx: &mut Cx<()>) -> El {
         crate::row().size(300.0, 40.0).child(el().key("leading").w(cx.titlebar_inset())).child(el().key("title").size(50.0, 20.0))

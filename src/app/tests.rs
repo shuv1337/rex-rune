@@ -139,13 +139,13 @@ fn relaunch(ws: &Workspace) -> Workspace {
 }
 
 #[test]
-fn the_window_size_is_saved_once_a_resize_settles_but_not_when_maximized() {
+fn the_window_size_is_saved_once_a_resize_settles_but_not_when_maximized_or_full_screen() {
     use std::time::{Duration, Instant};
     let mut ws = workspace();
-    ws.window_resized([1920., 1080.], true);
+    ws.window_resized([1920., 1080.], true, false);
     assert_eq!(ws.save_window_size(), None);
     assert_eq!(ws.settings.window_size, None);
-    ws.window_resized([1200.4, 799.6], false);
+    ws.window_resized([1200.4, 799.6], false, false);
     assert!(
         ws.save_window_size().is_some(),
         "waits for a drag to settle"
@@ -153,21 +153,28 @@ fn the_window_size_is_saved_once_a_resize_settles_but_not_when_maximized() {
     assert!(!ws.settings_path.exists());
     ws.resized = Some(Instant::now() - Duration::from_secs(2));
     // A new resize starts the settle delay again.
-    ws.window_resized([1100.4, 749.6], false);
+    ws.window_resized([1100.4, 749.6], false, false);
     assert!(ws.save_window_size().is_some());
     assert_eq!(ws.settings.window_size, None);
     ws.resized = Some(Instant::now() - Duration::from_secs(2));
     assert_eq!(ws.save_window_size(), None);
     assert_eq!(ws.settings.window_size, Some([1100., 750.]));
     assert_eq!(relaunch(&ws).settings.window_size, Some([1100., 750.]));
-    ws.window_resized([1100., 750.], false);
+    ws.window_resized([1100., 750.], false, false);
     assert_eq!(ws.resized, None, "the saved size needs no new save");
     // Maximizing during the delay cancels the pending write.
-    ws.window_resized([1000., 700.], false);
-    ws.window_resized([1920., 1080.], true);
+    ws.window_resized([1000., 700.], false, false);
+    ws.window_resized([1920., 1080.], true, false);
     assert_eq!(ws.resized, None);
     assert_eq!(ws.save_window_size(), None);
     assert_eq!(relaunch(&ws).settings.window_size, Some([1100., 750.]));
+    // Full screen without traffic lights (Linux, Windows) is the screen's size, not one to keep.
+    ws.window_resized([1000., 700.], false, false);
+    ws.window_resized([1920., 1080.], false, true);
+    assert_eq!(ws.resized, None);
+    assert!(ws.in_full_screen());
+    ws.window_resized([1000., 700.], false, false);
+    assert!(!ws.in_full_screen() && ws.resized.is_some());
     std::fs::remove_file(&ws.settings_path).unwrap();
 }
 
@@ -180,7 +187,7 @@ fn a_failed_window_size_save_rebuilds_to_show_the_notice() {
     let mut tx = rune::Tx::default();
     super::poll(&mut ws, 0., &mut tx);
     assert!(!super::poll(&mut ws, 0., &mut tx));
-    ws.window_resized([1100., 750.], false);
+    ws.window_resized([1100., 750.], false, false);
     ws.resized = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
     assert!(super::poll(&mut ws, 0., &mut tx));
     assert!(
@@ -214,6 +221,37 @@ fn window_layout_remembers_window_points_not_interface_zoom() {
         Some([1200., 800.])
     );
     std::fs::remove_file(&rt.state.settings_path).unwrap();
+}
+
+#[test]
+fn a_full_screen_window_keeps_no_size_and_has_no_resize_edges() {
+    let mut rt = runtime_at(workspace(), (1200., 800.));
+    let bands = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .iter()
+            .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("resize:")))
+            .count()
+    };
+    assert_eq!(bands(&rt), 7);
+    rt.set_window_full_screen(true);
+    rt.set_viewport((1920., 1080.), 1.);
+    for t in 1..5 {
+        rt.frame(f64::from(t));
+    }
+    assert!(rt.state.window_full_screen);
+    assert_eq!(
+        rt.state.resized, None,
+        "the screen's size is not the window's"
+    );
+    assert_eq!(bands(&rt), 0);
+    rt.set_window_full_screen(false);
+    rt.set_viewport((1100., 700.), 1.);
+    for t in 5..9 {
+        rt.frame(f64::from(t));
+    }
+    assert!(!rt.state.window_full_screen);
+    assert!(rt.state.resized.is_some(), "a normal size is kept again");
+    assert_eq!(bands(&rt), 7);
 }
 
 #[test]

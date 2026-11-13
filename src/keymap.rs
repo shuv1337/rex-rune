@@ -458,6 +458,8 @@ pub fn defaults_on(command: bool) -> KeymapDefault {
             ("cmd+shift+[", "client.tab.previous"),
             ("cmd+shift+]", "client.tab.next"),
             ("cmd+a", "pane.select_all"),
+            // A Mac's full-screen key. Elsewhere F11 stays with the terminal's programs.
+            ("ctrl+cmd+f", "client.full_screen.toggle"),
         ] {
             bindings.push(Binding::new([canonical(keys.to_owned())], action));
         }
@@ -942,12 +944,14 @@ mod tests {
             actions.dedup();
             actions
         };
-        // Everything Control binds, and Select all, which Control leaves to the program.
+        // Everything Control binds, Select all, which Control leaves to the program, and full
+        // screen, whose Linux key (F11) programs use.
         let mut expected = actions(&control);
         expected.push(("pane.select_all".into(), None));
+        expected.push(("client.full_screen.toggle".into(), None));
         expected.sort_by_key(|(action, args)| format!("{action} {args:?}"));
         assert_eq!(actions(&command), expected);
-        assert_eq!(command.bindings.len(), control.bindings.len() + 3);
+        assert_eq!(command.bindings.len(), control.bindings.len() + 4);
         let mut seen = std::collections::HashSet::new();
         for binding in &command.bindings {
             let keys = binding.keys.join(">");
@@ -960,9 +964,11 @@ mod tests {
             let chord = Chord::parse(&keys).unwrap();
             let tab = matches!(chord.key, Key::Named("tab"));
             let scroll = binding.action == "pane.scroll";
-            // Command everywhere Control was, except the two a Mac keeps on Control.
+            let full_screen = binding.action == "client.full_screen.toggle";
+            // Command everywhere Control was, except the two a Mac keeps on Control; full
+            // screen is on both, as on a Mac.
             assert_eq!(chord.modifiers.logo, !tab && !scroll, "{keys}");
-            assert_eq!(chord.modifiers.ctrl, tab, "{keys}");
+            assert_eq!(chord.modifiers.ctrl, tab || full_screen, "{keys}");
         }
         let bound = |keys: &str, action: &str, direction: Option<&str>| {
             command.bindings.iter().any(|b| {
@@ -985,6 +991,7 @@ mod tests {
             ("shift+cmd+[", "client.tab.previous"),
             ("cmd+=", "client.zoom.in"),
             ("cmd+a", "pane.select_all"),
+            ("ctrl+cmd+f", "client.full_screen.toggle"),
             ("ctrl+tab", "client.tab.next_global"),
         ] {
             assert!(bound(keys, action, None), "{keys} {action}");
