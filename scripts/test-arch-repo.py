@@ -71,8 +71,10 @@ package() {
 '''
 
 
-def fixture(dist, version, client='rex-rune'):
-    """A release's packages: under the old name it has six, since the rename eight."""
+def fixture(dist, version, client='rex-rune', certificate=None, recipe=None):
+    """A release's packages: under the old name it has six, since the rename eight.
+    `certificate` is the package-signing certificate the renamed package's update helper
+    is built to trust, as the release tarball carries the real one."""
     dist.mkdir()
     for a in arch.ARCHES:
         name = f'{client}-{version}-{a}-linux-gnu'
@@ -81,6 +83,8 @@ def fixture(dist, version, client='rex-rune'):
         # Like the client, the stub names itself as it was started.
         binary.write_text(f'#!/bin/sh\necho "${{0##*/}} {version}"\n'); binary.chmod(0o755)
         shutil.copytree(ROOT / 'resources', stage / 'resources')
+        if certificate:
+            shutil.copy2(certificate, stage / 'resources/pacman/archive-key.asc')
         if client == 'rex-linux':
             for path in sorted((stage / 'resources').rglob('*rex-rune*')):
                 path.rename(path.with_name(path.name.replace('rex-rune', 'rex-linux')))
@@ -94,7 +98,7 @@ def fixture(dist, version, client='rex-rune'):
             (dist / f'rex-linux-{version}-{a}-linux-gnu.tar.gz').write_text('fixture bridge tarball\n')
     for a in ('amd64', 'arm64'):
         (dist / f'{client}_{version}_{a}.deb').write_text('fixture deb\n')
-    arch.package(dist, version, LEGACY_RECIPE if client == 'rex-linux' else None, client)
+    arch.package(dist, version, LEGACY_RECIPE if client == 'rex-linux' else recipe, client)
 
 
 def release(tag, immutable=True, complete=True, prerelease=False, pacman=True, base='rex-rune-bin'):
@@ -171,7 +175,7 @@ def main():
             # 99.0.0 is the last release under the old name; the two after it are renamed.
             for v, client in (('99.0.0', 'rex-linux'), ('99.0.1', 'rex-rune'), ('99.0.2', 'rex-rune')):
                 dist = releases / ('v' + v)
-                fixture(dist, v, client)
+                fixture(dist, v, client, keys / site_builder.CERTIFICATE)
                 subprocess.run(['python3', str(SCRIPTS / 'sign-packages.py'), '--dist', str(dist),
                                 '--certificate', str(keys / site_builder.CERTIFICATE)], env=sign_env, check=True)
                 packages = sorted(p for p in dist.iterdir() if p.name.endswith(('.tar.gz', '.deb', '.pkg.tar.zst')))

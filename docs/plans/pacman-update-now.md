@@ -1,7 +1,9 @@
 # Update now for pacman installs: design note
 
-Status: **proposal, nothing built.** Written 2026-11-12 (PST) against `20f64b4`, and
-revised the same day after an independent review of the security argument.
+Status: **option (a) is built on the package side** (the helper, the polkit action and
+the certificate; see [As built](#as-built)). The client does not use it yet. Written
+2026-11-12 (PST) against `20f64b4`, and revised the same day after an independent review
+of the security argument.
 
 ## The ask
 
@@ -385,19 +387,92 @@ These are not engineering judgments:
    Omarchy's snapshot and migrations is acceptable there, or whether Omarchy machines
    should get (d) instead.
 
+## As built
+
+The owner's calls were made: keep the password dialog and ship no promptless rule; no
+AUR for now; the helper trusts only the Rex certificate in the package **and
+additionally** requires that key to be valid and trusted in this machine's pacman
+keyring, with no Minisign in the root path; a one-package update outside
+`omarchy update` is acceptable, with `omarchy update` staying the recommended path in
+the text.
+
+The package (`packaging/arch/PKGBUILD.in`) installs
+`resources/pacman/rex-rune-update` as `/usr/lib/rex-rune/rex-rune-update` (root, 755,
+not setuid), `resources/pacman/dev.shuv.rex-rune.update.policy`, and the certificate
+dearmored as `/usr/share/rex-rune/archive-key.gpg`. The certificate's primary
+fingerprint is written into the helper when the package is built. `polkit` is an
+optional dependency: without it there is simply no Update now.
+
+Where the helper differs from the steps above, and why:
+
+- **It does not `exec` `systemd-run`.** It runs `systemd-run --scope` as a child and
+  waits, so it can turn systemd-run's own failure (most likely the unit already exists
+  because an update is running) into its "another update is running" code. The work is
+  still in the scope; the waiting process stays in the caller's control group, and
+  killing it does not stop the update (tested). Inside, the helper checks
+  `/proc/self/cgroup` rather than believing its `--in-scope` argument. Without
+  systemd it runs in place.
+- **The second key check (the owner's call 3).** After `gpgv` against the shipped
+  certificate, the same signature is verified with `gpg --homedir /etc/pacman.d/gnupg`
+  and must be good, by the same subkey, and `TRUST_FULLY` or `TRUST_ULTIMATE`. This is
+  what lets a machine withdraw trust: a revocation that reached the pacman keyring, a
+  removed key, or a key that was never locally signed all refuse. It never fetches or
+  imports a key.
+- **The file's own name, version and architecture** are read from `.PKGINFO` with
+  `bsdtar`; `pacman -U --print` is then used only to confirm the plan is this one
+  package.
+- **`IgnorePkg` is checked by the helper** (`pacman-conf IgnorePkg`, entries matched as
+  patterns), not left to `pacman -U`.
+- **The signing key must be a subkey** of the pinned primary, as the production
+  certificate is laid out; a signature by the primary itself is refused.
+- **Only HTTP 200 counts.** curl does not follow a redirect, but it would save the
+  redirect's body and exit 0.
+- **The lock is `/run/rex-rune-update.lock`**, and the work directory
+  `/run/rex-rune-update.XXXXXXXX` (`/run` is root-only).
+- **No SHA-256 from the client**, and nothing else from it: one argument, the version.
+- The environment is dropped apart from a fixed `PATH`; bash runs in privileged mode
+  (`-p`); file name expansion is off; nothing is read from or written to the caller.
+- With `LocalFileSigLevel = Required` in `pacman.conf`, `pacman -U` refuses a file with
+  no `.sig` beside it, so the helper exits 73 there and the instructions remain.
+
+Exit codes: 0 upgraded; 64 arguments; 65 not installed or not newer; 66 `IgnorePkg`;
+67 another update or a pacman lock; 68 download; 69 not the Rex key's signature, or
+expired; 70 not valid or trusted in the pacman keyring; 71 not the package asked for;
+72 other packages would change; 73 pacman failed; 74 the system cannot run it. 126 and
+127 remain `pkexec`'s.
+
+`scripts/test-arch-helper.py` runs the shipped helper as root in `archlinux:latest`
+against a private HTTPS `pkg.shuv.dev` with throwaway keys (CI: the `pacman` job). It
+covers every refusal in the outline's step 2, a real upgrade under a hostile
+environment, and, in a second container that boots systemd with polkit installed, the
+run through `pkexec`: the action as `pkaction` lists it, a caller with no agent
+(127, nothing changed), exit codes through the scope, the work in
+`rex-rune-update.scope`, a second update refused meanwhile, and an update that
+finishes after its caller is killed mid-download. Three of the helper's checks were
+removed one at a time to see the test fail: without the metadata check the older
+package is not refused as such, and without the trust check an untrusted key is not;
+removing `EXPKEYSIG` from the refusal list changes nothing, because an expired key's
+signature is also not `GOODSIG`, which is required.
+
+Checked against the live site without root: the published 0.7.5 package and its
+signature give exactly the status the helper requires, with the committed certificate
+(`gpgv`) and with a copy of shuvdev's real pacman keyring (`TRUST_FULLY`).
+
 ## Not verified
 
 - That Omarchy's polkit agent is registered in a desktop session, and what its dialog
   shows for a custom action.
-- The control-group behaviour under `pkexec` (the file ownership was checked; killing
-  a root process that way was not reproduced), and that restarting under
-  `systemd-run --scope` fully removes it.
-- The exact pacman invocation for step 8; pacman's `--noconfirm` defaults, its
-  downgrade behaviour with `-U`, and whether `-U` honours `IgnorePkg`, against the
-  current source.
-- `gpgv`'s status lines for this certificate. That `gpgv` exits 0 for expired and
-  revoked keys was reproduced by the reviewer with throwaway keys and is in its
-  manual.
-- The helper's download and `gpgv` check run as root in a system scope (the same
-  check passed as an ordinary user for 0.7.5 x86_64 only).
+- The control-group behaviour under `pkexec` on a desktop: that the user's service
+  manager can kill a pkexec'd root process was not reproduced. (That the work runs in
+  its own system scope and survives its caller being killed is now tested in a
+  container.)
+- pacman's `--noconfirm` answer to a conflicting package, against the current source.
+  (The helper refuses earlier if the plan is anything but this one package, and does
+  its own version and `IgnorePkg` checks, so it no longer depends on what `-U` does
+  about downgrades or pinned packages.)
+- The helper against the production site as root: a real upgrade needs a release newer
+  than an installed `rex-rune-bin`, and the first `rex-rune-bin` release has not been
+  published. (The published 0.7.5 `rex-linux-bin` package passes both key checks as an
+  ordinary user; the helper ran as root only against the private fixture site.)
+- aarch64: the helper's logic is the same, but the container tests run on x86_64 only.
 - Arch Linux ARM, and Arch without Omarchy.
