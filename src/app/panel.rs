@@ -371,6 +371,7 @@ pub enum PanelKind {
     },
     /// Download a file from the captured pane's machine; see `downloads.rs`.
     Download(super::downloads::Dialog),
+    PairDevice(super::pair_device::Dialog),
     Directory(super::directory::Browser),
     /// The Downloads popover: this launch's transfers.
     Downloads,

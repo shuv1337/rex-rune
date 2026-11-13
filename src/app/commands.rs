@@ -710,6 +710,14 @@ impl Workspace {
                 ),
                 Intent::RemoteControl(host),
             ),
+            Command::action(
+                "host.pair_device",
+                G,
+                "Pair device…",
+                super::pair_device::ACTION,
+            )
+            .enabled(self.pair_address().is_some())
+            .keywords("tailscale qr phone"),
             Command::new("host.reconnect", G, "Reconnect host", Intent::Retry)
                 .keywords("retry connection"),
         ];

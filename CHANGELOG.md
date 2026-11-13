@@ -22,6 +22,8 @@
 
 ### Added
 
+- **Pair device (partial M3.3):** Settings → Server and Commands can show a QR code of the connected host's sanitized, last-reported Tailscale HTTPS address. Local-only, no server requests; the exact address stays visible, and an overlong address falls back to text. Encoder matrices and rendered captures are independently checked; phone acceptance is not yet verified. See [checks and limits](docs/parity-2026-11/M3.3-pair-device.md).
+
 - **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, shortcuts are still the Control-key defaults, and notifications and sounds are not available there yet. See [Building on macOS](README.md#building-on-macos).
 
 - **Pull-request CI on three platforms:** Linux runs formatting, Clippy and every test; macOS builds the app and runs the tests; Windows compiles the Ghostty VT library as a first probe.

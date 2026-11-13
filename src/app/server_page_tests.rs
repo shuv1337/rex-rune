@@ -156,7 +156,11 @@ fn pending_partial_refused_and_unknown_fields_remain_distinct() {
     ws.hosts[0].model.protocol.api_revision = 0;
     let mut rt = open(ws, (1024., 700.));
     assert!(shows(&rt, "Waiting for report"));
-    for label in ["Built-in Tailscale", "Tailscale HTTPS", "Tailscale address"] {
+    for label in [
+        "Built-in Tailscale",
+        "Tailscale HTTPS",
+        "Tailscale address · Pair device",
+    ] {
         assert!(page_text(&rt).contains(&format!("{label}\nWaiting for report")));
     }
     assert!(shows(&rt, "Not reported") && !shows(&rt, "Not connected"));
@@ -416,7 +420,7 @@ fn settings_search_history_keyboard_and_copy_are_local_even_over_a_live_pane() {
             "Session count",
             "Listeners",
             "Built-in Tailscale",
-            "Tailscale address",
+            "Tailscale address · Pair device",
         ] {
             click(&mut rt, "settings-search");
             rt.update(|s, _| {
@@ -588,4 +592,327 @@ fn server_disconnected_draw() {
 #[test]
 fn server_nohost_draw() {
     draw("nohost");
+}
+
+fn pair_report(ws: &mut Workspace, host: usize, state: &str, url: &str) {
+    if let Answer::Reported(p) = &mut ws.hosts[host].model.server_info.process {
+        let h = p.tailscale.as_mut().unwrap().https.as_mut().unwrap();
+        h.state = state.into();
+        h.url = Some(url.into());
+    }
+}
+
+fn pair_data(ws: &Workspace) -> &crate::app::pair_device::Dialog {
+    let PanelKind::PairDevice(d) = &ws.panel.as_ref().unwrap().kind else {
+        panic!("pair dialog")
+    };
+    d
+}
+
+#[test]
+fn pair_button_and_command_require_connected_available_https_report() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    for (connected, state, url, available) in [
+        (true, "available", "https://build.tail1234.ts.net", true),
+        (false, "available", "https://build.tail1234.ts.net", false),
+        (true, "pending", "https://build.tail1234.ts.net", false),
+        (true, "off", "https://build.tail1234.ts.net", false),
+        (true, "available", "http://build.tail1234.ts.net", false),
+        (true, "available", "https://", false),
+        (true, "available", "unix:///private/tunnel.sock", false),
+        (true, "available", "https://bad\n.example", false),
+    ] {
+        let mut ws = fixture();
+        ws.hosts[0].model.connected = connected;
+        pair_report(&mut ws, 0, state, url);
+        let mut rt = open(ws, (640., 480.));
+        assert_eq!(
+            has(&rt, "server-pair"),
+            available,
+            "{connected} {state} {url}"
+        );
+        assert_eq!(rt.state.pair_address().is_some(), available);
+        rt.update(|s, _| s.picker(false));
+        let entry = rt
+            .state
+            .entries()
+            .into_iter()
+            .find(|e| e.label == "Pair device…")
+            .unwrap();
+        assert_eq!(entry.enabled, available);
+        assert!(entry.keys.is_empty(), "unbound by default");
+        rt.update(|s, tx| {
+            crate::app::actions::run(
+                s,
+                crate::app::pair_device::ACTION,
+                &serde_json::Value::Null,
+                tx,
+            );
+        });
+        assert_eq!(
+            matches!(
+                rt.state.panel.as_ref().unwrap().kind,
+                PanelKind::PairDevice(_)
+            ),
+            available
+        );
+    }
+    let mut ws = fixture();
+    ws.hosts[0].model.server_info = ServerInfo::default();
+    assert!(
+        ws.pair_address().is_none(),
+        "no inference from the saved SSH destination or local Tailscale"
+    );
+}
+
+#[test]
+fn pair_code_copy_and_text_hold_exactly_the_same_sanitized_address_and_return() {
+    let mut rt = open(fixture(), (1024., 700.));
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    tap(&mut rt, "server-copy-tailnet");
+    let expected = "https://build.tail1234.ts.net/";
+    assert_eq!(
+        clipboard.text().as_ref().map(|s| s.as_str()),
+        Some(expected)
+    );
+    tap(&mut rt, "server-pair");
+    assert_eq!(pair_data(&rt.state).address, expected);
+    assert_eq!(
+        pair_data(&rt.state).symbol,
+        rex_rune::qr::encode(expected.as_bytes())
+    );
+    assert!(has(&rt, "pair-code"));
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some(expected))
+    );
+    assert!(!rt.elements().iter().filter(|e| !e.exiting).any(|e| {
+        e.text
+            .as_deref()
+            .is_some_and(|t| t.contains("secret-") || t.contains("user@") || t.contains("token="))
+    }));
+    press(&mut rt, Key::Escape);
+    settle(&mut rt);
+    assert!(matches!(
+        rt.state.panel.as_ref().unwrap().kind,
+        PanelKind::Settings
+    ));
+    assert_eq!(rt.state.settings_page(), SettingsSection::Server);
+    tap(&mut rt, "server-pair");
+    click(&mut rt, "pair-done");
+    settle(&mut rt);
+    assert!(matches!(
+        rt.state.panel.as_ref().unwrap().kind,
+        PanelKind::Settings
+    ));
+    assert_eq!(rt.state.settings_page(), SettingsSection::Server);
+}
+
+#[test]
+fn pair_too_long_keeps_full_selectable_text_without_a_code() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let address = format!("https://build.tail1234.ts.net/{}", "a".repeat(220));
+    let mut ws = fixture();
+    pair_report(&mut ws, 0, "available", &address);
+    let mut rt = open(ws, (640., 480.));
+    assert!(has(&rt, "server-pair"));
+    tap(&mut rt, "server-pair");
+    assert_eq!(pair_data(&rt.state).address, address);
+    assert_eq!(pair_data(&rt.state).symbol, Err(rex_rune::qr::TooLong));
+    assert!(!has(&rt, "pair-code"));
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some("This address is too long to show as a code."))
+    );
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some(&address))
+    );
+    let dialog = rect(&rt, "dialog");
+    let done = rect(&rt, "pair-done");
+    assert!(done[1] + done[3] <= dialog[1] + dialog[3]);
+    assert!(dialog[1] >= 0. && dialog[1] + dialog[3] <= 480.);
+}
+
+#[test]
+fn pair_host_switch_disconnect_epoch_or_changed_report_hides_old_code() {
+    for change in 0..4 {
+        let mut ws = workspace_hosts(2);
+        for i in 0..2 {
+            ws.hosts[i].model.connected = true;
+            ws.hosts[i].model.server_info = reported("test");
+            pair_report(
+                &mut ws,
+                i,
+                "available",
+                &format!("https://host{i}-rex.tail1234.ts.net/"),
+            );
+        }
+        let mut rt = open(ws, (1024., 700.));
+        tap(&mut rt, "server-pair");
+        assert_eq!(
+            pair_data(&rt.state).address,
+            "https://host0-rex.tail1234.ts.net/"
+        );
+        rt.update(|s, _| match change {
+            0 => s.active = 1,
+            1 => s.hosts[0].model.connected = false,
+            2 => s.hosts[0].model.connection_epoch += 1,
+            _ => pair_report(s, 0, "pending", "https://host0-rex.tail1234.ts.net/"),
+        });
+        settle(&mut rt);
+        assert!(!has(&rt, "pair-code") && !has(&rt, "pair-address"));
+        click(&mut rt, "pair-done");
+        settle(&mut rt);
+        if change == 0 {
+            tap(&mut rt, "server-pair");
+            let d = pair_data(&rt.state);
+            assert_eq!(d.address, "https://host1-rex.tail1234.ts.net/");
+            assert_eq!(d.symbol, rex_rune::qr::encode(d.address.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn pair_search_and_command_use_the_same_dialog_without_host_commands() {
+    let mut ws = fixture();
+    let host = capture_host(&mut ws, 0);
+    let mut rt = open(ws, (1024., 700.));
+    rt.update(|s, _| {
+        s.settings_nav.search = rune::TextEdit::new("pair");
+        s.settings_search_changed();
+    });
+    assert!(
+        rt.state
+            .settings_nav
+            .hits()
+            .iter()
+            .any(|h| h.page == SettingsSection::Server
+                && h.label == "Tailscale address · Pair device")
+    );
+    rt.update(|s, _| s.picker(false));
+    let entry = rt
+        .state
+        .entries()
+        .into_iter()
+        .find(|e| e.label == "Pair device…")
+        .unwrap();
+    rt.update(|s, tx| s.perform(entry.action, tx));
+    settle(&mut rt);
+    let expected = pair_data(&rt.state).symbol.clone();
+    click(&mut rt, "pair-done");
+    rt.update(|s, tx| {
+        s.perform(Intent::Settings, tx);
+        s.open_section(SettingsSection::Server);
+    });
+    settle(&mut rt);
+    tap(&mut rt, "server-pair");
+    assert_eq!(pair_data(&rt.state).symbol, expected);
+    click(&mut rt, "pair-done");
+    assert!(
+        host.is_empty(),
+        "no Identify, status, session or terminal commands"
+    );
+    let spec = crate::app::actions::find(crate::app::pair_device::ACTION).unwrap();
+    assert!(spec.requires_person());
+    assert!(matches!(
+        spec.remote(),
+        crate::app::actions::Remote::Never(_)
+    ));
+}
+
+#[test]
+fn pair_largest_symbol_fits_both_sizes_and_keeps_black_white_in_every_theme() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let prefix = "https://build.tail1234.ts.net/";
+    let address = format!("{prefix}{}", "a".repeat(213 - prefix.len()));
+    for theme in rex_rune::settings::ChromeTheme::ALL {
+        for size in [(1024., 700.), (640., 480.)] {
+            for scale in [1., 2.] {
+                let mut ws = fixture();
+                ws.settings.chrome_theme = theme;
+                pair_report(&mut ws, 0, "available", &address);
+                prepare(&mut ws, size);
+                ws.pair_device();
+                let mut rt = Runtime::new(ws, page_view, size, Env::new(true, scale));
+                settle(&mut rt);
+                assert_eq!(pair_data(&rt.state).symbol.as_ref().unwrap().size(), 57);
+                let code = rect(&rt, "pair-code");
+                let dialog = rect(&rt, "dialog");
+                let done = rect(&rt, "pair-done");
+                assert!(dialog[1] >= 0. && dialog[1] + dialog[3] <= size.1);
+                assert!(done[1] + done[3] <= dialog[1] + dialog[3]);
+                let elements = rt.elements();
+                let card = elements
+                    .iter()
+                    .find(|e| e.key.as_deref() == Some("pair-code") && !e.exiting)
+                    .unwrap();
+                assert_eq!(card.fill, rune::Color::WHITE);
+                let runs: Vec<_> = elements
+                    .iter()
+                    .filter(|e| !e.exiting && e.path.starts_with(&format!("{}/", card.path)))
+                    .collect();
+                assert!(
+                    !runs.is_empty() && runs.len() < 1000,
+                    "merged runs, not one element per module"
+                );
+                let unit = code[2] / 65.;
+                assert!((unit * scale - (unit * scale).round()).abs() < 0.001);
+                for run in runs {
+                    assert_eq!(run.fill, rune::Color::BLACK);
+                    assert!(
+                        run.rect[0] >= code[0] + 4. * unit - 0.01
+                            && run.rect[1] >= code[1] + 4. * unit - 0.01
+                    );
+                    assert!(run.rect[0] + run.rect[2] <= code[0] + code[2] - 4. * unit + 0.01);
+                    assert!(run.rect[1] + run.rect[3] <= code[1] + code[3] - 4. * unit + 0.01);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pair_device_draw() {
+    let Some(mut camera) = Camera::new() else {
+        return;
+    };
+    let fonts = crate::app::fonts::load("IBM Plex Mono", &[]);
+    let _families = rune::text::with_families("Inter", "IBM Plex Mono");
+    let size = if std::env::var_os("REX_M33_MINIMUM").is_some() {
+        (640., 480.)
+    } else {
+        (1024., 700.)
+    };
+    let scale = if std::env::var_os("REX_M33_SCALE2").is_some() {
+        2.
+    } else {
+        1.
+    };
+    let mut ws = fixture();
+    prepare(&mut ws, size);
+    let mut rt = Runtime::with_text(
+        ws,
+        page_view,
+        size,
+        Env::new(true, scale),
+        rune::text::TextSystem::new(fonts.files, fonts.families),
+    );
+    rt.on_key = Some(crate::app::input::on_key);
+    settle(&mut rt);
+    rt.update(|_, tx| tx.scroll_center("server-pair"));
+    settle(&mut rt);
+    camera.snap(&mut rt, "pair-row");
+    tap(&mut rt, "server-pair");
+    let code = rect(&rt, "pair-code");
+    let done = rect(&rt, "pair-done");
+    let dialog = rect(&rt, "dialog");
+    assert!(dialog[1] >= 0. && dialog[1] + dialog[3] <= size.1);
+    assert!(done[1] + done[3] <= dialog[1] + dialog[3]);
+    assert!((code[0] + code[2] / 2. - size.0 / 2.).abs() < 1.);
+    camera.snap(&mut rt, "pair-dialog");
 }

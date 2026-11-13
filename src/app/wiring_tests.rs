@@ -32,7 +32,7 @@ fn chord(index: usize) -> String {
     const SECOND: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
     format!(
         "ctrl+alt+shift+f{}>{}",
-        9 + index / SECOND.len(),
+        8 + index / SECOND.len(),
         SECOND[index % SECOND.len()] as char
     )
 }

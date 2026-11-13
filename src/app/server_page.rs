@@ -6,7 +6,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::connection::server_info::Answer;
-use rune::{El, col, text};
+use rune::{El, col, row, text};
 
 const MISSING: &str = "Not reported";
 
@@ -68,15 +68,48 @@ fn fact(label: &str, value: impl Into<String>, control: Option<El>) -> El {
 }
 
 fn address_row(key: &str, label: &str, address: Option<String>, fallback: &str) -> El {
+    address_row_with_pair(key, label, address, fallback, false)
+}
+
+fn address_row_with_pair(
+    key: &str,
+    label: &str,
+    address: Option<String>,
+    fallback: &str,
+    pair: bool,
+) -> El {
     let control = address.as_ref().map(|address| {
         let address = address.clone();
-        button(key, "Copy", Pill::Neutral, move |s, tx| {
+        let copy = button(key, "Copy", Pill::Neutral, move |s, tx| {
             tx.copy(address.clone());
             s.inform("Copied address to clipboard.");
         })
-        .help(format!("Copy {}", label.to_lowercase()))
+        .help(format!("Copy {}", label.to_lowercase()));
+        if pair {
+            row().gap(6.).child(copy).child(
+                button("server-pair", "Pair", Pill::Neutral, |s, _| s.pair_device())
+                    .help("Pair device"),
+            )
+        } else {
+            copy
+        }
     });
     fact(label, address.unwrap_or_else(|| fallback.into()), control)
+}
+
+pub(super) fn tailscale_address(model: &rex_rune::connection::HostModel) -> Option<String> {
+    model
+        .server_info
+        .process
+        .reported()?
+        .tailscale
+        .as_ref()?
+        .https
+        .as_ref()
+        .filter(|h| h.state == "available")
+        .and_then(|h| h.url.as_deref())
+        .and_then(address)
+        .filter(|url| url.starts_with("https://"))
 }
 
 fn last_state(state: &str, connected: bool) -> String {
@@ -230,11 +263,7 @@ pub fn section(s: &Workspace) -> El {
             "Pending"
         }
     });
-    let remote = https
-        .filter(|h| h.state == "available")
-        .and_then(|h| h.url.as_deref())
-        .and_then(address)
-        .filter(|url| url.starts_with("https://"));
+    let remote = tailscale_address(model);
     let tailscale = kit::section(
         "Server built-in Tailscale",
         [
@@ -249,11 +278,12 @@ pub fn section(s: &Workspace) -> El {
                     last_state(https_state, model.connected),
                     None,
                 ),
-                address_row(
+                address_row_with_pair(
                     "server-copy-tailnet",
-                    "Tailscale address",
+                    "Tailscale address · Pair device",
                     remote,
                     p_missing,
+                    model.connected,
                 ),
             ]),
             footnote(
