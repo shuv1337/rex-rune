@@ -33,6 +33,9 @@ pub const INSTALL_SCRIPT_COMMAND: &str = "curl --proto '=https' --tlsv1.2 -fsSL 
 /// stays as it is, because every published updater and installer checks for exactly it.
 pub const MANIFEST_PRODUCT: &str = "rex-linux";
 
+/// The last release published as rex-linux, whose `latest.json` has no `archive` entries.
+const LAST_WITHOUT_ARCHIVE: StableVersion = StableVersion(0, 7, 5);
+
 pub const CI_PUBLIC_KEY: &str = include_str!("../packaging/keys/release.pub");
 pub const BACKUP_PUBLIC_KEY: &str = include_str!("../packaging/keys/release-backup.pub");
 
@@ -88,7 +91,11 @@ pub struct TargetArtifacts {
     pub min_glibc: String,
     /// The `rex-rune` tarball this client installs. `latest.json` also carries `tarball`,
     /// which is not read here: it names the bridge tarball laid out for the 0.7.x updater.
-    pub archive: TarballArtifact,
+    /// Absent only from a release published before the rename (0.7.5 and earlier), which is
+    /// still a valid manifest: it can say that this client is up to date, and it is never
+    /// newer than this client, so there is never anything to install from it.
+    #[serde(default)]
+    pub archive: Option<TarballArtifact>,
     pub deb: DebArtifact,
 }
 
@@ -156,17 +163,24 @@ impl ReleaseManifest {
                 matches!(target.as_str(), "x86_64-linux-gnu" | "aarch64-linux-gnu"),
                 "unexpected target {target:?}"
             );
+            // Only a release published as rex-linux has none. Every later one must name it
+            // for every target, or a client would be offered an update it cannot install.
             ensure!(
-                entry.archive.size > 0 && is_hex_sha256(&entry.archive.sha256),
-                "invalid tarball entry for {target}"
+                entry.archive.is_some() || version <= LAST_WITHOUT_ARCHIVE,
+                "missing archive for {target}"
             );
-            ensure!(
-                entry
-                    .archive
-                    .url
-                    .starts_with(&format!("{REPOSITORY}/releases/download/{expected_tag}/")),
-                "unexpected tarball URL for {target}"
-            );
+            if let Some(archive) = &entry.archive {
+                ensure!(
+                    archive.size > 0 && is_hex_sha256(&archive.sha256),
+                    "invalid tarball entry for {target}"
+                );
+                ensure!(
+                    archive
+                        .url
+                        .starts_with(&format!("{REPOSITORY}/releases/download/{expected_tag}/")),
+                    "unexpected tarball URL for {target}"
+                );
+            }
             ensure!(
                 entry.deb.size > 0
                     && is_hex_sha256(&entry.deb.sha256)
@@ -1530,6 +1544,85 @@ mod tests {
                 &[CI_PUBLIC_KEY, BACKUP_PUBLIC_KEY]
             )
             .is_err()
+        );
+    }
+
+    /// `latest.json` as 0.7.5 published it, before the rename: no `archive`, and a `pacman`
+    /// entry this client does not read. Until a renamed release is out, that is the manifest
+    /// a build of this client meets, and it must read as "up to date", not as an error.
+    #[test]
+    fn a_manifest_from_before_the_rename_still_says_this_client_is_current() {
+        let sha = "b".repeat(64);
+        let target = |cpu: &str, deb: &str| {
+            serde_json::json!({
+                "min_glibc": "2.39",
+                "tarball": {
+                    "url": format!("{REPOSITORY}/releases/download/v0.7.5/rex-linux-0.7.5-{cpu}-linux-gnu.tar.gz"),
+                    "size": 23_000_000, "sha256": sha
+                },
+                "deb": {"name": format!("rex-linux_0.7.5_{deb}.deb"), "size": 22_000_000, "sha256": sha},
+                "pacman": {"name": format!("rex-linux-bin-0.7.5-1-{cpu}.pkg.tar.zst"), "size": 21_000_000, "sha256": sha}
+            })
+        };
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": 1,
+            "product": MANIFEST_PRODUCT,
+            "version": "0.7.5",
+            "tag": "v0.7.5",
+            "published": "2026-11-12T09:00:00-08:00",
+            "notes_url": format!("{REPOSITORY}/releases/tag/v0.7.5"),
+            "update_from": "0.4.2",
+            "targets": {
+                "x86_64-linux-gnu": target("x86_64", "amd64"),
+                "aarch64-linux-gnu": target("aarch64", "arm64"),
+            }
+        }))
+        .unwrap();
+        let (key_id, pair, public) = test_keypair();
+        let signature = sign_minisig(&key_id, &pair, &bytes, "rex-linux v0.7.5 latest.json", true);
+        let manifest = verify_and_parse_manifest(&bytes, &signature, &[&public]).unwrap();
+        assert!(manifest.targets.values().all(|t| t.archive.is_none()));
+
+        let this = env!("CARGO_PKG_VERSION");
+        let mut state = UpdateState::default();
+        assert_eq!(
+            apply_verified_manifest(&mut state, this, &manifest, 1).unwrap(),
+            CheckOutcome::UpToDate {
+                version: this.into()
+            }
+        );
+        let refusal = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&sample_manifest_json("0.8.0", "0.7.0")).unwrap();
+            edit(&mut manifest);
+            let error =
+                ReleaseManifest::parse_and_validate(&serde_json::to_vec(&manifest).unwrap());
+            format!("{:#}", error.unwrap_err())
+        };
+        // An archive that is present is still held to the same rules.
+        let wrong_url = refusal(&|m| {
+            m["targets"]["x86_64-linux-gnu"]["archive"]["url"] =
+                "https://example.invalid/rex-rune-0.8.0-x86_64-linux-gnu.tar.gz".into();
+        });
+        assert!(wrong_url.contains("unexpected tarball URL"), "{wrong_url}");
+        // A release since the rename must have one for every target, null or missing alike:
+        // otherwise a client would be offered an update it cannot install.
+        let missing = refusal(&|m| {
+            m["targets"]["aarch64-linux-gnu"]
+                .as_object_mut()
+                .unwrap()
+                .remove("archive");
+        });
+        assert!(
+            missing.contains("missing archive for aarch64-linux-gnu"),
+            "{missing}"
+        );
+        let null = refusal(&|m| {
+            m["targets"]["x86_64-linux-gnu"]["archive"] = serde_json::Value::Null;
+        });
+        assert!(
+            null.contains("missing archive for x86_64-linux-gnu"),
+            "{null}"
         );
     }
 
