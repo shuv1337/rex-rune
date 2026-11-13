@@ -22,7 +22,7 @@ use super::{
 };
 use rex_rune::{connection::HostCommand, settings::PaneDensity};
 use rune::Tx;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::borrow::Cow;
 
 pub const CLOSE_SESSION: &str = "session.close";
@@ -421,6 +421,18 @@ impl Workspace {
                 super::activity_list::ACTION,
             )
             .keywords("working needs you error done"),
+            Command::new(
+                "client.activity.priority",
+                G,
+                "Show activity by priority…",
+                Intent::ClientAction(super::activity_list::ACTION, json!({"view":"priority"})),
+            ),
+            Command::new(
+                "client.activity.session",
+                G,
+                "Show activity by session…",
+                Intent::ClientAction(super::activity_list::ACTION, json!({"view":"session"})),
+            ),
             Command::action(
                 "session.new",
                 G,

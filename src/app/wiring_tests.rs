@@ -191,6 +191,65 @@ fn every_commands_row_of_a_bound_action_shows_its_keys() {
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
+#[test]
+fn activity_view_arguments_have_commands_shortcut_rows_and_effective_hints() {
+    let mut ws = all_bound();
+    let bindings = json!([
+        {"keys":"ctrl+alt+f1", "action":"client.activity"},
+        {"keys":"ctrl+alt+f2", "action":"client.activity", "args":{"view":"priority"}},
+        {"keys":"ctrl+alt+f3", "action":"client.activity", "args":{"view":"session"}}
+    ]);
+    ws.settings.shortcut_file.overrides = Overrides::parse(&bindings);
+    ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
+    ws.keymap_generation += 1;
+    let rows = ws.shortcut_rows();
+    let activity: Vec<_> = rows
+        .iter()
+        .filter(|r| r.action == "client.activity")
+        .collect();
+    assert_eq!(activity.len(), 3);
+    ws.picker(false);
+    for (args, title) in [
+        (Value::Null, "Show activity"),
+        (json!({"view":"priority"}), "Show activity by priority"),
+        (json!({"view":"session"}), "Show activity by session"),
+    ] {
+        let row = activity
+            .iter()
+            .find(|r| r.args.as_ref().unwrap_or(&Value::Null) == &args)
+            .unwrap();
+        assert_eq!(row.title, title);
+        assert!(!row.keys.is_empty());
+        let command = ws
+            .entries()
+            .into_iter()
+            .find(|e| e.label == format!("{title}…"))
+            .unwrap();
+        assert_eq!(
+            command.action.shortcut(),
+            Some(("client.activity", args.clone()))
+        );
+        assert_eq!(command.keys, ws.shortcut_chords("client.activity", &args));
+        assert!(!command.keys.is_empty());
+    }
+    // All three references remain recordable with no keys at all.
+    ws.settings.shortcut_file.overrides = Overrides::default();
+    ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
+    ws.keymap_generation += 1;
+    let rows: Vec<_> = ws
+        .shortcut_rows()
+        .into_iter()
+        .filter(|r| r.action == "client.activity")
+        .collect();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| {
+        r.keys.is_empty()
+            && actions::find(&r.action)
+                .unwrap()
+                .accepts(r.args.as_ref().unwrap_or(&Value::Null))
+    }));
+}
+
 /// The surfaces that only exist once every part is in: the tab menu with its destructive
 /// group, the sidebar's tab menu, Commands at its Pane and App groups and as a search, the
 /// Pane headers list over Settings, Shortcuts with every action bound, and About. Drawn for

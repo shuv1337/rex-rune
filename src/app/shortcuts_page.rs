@@ -215,7 +215,14 @@ fn argument_words(args: &Value) -> String {
 /// Presentation metadata from the existing schema, not another action registry.
 fn argument(spec: &actions::Spec) -> Option<(String, Vec<String>)> {
     let schema = spec.schema()?;
-    let name = schema["required"][0].as_str()?.to_owned();
+    let name = schema["required"][0]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            // An optional enum has explicit choices as well as the no-argument action.
+            let properties = schema["properties"].as_object()?;
+            (properties.len() == 1).then(|| properties.keys().next().unwrap().clone())
+        })?;
     let choices = schema["properties"][&name]["enum"]
         .as_array()
         .map(|values| {
@@ -252,6 +259,9 @@ fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<P
                 .map(|choice| Some(json!({ name.as_str(): choice })))
                 .collect(),
         };
+        if argument.is_some() && spec.accepts(&Value::Null) {
+            listed.insert(0, None);
+        }
         if alias {
             listed.retain(|args| {
                 groups

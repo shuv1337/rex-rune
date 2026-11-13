@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 const IDS: &[&str] = &[
     "session.switch",
     "client.activity",
+    "client.activity.priority",
+    "client.activity.session",
     "session.new",
     "session.rename",
     "session.next",

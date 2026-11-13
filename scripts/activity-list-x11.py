@@ -159,6 +159,23 @@ try:
     assert "reported now" in words.lower(), words
     offsets = [words.lower().index(word) for word in ("needs you", "error", "done", "working")]
     assert offsets == sorted(offsets), words
+    # Tab was already reserved by the popup; it now switches grouping without
+    # taking a printable filter key or a workspace/terminal shortcut.
+    desk.key("Tab")
+    time.sleep(.5)
+    words = capture("by-session")
+    for word in ("Primary", "Private", "Elsewhere", "Approval", "Failure",
+                 "Finished", "Compile", "OtherTask"):
+        assert word.lower() in words.lower(), (word, words)
+    ordered = [words.index(word) for word in
+               ("Primary", "Approval", "Failure", "Finished", "Compile", "Elsewhere", "OtherTask")]
+    assert ordered == sorted(ordered), words
+    assert json.loads(config.read_text())["activity_view"] == "session"
+    desk.key("Escape")
+    time.sleep(.5)
+    show()
+    remembered = capture("by-session-remembered")
+    assert remembered.index("Primary") < remembered.index("Approval") < remembered.index("Elsewhere") < remembered.index("OtherTask"), remembered
     desk.key("Escape")
     time.sleep(.5)
     after = snapshot()
@@ -180,9 +197,10 @@ try:
     desk.key("Escape")
     (work / "result.json").write_text(json.dumps({"passed":True, "two_sessions":True, "live_osc7501":True,
         "groups":["Needs you","Error","Done","Working"], "unchanged_view_size_owner":True,
-        "cross_session_navigation":True, "sidebar_session_word":True, "elapsed_now_rendered":True, "read_back_reported_now_rendered":True, "done_cleared_only_after_navigation":True,
+        "cross_session_navigation":True, "by_session_key_headings_rows":True,
+        "by_session_remembered":True, "sidebar_session_word":True, "elapsed_now_rendered":True, "read_back_reported_now_rendered":True, "done_cleared_only_after_navigation":True,
         "not_exercised":["cross-host native navigation", "Wayland", "notification service"]}, indent=2))
-    print("PASS private OSC activity, four groups with elapsed now, filter, cross-session navigation, Done latch, unchanged view/size/owner", flush=True)
+    print("PASS private OSC activity, priority/session groups, Tab switch, remembered view, elapsed now, filter, cross-session navigation, Done latch, unchanged view/size/owner", flush=True)
 finally:
     if desk:
         desk.close()

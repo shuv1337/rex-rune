@@ -198,6 +198,22 @@ impl From<TerminalThemeChoice> for String {
     }
 }
 
+/// Local ordering of the Activity popup; not a server or notification preference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityView {
+    Session,
+    #[default]
+    #[serde(other)]
+    Priority,
+}
+
+impl ActivityView {
+    pub fn is_priority(&self) -> bool {
+        *self == Self::Priority
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -224,6 +240,8 @@ pub struct Settings {
     pub ui_scale: f32,
     pub notice_position: NoticePosition,
     pub notifications: NotificationsConfig,
+    #[serde(skip_serializing_if = "ActivityView::is_priority")]
+    pub activity_view: ActivityView,
     pub updates: UpdatesConfig,
     pub downloads: DownloadsConfig,
     /// Passed to `rex skill setup` as `--session-naming`, always explicitly.
@@ -283,6 +301,7 @@ impl Default for Settings {
             ui_scale: 1.,
             notice_position: NoticePosition::default(),
             notifications: NotificationsConfig::default(),
+            activity_view: ActivityView::default(),
             updates: UpdatesConfig::default(),
             downloads: DownloadsConfig::default(),
             agent_session_naming: false,

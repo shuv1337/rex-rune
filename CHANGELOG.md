@@ -22,15 +22,19 @@
 
 ### Added
 
+- **Activity by session (partial M3.2):** see each project's tabs together under session and host headings, ordered by what needs attention first. The list shows the choice, **By priority** or **By session**, at the end of its filter row; press either, or Tab while filtering, and the selected tab and the filter are kept. Commands has a row for each view. The choice is remembered across launches, including when opening from the toolbar chip. Browsing remains local and marks nothing seen. See [ordering and checks](docs/parity-2026-11/M3.2-activity-by-session.md).
+
 - **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
 
 - **Pair device (partial M3.3):** Settings → Server and Commands can show a QR code of the connected host's sanitized, last-reported Tailscale HTTPS address. Local-only, no server requests; the exact address stays visible, and an overlong address falls back to text. Encoder matrices and rendered captures are independently checked; phone acceptance is not yet verified. See [checks and limits](docs/parity-2026-11/M3.3-pair-device.md).
+
+- **Windows source builds (W1-W7).** MSVC CI builds the probes and app, links and runs Ghostty VT tests, and checks `--version` and `--help`. Settings and state use Windows profile folders; random IDs and updater locks are portable. Network WebSocket transports are unchanged. Unix sockets and SSH hosts are refused on Windows, which CI checks; downloads are refused by code that has not run there. No Windows UI or real server attachment has been tested. See [Building on Windows](README.md#building-on-windows).
 
 - **Builds from source on macOS.** `cargo build --locked` now produces a client on Apple Silicon macOS that attaches to a local Rex server at `~/Library/Application Support/rex/server.sock`, to `https://` hosts and to `ssh://` hosts, and keeps its settings in `~/Library/Application Support/rex-rune`. Two copies running at once no longer remove each other's SSH tunnels or partial downloads, which relied on `/proc`. There is no macOS release or app bundle, and notifications are not available there yet. See [Building on macOS](README.md#building-on-macos).
 
 - **macOS: Command shortcuts and the system's window.** The default shortcuts on macOS are on Command: ⌘K, ⌘T, ⌘W, ⌘C, ⌘V, ⌘F, ⌘D, ⇧⌘P and the rest, with Control left to the terminal. The window is a standard Mac window with the system's title bar, so its buttons close, minimize and zoom it, its edges resize it and it goes full screen; ⌘W closes an open popup before it closes the window. Links open on ⌘-click. Activity sounds play through `afplay`, and `tailscale` and `rex` are found inside their apps when they are not on `PATH`. Linux is unchanged. See [Shortcuts on macOS](README.md#shortcuts-on-macos).
 
-- **Pull-request CI on three platforms:** Linux runs formatting, Clippy and every test; macOS builds the app and runs the tests; Windows compiles the Ghostty VT library as a first probe.
+- **Pull-request CI on three platforms:** Linux runs formatting, Clippy and every test; macOS builds the app and runs the tests; Windows builds the probes and the app, lints them, and runs the tests that are known to run there.
 
 - **Activity sounds (partial M3.4):** optional sounds for unseen, unmuted tabs that need you, fail or finish, off by default and independent of desktop notifications. Bursts choose one most-pressing sound. Settings → Notifications offers Play and quiet playback health; uses installed freedesktop sound players, with no bundled audio. See [checks and limits](docs/parity-2026-11/M3.4-sounds.md).
 
@@ -41,6 +45,8 @@
 - **Activity toolbar chip (partial M3.2):** a chip in the toolbar opens Activity while known, unmuted tabs other than the one on screen need you (`3 need you`) or, with none waiting, have errors (`2 errors`). Working, Done and Bell keep the toolbar quiet, and so does the Activity in tabs switch. It never floats over the terminal, is not drawn below 720 pt of window width, waits for a key sequence or a download chip in windows under 1000 pt, never marks tabs seen and sends nothing to servers. Coverage now includes the per-connection status pass described above; an absent chip is not an all-clear while reading, after failed reads, or for missing events and suppressed activity. See [checks and limits](docs/parity-2026-11/M3.2-activity-chip.md).
 
 ### Fixed
+
+- **Omarchy is recognised by what is installed.** For the pacman package, the update instructions name `omarchy update` whenever Omarchy's updater or its pacman hook is present, and no longer only when `/etc/os-release` says Omarchy. Before, an Omarchy system whose os-release says Arch was told to run `sudo pacman -Syu rex-rune-bin`, which that hook refuses.
 
 - **A floating pane header under the toolbar's edge:** with the toolbar hidden or shown on hover, a pane header at the very top of the window sat inside the edge that brings the toolbar out, so a click aimed at Close pane could land on Close app. That was a lone pane's floating header (Pane headers → On hover, or Reveal pane headers) and, in Compact density, the headers of a tab's top panes. Such a header's row now sits 8 pt down, as a lone pane's header row already did.
 

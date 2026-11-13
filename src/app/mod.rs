@@ -33,7 +33,7 @@ mod pane_moves;
 mod pane_verbs;
 mod panel;
 mod panes;
-mod platform;
+pub(crate) mod platform;
 mod popups;
 mod recorder;
 mod remote;

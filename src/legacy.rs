@@ -47,7 +47,8 @@ fn migrate_dir(root: &Path) -> Option<(PathBuf, PathBuf)> {
     }
 }
 
-#[cfg(test)]
+// These fixtures include Unix symbolic links.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -80,7 +81,6 @@ mod tests {
         assert!(root.join(NAME).join("workspace.json").exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_linked_old_folder_is_left_alone() {
         let temp = tempfile::tempdir().unwrap();
