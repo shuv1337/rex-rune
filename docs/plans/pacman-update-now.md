@@ -1,7 +1,8 @@
 # Update now for pacman installs: design note
 
-Status: **option (a) is built on the package side** (the helper, the polkit action and
-the certificate; see [As built](#as-built)). The client does not use it yet. Written
+Status: **option (a) is built**: the helper, the polkit action and the certificate in
+the package (see [As built](#as-built)), and Update now in the client
+([how it behaves](../self-updates.md#pacman-installs)). Written
 2026-11-12 (PST) against `20f64b4`, and revised the same day after an independent review
 of the security argument.
 
@@ -512,6 +513,21 @@ refusal list changed nothing, because an expired key's signature is also not
 Checked against the live site without root: the published 0.7.5 package and its
 signature give exactly the status the helper requires, with the committed certificate
 (`gpgv`) and with a copy of shuvdev's real pacman keyring (`TRUST_FULLY`).
+
+### The client
+
+`src/update/pacman.rs` runs `pkexec --disable-internal-agent <helper> <version>` with
+nothing to read and nowhere to write, and turns the exit code into an outcome;
+`src/app/updates.rs` offers Update now for Rex's own pacman package when the helper
+and `/usr/bin/pkexec` exist, shows one waiting line, and then Restart to finish, a
+quiet "cancelled" for a closed dialog, or the refusal's reason with the command to
+copy. It never starts by itself: **Install updates automatically** is for install.sh
+installs only. It does not read the manifest's `pacman` entry; a package that is not on
+the site yet is the helper's exit 68. The outline's step 3 said the tests would use a
+fake helper: they replace the process runner, or name paths that do not exist, and
+nothing in the suite starts `pkexec`.
+
+Step 4, acceptance by hand on a real desktop, is still to do.
 
 ## Not verified
 

@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
 
 fn notify_restart_failure(error: &anyhow::Error) {
     let message = format!(
-        "Rex could not restart: {error:#}. Open Rex again; if it still fails, repair with install.sh. Server sessions are still running."
+        "Rex could not restart: {error:#}. Open Rex again; if it still fails, repair the installation (run install.sh again, or reinstall the package). Server sessions are still running."
     );
     // The Rune event loop and fonts cannot be initialized twice in this process.
     // Use our existing desktop notification transport, without an external utility.

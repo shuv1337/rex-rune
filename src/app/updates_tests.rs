@@ -222,3 +222,291 @@ fn updater_settings_render_install_states() {
         }
     }
 }
+
+/// A pacman install with its package's helper. The paths do not exist, so the worker a
+/// click starts cannot run anything: nothing in this suite starts `pkexec`.
+fn pacman_workspace(omarchy: bool) -> Workspace {
+    use rex_rune::update::pacman::Helper;
+    let mut ws = workspace();
+    ws.updates.channel = InstallChannel::Pacman {
+        omarchy,
+        custom_hint: None,
+    };
+    ws.updates.pacman = Some(Helper {
+        pkexec: "/nonexistent/pkexec".into(),
+        helper: "/nonexistent/rex-rune-update".into(),
+    });
+    ws.updates.state = UpdateState {
+        latest_version: Some("99.0.0".into()),
+        notes_url: Some("https://github.com/shuv1337/rex-rune/releases/tag/v99.0.0".into()),
+        ..UpdateState::default()
+    };
+    ws
+}
+
+fn settle(rt: &mut Runtime<Workspace>) {
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+}
+
+fn page_says(rt: &Runtime<Workspace>, words: &str) -> bool {
+    rt.elements()
+        .iter()
+        .any(|e| e.text.as_deref().is_some_and(|t| t.contains(words)))
+}
+
+#[test]
+fn a_pacman_install_offers_update_now_only_with_its_own_helper() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    for omarchy in [false, true] {
+        let mut ws = pacman_workspace(omarchy);
+        ws.settings.updates.install_automatically = true;
+        ws.open_updates_settings();
+        let mut rt = runtime(ws);
+        settle(&mut rt);
+        assert!(has(&rt, "updates-install-now"));
+        // Says what the button will do, and the command is still there to copy.
+        assert!(page_says(
+            &rt,
+            "asks for your password (an administrator's)"
+        ));
+        assert!(page_says(&rt, "this one package"));
+        assert!(has(&rt, "updates-copy-command"));
+        assert_eq!(
+            page_says(&rt, "`omarchy update` is the recommended way"),
+            omarchy
+        );
+        assert!(page_says(
+            &rt,
+            if omarchy {
+                "omarchy update"
+            } else {
+                "sudo pacman -Syu rex-rune-bin"
+            }
+        ));
+        // Installing on its own is for install.sh installs: it would open a password
+        // dialog nobody asked for. The switch is not shown even if the preference was
+        // left on by such an install.
+        assert!(rt.state.settings.updates.install_automatically);
+        assert!(!has(&rt, "updates-install-auto-switch"));
+
+        // No helper (a package from before it, or no polkit): instructions only, as before.
+        rt.update(|s, _| s.updates.pacman = None);
+        settle(&mut rt);
+        assert!(!has(&rt, "updates-install-now"));
+        assert!(!page_says(&rt, "asks for your password"));
+        assert!(has(&rt, "updates-copy-command"));
+        rt.state.install_update_now();
+        assert!(matches!(rt.state.updates.installation, Installation::Idle));
+        let _ = std::fs::remove_file(&rt.state.settings_path);
+    }
+
+    // Someone else's package says how to update it; the helper is not theirs to use, and
+    // an install.sh install never goes near it.
+    for channel in [
+        InstallChannel::Pacman {
+            omarchy: false,
+            custom_hint: Some("yay -Syu rex-rune".into()),
+        },
+        InstallChannel::Deb { custom_hint: None },
+        InstallChannel::Nix,
+        InstallChannel::Source,
+        InstallChannel::Unmanaged,
+    ] {
+        let mut ws = pacman_workspace(false);
+        ws.updates.channel = channel.clone();
+        assert!(ws.updates.pacman_helper().is_none(), "{channel:?}");
+        ws.open_updates_settings();
+        let mut rt = runtime(ws);
+        settle(&mut rt);
+        assert!(!has(&rt, "updates-install-now"), "{channel:?}");
+        rt.state.install_update_now();
+        assert!(matches!(rt.state.updates.installation, Installation::Idle));
+        let _ = std::fs::remove_file(&rt.state.settings_path);
+    }
+    let mut ws = pacman_workspace(false);
+    ws.updates.channel = InstallChannel::Tarball;
+    assert!(ws.updates.pacman_helper().is_none());
+    let _ = std::fs::remove_file(&ws.settings_path);
+}
+
+#[test]
+fn a_pacman_update_reports_each_ending_and_restarts_only_after_an_upgrade() {
+    use rex_rune::update::pacman::{Outcome, Refusal};
+    let _families = rune::text::with_families("Inter", "Inter");
+    let mut ws = pacman_workspace(true);
+    ws.open_updates_settings();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+
+    // The click says what is being waited for; a second one starts nothing more.
+    click(&mut rt, "updates-install-now");
+    settle(&mut rt);
+    assert!(matches!(
+        rt.state.updates.installation,
+        Installation::Working(_)
+    ));
+    assert!(page_says(&rt, "Waiting for your password"));
+    assert!(!has(&rt, "updates-install-now"));
+    assert!(!has(&rt, "updates-restart"));
+    rt.state.check_updates_now();
+    assert!(!rt.state.updates.checking, "no check during an update");
+
+    // The dialog was closed: not a failure, nothing to restart, the button is back.
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Dismissed));
+    settle(&mut rt);
+    assert!(matches!(rt.state.updates.installation, Installation::Idle));
+    assert!(has(&rt, "updates-install-now"));
+    assert!(!has(&rt, "updates-restart"));
+    assert!(!page_says(&rt, "Update failed"));
+    assert!(
+        rt.state
+            .notices
+            .iter()
+            .any(|n| n.text.contains("Update cancelled"))
+    );
+
+    // Every refusal says why, never offers Restart, and leaves the command to copy.
+    for (refusal, words) in [
+        (Refusal::NotAuthorized, "probably no agent is running"),
+        (Refusal::NotNewer, "already this version or newer"),
+        (Refusal::HeldBack, "IgnorePkg"),
+        (Refusal::Busy, "another pacman is running"),
+        (Refusal::Download, "pkg.shuv.dev"),
+        (Refusal::Signature, "not signed by the Rex package key"),
+        (Refusal::Untrusted, "pacman keyring does not trust"),
+        (Refusal::WrongPackage, "something other than the package"),
+        (
+            Refusal::OtherPackages,
+            "could not work out how to install it",
+        ),
+        (Refusal::Pacman, "journalctl -t rex-rune-update"),
+        (Refusal::Unsupported, "systemd"),
+        (Refusal::NoPkexec, "pkexec could not be started"),
+        (Refusal::Unexpected(Some(1)), "exit code 1"),
+        (Refusal::Unexpected(None), "may still finish"),
+    ] {
+        rt.update(|s, _| s.finish_pacman_update(Outcome::Refused(refusal)));
+        settle(&mut rt);
+        assert!(
+            matches!(&rt.state.updates.installation, Installation::Failed(e) if e.contains(words)),
+            "{refusal:?}"
+        );
+        assert!(page_says(&rt, "Update failed") && page_says(&rt, words));
+        assert!(page_says(&rt, "You can retry or use Copy command"));
+        assert!(!has(&rt, "updates-restart"), "{refusal:?}");
+        assert!(has(&rt, "updates-install-now") && has(&rt, "updates-copy-command"));
+    }
+
+    // An upgrade: Restart to finish.
+    let restart = rt.state.restart.clone();
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Installed));
+    settle(&mut rt);
+    assert!(has(&rt, "updates-restart"));
+    assert!(!has(&rt, "updates-install-now"));
+    rt.state.install_update_now();
+    assert!(matches!(
+        rt.state.updates.installation,
+        Installation::Ready(_)
+    ));
+    click(&mut rt, "updates-restart");
+    // The client the package installs, whatever path this process was started from: after
+    // a system upgrade under a running client, that path names a deleted file.
+    assert_eq!(
+        *restart.lock().unwrap(),
+        Some(std::path::PathBuf::from("/usr/bin/rex-rune"))
+    );
+    let _ = std::fs::remove_file(&rt.state.settings_path);
+}
+
+#[test]
+fn a_pacman_install_is_never_updated_without_being_asked() {
+    use rex_rune::update::CheckOutcome;
+    let mut ws = pacman_workspace(false);
+    let temp = tempfile::tempdir().unwrap();
+    ws.updates.config.state_path = temp.path().join("state.json");
+    // The preference can be left on from an install.sh install of the same account.
+    ws.settings.updates.check = true;
+    ws.settings.updates.install_automatically = true;
+    let state = ws.updates.state.clone();
+    state.save(&ws.updates.config.state_path).unwrap();
+    ws.finish_update_check(
+        false,
+        Ok((
+            CheckOutcome::UpdateAvailable {
+                version: "99.0.0".into(),
+                notes_url: String::new(),
+                published: String::new(),
+            },
+            state,
+        )),
+    );
+    assert!(ws.updates.available().is_some());
+    assert!(
+        matches!(ws.updates.installation, Installation::Idle),
+        "a check must not open a password dialog"
+    );
+    let _ = std::fs::remove_file(&ws.settings_path);
+}
+
+#[test]
+fn the_update_notice_points_a_pacman_install_at_settings_when_it_can_update() {
+    let ws = pacman_workspace(false);
+    assert_eq!(
+        ws.updates.guidance("99.0.0").summary,
+        "Rex Rune 99.0.0 is available. Open Settings → Updates to install it."
+    );
+    let omarchy = pacman_workspace(true);
+    let guidance = omarchy.updates.guidance("99.0.0");
+    assert_eq!(
+        guidance.summary,
+        "Rex Rune 99.0.0 is available. Run `omarchy update`, or open Settings → Updates to install it."
+    );
+    assert_eq!(guidance.command.as_deref(), Some("omarchy update"));
+    // Without the helper the words are the channel's own.
+    let mut plain = pacman_workspace(true);
+    plain.updates.pacman = None;
+    assert_eq!(
+        plain.updates.guidance("99.0.0"),
+        plain.updates.channel.guidance("99.0.0")
+    );
+    for ws in [ws, omarchy, plain] {
+        let _ = std::fs::remove_file(&ws.settings_path);
+    }
+}
+
+/// Run alone with REX_TEST_SNAP_DIR for real-font captures; optionally REX_UPDATE_MINIMUM=1.
+#[test]
+fn pacman_update_draw() {
+    use rex_rune::update::pacman::{Outcome, Refusal};
+    let Some(mut camera) = super::pane_verb_tests::Camera::new() else {
+        return;
+    };
+    let fonts = crate::app::fonts::load("IBM Plex Mono", &[]);
+    let mut ws = pacman_workspace(true);
+    ws.open_updates_settings();
+    let size = if std::env::var_os("REX_UPDATE_MINIMUM").is_some() {
+        (640., 480.)
+    } else {
+        (1024., 700.)
+    };
+    let mut rt = Runtime::with_text(
+        ws,
+        view,
+        size,
+        Env::new(true, 1.),
+        rune::text::TextSystem::new(fonts.files, fonts.families),
+    );
+    settle(&mut rt);
+    camera.snap(&mut rt, "pacman-update-available");
+    click(&mut rt, "updates-install-now");
+    settle(&mut rt);
+    camera.snap(&mut rt, "pacman-update-waiting");
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Refused(Refusal::NotAuthorized)));
+    settle(&mut rt);
+    camera.snap(&mut rt, "pacman-update-refused");
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Installed));
+    settle(&mut rt);
+    camera.snap(&mut rt, "pacman-update-ready");
+}
