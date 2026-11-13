@@ -735,6 +735,7 @@ pub fn omarchy_installed(root: &Path) -> bool {
     [
         "usr/share/libalpm/hooks/00-omarchy-update-guard.hook",
         "usr/share/omarchy/bin/omarchy-update",
+        "usr/bin/omarchy-update",
     ]
     .iter()
     .any(|path| root.join(path).is_file())
@@ -1762,11 +1763,14 @@ mod tests {
         for marker in [
             "usr/share/libalpm/hooks/00-omarchy-update-guard.hook",
             "usr/share/omarchy/bin/omarchy-update",
+            "usr/bin/omarchy-update",
         ] {
             let root = temp.join(marker.replace('/', "-"));
             let file = root.join(marker);
-            fs::create_dir_all(file.parent().unwrap()).unwrap();
-            assert!(!omarchy_installed(&root), "a folder alone is not it");
+            // A folder of that name is not the file.
+            fs::create_dir_all(&file).unwrap();
+            assert!(!omarchy_installed(&root), "a folder is not it: {marker}");
+            fs::remove_dir(&file).unwrap();
             fs::write(&file, "").unwrap();
             assert!(omarchy_installed(&root), "{marker}");
         }
