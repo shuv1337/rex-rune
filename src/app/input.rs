@@ -237,9 +237,20 @@ pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 s.start_rename(host, session);
             }
         }
-        // Lists have one control; Tab must not walk focus out to the window behind them.
+        // Tab was already reserved in lists: it never inserts filter text or reaches
+        // the terminal. Activity uses it for its two-way choice, keeping field focus.
         Key::Tab => {
-            if !ev.mods.shift {
+            if s.panel
+                .as_ref()
+                .is_some_and(|p| matches!(p.kind, PanelKind::Activity))
+            {
+                // Plain Tab or Shift Tab only: Ctrl Tab is the next tab across sessions,
+                // and must not rearrange a list it merely fell through to.
+                if !(ev.mods.ctrl || ev.mods.cmd || ev.mods.alt || ev.mods.logo) {
+                    s.toggle_activity_view();
+                    tx.instant();
+                }
+            } else if !ev.mods.shift {
                 s.descend_directory();
             }
         }
