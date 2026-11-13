@@ -1557,6 +1557,74 @@ fn space_presses_the_focused_close_button_on_every_platform() {
     assert_eq!(sent[0].0, "session.close_window");
 }
 
+/// The form side of #106: Tab from the field to Cancel, then Return.
+#[test]
+fn tab_to_cancel_and_return_saves_nothing_where_the_platform_presses_the_focused_button() {
+    let mut ws = workspace();
+    ws.panel = Some(super::panel::Panel::new(
+        PanelKind::Form(Form::ClientLabel),
+        "Client name",
+        &[("Name", "This computer's name", "Headless")],
+    ));
+    let mut rt = runtime(ws);
+    press(&mut rt, Key::Tab);
+    let path = focused(&rt).expect("Cancel has focus after Tab");
+    assert!(path.ends_with("cancel-form"), "Tab reached {path}");
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.panel.is_none(), "Return answered the form");
+    if super::platform::keys::RETURN_PRESSES_FOCUSED {
+        assert_eq!(rt.state.settings.client_label, None, "Cancel saved nothing");
+    } else {
+        assert_eq!(rt.state.settings.client_label.as_deref(), Some("Headless"));
+    }
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// A held Return on a focused button that keeps focus presses it once.
+#[test]
+fn a_held_return_presses_a_focused_button_once() {
+    fn one_button(_: &Workspace, _: &mut rune::Cx<Workspace>) -> rune::El {
+        super::widgets::pill(
+            "probe",
+            "Probe",
+            super::widgets::Pill::Neutral,
+            32.,
+            |s, _| {
+                s.settings.font_size += 1.;
+            },
+        )
+    }
+    if !super::platform::keys::RETURN_PRESSES_FOCUSED {
+        return;
+    }
+    let mut ws = workspace();
+    ws.settings.font_size = 0.;
+    let mut rt = Runtime::new(ws, one_button, (400., 200.), Env::new(true, 1.));
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
+    press(&mut rt, Key::Tab);
+    assert!(
+        focused(&rt).is_some_and(|p| p.ends_with("probe")),
+        "{:?}",
+        focused(&rt)
+    );
+    let enter = KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    };
+    rt.key(enter.clone());
+    for _ in 0..3 {
+        rt.repeat_key(enter.clone());
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        focused(&rt).is_some_and(|p| p.ends_with("probe")),
+        "focus stayed"
+    );
+    assert_eq!(rt.state.settings.font_size, 1., "pressed once");
+}
+
 #[test]
 fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     let mut ws = workspace();
