@@ -213,7 +213,7 @@ What differs from Linux today:
 | Area | On macOS |
 | --- | --- |
 | Shortcuts | On the Command key: see [Shortcuts on macOS](#shortcuts-on-macos) |
-| Window | The toolbar is the title bar, as in Rex for macOS: one 38 pt row with the system's close, minimize and zoom buttons at its start, then the sidebar toggle, the focused pane's program and directory (or the tabs' pills while there are several in the toolbar), drag space, the session (a press opens Switch session), Commands, New tab and Settings. A tab with one pane has no header row of its own: its buttons end the title row. Split panes keep their headers. Empty space in the row moves the window, and a double-click on it does what System Settings says for title bars. With the toolbar hidden or shown on hover, a title strip with the pane's title and buttons keeps the traffic lights clear; in full screen it goes. Edge resizing and full screen are the system's |
+| Window | The toolbar is the title bar, as in Rex for macOS: one 38 pt row with the system's close, minimize and zoom buttons at its start, then the sidebar toggle, the focused pane's program and directory (or the tabs' pills while there are several in the toolbar), drag space, the session (a press opens Switch session), Commands, New tab and Settings. A tab with one pane has no header row of its own: its buttons end the title row. Split panes keep their headers. Empty space in the row moves the window, and a double-click on it does what System Settings says for title bars. With the toolbar hidden or shown on hover, a title strip with the pane's title and buttons keeps the traffic lights clear; in full screen it goes. Edge resizing and full screen are the system's; ⌃⌘F and **Enter full screen** in Commands also toggle it |
 | Primary selection | macOS has none, so the setting is not shown |
 | Links and Show in folder | Opened with `open`; Show in folder selects the file in Finder |
 | Sounds | Played with `afplay` from the system's alert sounds: Ping when a program needs you, Basso for an error, Glass when one is done |
@@ -485,6 +485,7 @@ On macOS the defaults are on Command (⌘), which terminal programs do not use, 
 | ⌥⌘ arrows | Ctrl Alt arrows | Focus an adjacent pane |
 | ⇧⌘[ / ⇧⌘] (and ⌘ Page Up / Down) | Ctrl PageUp / PageDown | Previous / next tab in the session |
 | ⌘A | none | Select the terminal's screen and scrollback (`pane.select_all`) |
+| ⌃⌘F | none | Enter or leave full screen (`client.full_screen.toggle`) |
 | Ctrl Tab / Ctrl Shift Tab | the same | Next / previous tab across sessions |
 | Shift PageUp / PageDown | the same | Scroll local history |
 
