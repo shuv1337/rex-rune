@@ -22,7 +22,7 @@
 
 ### Added
 
-- **Activity by session (partial M3.2):** see each project's tabs together under session and host headings, ordered by what needs attention first. The list shows the choice, **By priority** or **By session**, on a line under its filter; press either, or Tab while filtering, and the selected tab and the filter are kept. Commands has a row for each view. The choice is remembered across launches, including when opening from the toolbar chip. Browsing remains local and marks nothing seen. See [ordering and checks](docs/parity-2026-11/M3.2-activity-by-session.md).
+- **Activity by session (partial M3.2):** see each project's tabs together under session and host headings, ordered by what needs attention first. The list shows the choice, **By priority** or **By session**, at the end of its filter row; press either, or Tab while filtering, and the selected tab and the filter are kept. Commands has a row for each view. The choice is remembered across launches, including when opening from the toolbar chip. Browsing remains local and marks nothing seen. See [ordering and checks](docs/parity-2026-11/M3.2-activity-by-session.md).
 
 - **Pair device (partial M3.3):** Settings → Server and Commands can show a QR code of the connected host's sanitized, last-reported Tailscale HTTPS address. Local-only, no server requests; the exact address stays visible, and an overlong address falls back to text. Encoder matrices and rendered captures are independently checked; phone acceptance is not yet verified. See [checks and limits](docs/parity-2026-11/M3.3-pair-device.md).
 

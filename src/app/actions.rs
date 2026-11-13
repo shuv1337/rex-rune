@@ -883,8 +883,11 @@ pub fn binding_title(binding: &rexrs::api::client::Binding) -> String {
             .replace('_', " ")
     };
     match binding.action.as_str() {
-        "client.activity" if args["view"].as_str().is_some() => {
-            format!("Show activity by {}", args["view"].as_str().unwrap())
+        "client.activity" if matches!(args["view"].as_str(), Some("priority" | "session")) => {
+            format!(
+                "Show activity by {}",
+                args["view"].as_str().unwrap_or_default()
+            )
         }
         "pane.split" => format!("Split {}", direction()),
         "pane.focus" => format!("Focus pane {}", direction()),

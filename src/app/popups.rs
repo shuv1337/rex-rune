@@ -165,6 +165,60 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     )
 }
 
+/// The Activity list's grouping, as two small text choices: the current one marked, the
+/// other a press away. Tab switches them from the filter, and a press never takes its focus.
+fn activity_view(s: &Workspace) -> El {
+    use rex_rune::settings::ActivityView;
+    let view = s.settings.activity_view;
+    let choice = |key: &str, label: &str, target: ActivityView| {
+        let on = view == target;
+        let mut cell = row()
+            .key(key.to_owned())
+            .role("radio")
+            .label(label.to_owned())
+            .help(format!("{label} · Tab"))
+            .focus_selected(on)
+            .h(22.)
+            .px(7.)
+            .center()
+            .radius(6.)
+            .continuous_corners()
+            .hover_group()
+            .preserve_focus_on_press(true)
+            .tab_index(-1)
+            .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                s.set_activity_view(target);
+                tx.instant();
+            });
+        let mut word = text(label.to_owned())
+            .font(if on { medium(11.) } else { ui(11.) })
+            .color(rgb(if on { ink() } else { muted() }));
+        if on {
+            cell = cell.fill(white(0.09));
+        } else {
+            word = word.group_color(rgb(ink()));
+            cell = cell.cursor(rune::Cursor::Pointer).hover(white(0.05));
+        }
+        cell.child(word)
+    };
+    row()
+        .key("activity-view")
+        .role("radiogroup")
+        .label("Group activity")
+        .gap(2.)
+        .mr(4.)
+        .child(choice(
+            "activity-view-priority",
+            "By priority",
+            ActivityView::Priority,
+        ))
+        .child(choice(
+            "activity-view-session",
+            "By session",
+            ActivityView::Session,
+        ))
+}
+
 pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let k = kit();
     let panel = s.panel.as_ref().expect("list panel");
@@ -611,82 +665,23 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                         .width(None)
                         .build(k)
                         .key("popup-search")
-                        .w_full(),
-                ),
+                        .grow(1.)
+                        .shrink()
+                        .min_w(0.),
+                )
+                // Activity's grouping sits at the end of its filter row, so the coverage
+                // line under it keeps the whole width for what it has to say.
+                .children(activity.then(|| activity_view(s))),
         );
     }
-    if activity {
-        // One line under the filter: what the list may be missing, and how it is grouped.
-        // It is always there now (it used to appear only with something to say), so the
-        // rows start 28 pt lower when coverage is complete; the list's height budget
-        // already allowed for it.
-        let coverage = s.activity_coverage();
-        let view = s.settings.activity_view;
-        let choice = |key: &str, label: &str, target: rex_rune::settings::ActivityView| {
-            let on = view == target;
-            let mut cell = row()
-                .key(key.to_owned())
-                .role("radio")
-                .label(label.to_owned())
-                .focus_selected(on)
-                .h(20.)
-                .px(7.)
-                .center()
-                .radius(6.)
-                .continuous_corners()
-                .hover_group()
-                .preserve_focus_on_press(true)
-                .tab_index(-1)
-                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                    s.set_activity_view(target);
-                    tx.instant();
-                });
-            let mut word = text(label.to_owned())
-                .font(if on { medium(11.) } else { ui(11.) })
-                .color(rgb(if on { ink() } else { muted() }));
-            if on {
-                cell = cell.fill(white(0.09));
-            } else {
-                word = word.group_color(rgb(ink()));
-                cell = cell.cursor(rune::Cursor::Pointer).hover(white(0.05));
-            }
-            cell.child(word)
-        };
+    let coverage = s.activity_coverage();
+    if activity && !coverage.is_empty() {
         surface = surface.child(
             row()
-                .key("activity-line")
                 .h(28.)
-                .pl(10.)
-                .pr(6.)
-                .gap(8.)
+                .px(10.)
                 .center_y()
-                .child(
-                    text(coverage.clone())
-                        .font(ui(11.))
-                        .color(rgb(muted()))
-                        .truncate()
-                        .help_when_truncated(coverage)
-                        .grow(1.)
-                        .shrink(),
-                )
-                .child(
-                    row()
-                        .key("activity-view")
-                        .role("radiogroup")
-                        .label("Group activity")
-                        .gap(2.)
-                        .child(choice(
-                            "activity-view-priority",
-                            "By priority",
-                            rex_rune::settings::ActivityView::Priority,
-                        ))
-                        .child(choice(
-                            "activity-view-session",
-                            "By session",
-                            rex_rune::settings::ActivityView::Session,
-                        )),
-                )
-                .child(keycap("Tab", false).help("Switch between the two")),
+                .child(text(coverage).font(ui(11.)).color(rgb(muted())).truncate()),
         );
     }
     let mut results = el().w_full().min_h(0.).child(scroller);

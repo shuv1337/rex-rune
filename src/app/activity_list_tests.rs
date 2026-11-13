@@ -494,8 +494,82 @@ fn the_switch_in_the_list_shows_the_view_and_a_press_changes_it_without_leaving_
         rx.iter().all(|r| r.is_empty()),
         "a local choice sends nothing"
     );
-    assert!(has(&rt, "activity-line"));
+    // The choices are beside the filter, so the coverage line under it keeps its width.
+    let field = super::pane_verb_tests::rect(&rt, "popup-search");
+    let choices = super::pane_verb_tests::rect(&rt, "activity-view");
+    assert!(
+        choices[0] >= field[0] + field[2] - 0.5 && (choices[1] - field[1]).abs() < 12.,
+        "field {field:?}, choices {choices:?}"
+    );
     std::fs::remove_file(&rt.state.settings_path).unwrap();
+}
+
+#[test]
+fn ctrl_tab_falls_through_the_list_without_changing_the_grouping() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let (mut ws, _rx) = fixture();
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    for shift in [false, true] {
+        rt.key(KeyEvent {
+            key: Key::Tab,
+            mods: Mods {
+                ctrl: true,
+                cmd: true,
+                shift,
+                ..Default::default()
+            },
+        });
+        settle(&mut rt);
+        assert_eq!(rt.state.settings.activity_view, ActivityView::Priority);
+    }
+    assert!(!rt.state.settings_path.exists(), "and nothing was saved");
+}
+
+#[test]
+fn a_session_is_placed_by_the_most_pressing_row_the_filter_leaves_it() {
+    let (mut ws, _rx) = fixture();
+    ws.settings.activity_view = ActivityView::Session;
+    let groups = |ws: &Workspace, query: &str| {
+        let mut seen: Vec<String> = Vec::new();
+        for entry in ws.activity_entries_at(query, std::time::Instant::now()) {
+            let key = entry.group_key.clone().expect("a session heading");
+            if seen.last() != Some(&key) {
+                seen.push(key);
+            }
+        }
+        seen
+    };
+    // Unfiltered, a session with a tab that needs you comes before one that is only working.
+    let all = groups(&ws, "");
+    let needs = all
+        .iter()
+        .position(|k| k == "activity:0:s")
+        .expect("host 0's session s");
+    let working = all
+        .iter()
+        .position(|k| k == "activity:0:other")
+        .expect("host 0's session other");
+    assert!(needs < working, "{all:?}");
+    // Filtered to working tabs, session s has only its working row left and ranks with it:
+    // it no longer goes first because of rows the filter took away.
+    let filtered = groups(&ws, "working");
+    assert_eq!(
+        filtered,
+        [
+            "activity:0:s",
+            "activity:0:other",
+            "activity:1:s",
+            "activity:1:other"
+        ],
+        "host and session order among equals"
+    );
+    let rows = ws.activity_entries_at("working", std::time::Instant::now());
+    assert!(
+        rows.iter().all(|e| e.detail == "Working"),
+        "only working rows remain"
+    );
 }
 
 #[test]
