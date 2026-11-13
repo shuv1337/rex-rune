@@ -1,0 +1,256 @@
+#!/bin/bash -p
+# Rex Rune's one privileged step for pacman installs: upgrade the rex-rune-bin package to
+# one exact, newer, Rex-signed release from the Rex package site. Run as root through
+#
+#     pkexec --disable-internal-agent /usr/lib/rex-rune/rex-rune-update <version>
+#
+# by the client's "Update now", behind polkit's own dialog (dev.shuv.rex-rune.update).
+#
+# The caller is assumed hostile: the client talks to servers and parses terminal output.
+# So this takes one argument, a version, and nothing else from it: no path, URL, option,
+# file descriptor contents or environment. Everything else is fixed here or worked out
+# here. What it can do, in full: download one named file from one host, check it, and hand
+# that file to pacman. docs/plans/pacman-update-now.md has the reasoning.
+#
+# It runs twice. The process pkexec starts is still the caller's in every way that is not
+# an argument: its resource limits, its terminal, its session and its control group. So
+# that process only checks the version and asks systemd to run this same file as a
+# service (rex-rune-update.service), then waits for it. The service is started by systemd,
+# with nothing of the caller's, and does the work. Without systemd there is no update.
+#
+# Exit codes (the client turns them into sentences; 126 and 127 are pkexec's own):
+#   0   upgraded
+#   64  not a version, or wrong arguments
+#   65  rex-rune-bin is not installed, or that version is not newer than it
+#   66  the package is held back in pacman.conf (IgnorePkg)
+#   67  another update is running, or pacman's database is locked
+#   68  the package could not be downloaded
+#   69  the signature is not the Rex package key's, or that key is expired or revoked
+#   70  this machine's pacman keyring does not trust that key (any more)
+#   71  the file is not the package and version asked for
+#   72  installing it would change other packages
+#   73  pacman refused or failed
+#   74  this system cannot run the helper (no systemd, architecture, missing tool), or the
+#       update service did not start or did not finish
+
+set -u
+# Privileged mode (-p above) already ignores BASH_ENV and functions from the environment.
+# pkexec passes almost none of the caller's environment on; drop what is left, so that no
+# proxy, home directory or configuration variable reaches curl, gpg or pacman.
+while IFS= read -r name; do
+    case $name in
+        PATH | LC_ALL) ;;
+        *) unset "$name" 2>/dev/null || true ;;
+    esac
+done < <(compgen -e)
+IFS=$' \t\n'
+export PATH=/usr/bin LC_ALL=C HOME=/root
+umask 077
+
+readonly PACKAGE=rex-rune-bin
+readonly SITE=https://pkg.shuv.dev/arch
+readonly KEYRING=/usr/share/rex-rune/archive-key.gpg
+# The primary key of the certificate in KEYRING, written in when the package is built.
+readonly PRIMARY='@PRIMARY@'
+readonly UNIT=rex-rune-update.service
+# Where the service is, exactly: a unit of the system manager, not something of that name
+# in a user's own part of the tree.
+readonly CGROUP="0::/system.slice/$UNIT"
+# The service's own directory under /run, made by systemd for it and removed with it.
+readonly RUNTIME=rex-rune-update
+readonly WORK=/run/$RUNTIME
+readonly MAX_PACKAGE=$((256 * 1024 * 1024))
+readonly MAX_SIGNATURE=4096
+readonly SELF=/usr/lib/rex-rune/rex-rune-update
+
+say() { logger -t rex-rune-update -- "$*" 2>/dev/null || true; }
+fail() { say "refused ($1): $2"; exit "$1"; }
+
+[[ $EUID -eq 0 ]] || exit 64
+
+# Nothing here reads from or writes to the caller: a closed window or a full pipe must not
+# stop an install half-way, and nothing the caller holds open is passed on to pacman.
+exec </dev/null >/dev/null 2>&1
+trap '' HUP PIPE
+# No file name expansion anywhere: nothing read below is ever a pattern.
+set -f
+
+in_service=0
+if [[ $# -eq 2 && $1 == --in-service ]]; then
+    in_service=1
+    shift
+fi
+[[ $# -eq 1 ]] || fail 64 'expected one argument'
+readonly VERSION=$1
+[[ $VERSION =~ ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$ ]] \
+    || fail 64 'not a version'
+
+[[ -d /run/systemd/system && ! -L /run/systemd/system ]] || fail 74 'no systemd'
+
+# Whether an update is running (or starting, or ending) right now.
+running() {
+    case $(systemctl is-active "$UNIT" 2>/dev/null) in
+        active | activating | deactivating | reloading) return 0 ;;
+    esac
+    return 1
+}
+
+if (( ! in_service )); then
+    for tool in systemd-run systemctl pacman logger; do
+        command -v "$tool" >/dev/null || fail 74 "missing $tool"
+    done
+    running && fail 67 'another update is running'
+    # The unit name is the lock: systemd will not start a second one. systemd-run waits and
+    # passes the service's exit code on; if this process is killed, the service still
+    # finishes.
+    systemd-run --quiet --wait --collect --no-ask-password --service-type=exec \
+        --unit "$UNIT" --description 'Rex Rune update' \
+        --property "RuntimeDirectory=$RUNTIME" --property RuntimeDirectoryMode=0700 \
+        -- "$SELF" --in-service "$VERSION"
+    code=$?
+    if (( code == 0 )); then
+        # Believe pacman, not an exit code.
+        [[ $(pacman -Q "$PACKAGE" 2>/dev/null) == "$PACKAGE $VERSION-1" ]] \
+            || fail 74 'the update service ended without installing'
+        exit 0
+    fi
+    # The helper's own codes come back as they are. Anything else is systemd-run's or a
+    # signal's: the unit already exists, or the service could not start or was stopped.
+    (( code >= 64 && code <= 74 )) && exit "$code"
+    # systemd-run's own failure is 1. With the unit there, another update got in first.
+    # (After any other ending the unit may be there too, and then it is this update,
+    # still going without its waiter.)
+    (( code == 1 )) && running && fail 67 'another update is running'
+    fail 74 'the update service did not start, or this stopped waiting for it'
+fi
+
+# `--in-service` grants nothing: what counts is where this process really is.
+grep -qxF -- "$CGROUP" /proc/self/cgroup || fail 64 'not the update service'
+[[ -d $WORK && ! -L $WORK && -O $WORK ]] || fail 74 'no work directory'
+readonly work=$WORK
+
+for tool in pacman pacman-conf vercmp curl gpgv gpg bsdtar stat logger uname sed grep find tail tr cut rm; do
+    command -v "$tool" >/dev/null || fail 74 "missing $tool"
+done
+find "$work" -mindepth 1 -delete || fail 74 'work directory not empty'
+# The keyring pacman itself reads, wherever pacman.conf puts it.
+PACMAN_KEYRING=$(pacman-conf GPGDir 2>/dev/null) || fail 74 'no pacman keyring'
+[[ $PACMAN_KEYRING == /* && -d $PACMAN_KEYRING ]] || fail 74 'no pacman keyring'
+readonly PACMAN_KEYRING
+
+case $(uname -m) in
+    x86_64) readonly ARCH=x86_64 ;;
+    aarch64) readonly ARCH=aarch64 ;;
+    *) fail 74 'unsupported architecture' ;;
+esac
+
+# Only an upgrade of what is installed: never a first install, a reinstall or a downgrade.
+installed=$(pacman -Q "$PACKAGE" 2>/dev/null) || fail 65 'not installed'
+[[ $installed == "$PACKAGE "* ]] || fail 65 'not installed under this name'
+readonly INSTALLED=${installed#"$PACKAGE "}
+readonly WANTED="$VERSION-1"
+[[ $(vercmp "$WANTED" "$INSTALLED") == 1 ]] || fail 65 "not newer than $INSTALLED"
+
+# An administrator who pinned the package keeps it pinned. IgnorePkg entries may be
+# patterns, as pacman reads them.
+while IFS= read -r held; do
+    # shellcheck disable=SC2053  # a pattern match is the point
+    [[ -n $held && $PACKAGE == $held ]] && fail 66 'held back by IgnorePkg'
+done < <(pacman-conf IgnorePkg 2>/dev/null)
+
+readonly FILE="$PACKAGE-$WANTED-$ARCH.pkg.tar.zst"
+readonly URL="$SITE/$ARCH/$FILE"
+
+# HTTPS to the one host, bounded in size and time, and never root's own curl configuration.
+# curl follows no redirect unless asked to, but it would save a redirect's own body and call
+# that success, so only a plain 200 counts.
+fetch() {
+    local code
+    code=$(curl -q --proto '=https' --tlsv1.2 --fail --silent --no-progress-meter \
+        --connect-timeout 20 --max-time "$3" --max-filesize "$2" \
+        --output "$work/$1" --write-out '%{http_code}' -- "$URL${1#"$FILE"}") || return 1
+    [[ $code == 200 ]] || return 1
+    [[ -f $work/$1 && ! -L $work/$1 ]] || return 1
+    (( $(stat -c %s -- "$work/$1") <= $2 )) || return 1
+}
+fetch "$FILE.sig" "$MAX_SIGNATURE" 60 || fail 68 'no signature'
+fetch "$FILE" "$MAX_PACKAGE" 900 || fail 68 'no package'
+
+# The gate. gpgv exits 0 for a good signature by an expired or revoked key, so read what it
+# reports instead: exactly one signature, good, valid, made by a subkey of the Rex primary,
+# with no word of expiry, revocation or error.
+status=$(gpgv --keyring "$KEYRING" --status-fd 3 -- "$work/$FILE.sig" "$work/$FILE" 3>&1 >/dev/null 2>&1)
+signer=
+verdict() {
+    local report=$1 line good=0 valid=0 new=0
+    local -a part
+    signer=
+    while IFS= read -r line; do
+        [[ $line == '[GNUPG:] '* ]] || continue
+        read -r -a part <<<"${line#'[GNUPG:] '}"
+        case ${part[0]-} in
+            NEWSIG) new=$((new + 1)) ;;
+            GOODSIG) good=$((good + 1)) ;;
+            VALIDSIG)
+                valid=$((valid + 1))
+                # The second word is the key that signed, the last its primary key: the
+                # signer must be a subkey of the Rex primary, not the primary itself.
+                [[ ${part[1]-} =~ ^[0-9A-F]{40}$ ]] || return 1
+                [[ ${part[-1]} == "$PRIMARY" && ${part[1]} != "$PRIMARY" ]] || return 1
+                signer=${part[1]}
+                ;;
+            # About the signature and the key that made it. (KEYEXPIRED and KEYREVOKED are
+            # not here: gpg also says them for subkeys the signature did not use.)
+            BADSIG | ERRSIG | EXPSIG | EXPKEYSIG | REVKEYSIG | NO_PUBKEY | FAILURE)
+                return 1
+                ;;
+        esac
+    done <<<"$report"
+    (( new == 1 && good == 1 && valid == 1 )) && [[ -n $signer ]]
+}
+[[ $PRIMARY =~ ^[0-9A-F]{40}$ ]] || fail 74 'no pinned key'
+verdict "$status" || fail 69 'not signed by the Rex package key'
+readonly SIGNER=$signer
+
+# The same signature again, against this machine's pacman keyring: the Rex key must still be
+# there, trusted, and neither expired nor revoked as far as this machine knows. This is what
+# lets an administrator (or a refreshed keyring) withdraw trust from a key that the package's
+# own copy of the certificate cannot know was revoked. It never fetches or imports a key.
+status=$(gpg --homedir "$PACMAN_KEYRING" --no-permission-warning --batch --no-tty \
+    --no-auto-key-locate --no-auto-key-retrieve \
+    --status-fd 3 --verify -- "$work/$FILE.sig" "$work/$FILE" 3>&1 >/dev/null 2>&1)
+verdict "$status" && [[ $signer == "$SIGNER" ]] || fail 70 'not valid in the pacman keyring'
+grep -Eq '^\[GNUPG:\] TRUST_(FULLY|ULTIMATE)( |$)' <<<"$status" || fail 70 'not trusted by the pacman keyring'
+
+# A signature covers the bytes, not the name they were served under: an older or other
+# Rex-signed package under this file name would have passed. Read what the file itself says.
+info=$(bsdtar -xOf "$work/$FILE" .PKGINFO 2>/dev/null) || fail 71 'no package information'
+field() { sed -n "s/^$1 = //p" <<<"$info"; }
+[[ $(field pkgname) == "$PACKAGE" && $(field pkgver) == "$WANTED" && $(field arch) == "$ARCH" ]] \
+    || fail 71 'not the package and version asked for'
+# A package held back through one of its groups is held back too.
+while IFS= read -r group; do
+    while IFS= read -r held; do
+        # shellcheck disable=SC2053  # a pattern match is the point
+        [[ -n $held && -n $group && $group == $held ]] && fail 66 'held back by IgnoreGroup'
+    done < <(pacman-conf IgnoreGroup 2>/dev/null)
+done < <(field group)
+
+# What pacman would do with it: this one package, and nothing pulled in or removed. A lock
+# held by another pacman shows here first.
+[[ ! -e $(pacman-conf DBPath)db.lck ]] || fail 67 'the pacman database is locked'
+plan=$(pacman -U --print --print-format '%n %v' -- "$work/$FILE" 2>/dev/null) || fail 72 'pacman could not plan it'
+[[ $plan == "$PACKAGE $WANTED" ]] || fail 72 'other packages would change'
+
+say "installing $PACKAGE $WANTED over $INSTALLED (signed by $SIGNER)"
+# The .sig stays beside it: pacman checks it once more against its keyring (which the
+# second check above already found to trust this key, so there is no key for it to offer
+# to import), and a machine with LocalFileSigLevel = Required gets the signature it asks
+# for. --noconfirm answers no to removing a conflicting package, so a conflict stops here.
+if ! pacman -U --noconfirm --noprogressbar -- "$work/$FILE" >"$work/pacman.log" 2>&1; then
+    say "pacman: $(tail -n 5 "$work/pacman.log" | tr '\n' ' ' | cut -c1-400)"
+    fail 73 'pacman failed'
+fi
+[[ $(pacman -Q "$PACKAGE" 2>/dev/null) == "$PACKAGE $WANTED" ]] || fail 73 'not installed afterwards'
+say "installed $PACKAGE $WANTED"
+exit 0

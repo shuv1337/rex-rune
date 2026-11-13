@@ -5,6 +5,7 @@ on:
       - '.github/workflows/**'
       - 'scripts/**'
       - 'packaging/**'
+      - 'resources/pacman/**'
       - 'nix/package.nix'
   workflow_dispatch:
   workflow_call:
@@ -26,3 +27,5 @@ jobs:
         run: python3 scripts/test-install-receipt.py
       - name: Real makepkg, signed rebuild, pacman install/upgrade and tamper refusals
         run: python3 scripts/test-arch-repo.py
+      - name: Root update helper, every refusal and a real upgrade, then through pkexec under systemd
+        run: python3 scripts/test-arch-helper.py
