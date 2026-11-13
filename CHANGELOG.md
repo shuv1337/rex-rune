@@ -42,6 +42,8 @@
 
 ### Fixed
 
+- **Omarchy is recognised by what is installed.** For the pacman package, the update instructions name `omarchy update` whenever Omarchy's updater or its pacman hook is present, and no longer only when `/etc/os-release` says Omarchy. Before, an Omarchy system whose os-release says Arch was told to run `sudo pacman -Syu rex-rune-bin`, which that hook refuses.
+
 - **A floating pane header under the toolbar's edge:** with the toolbar hidden or shown on hover, a pane header at the very top of the window sat inside the edge that brings the toolbar out, so a click aimed at Close pane could land on Close app. That was a lone pane's floating header (Pane headers → On hover, or Reveal pane headers) and, in Compact density, the headers of a tab's top panes. Such a header's row now sits 8 pt down, as a lone pane's header row already did.
 
 - **Update instructions on Omarchy:** the update notice and Settings → Updates no longer offer `sudo pacman -Syu rex-linux-bin` as an alternative on Omarchy, where Omarchy's update guard refuses a direct system upgrade. They name `omarchy update` only. Arch without Omarchy is unchanged.
