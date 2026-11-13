@@ -92,6 +92,7 @@ rustPlatform.buildRustPackage {
     pkgs.clippy
     pkgs.rustfmt
     pkgs.python3
+    pkgs.desktop-file-utils
     fontconfig
   ];
 
