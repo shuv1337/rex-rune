@@ -4,7 +4,10 @@ The tiles and glyphs in `tiles/` and `glyphs/` are Superlogical's Rex icon set
 ([icons.superlogical.com](https://icons.superlogical.com)), the icons the official Rex clients
 show for the program running in a terminal. The artwork is Superlogical's, and the logos it
 draws are trademarks of their owners; Rex Rune uses them only to say which program a pane is
-running, as Rex does. Ask Superlogical for the terms before reusing them outside Rex Rune.
+running, as Rex does. **They are not covered by this repository's MIT license** or the
+dependencies' licenses. If you redistribute or package Rex Rune, check that doing so is
+acceptable to Superlogical, or replace these files; ask Superlogical for the terms before reusing
+them outside Rex Rune.
 
 `scripts/program-icons.py` made these files from a copy of the set. It changed:
 

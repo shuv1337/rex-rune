@@ -11,7 +11,7 @@ use crate::app::{
 };
 
 fn slug(program: Option<&str>, executable: Option<&str>) -> &'static str {
-    program_icon(program, executable).slug
+    program_icon(program, None, executable).slug
 }
 
 #[test]
@@ -31,6 +31,23 @@ fn programs_get_the_official_clients_icons() {
         ("sleep", "shell-sleep"),
         ("caffeinate", "shell-caffeinate"),
         ("log", "shell-log"),
+        ("head", "shell-log"),
+        // Names from the official client's own table.
+        ("claude code", "claude-code"),
+        ("pool", "poolside"),
+        ("grok-build", "grok"),
+        ("agent", "cursor"),
+        ("agy", "antigravity"),
+        ("vibe-rs", "mistral"),
+        ("glab-tui", "gitlab"),
+        ("pub", "dart"),
+        ("fvm", "flutter"),
+        ("pass-cli", "proton-pass"),
+        ("./proton-drive", "proton-drive"),
+        ("./gradlew", "gradle"),
+        ("UE4Editor", "unreal-engine"),
+        ("python2.7", "python"),
+        ("python3.15", "python"),
         ("zsh", "shell"),
         ("bash", "shell"),
         ("fish", "shell"),
@@ -47,6 +64,9 @@ fn programs_get_the_official_clients_icons() {
         // A name that only looks like a version keeps its own icon.
         ("k9s", "k9s"),
         ("d2", "d2"),
+        // And a version doesn't make an unknown name a known one.
+        ("x264", "shell"),
+        ("ue5", "shell"),
     ] {
         assert_eq!(slug(Some(program), None), expected, "{program}");
     }
@@ -63,12 +83,43 @@ fn a_script_without_an_icon_shows_its_interpreter() {
     // The program's own icon wins over its interpreter's.
     assert_eq!(slug(Some("pi"), Some("node")), "pi");
     assert_eq!(slug(Some("sq"), Some("mystery")), "shell");
+    // Scripts known by where they live, as the official client knows them, before their
+    // interpreter; their own name still comes first.
+    let script = |path: &str| program_icon(Some("cli.js"), Some(path), Some("node")).slug;
+    assert_eq!(
+        script("/opt/homebrew/lib/node_modules/@github/copilot/npm-loader.js"),
+        "copilot"
+    );
+    assert_eq!(script("/u/.npm/pi-coding-agent/dist/cli.js"), "pi");
+    assert_eq!(script("pi-coding-agent/dist/bundle/cli.js"), "pi");
+    assert_eq!(script("/u/.local/share/vibe/_bin/vibe-rs"), "mistral");
+    assert_eq!(
+        script("/u/not-copilot/npm-loader.js"),
+        "node",
+        "only at a /"
+    );
+    assert_eq!(script("/u/app/dist/cli.js"), "node");
+    assert_eq!(
+        program_icon(Some("claude"), Some("/x/copilot/npm-loader.js"), None).slug,
+        "claude-code"
+    );
 
     let (mut ws, _host) = tabbed_workspace("single");
     let model = &mut ws.hosts[0].model;
     model.programs.insert("block:a".into(), "sq".into());
     model.executables.insert("block:a".into(), "node".into());
     assert_eq!(PaneProgram::of(model, "block:a").icon().slug, "node");
+    model
+        .programs
+        .insert("block:a".into(), "npm-loader.js".into());
+    model
+        .scripts
+        .insert("block:a".into(), "/n/@github/copilot/npm-loader.js".into());
+    assert_eq!(PaneProgram::of(model, "block:a").icon().slug, "copilot");
+    let tab = model.views["s"].windows[0].clone();
+    assert_eq!(tab_activity(model, &tab).icon().slug, "copilot");
+    model.scripts.remove("block:a");
+    model.programs.insert("block:a".into(), "sq".into());
     let tab = model.views["s"].windows[0].clone();
     let activity = tab_activity(model, &tab);
     assert_eq!(
@@ -82,7 +133,7 @@ fn a_script_without_an_icon_shows_its_interpreter() {
 }
 
 #[test]
-fn every_slug_is_unique_and_every_icon_draws_at_1x_and_2x() {
+fn every_slug_is_unique_and_every_icon_paints_at_1x_and_2x() {
     let slugs: std::collections::HashSet<_> = all().iter().map(|i| i.slug).collect();
     assert_eq!(slugs.len(), all().len());
     assert!(all().len() >= 150);
@@ -100,6 +151,15 @@ fn every_slug_is_unique_and_every_icon_draws_at_1x_and_2x() {
                     size.is_some_and(|(w, h)| w == px && h == px),
                     "{} {what} at {px} px: {size:?}",
                     icon.slug
+                );
+                // A lost mask or an empty trace still makes an image of the right size.
+                let rgba = image.unwrap().rgba();
+                let painted = rgba.chunks(4).filter(|p| p[3] > 0).count();
+                assert!(
+                    painted * 20 >= (px * px) as usize,
+                    "{} {what} at {px} px paints {painted} of {} pixels",
+                    icon.slug,
+                    px * px
                 );
             }
         }

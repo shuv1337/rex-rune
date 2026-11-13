@@ -1,9 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.3125)"><g id="hashi-vagrant" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Vagrant-LogoMark_onLight" transform="translate(3.7094, -12)" fill="#000000">
-            <g id="Logos" transform="translate(0, 14.5356)">
-                <path d="M79.39 0L79.41 0L92.02 7.3L92.02 15.76L63.93 84.58L46.02 94.91L46.01 94.91L63.89 84.6L92 15.78L92 7.32L92 7.3L71.25 19.27L71.25 26.64L54.41 64.29L45.98 69.15L45.98 94.89L28.11 84.58L0 15.76L0 7.3L12.61 0L33.36 11.99L20.74 19.27L20.74 26.64L37.6 64.29L46.02 59.43L46.02 49.07L46.01 49.05L58.64 19.34L58.64 11.99L79.39 0Z" id="Combined-Shape" />
-                <path d="M92 7.3L92 7.32L92 15.78L63.89 84.6L45.98 94.93L45.98 69.15L54.41 64.29L71.25 26.64L71.25 19.27L92 7.3ZM33.36 11.99L33.36 19.34L33.38 19.34L46.02 49.07L46.02 59.43L37.6 64.29L20.74 26.64L20.74 19.27L33.36 11.99Z" id="Combined-Shape" opacity="0.75" />
-            </g>
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.3125)"><g id="hashi-vagrant" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Vagrant-LogoMark_onLight" transform="translate(3.7094, -12)" fill="#000000"><g id="Logos" transform="translate(0, 14.5356)"><path d="M79.39 0L79.41 0L92.02 7.3L92.02 15.76L63.93 84.58L46.02 94.91L46.01 94.91L63.89 84.6L92 15.78L92 7.32L92 7.3L71.25 19.27L71.25 26.64L54.41 64.29L45.98 69.15L45.98 94.89L28.11 84.58L0 15.76L0 7.3L12.61 0L33.36 11.99L20.74 19.27L20.74 26.64L37.6 64.29L46.02 59.43L46.02 49.07L46.01 49.05L58.64 19.34L58.64 11.99L79.39 0Z" id="Combined-Shape" /><path d="M92 7.3L92 7.32L92 15.78L63.89 84.6L45.98 94.93L45.98 69.15L54.41 64.29L71.25 26.64L71.25 19.27L92 7.3ZM33.36 11.99L33.36 19.34L33.38 19.34L46.02 49.07L46.02 59.43L37.6 64.29L20.74 26.64L20.74 19.27L33.36 11.99Z" id="Combined-Shape" opacity="0.75" /></g></g></g></g></svg>

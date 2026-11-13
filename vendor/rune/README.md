@@ -63,11 +63,13 @@ maximized. The patch adds the following without changing existing behavior on ma
 - `Tx::set_option_as_alt(bool)` asks for winit's `OptionAsAlt` (`Both` or `None`) on the macOS
   window, and the request lasts. The window gets `Both` only while no text field has focus,
   set after every frame that runs input, drawn or not (a covered window's and a timer's too,
-  but not one whose surface then fails), so a field focused by one key composes the next once
-  that frame has run. winit replaces the key event before AppKit's text input sees it, so
+  but not one whose surface is missing or refuses a new blend format), so a field focused by
+  one key composes the next once that frame has run. winit replaces the key event before AppKit's text input sees it, so
   Option+E should be Alt+E rather than a dead accent (not tried by hand), which the app cannot
   undo afterwards. A no-op elsewhere. A window Rune creates again gets the request too.
   `Runtime::option_as_alt` (hidden) is what the window gets now, for headless tests.
+- `Pixels::rgba()` (hidden) is public instead of test-only, so the app's tests can check that
+  each program icon `TextSystem::color_icon` rasterizes actually paints something.
 
 Spike: `examples/chrome_spike.rs` and `scripts/chrome-spike-x11.py`.
 

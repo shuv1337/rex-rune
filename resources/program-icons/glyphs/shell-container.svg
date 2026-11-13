@@ -1,8 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.651042)"><g id="container" stroke="none" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="3">
-        <g id="Graphic" stroke="#000000">
-            <path d="M24 24L24 11C24 8.2 24 6.8 24.54 5.73C25.02 4.79 25.79 4.02 26.73 3.54C27.8 3 29.2 3 32 3L37 3C39.8 3 41.2 3 42.27 3.54C43.21 4.02 43.98 4.79 44.46 5.73C45 6.8 45 8.2 45 11L45 24L45 37C45 39.8 45 41.2 44.46 42.27C43.98 43.21 43.21 43.98 42.27 44.46C41.2 45 39.8 45 37 45L11 45C8.2 45 6.8 45 5.73 44.46C4.79 43.98 4.02 43.21 3.54 42.27C3 41.2 3 39.8 3 37L3 32C3 29.2 3 27.8 3.54 26.73C4.02 25.79 4.79 25.02 5.73 24.54C6.8 24 8.2 24 11 24L24 24Z" id="Rectangle-2" transform="translate(24, 24) scale(-1, 1) translate(-24, -24)" />
-            <line x1="3.78" y1="24" x2="30.5" y2="24" id="Line" />
-            <line x1="24" y1="23.5" x2="24" y2="43.5" id="Line" />
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.651042)"><g id="container" stroke="none" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"><g id="Graphic" stroke="#000000"><path d="M24 24L24 11C24 8.2 24 6.8 24.54 5.73C25.02 4.79 25.79 4.02 26.73 3.54C27.8 3 29.2 3 32 3L37 3C39.8 3 41.2 3 42.27 3.54C43.21 4.02 43.98 4.79 44.46 5.73C45 6.8 45 8.2 45 11L45 24L45 37C45 39.8 45 41.2 44.46 42.27C43.98 43.21 43.21 43.98 42.27 44.46C41.2 45 39.8 45 37 45L11 45C8.2 45 6.8 45 5.73 44.46C4.79 43.98 4.02 43.21 3.54 42.27C3 41.2 3 39.8 3 37L3 32C3 29.2 3 27.8 3.54 26.73C4.02 25.79 4.79 25.02 5.73 24.54C6.8 24 8.2 24 11 24L24 24Z" id="Rectangle-2" transform="translate(24, 24) scale(-1, 1) translate(-24, -24)" /><line x1="3.78" y1="24" x2="30.5" y2="24" id="Line" /><line x1="24" y1="23.5" x2="24" y2="43.5" id="Line" /></g></g></g></svg>

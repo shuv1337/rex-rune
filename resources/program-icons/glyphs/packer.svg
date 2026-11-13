@@ -1,9 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.3125)"><g id="hashi-packer" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Packer-LogoMark_onLight" transform="translate(19.325, -12)" fill="#000000">
-            <g id="Logos" transform="translate(0, 12.4861)">
-                <polygon id="Path" points="0 12.06 32.03 30.66 32.03 99.03 0 80.43" />
-                <path d="M47.88 19.98L13.09 0L13.09 13.95L36.68 27.73L36.68 69.58L47.88 75.95C54.77 79.91 60.45 77.67 60.45 70.61L60.45 39.78C60.28 32.89 54.59 23.94 47.88 19.98L47.88 19.98Z" id="Path" />
-            </g>
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.3125)"><g id="hashi-packer" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Packer-LogoMark_onLight" transform="translate(19.325, -12)" fill="#000000"><g id="Logos" transform="translate(0, 12.4861)"><polygon id="Path" points="0 12.06 32.03 30.66 32.03 99.03 0 80.43" /><path d="M47.88 19.98L13.09 0L13.09 13.95L36.68 27.73L36.68 69.58L47.88 75.95C54.77 79.91 60.45 77.67 60.45 70.61L60.45 39.78C60.28 32.89 54.59 23.94 47.88 19.98L47.88 19.98Z" id="Path" /></g></g></g></g></svg>

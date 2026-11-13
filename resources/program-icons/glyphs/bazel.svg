@@ -1,12 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.065104)"><g id="bazel" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Group" transform="translate(26.86, 35.63)" fill="#000000">
-            <polygon id="Path" opacity="0.6" points="213.5 320.3 213.5 425 106.7 318.3 106.7 213.5" />
-            <polygon id="Path" opacity="0.4" points="213.5 320.3 320.3 213.5 320.3 318.3 213.5 425" />
-            <polygon id="Path" opacity="0.8" points="106.7 213.5 106.7 318.3 0 211.5 0 106.7" />
-            <polygon id="Path" opacity="0.8" points="427 106.7 427 211.5 320.3 318.3 320.3 213.5" />
-            <polygon id="Path" opacity="0.8" points="213.5 320.3 106.7 213.5 213.5 106.7 320.3 213.5" />
-            <polygon id="Path" points="106.7 213.5 0 106.7 106.7 0 213.5 106.7" />
-            <polygon id="Path" points="320.3 213.5 213.5 106.7 320.3 0 427 106.7" />
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.065104)"><g id="bazel" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Group" transform="translate(26.86, 35.63)" fill="#000000"><polygon id="Path" opacity="0.6" points="213.5 320.3 213.5 425 106.7 318.3 106.7 213.5" /><polygon id="Path" opacity="0.4" points="213.5 320.3 320.3 213.5 320.3 318.3 213.5 425" /><polygon id="Path" opacity="0.8" points="106.7 213.5 106.7 318.3 0 211.5 0 106.7" /><polygon id="Path" opacity="0.8" points="427 106.7 427 211.5 320.3 318.3 320.3 213.5" /><polygon id="Path" opacity="0.8" points="213.5 320.3 106.7 213.5 213.5 106.7 320.3 213.5" /><polygon id="Path" points="106.7 213.5 0 106.7 106.7 0 213.5 106.7" /><polygon id="Path" points="320.3 213.5 213.5 106.7 320.3 0 427 106.7" /></g></g></g></svg>

@@ -18,17 +18,20 @@ that, so this writes, per icon:
 and `src/app/program_icons/catalog.rs`, which includes them, with each icon's tint for coloured
 tab icons. Colours are converted from Display P3 and mixed in OKLCH as CSS does, then clamped to
 sRGB; gradient stops that linear interpolation reproduces within a 255th are dropped and
-coordinates are rounded to a 4000th of the drawing. The eight tiles whose glyph is filled with a
-blurred mesh gradient get a five-stop linear gradient along the mesh's main colour axis instead,
-and the one bitmap glyph (Cua) is traced to rectangles, since Rex's resvg is built without
-raster images. Needs Pillow for that bitmap.
+coordinates are rounded to a 4000th of the drawing. The nine tiles drawn with a blurred
+mesh gradient (hundreds of patches) get a coarse grid of the patches' mean colours under the same
+blur instead, and the one bitmap glyph (Cua) is traced to rectangles, since Rex's resvg is built
+without raster images. Needs Pillow for that bitmap. Whitespace between elements is dropped, and
+the output replaces the old only once every icon has been written.
 """
 
 import base64
 import io
 import json
 import math
+import os
 import re
+import shutil
 import sys
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -382,6 +385,11 @@ def simplify_stops(grad):
 
 
 def serialize(el):
+    for e in el.iter():
+        if e.text is not None and not e.text.strip():
+            e.text = None
+        if e.tail is not None and not e.tail.strip():
+            e.tail = None
     s = ET.tostring(el, encoding="unicode")
     return re.sub(r' xmlns(:xlink)?="[^"]*"', "", s)
 
@@ -608,11 +616,15 @@ def colours_in(src_dir, slug):
     return [clamp(parse_color(c)[:3]) for c in re.findall(r"background:(color\([^)]*\))", html)]
 
 
-def write_glyph(slug, spans):
-    """The masks of every layer, drawn black on a square around their boxes."""
+def write_glyph(out, slug, spans):
+    """The masks of every layer, drawn black and centred on a square around their boxes."""
     x0 = min(b[0] for b, *_ in spans)
     y0 = min(b[1] for b, *_ in spans)
-    side = max(max(b[0] + b[2] for b, *_ in spans) - x0, max(b[1] + b[3] for b, *_ in spans) - y0)
+    w = max(b[0] + b[2] for b, *_ in spans) - x0
+    h = max(b[1] + b[3] for b, *_ in spans) - y0
+    side = max(w, h)
+    x0 -= (side - w) / 2
+    y0 -= (side - h) / 2
     groups = []
     for i, (box, _, _, mask) in enumerate(spans):
         prefix = f"m{i}" if len(spans) > 1 else ""
@@ -620,11 +632,11 @@ def write_glyph(slug, spans):
     inner = "".join(groups)
     if not re.search(r'(fill|stroke|stop-color)="#', inner):
         inner = f'<g fill="#000000">{inner}</g>'
-    (OUT / "glyphs" / f"{slug}.svg").write_text(document(side, inner, "xlink:href" in inner))
+    (out / "glyphs" / f"{slug}.svg").write_text(document(side, inner, "xlink:href" in inner))
     return side
 
 
-def write_tile(icon, src_dir, spans):
+def write_tile(out, icon, src_dir, spans):
     tile = ET.parse(src_dir / icon["files"][0]).getroot()
     coarsen_meshes(tile)
     clean(tile, 2, "t")
@@ -651,7 +663,7 @@ def write_tile(icon, src_dir, spans):
             clean(layer, 3, f"l{i}")
             colours.extend(stop_colours(layer))
     inner = serialize(shift)
-    (OUT / "tiles" / f"{icon['slug']}.svg").write_text(document(TILE_VIEW, inner, "xlink:href" in inner))
+    (out / "tiles" / f"{icon['slug']}.svg").write_text(document(TILE_VIEW, inner, "xlink:href" in inner))
     return [base_color(tile)] + colours
 
 
@@ -702,6 +714,12 @@ def tint(colours):
         l += 0.005
 
 
+def rust_f32(v):
+    s = fmt(v, 3)
+    s = ("-0" + s[2:]) if s.startswith("-.") else ("0" + s) if s.startswith(".") else s
+    return s if "." in s else s + ".0"
+
+
 def rust_str(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -711,26 +729,26 @@ def main():
         sys.exit(__doc__)
     src_dir = Path(sys.argv[1]).expanduser()
     icons = json.loads((src_dir / "manifest.json").read_text())
+    staging = OUT / ".new"
+    shutil.rmtree(staging, ignore_errors=True)
     for sub in ("tiles", "glyphs"):
-        (OUT / sub).mkdir(parents=True, exist_ok=True)
-        for old in (OUT / sub).glob("*.svg"):
-            old.unlink()
-    CATALOG.parent.mkdir(parents=True, exist_ok=True)
+        (staging / sub).mkdir(parents=True)
     rows = []
     for icon in sorted(icons, key=lambda i: i["slug"]):
         slug = icon["slug"]
-        side = write_glyph(slug, layers(src_dir, icon))
-        colours = write_tile(icon, src_dir, layers(src_dir, icon))
+        side = write_glyph(staging, slug, layers(src_dir, icon))
+        colours = write_tile(staging, icon, src_dir, layers(src_dir, icon))
         rows.append(
             f"    ProgramIcon {{\n"
             f"        name: {rust_str(icon['name'])},\n"
             f"        slug: {rust_str(slug)},\n"
             f"        tint: 0x{tint(colours):06x},\n"
-            f"        glyph: Icon {{ name: {rust_str('program-' + slug)}, view: {fmt(side, 3)}{'.0' if '.' not in fmt(side, 3) else ''}, body: include_str!({rust_str('../../../resources/program-icons/glyphs/' + slug + '.svg')}) }},\n"
-            f"        tile: Icon {{ name: {rust_str('program-tile-' + slug)}, view: {fmt(TILE_VIEW, 1)}.0, body: include_str!({rust_str('../../../resources/program-icons/tiles/' + slug + '.svg')}) }},\n"
+            f"        glyph: Icon {{ name: {rust_str('program-' + slug)}, view: {rust_f32(side)}, body: include_str!({rust_str('../../../resources/program-icons/glyphs/' + slug + '.svg')}) }},\n"
+            f"        tile: Icon {{ name: {rust_str('program-tile-' + slug)}, view: {rust_f32(TILE_VIEW)}, body: include_str!({rust_str('../../../resources/program-icons/tiles/' + slug + '.svg')}) }},\n"
             f"    }},\n"
         )
-    CATALOG.write_text(
+    catalog = CATALOG.with_suffix(".rs.new")
+    catalog.write_text(
         "//! Generated by `scripts/program-icons.py` from Superlogical's Rex icon set; do not edit.\n"
         "//! The artwork's terms are in `resources/program-icons/NOTICE.md`.\n\n"
         "use rune::Icon;\n\n"
@@ -738,6 +756,11 @@ def main():
         "#[rustfmt::skip]\n"
         f"pub(super) static ALL: [ProgramIcon; {len(rows)}] = [\n" + "".join(rows) + "];\n"
     )
+    for sub in ("tiles", "glyphs"):
+        shutil.rmtree(OUT / sub, ignore_errors=True)
+        (staging / sub).rename(OUT / sub)
+    staging.rmdir()
+    os.replace(catalog, CATALOG)
     print(f"{len(rows)} icons")
 
 

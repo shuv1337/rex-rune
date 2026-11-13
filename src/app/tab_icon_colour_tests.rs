@@ -77,6 +77,7 @@ fn complete_colour_truth_table_and_focused_dedup_fallback_counts() {
     let named = |name: Option<&str>| PaneProgram {
         name: name.map(str::to_owned),
         executable: None,
+        script: None,
     };
     for programs in [
         vec![],
@@ -255,7 +256,7 @@ fn sidebar_on_screen_requires_host_session_and_window_not_colliding_ids() {
                         TabIconColor::Never => false,
                     };
                     let color = if colored {
-                        program_icon(Some(name), None).tint
+                        program_icon(Some(name), None, None).tint
                     } else if active {
                         ink()
                     } else {
@@ -368,7 +369,7 @@ fn colour_search_anchored_keyboard_save_relaunch_and_inert_count_preview() {
                         let e = element(&rt, &key);
                         assert_eq!(e.rect, e.visible, "{size:?} {key}");
                         let expected = if in_color(mode, active, j == 0) {
-                            program_icon(Some(name), None).tint
+                            program_icon(Some(name), None, None).tint
                         } else if active {
                             ink()
                         } else {

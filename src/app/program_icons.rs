@@ -25,9 +25,10 @@ pub struct ProgramIcon {
     pub tile: Icon,
 }
 
-/// Process names that are not an icon's slug, by the official client's grouping: an editor's
-/// other commands, a language's tools, a service's CLI. Shells, and anything not here or in
-/// the set, are Shell.
+/// Process names that are not an icon's slug: every name in the official client's own table
+/// whose icon its name makes plain, and the same grouping for other common commands (an
+/// editor's other commands, a language's tools, a service's CLI). Shells, and anything not
+/// here or in the set, are Shell.
 const ALIASES: &[(&str, &str)] = &[
     // Shell's variants for the programs a terminal sits in.
     ("top", "shell-top"),
@@ -41,6 +42,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("caffeinate", "shell-caffeinate"),
     ("log", "shell-log"),
     ("tail", "shell-log"),
+    ("head", "shell-log"),
     ("journalctl", "shell-log"),
     ("lnav", "shell-log"),
     ("distrobox", "shell-container"),
@@ -62,6 +64,13 @@ const ALIASES: &[(&str, &str)] = &[
     ("sublime_text", "sublime"),
     // Agents.
     ("claude", "claude-code"),
+    ("claude code", "claude-code"),
+    ("pool", "poolside"),
+    ("grok-build", "grok"),
+    ("agent", "cursor"),
+    ("mastracode", "mastra"),
+    ("agy", "antigravity"),
+    ("vibe-rs", "mistral"),
     ("pi-coding-agent", "pi"),
     ("cursor-agent", "cursor"),
     ("gh-copilot", "copilot"),
@@ -81,6 +90,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("tuicr", "git-changes"),
     ("gh", "github"),
     ("glab", "gitlab"),
+    ("glab-tui", "gitlab"),
+    ("duo", "gitlab"),
     ("jjui", "jj"),
     ("lazyjj", "jj"),
     ("but", "git-butler"),
@@ -122,16 +133,24 @@ const ALIASES: &[(&str, &str)] = &[
     ("swiftc", "swift"),
     ("xcodebuild", "xcode"),
     ("xcrun", "xcode"),
+    ("xcbuild", "xcode"),
     ("iex", "elixir"),
     ("mix", "elixir"),
     ("elixirc", "elixir"),
     ("dotnet", "net"),
     ("clang++", "clang"),
     ("clangd", "clang"),
+    ("clang-cpp", "clang"),
+    ("clang-cl", "clang"),
     ("gcc", "gnu"),
     ("g++", "gnu"),
+    ("cpp", "gnu"),
     ("make", "gnu"),
     ("gmake", "gnu"),
+    ("configure", "gnu"),
+    ("libtool", "gnu"),
+    ("pub", "dart"),
+    ("fvm", "flutter"),
     ("cargo", "rust"),
     ("rustc", "rust"),
     ("rustup", "rust"),
@@ -150,9 +169,13 @@ const ALIASES: &[(&str, &str)] = &[
     ("mycli", "dbcli"),
     ("litecli", "dbcli"),
     ("iredis", "dbcli"),
+    ("mssql-cli", "dbcli"),
+    ("athenacli", "dbcli"),
+    ("vcli", "dbcli"),
     ("jupyter-lab", "jupyter"),
     ("jupyter-notebook", "jupyter"),
     ("jupyter-console", "jupyter"),
+    ("jupyter-qtconsole", "jupyter"),
     ("snow", "snowflake"),
     ("snowsql", "snowflake"),
     // Infrastructure and services.
@@ -163,6 +186,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("nix-env", "nix"),
     ("nix-store", "nix"),
     ("nixos-rebuild", "nix"),
+    ("nom", "nix"),
     ("home-manager", "nix"),
     ("wrangler", "cloudflare"),
     ("cloudflared", "cloudflare"),
@@ -179,6 +203,21 @@ const ALIASES: &[(&str, &str)] = &[
     ("vhs", "charm"),
     ("mods", "charm"),
     ("unrealeditor", "unreal-engine"),
+    ("unrealbuildtool", "unreal-engine"),
+    ("ue4", "unreal-engine"),
+    ("ue4editor", "unreal-engine"),
+    ("pass-cli", "proton-pass"),
+    ("pup", "datadog"),
+    ("ntn", "notion"),
+];
+
+/// Scripts known by where they live rather than by their name, as the official client knows
+/// them: a path ending in one of these, at a `/`.
+const SCRIPTS: &[(&str, &str)] = &[
+    ("copilot/npm-loader.js", "copilot"),
+    ("pi-coding-agent/dist/cli.js", "pi"),
+    ("pi-coding-agent/dist/bundle/cli.js", "pi"),
+    ("vibe/_bin/vibe-rs", "mistral"),
 ];
 
 /// Slugs that are not a program's command: Shell (the fallback) and its variants, which only
@@ -214,19 +253,38 @@ pub fn by_slug(slug: &str) -> Option<&'static ProgramIcon> {
     catalog::ALL.iter().find(|icon| icon.slug == slug)
 }
 
+static SHELL: LazyLock<&'static ProgramIcon> =
+    LazyLock::new(|| by_slug("shell").expect("the set has Shell"));
+
 /// Shell: plain shells and anything without an icon of its own.
 pub fn shell() -> &'static ProgramIcon {
-    by_slug("shell").expect("the set has Shell")
+    &SHELL
 }
 
 /// The icon for a pane's program: by its name (a status report's app, or the foreground
-/// program's), else by the executable running it, so a Node or Python script without an icon
-/// of its own shows its interpreter's; Shell for neither.
-pub fn program_icon(program: Option<&str>, executable: Option<&str>) -> &'static ProgramIcon {
+/// program's), else by where its script lives (`SCRIPTS`), else by the executable running
+/// it, so a Node or Python script without an icon of its own shows its interpreter's; Shell
+/// for none of them.
+pub fn program_icon(
+    program: Option<&str>,
+    script: Option<&str>,
+    executable: Option<&str>,
+) -> &'static ProgramIcon {
     program
         .and_then(command_icon)
+        .or_else(|| script.and_then(script_icon))
         .or_else(|| executable.and_then(command_icon))
         .unwrap_or_else(shell)
+}
+
+fn script_icon(path: &str) -> Option<&'static ProgramIcon> {
+    SCRIPTS
+        .iter()
+        .find(|(end, _)| {
+            path.strip_suffix(end)
+                .is_some_and(|before| before.is_empty() || before.ends_with('/'))
+        })
+        .map(|(_, slug)| by_slug(slug).expect("a script names a slug"))
 }
 
 /// A command's icon, ignoring case, a path, a Windows `.exe` and a version (`python3.12`).

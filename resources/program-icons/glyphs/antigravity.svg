@@ -1,11 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.065104)"><defs>
-        <path d="M455.4 413C490.7 448.3 452.2 461.1 426.6 441.9C327.3 374.6 333.7 256 240.7 256C147.8 256 154.2 374.6 54.9 441.9C29.2 461.1-12.4 451.5 26 413C131.8 310.4 109.3 28.4 240.7 28.4C372.1 28.4 349.7 310.4 455.4 413Z" id="path-1" />
-        <path d="M426.6 441.9C452.2 461.1 490.7 448.3 455.4 413C349.7 310.4 372.1 28.4 240.7 28.4C109.3 28.4 131.8 310.4 26 413C-12.4 451.5 29.2 461.1 54.9 441.9C154.2 374.6 147.8 256 240.7 256C333.7 256 327.3 374.6 426.6 441.9Z" id="path-2" />
-    </defs>
-    <g id="antigravity" stroke="none" fill="none" xlink:href="#path-1">
-        <mask id="mask-3" fill="#ffffff">
-            <use xlink:href="#path-2" />
-        </mask>
-        <use id="Path" fill="#000000" fill-rule="evenodd" xlink:href="#path-2" />
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.065104)"><defs><path d="M455.4 413C490.7 448.3 452.2 461.1 426.6 441.9C327.3 374.6 333.7 256 240.7 256C147.8 256 154.2 374.6 54.9 441.9C29.2 461.1-12.4 451.5 26 413C131.8 310.4 109.3 28.4 240.7 28.4C372.1 28.4 349.7 310.4 455.4 413Z" id="path-1" /><path d="M426.6 441.9C452.2 461.1 490.7 448.3 455.4 413C349.7 310.4 372.1 28.4 240.7 28.4C109.3 28.4 131.8 310.4 26 413C-12.4 451.5 29.2 461.1 54.9 441.9C154.2 374.6 147.8 256 240.7 256C333.7 256 327.3 374.6 426.6 441.9Z" id="path-2" /></defs><g id="antigravity" stroke="none" fill="none" xlink:href="#path-1"><mask id="mask-3" fill="#ffffff"><use xlink:href="#path-2" /></mask><use id="Path" fill="#000000" fill-rule="evenodd" xlink:href="#path-2" /></g></g></svg>

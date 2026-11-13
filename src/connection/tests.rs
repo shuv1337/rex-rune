@@ -546,6 +546,7 @@ fn unknown_states_kinds_and_events_stay_quiet() {
             BlockEvent::Process {
                 name: None,
                 executable: None,
+                script: None,
                 pids: Vec::new(),
                 place: Default::default()
             }
@@ -610,6 +611,7 @@ fn progress_reports_set_and_clear_a_blocks_progress() {
     let process = |name: Option<&str>| activity::BlockEvent::Process {
         name: name.map(str::to_owned),
         executable: name.map(str::to_owned),
+        script: None,
         pids: name.map(|_| vec![7]).unwrap_or_default(),
         place: Default::default(),
     };
@@ -649,6 +651,7 @@ fn progress_goes_when_another_process_of_the_same_name_takes_the_foreground() {
     let python = |pids: Vec<u64>| activity::BlockEvent::Process {
         name: Some("python".into()),
         executable: Some("python".into()),
+        script: None,
         pids,
         place: Default::default(),
     };
@@ -675,6 +678,7 @@ fn progress_goes_with_the_process_not_just_its_name() {
     let python = |pids: &[u64]| BlockEvent::Process {
         name: Some("python".into()),
         executable: Some("python".into()),
+        script: None,
         pids: pids.to_vec(),
         place: Default::default(),
     };
@@ -744,15 +748,22 @@ fn a_scripts_executable_is_its_interpreter() {
     model.apply_block_event("s", "b".into(), event);
     assert_eq!(model.programs["b"], "sq");
     assert_eq!(model.executables["b"], "node");
+    assert_eq!(model.scripts["b"], "/u/bin/sq");
     model.apply_block_event(
         "s",
         "b".into(),
         activity::parse_process(&json!({"foreground": {}})),
     );
     assert!(
-        !model.executables.contains_key("b"),
+        !model.executables.contains_key("b") && !model.scripts.contains_key("b"),
         "the shell has no foreground"
     );
+    let script = |v: Value| activity::script_path(&v);
+    assert_eq!(
+        script(json!({"script":"C:\\npm\\copilot\\npm-loader.js"})).as_deref(),
+        Some("C:/npm/copilot/npm-loader.js")
+    );
+    assert_eq!(script(json!({"script":"", "name":"zsh"})), None);
 }
 
 const OTHER: &str = "session:00000000-0000-0000-0000-000000000002";

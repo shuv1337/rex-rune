@@ -518,7 +518,7 @@ fn agent_row(s: &Workspace, harness: &Harness) -> El {
         .grow(1.)
         .min_w(0.)
         .child(program_glyph(
-            super::program_icons::program_icon(Some(&id), None),
+            super::program_icons::program_icon(Some(&id), None, None),
             16.,
             rgb(muted()),
         ))

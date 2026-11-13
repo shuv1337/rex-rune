@@ -1,8 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.3125)"><g id="hashi-boundary" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Logos" transform="translate(17, 5.4)" fill="#000000">
-            <polygon id="Path" points="11.58 89 11.58 82.13 25.87 82.13 25.87 77.78 18.99 77.78 18.99 70.91 51.74 70.91 36.54 44.5 51.74 18.09 18.09 18.09 18.09 54.63 0 54.63 0 0 62.05 0 72.36 17.91 57.34 44.5 72.9 71.45 62.77 89" />
-            <polygon id="Path" points="14.29 70.91 7.42 70.91 7.42 77.78 14.29 77.78" />
-            <polygon id="Path" points="7.05 81.95.18 81.95.18 88.82 7.05 88.82" />
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.3125)"><g id="hashi-boundary" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Logos" transform="translate(17, 5.4)" fill="#000000"><polygon id="Path" points="11.58 89 11.58 82.13 25.87 82.13 25.87 77.78 18.99 77.78 18.99 70.91 51.74 70.91 36.54 44.5 51.74 18.09 18.09 18.09 18.09 54.63 0 54.63 0 0 62.05 0 72.36 17.91 57.34 44.5 72.9 71.45 62.77 89" /><polygon id="Path" points="14.29 70.91 7.42 70.91 7.42 77.78 14.29 77.78" /><polygon id="Path" points="7.05 81.95.18 81.95.18 88.82 7.05 88.82" /></g></g></g></svg>

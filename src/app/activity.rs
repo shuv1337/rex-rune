@@ -29,8 +29,10 @@ pub struct TabActivity {
     pub source: Option<String>,
     /// The focused block's program: the one reporting, else the foreground process.
     pub program: Option<String>,
-    /// The executable behind the focused block's foreground process, for its icon.
+    /// The executable behind the focused block's foreground process, and its script, for its
+    /// icon.
     pub executable: Option<String>,
+    pub script: Option<String>,
     /// The tab's OSC 9;4 progress: an error, else a pause, else progress, across its panes.
     pub progress: Option<TerminalProgress>,
 }
@@ -109,12 +111,13 @@ pub(super) fn block_program(model: &HostModel, block: &str) -> Option<String> {
         .or_else(|| model.programs.get(block).cloned())
 }
 
-/// What a pane runs, for its icon: the program [`block_program`] names and the executable
-/// behind its foreground process.
+/// What a pane runs, for its icon: the program [`block_program`] names, and the executable
+/// and script behind its foreground process.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PaneProgram {
     pub name: Option<String>,
     pub executable: Option<String>,
+    pub script: Option<String>,
 }
 
 impl PaneProgram {
@@ -122,18 +125,27 @@ impl PaneProgram {
         Self {
             name: block_program(model, block),
             executable: model.executables.get(block).cloned(),
+            script: model.scripts.get(block).cloned(),
         }
     }
 
     pub fn icon(&self) -> &'static ProgramIcon {
-        program_icon(self.name.as_deref(), self.executable.as_deref())
+        program_icon(
+            self.name.as_deref(),
+            self.script.as_deref(),
+            self.executable.as_deref(),
+        )
     }
 }
 
 impl TabActivity {
     /// The focused pane's icon.
     pub fn icon(&self) -> &'static ProgramIcon {
-        program_icon(self.program.as_deref(), self.executable.as_deref())
+        program_icon(
+            self.program.as_deref(),
+            self.script.as_deref(),
+            self.executable.as_deref(),
+        )
     }
 }
 
@@ -177,6 +189,7 @@ fn fold_activity<'a>(
     );
     let program = focused.and_then(|b| block_program(model, b));
     let executable = focused.and_then(|b| model.executables.get(b).cloned());
+    let script = focused.and_then(|b| model.scripts.get(b).cloned());
     // A program's own OSC 9;4 report wins over the percentage in its status record.
     let progress = blocks
         .filter_map(|b| model.progress.get(b).copied())
@@ -194,6 +207,7 @@ fn fold_activity<'a>(
         source: top.and_then(|r| r.app.clone()),
         program,
         executable,
+        script,
         progress,
     }
 }
@@ -604,8 +618,8 @@ impl Workspace {
                     .find(|w| w.window_id.is_some() && w.window_id == view.active_window_id)
                     .or_else(|| view.windows.first())
             })
-            .and_then(|window| tab_programs(model, window).into_iter().next())
-            .map_or_else(shell, |program| program.icon())
+            .and_then(focused_block)
+            .map_or_else(shell, |block| PaneProgram::of(model, block).icon())
     }
 
     pub fn unseen_on(&self, host: usize, window: &str) -> bool {

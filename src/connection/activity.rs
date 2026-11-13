@@ -147,6 +147,15 @@ pub fn executable_name(foreground: &Value) -> Option<String> {
     basename_of(foreground, &["name", "argv0"])
 }
 
+/// A foreground script's path as the server gave it, with `/` between its parts, for the
+/// icons of scripts known by where they live (`copilot/npm-loader.js`).
+pub fn script_path(foreground: &Value) -> Option<String> {
+    foreground["script"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace('\\', "/"))
+}
+
 fn basename_of(foreground: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .filter_map(|key| foreground[*key].as_str())
@@ -171,6 +180,8 @@ pub enum BlockEvent {
         name: Option<String>,
         /// The executable behind `name`: a script's interpreter, else the same program.
         executable: Option<String>,
+        /// The script `name` was taken from, as a whole path.
+        script: Option<String>,
         pids: Vec<u64>,
         /// Foreground directory and the terminal's own shell, for display-only titles.
         place: Place,
@@ -248,6 +259,7 @@ pub fn parse_process(body: &Value) -> BlockEvent {
     BlockEvent::Process {
         name: program_name(foreground),
         executable: executable_name(foreground),
+        script: script_path(foreground),
         pids,
         place: Place::parse(body),
     }

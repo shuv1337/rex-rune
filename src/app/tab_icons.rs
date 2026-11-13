@@ -109,6 +109,7 @@ pub fn preview(s: &Workspace) -> El {
     let programs = ["zsh", "claude", "nvim", "git", "cargo"].map(|p| PaneProgram {
         name: Some(p.to_owned()),
         executable: Some(p.to_owned()),
+        script: None,
     });
     let icons = icons_of(&programs, s.settings.interface.tab_icon_count);
     let mut samples = col()

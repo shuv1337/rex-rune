@@ -1,7 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 2.6042) scale(.052083)"><g id="duckdb" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Group" transform="translate(8, 65.1536)" fill="#000000">
-            <path d="M184.8 0C83.3 0 0 83.3 0 184.8C0 287.4 83.3 369.7 184.8 369.7C286.4 369.7 369.7 286.4 369.7 184.8C369.7 83.3 286.4 0 184.8 0L184.8 0Z" id="Path" />
-            <path d="M517.5 118.3L429.6 118.3L429.6 251.4L517.5 251.4C554.2 251.4 584 221.6 584 184.8L584 184.8C584 148.1 554.2 118.3 517.5 118.3L517.5 118.3Z" id="Path" />
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 2.6042) scale(.052083)"><g id="duckdb" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Group" transform="translate(8, 65.1536)" fill="#000000"><path d="M184.8 0C83.3 0 0 83.3 0 184.8C0 287.4 83.3 369.7 184.8 369.7C286.4 369.7 369.7 286.4 369.7 184.8C369.7 83.3 286.4 0 184.8 0L184.8 0Z" id="Path" /><path d="M517.5 118.3L429.6 118.3L429.6 251.4L517.5 251.4C554.2 251.4 584 221.6 584 184.8L584 184.8C584 148.1 554.2 118.3 517.5 118.3L517.5 118.3Z" id="Path" /></g></g></g></svg>

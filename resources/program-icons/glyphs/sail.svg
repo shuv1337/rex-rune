@@ -1,10 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.078125)"><g id="sail" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="lakesail-logomark" transform="translate(-51, -51)" fill="#000000">
-            <g id="Group" transform="translate(72.0694, 72.0694)">
-                <polygon id="Path" points="200.1 0 71.6 250.5 200.1 250.5" />
-                <polygon id="Path" points="322 322.2 71.6 357.9 0 286.6 336.4 287.2" />
-                <path d="M239.7 71.8L239.7 250.5L357.9 250.5C244.5 176.7 239.7 71.8 239.7 71.8Z" id="Path" />
-            </g>
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.078125)"><g id="sail" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="lakesail-logomark" transform="translate(-51, -51)" fill="#000000"><g id="Group" transform="translate(72.0694, 72.0694)"><polygon id="Path" points="200.1 0 71.6 250.5 200.1 250.5" /><polygon id="Path" points="322 322.2 71.6 357.9 0 286.6 336.4 287.2" /><path d="M239.7 71.8L239.7 250.5L357.9 250.5C244.5 176.7 239.7 71.8 239.7 71.8Z" id="Path" /></g></g></g></g></svg>

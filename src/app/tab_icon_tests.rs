@@ -37,6 +37,7 @@ fn named(names: &[Option<&str>]) -> Vec<PaneProgram> {
         .map(|name| PaneProgram {
             name: name.map(str::to_owned),
             executable: None,
+            script: None,
         })
         .collect()
 }

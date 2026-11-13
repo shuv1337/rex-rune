@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.061035)"><g id="stripe" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Group" fill="#000000">
-            <polygon id="Path" points="120 392 392 334.3 392 120 120 178.4" />
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.061035)"><g id="stripe" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Group" fill="#000000"><polygon id="Path" points="120 392 392 334.3 392 120 120 178.4" /></g></g></g></svg>

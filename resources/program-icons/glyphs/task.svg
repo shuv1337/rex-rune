@@ -1,8 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.078125)"><g id="task" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Group" transform="translate(37.1337, 6)" fill="#000000">
-            <polygon id="Path" opacity="0.7" points="163 197.6 163 388 0 289.2 0 98.8" />
-            <polygon id="Path" opacity="0.85" points="163 197.6 163 388 325.9 289.2 325.9 98.8" />
-            <polygon id="Path" points="163 197.6 0 98.8 163 0 325.9 98.8" />
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 0) scale(.078125)"><g id="task" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Group" transform="translate(37.1337, 6)" fill="#000000"><polygon id="Path" opacity="0.7" points="163 197.6 163 388 0 289.2 0 98.8" /><polygon id="Path" opacity="0.85" points="163 197.6 163 388 325.9 289.2 325.9 98.8" /><polygon id="Path" points="163 197.6 0 98.8 163 0 325.9 98.8" /></g></g></g></svg>

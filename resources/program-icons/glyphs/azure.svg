@@ -1,18 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 1.0062) scale(.059186)"><defs>
-        <linearGradient x1="52.6506139%" y1="8.64110131%" x2="3.81838443%" y2="94.2688026%" id="linearGradient-1">
-            <stop stop-color="#ffffff" stop-opacity="0.499942555" offset="0" />
-            <stop stop-color="#ffffff" stop-opacity="0.704388787" offset="1" />
-        </linearGradient>
-        <linearGradient x1="39.4425356%" y1="3.46152937%" x2="64.6957204%" y2="98.8431685%" id="linearGradient-2">
-            <stop stop-color="#ffffff" offset="0" />
-            <stop stop-color="#ffffff" stop-opacity="0.700712316" offset="1" />
-        </linearGradient>
-    </defs>
-    <g id="azure" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1">
-        <g id="Group" transform="translate(42.1998, 37.9105)">
-            <path d="M131.1 271.8L256 271.8L296.1 390.6C300.7 404.1 290.6 418.2 276.3 418.2L271.9 418.2C266.6 418.2 261.5 416.2 257.6 412.6L124.6 288.4C118.2 282.5 122.4 271.8 131.1 271.8Z" id="Combined-Shape" fill-opacity="0.4" fill="#000000" />
-            <path d="M147.9 0L149.3 0C158.3 0 166.2 5.7 169.1 14.2L221.8 170.4L187.6 271.8L131.1 271.8C122.4 271.8 118.2 282.5 124.6 288.4L168.2 329.1L143 404C140.1 412.5 132.1 418.2 123.2 418.2L20.9 418.2C6.6 418.2-3.5 404.1 1.1 390.6L128.1 14.2C131 5.7 139 0 147.9 0Z" id="Combined-Shape" fill="url(#linearGradient-1)" />
-            <path d="M315.5 14.2C312.6 5.7 304.6 0 295.7 0L148.6 0L149.3 0C158.3 0 166.2 5.7 169.1 14.2L296.1 390.6C300.7 404.1 290.6 418.2 276.3 418.2L274.1 418.2L422.7 418.2C437 418.2 447.1 404.1 442.5 390.6L315.5 14.2Z" id="Path" fill="url(#linearGradient-2)" />
-        </g>
-    </g>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31.25 31.25" width="31.25" height="31.25"><g transform="translate(0 1.0062) scale(.059186)"><defs><linearGradient x1="52.6506139%" y1="8.64110131%" x2="3.81838443%" y2="94.2688026%" id="linearGradient-1"><stop stop-color="#ffffff" stop-opacity="0.499942555" offset="0" /><stop stop-color="#ffffff" stop-opacity="0.704388787" offset="1" /></linearGradient><linearGradient x1="39.4425356%" y1="3.46152937%" x2="64.6957204%" y2="98.8431685%" id="linearGradient-2"><stop stop-color="#ffffff" offset="0" /><stop stop-color="#ffffff" stop-opacity="0.700712316" offset="1" /></linearGradient></defs><g id="azure" stroke="none" fill="none" fill-rule="evenodd" stroke-width="1"><g id="Group" transform="translate(42.1998, 37.9105)"><path d="M131.1 271.8L256 271.8L296.1 390.6C300.7 404.1 290.6 418.2 276.3 418.2L271.9 418.2C266.6 418.2 261.5 416.2 257.6 412.6L124.6 288.4C118.2 282.5 122.4 271.8 131.1 271.8Z" id="Combined-Shape" fill-opacity="0.4" fill="#000000" /><path d="M147.9 0L149.3 0C158.3 0 166.2 5.7 169.1 14.2L221.8 170.4L187.6 271.8L131.1 271.8C122.4 271.8 118.2 282.5 124.6 288.4L168.2 329.1L143 404C140.1 412.5 132.1 418.2 123.2 418.2L20.9 418.2C6.6 418.2-3.5 404.1 1.1 390.6L128.1 14.2C131 5.7 139 0 147.9 0Z" id="Combined-Shape" fill="url(#linearGradient-1)" /><path d="M315.5 14.2C312.6 5.7 304.6 0 295.7 0L148.6 0L149.3 0C158.3 0 166.2 5.7 169.1 14.2L296.1 390.6C300.7 404.1 290.6 418.2 276.3 418.2L274.1 418.2L422.7 418.2C437 418.2 447.1 404.1 442.5 390.6L315.5 14.2Z" id="Path" fill="url(#linearGradient-2)" /></g></g></g></svg>
