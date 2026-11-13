@@ -798,6 +798,17 @@ fn pane_headers_draw_under_each_choice() {
     camera.snap(&mut rt, "header-hover-single");
     std::fs::remove_file(&rt.state.settings_path).ok();
 
+    // The same with no toolbar row: the floating header keeps clear of the window's top edge.
+    let mut rt = scene("single", PaneHeader::OnHover, PaneDensity::Comfortable);
+    rt.update(|s, _| {
+        s.settings.interface.toolbar = rex_rune::settings::interface::ToolbarBehavior::OnHover
+    });
+    settle(&mut rt);
+    rt.pointer_move(300., 20.);
+    settle(&mut rt);
+    camera.snap(&mut rt, "header-hover-single-no-toolbar");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
     let mut rt = scene("split", PaneHeader::OnHover, PaneDensity::Comfortable);
     let pane = rect(&rt, "pane:block:c");
     rt.pointer_move(pane[0] + 200., pane[1] + 14.);
