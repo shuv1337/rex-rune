@@ -426,7 +426,9 @@ fn install_with(
         .get(&target)
         .context("release does not support this architecture")?;
     check_glibc(&release_target.min_glibc)?;
-    let artifact = &release_target.archive;
+    let artifact = release_target.archive.as_ref().context(
+        "this release was published before the rename to rex-rune and has nothing to install",
+    )?;
     ensure!(
         artifact.size <= MAX_ARCHIVE,
         "tarball exceeds 256 MiB limit"

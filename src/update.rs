@@ -88,7 +88,10 @@ pub struct TargetArtifacts {
     pub min_glibc: String,
     /// The `rex-rune` tarball this client installs. `latest.json` also carries `tarball`,
     /// which is not read here: it names the bridge tarball laid out for the 0.7.x updater.
-    pub archive: TarballArtifact,
+    /// Absent from a release published before the rename, which is still a valid manifest:
+    /// it can say that this client is up to date, and has nothing this client could install.
+    #[serde(default)]
+    pub archive: Option<TarballArtifact>,
     pub deb: DebArtifact,
 }
 
@@ -156,17 +159,18 @@ impl ReleaseManifest {
                 matches!(target.as_str(), "x86_64-linux-gnu" | "aarch64-linux-gnu"),
                 "unexpected target {target:?}"
             );
-            ensure!(
-                entry.archive.size > 0 && is_hex_sha256(&entry.archive.sha256),
-                "invalid tarball entry for {target}"
-            );
-            ensure!(
-                entry
-                    .archive
-                    .url
-                    .starts_with(&format!("{REPOSITORY}/releases/download/{expected_tag}/")),
-                "unexpected tarball URL for {target}"
-            );
+            if let Some(archive) = &entry.archive {
+                ensure!(
+                    archive.size > 0 && is_hex_sha256(&archive.sha256),
+                    "invalid tarball entry for {target}"
+                );
+                ensure!(
+                    archive
+                        .url
+                        .starts_with(&format!("{REPOSITORY}/releases/download/{expected_tag}/")),
+                    "unexpected tarball URL for {target}"
+                );
+            }
             ensure!(
                 entry.deb.size > 0
                     && is_hex_sha256(&entry.deb.sha256)
@@ -1531,6 +1535,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// `latest.json` as 0.7.5 published it, before the rename: no `archive`, and a `pacman`
+    /// entry this client does not read. Until a renamed release is out, that is the manifest
+    /// a build of this client meets, and it must read as "up to date", not as an error.
+    #[test]
+    fn a_manifest_from_before_the_rename_still_says_this_client_is_current() {
+        let sha = "b".repeat(64);
+        let target = |cpu: &str, deb: &str| {
+            serde_json::json!({
+                "min_glibc": "2.39",
+                "tarball": {
+                    "url": format!("{REPOSITORY}/releases/download/v0.7.5/rex-linux-0.7.5-{cpu}-linux-gnu.tar.gz"),
+                    "size": 23_000_000, "sha256": sha
+                },
+                "deb": {"name": format!("rex-linux_0.7.5_{deb}.deb"), "size": 22_000_000, "sha256": sha},
+                "pacman": {"name": format!("rex-linux-bin-0.7.5-1-{cpu}.pkg.tar.zst"), "size": 21_000_000, "sha256": sha}
+            })
+        };
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": 1,
+            "product": MANIFEST_PRODUCT,
+            "version": "0.7.5",
+            "tag": "v0.7.5",
+            "published": "2026-11-12T09:00:00-08:00",
+            "notes_url": format!("{REPOSITORY}/releases/tag/v0.7.5"),
+            "update_from": "0.4.2",
+            "targets": {
+                "x86_64-linux-gnu": target("x86_64", "amd64"),
+                "aarch64-linux-gnu": target("aarch64", "arm64"),
+            }
+        }))
+        .unwrap();
+        let (key_id, pair, public) = test_keypair();
+        let signature = sign_minisig(&key_id, &pair, &bytes, "rex-linux v0.7.5 latest.json", true);
+        let manifest = verify_and_parse_manifest(&bytes, &signature, &[&public]).unwrap();
+        assert!(manifest.targets.values().all(|t| t.archive.is_none()));
+
+        let mut state = UpdateState::default();
+        assert_eq!(
+            apply_verified_manifest(&mut state, "0.7.5", &manifest, 1).unwrap(),
+            CheckOutcome::UpToDate {
+                version: "0.7.5".into()
+            }
+        );
+        // An archive that is present is still held to the same rules.
+        let mut wrong: serde_json::Value =
+            serde_json::from_slice(&sample_manifest_json("0.8.0", "0.7.0")).unwrap();
+        wrong["targets"]["x86_64-linux-gnu"]["archive"]["url"] =
+            "https://example.invalid/rex-rune-0.8.0-x86_64-linux-gnu.tar.gz".into();
+        assert!(ReleaseManifest::parse_and_validate(&serde_json::to_vec(&wrong).unwrap()).is_err());
     }
 
     #[test]
