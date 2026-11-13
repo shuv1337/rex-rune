@@ -32,8 +32,8 @@ maximized. The patch adds the following without changing existing behavior on ma
   the same way and, on macOS, on the full-screen notifications as well, so a full-screen window
   is not saved as the normal size. It sees full screen made by `Tx::toggle_full_screen`
   everywhere and the system's own on macOS and Wayland; on X11 winit reports only what the app
-  asked for, so the window manager entering or leaving full screen is not seen. A change with no size change is
-  missed off macOS.
+  asked for, so the window manager entering or leaving full screen is not seen. A change with
+  no size change is missed off macOS.
 - `Tx::minimize()` works on borderless windows off macOS (used by the spike only).
 - `El::window_resize(WindowEdge)` (winit `drag_resize_window`, started inside the press),
   `WindowEdge`, `TitlebarAction::Resize` and `Cursor::ResizeEdge(WindowEdge)`.
@@ -61,12 +61,13 @@ maximized. The patch adds the following without changing existing behavior on ma
   fallbacks, so a file the app registered is not loaded twice. The embedded-font API is
   unchanged.
 - `Tx::set_option_as_alt(bool)` asks for winit's `OptionAsAlt` (`Both` or `None`) on the macOS
-  window, and the request lasts. The window gets `Both` only while no text field has focus:
-  after every frame that runs input, drawn or not (a covered window's too), so a field
-  focused by one key composes the next once that frame has run. winit replaces the key event before AppKit's text input sees it, so Option+E should be
-  Alt+E rather than a dead accent (not tried by hand), which the app cannot undo afterwards. A
-  no-op elsewhere. A window Rune creates again gets the request too. `Runtime::option_as_alt`
-  (hidden) is what the window gets now, for headless tests.
+  window, and the request lasts. The window gets `Both` only while no text field has focus,
+  set after every frame that runs input, drawn or not (a covered window's and a timer's too,
+  but not one whose surface then fails), so a field focused by one key composes the next once
+  that frame has run. winit replaces the key event before AppKit's text input sees it, so
+  Option+E should be Alt+E rather than a dead accent (not tried by hand), which the app cannot
+  undo afterwards. A no-op elsewhere. A window Rune creates again gets the request too.
+  `Runtime::option_as_alt` (hidden) is what the window gets now, for headless tests.
 
 Spike: `examples/chrome_spike.rs` and `scripts/chrome-spike-x11.py`.
 
