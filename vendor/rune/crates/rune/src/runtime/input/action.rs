@@ -204,6 +204,7 @@ pub(super) fn merge(tx: &mut Tx, one: Tx) {
     tx.minimize |= one.minimize;
     tx.toggle_maximized |= one.toggle_maximized;
     tx.toggle_full_screen |= one.toggle_full_screen;
+    tx.option_as_alt = one.option_as_alt.or(tx.option_as_alt);
     if one.show_window_menu.is_some() { tx.show_window_menu = one.show_window_menu; }
     tx.keys.extend(one.keys);
     if one.title.is_some() { tx.title = one.title; }

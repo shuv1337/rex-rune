@@ -99,6 +99,14 @@ pub struct Workspace {
     pub window_full_screen: bool,
     /// The title row's session button, where its list opens.
     pub title_session: [f32; 4],
+    /// Whether Alt is a Mac's Option key and Terminal settings offer what it does
+    /// (`platform::keys::OPTION_COMPOSES`). Headless tests leave it out unless they turn it on.
+    pub option_choice: bool,
+    /// Whether the layout in use is U.S., read again when the person picks another one.
+    pub us_layout: Option<bool>,
+    /// The panes' Option, as last asked of Rune (`Tx::set_option_as_alt`); Rune drops it while
+    /// a field has focus.
+    pub option_as_alt: Option<bool>,
     /// The pane a file drag from another app is over.
     pub drop_hover: Option<String>,
     /// Pane headers brought out by the pointer or by Reveal pane headers.
@@ -270,6 +278,9 @@ impl Workspace {
             window_focused: true,
             own_frame: cfg!(test) || super::platform::chrome::OWN_FRAME,
             unified_title: !cfg!(test) && super::platform::chrome::UNIFIED,
+            option_choice: !cfg!(test) && super::platform::keys::OPTION_COMPOSES,
+            us_layout: None,
+            option_as_alt: None,
             title_inset: 0.,
             full_screen: false,
             window_full_screen: false,
@@ -978,6 +989,42 @@ impl Workspace {
     /// Whether the window is full screen, as the window or its traffic lights say.
     pub fn in_full_screen(&self) -> bool {
         self.full_screen || self.window_full_screen
+    }
+
+    /// Asks Rune for the panes' Option when the setting or the layout has changed. Main
+    /// thread only: `layout_changed` reads the layout again.
+    pub fn sync_option_key(&mut self, tx: &mut Tx, layout_changed: bool) {
+        if !self.option_choice {
+            return;
+        }
+        // Tests never read or watch the real layout; they set `us_layout`.
+        if self.us_layout.is_none() && !cfg!(test) {
+            let handle = self.handle.clone();
+            super::platform::keys::watch_layout(move || {
+                handle.update(|s, tx| s.sync_option_key(tx, true));
+            });
+        }
+        if (layout_changed && !cfg!(test)) || self.us_layout.is_none() {
+            self.us_layout = Some(cfg!(test) || super::platform::keys::us_layout());
+        }
+        // Rune keeps Option's characters for whichever of Rex's own fields has focus (@ in an
+        // address, é in a search), so this is the panes' Option.
+        let alt = self.option_is_alt();
+        if self.option_as_alt != Some(alt) {
+            tx.set_option_as_alt(alt);
+            self.option_as_alt = Some(alt);
+        }
+    }
+
+    /// Whether Terminal settings make Option Alt with the layout in use.
+    fn option_is_alt(&self) -> bool {
+        (self.settings.terminal.option_key).acts_as_alt(self.us_layout != Some(false))
+    }
+
+    /// Whether Option composes the text of a key typed with it, which the program then gets
+    /// without Alt.
+    pub fn option_composes(&self) -> bool {
+        self.option_choice && !self.option_is_alt()
     }
 
     /// A drag writes preferences once, after the window has kept its size for a second.

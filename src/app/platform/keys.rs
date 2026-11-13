@@ -86,6 +86,118 @@ pub enum WindowMenuKey {
     Minimize,
 }
 
+/// Whether Alt is a Mac's Option key, which composes characters unless it is told to act as
+/// Alt (`Tx::set_option_as_alt`). Elsewhere Alt is always Alt.
+pub const OPTION_COMPOSES: bool = cfg!(target_os = "macos");
+
+/// Whether the keyboard layout in use is U.S. English or ABC. Main thread only. True where
+/// [`OPTION_COMPOSES`] is false.
+pub fn us_layout() -> bool {
+    #[cfg(target_os = "macos")]
+    return layout::current().is_some_and(|id| layout::is_us(&id));
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// Calls `changed` whenever the person picks another keyboard layout, for as long as the
+/// process runs. Call it once, from the main thread. Nothing where [`OPTION_COMPOSES`] is
+/// false.
+pub fn watch_layout(changed: impl Fn() + Send + Sync + 'static) {
+    #[cfg(target_os = "macos")]
+    layout::watch(Box::new(changed));
+    #[cfg(not(target_os = "macos"))]
+    let _ = changed;
+}
+
+#[cfg(target_os = "macos")]
+mod layout {
+    use std::ffi::{c_char, c_void};
+
+    type CFTypeRef = *const c_void;
+    const UTF8: u32 = 0x0800_0100;
+    const DELIVER_IMMEDIATELY: isize = 4;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        static kTISPropertyInputSourceID: CFTypeRef;
+        static kTISNotifySelectedKeyboardInputSourceChanged: CFTypeRef;
+        fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+        fn TISGetInputSourceProperty(source: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(value: CFTypeRef);
+        fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, len: isize, encoding: u32) -> u8;
+        fn CFNotificationCenterGetDistributedCenter() -> CFTypeRef;
+        fn CFNotificationCenterAddObserver(
+            center: CFTypeRef,
+            observer: *const c_void,
+            callback: extern "C" fn(CFTypeRef, *mut c_void, CFTypeRef, CFTypeRef, CFTypeRef),
+            name: CFTypeRef,
+            object: CFTypeRef,
+            suspension: isize,
+        );
+    }
+
+    /// Layouts whose Option characters few people type in a terminal, as Rex for macOS and
+    /// Ghostty decide.
+    pub(super) fn is_us(id: &str) -> bool {
+        matches!(id, "com.apple.keylayout.US" | "com.apple.keylayout.ABC")
+    }
+
+    /// The input source id of the layout in use, such as `com.apple.keylayout.German`.
+    pub(super) fn current() -> Option<String> {
+        // SAFETY: the copied source is released once its id, which it owns, is read.
+        unsafe {
+            let source = TISCopyCurrentKeyboardLayoutInputSource();
+            if source.is_null() {
+                return None;
+            }
+            let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
+            let mut buf = [0 as c_char; 128];
+            let read = !id.is_null()
+                && CFStringGetCString(id, buf.as_mut_ptr(), buf.len() as isize, UTF8) != 0;
+            CFRelease(source);
+            read.then(|| {
+                std::ffi::CStr::from_ptr(buf.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        }
+    }
+
+    type Changed = Box<dyn Fn() + Send + Sync>;
+
+    extern "C" fn notified(
+        _: CFTypeRef,
+        observer: *mut c_void,
+        _: CFTypeRef,
+        _: CFTypeRef,
+        _: CFTypeRef,
+    ) {
+        // SAFETY: `observer` is the `Changed` that `watch` leaked, which is never freed.
+        let changed = unsafe { &*(observer as *const Changed) };
+        // A panic must not unwind into CoreFoundation.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(changed));
+    }
+
+    pub(super) fn watch(changed: Changed) {
+        let observer = Box::into_raw(Box::new(changed));
+        // SAFETY: the observer lives for the process and may be called on any thread.
+        unsafe {
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDistributedCenter(),
+                observer as *const c_void,
+                notified,
+                kTISNotifySelectedKeyboardInputSourceChanged,
+                std::ptr::null(),
+                DELIVER_IMMEDIATELY,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

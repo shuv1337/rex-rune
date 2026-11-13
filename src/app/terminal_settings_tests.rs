@@ -4,7 +4,7 @@ use super::*;
 use crate::app::{panel::SettingsSection, select_copy::memory, term};
 use rex_rune::{
     connection::Command,
-    settings::terminal::{CursorStyle, SelectionColor},
+    settings::terminal::{CursorStyle, OptionKey, SelectionColor},
     terminal::{CursorShape, Renderer, selection},
 };
 use std::sync::Arc;
@@ -550,6 +550,175 @@ fn selection_colours_and_corners_follow_their_settings_in_panes_and_the_preview(
         Some(PanelKind::Settings)
     ));
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_option_key_setting_is_a_macs_and_tells_the_window_what_option_is() {
+    let rt = terminal_settings(|_| {});
+    assert!(!has(&rt, "option-key"), "only where Alt is Option");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
+    let mut rt = terminal_settings(|ws| {
+        ws.option_choice = true;
+        ws.us_layout = Some(false);
+    });
+    rt.poll = Some(crate::app::poll);
+    // What the window gets once the frame that changed something is drawn.
+    let told = |rt: &mut Runtime<Workspace>| {
+        rt.frame(1. / 60.);
+        rt.option_as_alt()
+    };
+    assert!(!told(&mut rt), "a German layout types");
+    choose(&mut rt, "option-key", "Acts as Alt");
+    assert_eq!(rt.state.settings.terminal.option_key, OptionKey::Alt);
+    let saved = Settings::load(&rt.state.settings_path).unwrap();
+    assert_eq!(saved.terminal.option_key, OptionKey::Alt);
+    assert_eq!(rt.state.option_as_alt, Some(true), "asked for at once");
+    assert!(told(&mut rt), "the popup button is no field");
+    click(&mut rt, "settings-search");
+    assert!(
+        !told(&mut rt),
+        "Settings' own fields keep Option's characters"
+    );
+    rt.update(|s, _| {
+        s.settings_nav.search.text = "option".into();
+        s.settings_search_changed();
+    });
+    assert!(
+        rt.state
+            .settings_nav
+            .hits()
+            .iter()
+            .any(|h| h.label == "Option key" && h.place == "Terminal"),
+        "found by search"
+    );
+
+    rt.update(|s, tx| s.close_panel(tx));
+    assert!(
+        told(&mut rt),
+        "closing Settings gives the panes Alt in its own frame"
+    );
+    rt.update(|s, _| s.settings.terminal.option_key = OptionKey::Automatic);
+    assert!(!told(&mut rt), "a German layout types");
+    rt.update(|s, _| s.us_layout = Some(true));
+    assert!(told(&mut rt), "a U.S. layout's Option is Alt");
+    rt.update(|s, _| s.settings.terminal.option_key = OptionKey::Characters);
+    assert!(!told(&mut rt));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_character_option_composes_reaches_the_program_without_alt() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    let (sender, sent) = flume::unbounded();
+    for block in ["block:b", "block:c"] {
+        live_terminal(&mut ws, block, &sender);
+    }
+    let mut rt = runtime(ws);
+    rt.poll = Some(crate::app::poll);
+    let mods = |shift, ctrl, alt| Mods {
+        shift,
+        ctrl,
+        cmd: ctrl,
+        alt,
+        ..Mods::default()
+    };
+    let send = |rt: &mut Runtime<Workspace>, text: Option<&str>, mods: Mods| {
+        use rune::{PhysicalInput, PhysicalKeyCode as Code};
+        let (key, code, base) = match text {
+            None => (Key::Left, Code::ArrowLeft, None),
+            Some(t) => {
+                let (code, base) = match t {
+                    "@" => (Code::KeyL, 'l'),
+                    "€" => (Code::KeyE, 'e'),
+                    "x" => (Code::KeyX, 'x'),
+                    _ => (Code::KeyB, 'b'),
+                };
+                (Key::Text(t.into()), code, Some(base))
+            }
+        };
+        for pressed in [true, false] {
+            let input = PhysicalInput::Key {
+                key: code,
+                mods,
+                pressed,
+                repeat: false,
+            };
+            let event = KeyEvent {
+                key: key.clone(),
+                mods,
+            };
+            rt.physical_key_input(input, event, base);
+            for _ in 0..3 {
+                rt.frame(1. / 60.);
+            }
+        }
+        let keys = sent_keys(&sent);
+        assert_eq!(keys.len(), 2, "{text:?} {mods:?} sent {keys:?}");
+        let (press, release) = (&keys[0], &keys[1]);
+        assert_eq!(release["action"], "release");
+        assert_eq!(
+            release["consumed_mods"], press["consumed_mods"],
+            "{text:?} {mods:?}: a release as its press"
+        );
+        [&press["text"], &press["mods"], &press["consumed_mods"]]
+            .map(|v| v.as_str().unwrap().to_owned())
+    };
+    let option = mods(false, false, true);
+    // Where Alt is not a Mac's Option, it is always Alt.
+    assert_eq!(send(&mut rt, Some("@"), option), ["@", "alt", ""]);
+
+    rt.update(|s, _| {
+        s.option_choice = true;
+        s.us_layout = Some(false);
+    });
+    assert_eq!(send(&mut rt, Some("@"), option), ["@", "alt", "alt"]);
+    let shifted = mods(true, false, true);
+    assert_eq!(
+        send(&mut rt, Some("€"), shifted),
+        ["€", "shift+alt", "shift+alt"]
+    );
+    // A key that types nothing, and Option with Control, keep Alt.
+    assert_eq!(send(&mut rt, None, option), ["", "alt", ""]);
+    assert_eq!(
+        send(&mut rt, Some("x"), mods(false, true, true)),
+        ["x", "ctrl+alt", ""]
+    );
+    let command = Mods {
+        logo: true,
+        ..option
+    };
+    assert_eq!(send(&mut rt, Some("x"), command), ["x", "alt+super", ""]);
+
+    rt.update(|s, _| s.settings.terminal.option_key = OptionKey::Alt);
+    rt.frame(1. / 60.);
+    assert!(rt.option_as_alt());
+    assert_eq!(send(&mut rt, Some("b"), option), ["b", "alt", ""]);
+    assert_eq!(
+        send(&mut rt, Some("B"), shifted),
+        ["B", "shift+alt", "shift"]
+    );
+    // Rex's own fields keep Option's characters: the find bar's, from the frame that focuses
+    // it, and the pane has Alt again from the frame that closes it.
+    let shortcut = |rt: &mut Runtime<Workspace>, key: Key, mods: Mods| {
+        rt.key(KeyEvent { key, mods });
+        rt.frame(1. / 60.);
+        rt.option_as_alt()
+    };
+    let find = Mods {
+        ctrl: true,
+        shift: true,
+        ..Mods::default()
+    };
+    assert!(
+        !shortcut(&mut rt, Key::Text("F".into()), find),
+        "find has the keyboard"
+    );
+    assert!(
+        shortcut(&mut rt, Key::Escape, Mods::default()),
+        "Escape gives it back"
+    );
+    assert_eq!(send(&mut rt, Some("b"), option), ["b", "alt", ""]);
 }
 
 #[test]

@@ -14,7 +14,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::settings::{
-    terminal::{CursorStyle, SelectionColor, TerminalConfig},
+    terminal::{CursorStyle, OptionKey, SelectionColor, TerminalConfig},
     typography::FontStyle,
 };
 use rune::{El, TextStyle, col, row, text};
@@ -158,19 +158,34 @@ fn cursor(s: &Workspace, inks: &Inks) -> El {
 }
 
 fn keyboard(s: &Workspace) -> El {
-    section(
-        "Keyboard",
-        [card([setting(
+    let hints = setting(
+        "Show key sequence hints",
+        "The keys pressed so far of a multi-key shortcut, in the toolbar.",
+        toggle(
+            "sequence-hints",
             "Show key sequence hints",
-            "The keys pressed so far of a multi-key shortcut, in the toolbar.",
-            toggle(
-                "sequence-hints",
-                "Show key sequence hints",
-                s.settings.terminal.key_sequence_hints,
-                |c| &mut c.key_sequence_hints,
-            ),
-        )])],
-    )
+            s.settings.terminal.key_sequence_hints,
+            |c| &mut c.key_sequence_hints,
+        ),
+    );
+    let option = s.option_choice.then(|| {
+        select_row(
+            "option-key",
+            "Option key",
+            "Automatic sends Alt on a U.S. layout and types characters on others.",
+            &OptionKey::ALL.map(OptionKey::name),
+            OptionKey::ALL
+                .iter()
+                .position(|key| *key == s.settings.terminal.option_key)
+                .unwrap_or_default(),
+            |s, i, tx| {
+                s.settings.terminal.option_key = OptionKey::ALL[i.min(OptionKey::ALL.len() - 1)];
+                s.save();
+                s.sync_option_key(tx, false);
+            },
+        )
+    });
+    section("Keyboard", [card(option.into_iter().chain([hints]))])
 }
 
 /// The choice at `index` of a selection colour's list.

@@ -16,6 +16,7 @@ pub(super) fn sync_platform<S: 'static>(l: &mut Win, rt: &mut Runtime<S>, secure
         *ime = ime_allowed;
     }
     l.apply_cursor(rt, focused);
+    l.sync_option(rt);
     #[cfg(target_os = "macos")]
     if rt.zoom() == 1.0 {
         l.native.help.sync(&l.window, rt.help_regions());
@@ -37,6 +38,20 @@ pub(super) fn sync_platform<S: 'static>(l: &mut Win, rt: &mut Runtime<S>, secure
 }
 
 impl Win {
+    /// Option as the runtime last asked: Alt, or the layout's characters while a field has
+    /// focus. Set after a frame's input, so a field focused by a key has Option's characters
+    /// from the next key on. It needs no drawable, so frames that run input without drawing
+    /// (covered or occluded windows) set it too.
+    pub(super) fn sync_option<S>(&mut self, rt: &Runtime<S>) {
+        #[cfg(target_os = "macos")]
+        if rt.option_as_alt() != self.option_as_alt {
+            self.option_as_alt = rt.option_as_alt();
+            super::chrome::option_as_alt(&self.window, self.option_as_alt);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = rt;
+    }
+
     /// The runtime's cursor while the pointer is in the window, the arrow once it leaves.
     /// `Hidden` needs focus, so it can't outlive the window being active.
     pub(super) fn apply_cursor<S>(&mut self, rt: &Runtime<S>, focused: bool) {

@@ -225,6 +225,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
 
 fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     let now = std::time::Instant::now();
+    s.sync_option_key(tx, false);
     let (activity_changed, next_activity) = s.refresh_activity_at(now);
     if let Some(delay) = next_activity {
         tx.wake_after(delay);

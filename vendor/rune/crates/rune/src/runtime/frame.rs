@@ -174,6 +174,7 @@ impl<S: 'static> Runtime<S> {
         self.minimize_request |= std::mem::take(&mut tx.minimize);
         self.titlebar.toggle_maximized |= std::mem::take(&mut tx.toggle_maximized);
         self.titlebar.toggle_full_screen |= std::mem::take(&mut tx.toggle_full_screen);
+        if let Some(on) = tx.option_as_alt.take() { self.titlebar.option_as_alt = on; }
         if let Some(at) = tx.show_window_menu.take() { self.titlebar.menu_at = Some(at); }
         for ev in std::mem::take(&mut tx.keys) { self.key(ev); }
         self.latch_playground(tx);

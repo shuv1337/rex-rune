@@ -62,6 +62,8 @@ pub struct Tx {
     pub(crate) toggle_maximized: bool,
     /// `Tx::toggle_full_screen`.
     pub(crate) toggle_full_screen: bool,
+    /// `Tx::set_option_as_alt`; the last wins.
+    pub(crate) option_as_alt: Option<bool>,
     /// `Tx::show_window_menu`, in window points; the last wins.
     pub(crate) show_window_menu: Option<(f32, f32)>,
     /// `Tx::send_key`, in order.
@@ -294,6 +296,15 @@ impl Tx {
     /// Does nothing for overlays and headless runs.
     pub fn toggle_full_screen(&mut self) {
         self.toggle_full_screen = true;
+    }
+
+    /// Whether macOS's Option keys act as Alt in this window: the key arrives as the character
+    /// it types without Option (Shift kept), with `alt`, instead of the character Option
+    /// composes (∫ for B), and Option never starts a dead key. winit's `OptionAsAlt::Both` or
+    /// `None`. Lasts until the next call, but a focused text field gets Option's characters;
+    /// the window follows focus after every frame that runs input. Does nothing off macOS.
+    pub fn set_option_as_alt(&mut self, on: bool) {
+        self.option_as_alt = Some(on);
     }
 
     /// Deliver `ev` once this handler is done, as if it were typed: to the focused field, then
