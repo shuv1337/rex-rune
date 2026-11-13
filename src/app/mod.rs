@@ -53,6 +53,7 @@ mod tabs;
 mod term;
 mod terminal_page;
 mod theme;
+mod title_row;
 mod titles;
 mod toolbar;
 mod toolbar_reveal;
@@ -93,6 +94,11 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
     let maximized = cx.window_maximized();
+    let insets = cx.chrome_insets();
+    if s.unified_title {
+        // The title row grows with the interface zoom, and the traffic lights stay centred in it.
+        cx.titlebar_height(platform::chrome::TITLE_ROW * scale);
+    }
     let mut body = row().key("body").grow(1.).w_full().min_h(0.);
     if s.sidebar.is_open() {
         body = body
@@ -121,11 +127,21 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             .pt(toolbar_reveal::row_height(s))
             .child(body),
     );
-    root = match toolbar_reveal::placement(s) {
-        toolbar_reveal::Placement::Row => root.child(toolbar::toolbar(s).absolute(0., 0.)),
-        toolbar_reveal::Placement::Floating => {
-            root.child(toolbar_reveal::floating(toolbar::toolbar(s)))
+    let bar = |s: &Workspace| {
+        if s.unified_title {
+            title_row::title_row(s)
+        } else {
+            toolbar::toolbar(s)
         }
+    };
+    if toolbar_reveal::shows_title_strip(s) {
+        root = root.child(title_row::title_strip(s).absolute(0., 0.));
+    }
+    root = match toolbar_reveal::placement(s) {
+        toolbar_reveal::Placement::Row => root.child(bar(s).absolute(0., 0.)),
+        toolbar_reveal::Placement::Floating => root.child(toolbar_reveal::floating(s, bar(s))),
+        // The title strip draws them.
+        toolbar_reveal::Placement::None if toolbar_reveal::shows_title_strip(s) => root,
         toolbar_reveal::Placement::None => {
             root.children(toolbar::floating_status(s).map(toolbar_reveal::sequence_float))
         }
@@ -173,6 +189,15 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .h_full()
         .fill(rgb(ground()))
         .on_layout(move |s: &mut Workspace, r| s.window_resized([r[2], r[3]], maximized))
+        .children(s.unified_title.then(|| {
+            // The insets also change with no resize (full screen), and a rect that moves is
+            // what reports them.
+            el().key("traffic-lights")
+                .absolute(0., 0.)
+                .size(insets.leading, insets.height)
+                .inert()
+                .on_layout(|s: &mut Workspace, r| s.traffic_lights(r[2], r[3]))
+        }))
         .child(root);
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
@@ -346,6 +371,9 @@ pub fn run(
         })
         .on_ime(input::on_ime)
         .srgb_blend(true);
+    if let Some(titlebar) = platform::chrome::TITLEBAR {
+        app = app.titlebar(titlebar);
+    }
     if stats::FrameStats::enabled() {
         let mut frames = stats::FrameStats::default();
         app = app.on_frame_encoded(move |f| frames.record(f));

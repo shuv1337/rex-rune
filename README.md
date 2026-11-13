@@ -213,7 +213,7 @@ What differs from Linux today:
 | Area | On macOS |
 | --- | --- |
 | Shortcuts | On the Command key: see [Shortcuts on macOS](#shortcuts-on-macos) |
-| Window | A standard Mac window: the system's title bar with the session's title and the close, minimize and zoom buttons, edge resizing and full screen. Rex's toolbar is below the title bar and has no close button of its own. Drawing the toolbar in the title bar, beside the traffic lights, is not done yet |
+| Window | The toolbar is the title bar, as in Rex for macOS: one 38 pt row with the system's close, minimize and zoom buttons at its start, then the sidebar toggle, the focused pane's program and directory (or the tabs' pills while there are several in the toolbar), drag space, the session (a press opens Switch session), Commands, New tab and Settings. A tab with one pane has no header row of its own: its buttons end the title row. Split panes keep their headers. Empty space in the row moves the window, and a double-click on it does what System Settings says for title bars. With the toolbar hidden or shown on hover, a title strip with the pane's title and buttons keeps the traffic lights clear; in full screen it goes. Edge resizing and full screen are the system's |
 | Primary selection | macOS has none, so the setting is not shown |
 | Links and Show in folder | Opened with `open`; Show in folder selects the file in Finder |
 | Sounds | Played with `afplay` from the system's alert sounds: Ping when a program needs you, Basso for an error, Glass when one is done |
@@ -226,7 +226,7 @@ What differs from Linux today:
 | Updates | Settings → Updates reports a source build; nothing is installed for you |
 | `ssh://` hosts, uploads, everything on the server | As on Linux |
 
-The window frame is the one part that has been started and measured but not looked at: this was built without screen access to the Mac. The window server reports a title bar's height above the requested content size and the session's title on it; how it looks has not been seen, and neither has full screen.
+The title row has been looked at on a Mac (macOS 27, Apple silicon) with one pane, a split, two tabs, the smallest window, in and after full screen, with the toolbar hidden and under the light system appearance. Full screen was entered and left by the app, not with the green button or the menu bar that slides down over a full-screen window, and moving the window by the row and double-clicking it are checked by the headless tests, not by hand. While a list or dialog is open, a press on the row closes it rather than moving the window. A window in full screen does not save its size, so the next start opens at the last windowed size.
 
 CI builds the app and runs the unit and headless UI tests on macOS for every pull request.
 

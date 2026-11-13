@@ -262,14 +262,21 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     })
     .min(vw - 16.);
     let top = if sessions || pane {
-        TOOLBAR - 4.
+        super::toolbar_reveal::bar_height(s) - 4.
     } else if vh < 750. {
         60.
     } else {
         76.
     };
     let (ax, ay) = panel.anchor.unwrap_or((
-        if sessions {
+        if sessions && s.unified_title {
+            // Only a drawn title row has a session button to open under.
+            if super::toolbar_reveal::placement(s) == super::toolbar_reveal::Placement::None {
+                vw - width - MARGIN
+            } else {
+                s.title_session[0] + s.title_session[2] - width
+            }
+        } else if sessions {
             MARGIN + 38.
         } else if pane {
             vw - 450.
