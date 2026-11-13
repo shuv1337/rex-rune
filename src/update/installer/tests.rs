@@ -711,7 +711,13 @@ fn signed_fixture_end_to_end() {
         &super::super::tests::sample_manifest_json("99.0.0", "0.7.0"),
     )
     .unwrap();
-    let artifact = &mut manifest.targets.get_mut(&target).unwrap().archive;
+    let artifact = manifest
+        .targets
+        .get_mut(&target)
+        .unwrap()
+        .archive
+        .as_mut()
+        .unwrap();
     artifact.size = tarball.len() as u64;
     artifact.sha256 = hex_sha256(&tarball);
     let bytes = serde_json::to_vec(&manifest).unwrap();
