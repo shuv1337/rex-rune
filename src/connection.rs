@@ -237,6 +237,9 @@ pub struct ProtocolStats {
     pub data_connect_requests: u64,
 }
 
+/// What the person is told when the server took a stop request.
+const STOP_ACCEPTED: &str = "Server stop accepted. Rex Rune will not start it again.";
+
 #[derive(Clone, Default)]
 pub struct HostModel {
     /// A successful SSH lookup found no default server; setup may be offered, never run.
@@ -1465,6 +1468,11 @@ async fn run_host(
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
+                // A server is answering again, so "stop accepted" is no longer the news. A
+                // refusal or an unconfirmed stop stays: the person has not seen it resolved.
+                if m.server_stop_result.as_deref() == Some(STOP_ACCEPTED) {
+                    m.server_stop_result = None;
+                }
                 m.views.clear();
                 m.background_views.clear();
                 // Reports made while disconnected were missed; the per-connection pass refills them.
@@ -1672,7 +1680,7 @@ async fn run_host(
                             match request(&mut control, "server.stop", json!({})).await {
                                 Ok(_) => {
                                     shared.update(|m| {
-                                        m.notice = Some("Server stop accepted. Rex Rune will not start it again.".into());
+                                        m.notice = Some(STOP_ACCEPTED.into());
                                         m.server_stop_result = m.notice.clone();
                                     });
                                     // The API replies before shutdown and asks the caller to close.
@@ -1821,6 +1829,15 @@ async fn run_host(
                 HostCommand::Download(request) => {
                     downloads::refuse(shared, *request, crate::download::Failure::Disconnected)
                 }
+                // Confirmed, but the connection failed before it was read: say so, since
+                // the dialog has already closed.
+                HostCommand::StopServer { .. } => shared.update(|m| {
+                    m.notice = Some(
+                        "Stop not sent: the connection dropped first. Check the host before trying again. Nothing was retried."
+                            .into(),
+                    );
+                    m.server_stop_result = m.notice.clone();
+                }),
                 _ => {}
             }
         }

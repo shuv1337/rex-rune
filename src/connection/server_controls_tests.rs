@@ -86,6 +86,11 @@ async fn stop_case(failure: Option<(&'static str, u16)>) {
         ),
     }
     until(&host, |m| m.connected && m.connection_epoch == 2).await;
+    // Once a server answers again an accepted stop is old news; a failure is kept.
+    assert_eq!(
+        host.model.lock().unwrap().server_stop_result.is_none(),
+        failure.is_none()
+    );
     drop(host);
     tokio::time::timeout(Duration::from_secs(5), server)
         .await

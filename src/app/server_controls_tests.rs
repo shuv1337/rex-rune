@@ -178,7 +178,7 @@ fn stop_confirmation_names_consequences_and_cancel_and_escape_restore_server() {
                 "Build machine",
                 "Every program running in its sessions ends.",
                 "Other clients are disconnected.",
-                "Rex Rune will not start it again.",
+                "Rex Rune will not start it again; a service manager on that machine may.",
             ] {
                 assert!(words.contains(word), "{words}");
             }
@@ -243,6 +243,53 @@ fn confirmed_stop_targets_only_one_host_once_and_rejects_changed_target() {
         ws.submit(&mut rune::Tx::default());
         assert!(a.is_empty() && b.is_empty(), "confirmation consumed");
     }
+}
+
+#[test]
+fn pressing_the_stop_button_in_the_confirmation_sends_one_stop_to_that_host() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let mut ws = workspace_hosts(2);
+    for i in 0..2 {
+        ws.settings.hosts[i].endpoint = format!("unix:///private/{i}.sock");
+        ws.hosts[i].model.connected = true;
+        ws.hosts[i].model.connection_epoch = 9;
+    }
+    let a = capture_host(&mut ws, 0);
+    let b = capture_host(&mut ws, 1);
+    let mut rt = open(ws, (1024., 700.));
+    tap(&mut rt, "server-stop");
+    // The real destructive button, not the default one.
+    click(&mut rt, "confirm-close");
+    settle(&mut rt);
+    let stops: Vec<u64> = a
+        .try_iter()
+        .filter_map(|c| match c {
+            HostCommand::StopServer { epoch } => Some(epoch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stops,
+        [9],
+        "one stop, for the connection it was confirmed on"
+    );
+    assert!(
+        !b.try_iter()
+            .any(|c| matches!(c, HostCommand::StopServer { .. })),
+        "the other host is not asked to stop"
+    );
+    assert!(!matches!(
+        rt.state.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Confirm { .. })
+    ));
+    // Nothing is left to press a second time.
+    press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert!(
+        !a.try_iter()
+            .chain(b.try_iter())
+            .any(|c| matches!(c, HostCommand::StopServer { .. }))
+    );
 }
 
 #[test]

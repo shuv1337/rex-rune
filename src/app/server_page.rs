@@ -72,7 +72,7 @@ impl Workspace {
             |n| format!("Last reported session count: {n}."),
         );
         let description = format!(
-            "Stop the server on {}? Every program running in its sessions ends. {sessions} Other clients are disconnected. Rex Rune will not start it again.",
+            "Stop the server on {}? Every program running in its sessions ends. {sessions} Other clients are disconnected. Rex Rune will not start it again; a service manager on that machine may.",
             saved.label
         );
         self.confirm(
