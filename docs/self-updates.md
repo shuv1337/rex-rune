@@ -10,7 +10,7 @@ arguments, including `--config`, `--font`, `--font-size` and `--window-size`, ar
 preserved, except `--new`: session creation is never replayed. Rex server sessions
 keep running. If re-exec fails after the window closes, Rex sends a critical desktop
 notification through the session notification service (and logs any delivery failure
-to stderr); reopen Rex or repair with install.sh.
+to stderr); reopen Rex or repair the installation.
 
 ## Eligibility and trust
 
@@ -185,7 +185,8 @@ Rune with the rest of the system.
 
 **Update now** runs `pkexec --disable-internal-agent /usr/lib/rex-rune/rex-rune-update
 <version>` on a worker thread and waits. Your desktop's polkit agent asks for an
-administrator's password; nothing runs before that. The client passes the version and
+administrator's password (on a one-person Arch or Omarchy machine, your own); nothing
+runs before that. The client passes the version and
 reads an exit code, and that is all it does: the helper downloads the package itself
 from the Rex package site, checks it against the Rex package key shipped in the
 package and against this computer's pacman keyring, refuses anything but a newer
@@ -204,10 +205,25 @@ What the page says afterwards:
 
 | Ending | Shown |
 | --- | --- |
-| Upgraded | **Restart to finish**, as for an install.sh update |
+| Upgraded | **Restart to finish**, as for an install.sh update. It starts `/usr/bin/rex-rune`, the client the package installs |
 | The dialog was closed | "Update cancelled. Nothing was installed."; **Update now** is back |
 | Not authorized, or no polkit agent running | Why, with the command to copy |
 | Any refusal by the helper (held back by `IgnorePkg`, another pacman running, a download or signature problem, a key this computer does not trust, other packages would change, pacman failed, no systemd) | The reason in a sentence, with the command to copy. `journalctl -t rex-rune-update` has the helper's own words |
+
+Limits, as built:
+
+- The waiting line has no time limit of its own. It ends when `pkexec` does: the helper
+  bounds its downloads, but a dialog nobody answers stays, and the page waits with it.
+  Restarting Rex clears it.
+- Quitting Rex after the password was given does not stop the update. Quitting while
+  the dialog is still open leaves that to polkit: the dialog may stay until dismissed,
+  and nothing is installed unless it is answered.
+- The helper is looked for once, at start, so a package that gains it while Rex runs
+  offers Update now after a restart. If the package was already upgraded another way
+  while Rex runs, Update now says the installed package is already this version or
+  newer; restart Rex to use it.
+- A release that needs a manual upgrade first (a floor) shows instructions only, as
+  for install.sh installs.
 
 It never starts on its own: **Install updates automatically** applies to install.sh
 installs only, since a password dialog nobody asked for would be worse than a notice.

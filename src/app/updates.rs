@@ -13,7 +13,7 @@ use rex_rune::update::{
     InstallChannel, STARTUP_DELAY, UpdateState, check_for_updates,
     installer::{self, Progress},
     now_epoch_secs,
-    pacman::{Helper, Outcome},
+    pacman::{CLIENT, Helper, Outcome},
 };
 use rune::{Cursor, El, Tx, col, el, row, text};
 use rune_kit::Switch;
@@ -52,8 +52,8 @@ pub struct Updates {
 }
 
 /// The pacman install's own words once Update now can be offered for it.
-const PACMAN_DETAIL: &str = "Installed from the signed Arch repository. Update now asks for an administrator's password and upgrades this one package; restart when ready.";
-const OMARCHY_DETAIL: &str = "Installed from the signed Arch / Omarchy repository. `omarchy update` is the recommended way: it updates Rex Rune with the rest of the system. Update now asks for an administrator's password and upgrades this one package on its own.";
+const PACMAN_DETAIL: &str = "Installed from the signed Arch repository. Update now asks for your password (an administrator's) and upgrades this one package; restart when ready.";
+const OMARCHY_DETAIL: &str = "Installed from the signed Arch / Omarchy repository. `omarchy update` is the recommended way: it updates Rex Rune with the rest of the system. Update now asks for your password (an administrator's) and upgrades this one package on its own.";
 
 /// Whether this pacman install is Rex's own package, which is the one that has the helper.
 /// A package from elsewhere says how to update it in its marker (`custom_hint`).
@@ -559,17 +559,15 @@ impl Workspace {
     /// dialog and then for the whole update. The helper reports nothing until it ends.
     fn update_pacman_package(&mut self, helper: Helper, version: String) {
         self.updates.installation = Installation::Working(format!(
-            "Waiting for the administrator's password, then downloading, checking and installing Rex Rune {}…",
+            "Waiting for your password, then downloading, checking and installing Rex Rune {}…",
             rex_rune::format_version(&version)
         ));
-        // Where this client is, read before the package replaces the file there.
-        let binary = std::env::current_exe().unwrap_or_else(|_| "/usr/bin/rex-rune".into());
         let handle = self.handle.clone();
         let spawn = std::thread::Builder::new()
             .name("rex-pacman-update".into())
             .spawn(move || {
                 let outcome = helper.update(&version);
-                handle.update(move |s, _| s.finish_pacman_update(outcome, binary));
+                handle.update(move |s, _| s.finish_pacman_update(outcome));
             });
         if let Err(error) = spawn {
             self.updates.installation =
@@ -577,13 +575,14 @@ impl Workspace {
         }
     }
 
-    /// What the helper's exit means here. Only an upgrade offers Restart; a closed dialog
-    /// is not a failure; anything else names the reason and leaves the command to copy.
-    pub fn finish_pacman_update(&mut self, outcome: Outcome, binary: PathBuf) {
+    /// What the helper's exit means here. Only an upgrade offers Restart, into the client
+    /// the package installs; a closed dialog is not a failure; anything else names the
+    /// reason and leaves the command to copy.
+    pub fn finish_pacman_update(&mut self, outcome: Outcome) {
         self.updates.installation = match outcome {
             Outcome::Installed => {
                 self.inform("Update installed. Settings → Updates offers Restart to finish.");
-                Installation::Ready(binary)
+                Installation::Ready(CLIENT.into())
             }
             Outcome::Dismissed => {
                 self.inform("Update cancelled. Nothing was installed.");

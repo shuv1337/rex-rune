@@ -15,6 +15,10 @@ use std::{
 /// Where the package installs its helper, and where polkit allows it to be run from.
 pub const HELPER: &str = "/usr/lib/rex-rune/rex-rune-update";
 pub const PKEXEC: &str = "/usr/bin/pkexec";
+/// The client the package installs, and so the one to start after an upgrade. Not
+/// `current_exe()`: if the file was already replaced under this process (by a system
+/// upgrade), Linux reports the old one's path with " (deleted)" after it.
+pub const CLIENT: &str = "/usr/bin/rex-rune";
 
 /// The helper and the program that runs it as root, both present.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,20 +157,20 @@ impl Refusal {
     /// Why nothing was installed, as the end of "Update failed: ". No full stop.
     pub fn sentence(&self) -> String {
         match self {
-            Self::NotAuthorized => "it was not authorized. It needs an administrator's password, which your desktop's polkit agent asks for; if no dialog appeared, no agent is running".into(),
+            Self::NotAuthorized => "it was not authorized. It needs your password (an administrator's), which your desktop's polkit agent asks for; if no dialog appeared, probably no agent is running".into(),
             Self::NotNewer => "the installed package is already this version or newer, or is not rex-rune-bin. If it was updated another way, restart Rex Rune".into(),
             Self::HeldBack => "rex-rune-bin is held back in pacman.conf (IgnorePkg or IgnoreGroup)".into(),
             Self::Busy => "another update or another pacman is running. Try again when it has finished".into(),
             Self::Download => "the package could not be downloaded from pkg.shuv.dev. A new release can take a few minutes to appear there".into(),
             Self::Signature => "the package was not signed by the Rex package key, or that key has expired. Nothing was installed".into(),
-            Self::Untrusted => "this computer's pacman keyring does not trust the Rex package key. Nothing was installed".into(),
+            Self::Untrusted => "this computer's pacman keyring does not trust the Rex package key (it may be missing, not locally signed, or revoked). Nothing was installed".into(),
             Self::WrongPackage => "the package site served something other than the package asked for. Nothing was installed".into(),
-            Self::OtherPackages => "installing it would change other packages too".into(),
+            Self::OtherPackages => "installing it would change other packages too, or pacman could not work out how to install it".into(),
             Self::Pacman => "pacman refused or failed; `journalctl -t rex-rune-update` has its words".into(),
             Self::Unsupported => "this system cannot run the update helper (it needs systemd), or the update did not finish; `journalctl -t rex-rune-update` says which".into(),
             Self::NoPkexec => "pkexec could not be started".into(),
             Self::Unexpected(Some(code)) => format!("the update helper ended with exit code {code}"),
-            Self::Unexpected(None) => "the update helper did not finish".into(),
+            Self::Unexpected(None) => "the update helper stopped before reporting. The update may still finish; check with Check now after a minute".into(),
         }
     }
 }

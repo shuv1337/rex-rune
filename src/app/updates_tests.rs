@@ -261,12 +261,16 @@ fn a_pacman_install_offers_update_now_only_with_its_own_helper() {
     let _families = rune::text::with_families("Inter", "Inter");
     for omarchy in [false, true] {
         let mut ws = pacman_workspace(omarchy);
+        ws.settings.updates.install_automatically = true;
         ws.open_updates_settings();
         let mut rt = runtime(ws);
         settle(&mut rt);
         assert!(has(&rt, "updates-install-now"));
         // Says what the button will do, and the command is still there to copy.
-        assert!(page_says(&rt, "asks for an administrator's password"));
+        assert!(page_says(
+            &rt,
+            "asks for your password (an administrator's)"
+        ));
         assert!(page_says(&rt, "this one package"));
         assert!(has(&rt, "updates-copy-command"));
         assert_eq!(
@@ -282,14 +286,16 @@ fn a_pacman_install_offers_update_now_only_with_its_own_helper() {
             }
         ));
         // Installing on its own is for install.sh installs: it would open a password
-        // dialog nobody asked for.
+        // dialog nobody asked for. The switch is not shown even if the preference was
+        // left on by such an install.
+        assert!(rt.state.settings.updates.install_automatically);
         assert!(!has(&rt, "updates-install-auto-switch"));
 
         // No helper (a package from before it, or no polkit): instructions only, as before.
         rt.update(|s, _| s.updates.pacman = None);
         settle(&mut rt);
         assert!(!has(&rt, "updates-install-now"));
-        assert!(!page_says(&rt, "administrator's password"));
+        assert!(!page_says(&rt, "asks for your password"));
         assert!(has(&rt, "updates-copy-command"));
         rt.state.install_update_now();
         assert!(matches!(rt.state.updates.installation, Installation::Idle));
@@ -341,14 +347,14 @@ fn a_pacman_update_reports_each_ending_and_restarts_only_after_an_upgrade() {
         rt.state.updates.installation,
         Installation::Working(_)
     ));
-    assert!(page_says(&rt, "Waiting for the administrator's password"));
+    assert!(page_says(&rt, "Waiting for your password"));
     assert!(!has(&rt, "updates-install-now"));
     assert!(!has(&rt, "updates-restart"));
     rt.state.check_updates_now();
     assert!(!rt.state.updates.checking, "no check during an update");
 
     // The dialog was closed: not a failure, nothing to restart, the button is back.
-    rt.update(|s, _| s.finish_pacman_update(Outcome::Dismissed, "/nonexistent/rex-rune".into()));
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Dismissed));
     settle(&mut rt);
     assert!(matches!(rt.state.updates.installation, Installation::Idle));
     assert!(has(&rt, "updates-install-now"));
@@ -363,7 +369,7 @@ fn a_pacman_update_reports_each_ending_and_restarts_only_after_an_upgrade() {
 
     // Every refusal says why, never offers Restart, and leaves the command to copy.
     for (refusal, words) in [
-        (Refusal::NotAuthorized, "administrator's password"),
+        (Refusal::NotAuthorized, "probably no agent is running"),
         (Refusal::NotNewer, "already this version or newer"),
         (Refusal::HeldBack, "IgnorePkg"),
         (Refusal::Busy, "another pacman is running"),
@@ -371,16 +377,17 @@ fn a_pacman_update_reports_each_ending_and_restarts_only_after_an_upgrade() {
         (Refusal::Signature, "not signed by the Rex package key"),
         (Refusal::Untrusted, "pacman keyring does not trust"),
         (Refusal::WrongPackage, "something other than the package"),
-        (Refusal::OtherPackages, "other packages"),
+        (
+            Refusal::OtherPackages,
+            "could not work out how to install it",
+        ),
         (Refusal::Pacman, "journalctl -t rex-rune-update"),
         (Refusal::Unsupported, "systemd"),
         (Refusal::NoPkexec, "pkexec could not be started"),
         (Refusal::Unexpected(Some(1)), "exit code 1"),
-        (Refusal::Unexpected(None), "did not finish"),
+        (Refusal::Unexpected(None), "may still finish"),
     ] {
-        rt.update(|s, _| {
-            s.finish_pacman_update(Outcome::Refused(refusal), "/nonexistent/rex-rune".into())
-        });
+        rt.update(|s, _| s.finish_pacman_update(Outcome::Refused(refusal)));
         settle(&mut rt);
         assert!(
             matches!(&rt.state.updates.installation, Installation::Failed(e) if e.contains(words)),
@@ -392,9 +399,9 @@ fn a_pacman_update_reports_each_ending_and_restarts_only_after_an_upgrade() {
         assert!(has(&rt, "updates-install-now") && has(&rt, "updates-copy-command"));
     }
 
-    // An upgrade: Restart to finish, with the path this client was started from.
+    // An upgrade: Restart to finish.
     let restart = rt.state.restart.clone();
-    rt.update(|s, _| s.finish_pacman_update(Outcome::Installed, "/nonexistent/rex-rune".into()));
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Installed));
     settle(&mut rt);
     assert!(has(&rt, "updates-restart"));
     assert!(!has(&rt, "updates-install-now"));
@@ -404,9 +411,11 @@ fn a_pacman_update_reports_each_ending_and_restarts_only_after_an_upgrade() {
         Installation::Ready(_)
     ));
     click(&mut rt, "updates-restart");
+    // The client the package installs, whatever path this process was started from: after
+    // a system upgrade under a running client, that path names a deleted file.
     assert_eq!(
         *restart.lock().unwrap(),
-        Some(std::path::PathBuf::from("/nonexistent/rex-rune"))
+        Some(std::path::PathBuf::from("/usr/bin/rex-rune"))
     );
     let _ = std::fs::remove_file(&rt.state.settings_path);
 }
@@ -494,15 +503,10 @@ fn pacman_update_draw() {
     click(&mut rt, "updates-install-now");
     settle(&mut rt);
     camera.snap(&mut rt, "pacman-update-waiting");
-    rt.update(|s, _| {
-        s.finish_pacman_update(
-            Outcome::Refused(Refusal::NotAuthorized),
-            "/nonexistent/rex-rune".into(),
-        )
-    });
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Refused(Refusal::NotAuthorized)));
     settle(&mut rt);
     camera.snap(&mut rt, "pacman-update-refused");
-    rt.update(|s, _| s.finish_pacman_update(Outcome::Installed, "/nonexistent/rex-rune".into()));
+    rt.update(|s, _| s.finish_pacman_update(Outcome::Installed));
     settle(&mut rt);
     camera.snap(&mut rt, "pacman-update-ready");
 }
