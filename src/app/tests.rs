@@ -1473,6 +1473,90 @@ fn close_confirmation_opens_on_keep_running_and_return_keeps_it_running() {
     assert!(rt.state.notices.is_empty(), "no request failed");
 }
 
+/// The steps of #106: Tab from Keep running to Close, then Return.
+#[test]
+fn tab_to_close_and_return_ends_the_programs_where_the_platform_presses_the_focused_button() {
+    let mut ws = workspace();
+    ws.panel = Some(super::panel::Panel::new(
+        PanelKind::Confirm {
+            method: "session.close_window".into(),
+            payload: serde_json::json!({"session_id": "s", "window_id": "a"}),
+            description: "Ends programs.".into(),
+        },
+        "Close this tab?",
+        &[],
+    ));
+    let rx = capture_host(&mut ws, 0);
+    ws.hosts[0].model.selected = Some("s".into());
+    let mut rt = runtime(ws);
+    assert!(focused(&rt).is_some_and(|p| p.ends_with("cancel-close")));
+    press(&mut rt, Key::Tab);
+    let path = focused(&rt).expect("Close has focus after Tab");
+    assert!(path.ends_with("confirm-close"), "Tab reached {path}");
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.panel.is_none(), "Return answered the dialog");
+    let sent = requests(&rx);
+    if super::platform::keys::RETURN_PRESSES_FOCUSED {
+        // Linux and Windows: Return presses the focused Close button, as their dialogs do.
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].0, "session.close_window");
+        assert_eq!(sent[0].2["window_id"], "a");
+    } else {
+        // macOS: Return is the default button's, so Keep running answered and nothing closed.
+        assert!(sent.is_empty(), "Return kept the programs: {sent:?}");
+    }
+}
+
+/// A dialog always keeps something focused (Rune brings focus back into an open modal), so
+/// the default button's Return is what presses a form with its field focused and no button.
+#[test]
+fn return_with_no_button_focused_still_presses_the_default_save() {
+    let mut ws = workspace();
+    ws.panel = Some(super::panel::Panel::new(
+        PanelKind::Form(Form::ClientLabel),
+        "Client name",
+        &[("Name", "This computer's name", "Headless")],
+    ));
+    let mut rt = runtime(ws);
+    let path = focused(&rt).expect("the field has the keyboard");
+    assert!(
+        path.contains("field:0"),
+        "focus starts in the field: {path}"
+    );
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.panel.is_none(), "Return pressed the default Save");
+    assert_eq!(
+        rt.state.settings.client_label.as_deref(),
+        Some("Headless"),
+        "Save took the field's text"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn space_presses_the_focused_close_button_on_every_platform() {
+    let mut ws = workspace();
+    ws.panel = Some(super::panel::Panel::new(
+        PanelKind::Confirm {
+            method: "session.close_window".into(),
+            payload: serde_json::json!({"session_id": "s", "window_id": "a"}),
+            description: "Ends programs.".into(),
+        },
+        "Close this tab?",
+        &[],
+    ));
+    let rx = capture_host(&mut ws, 0);
+    ws.hosts[0].model.selected = Some("s".into());
+    let mut rt = runtime(ws);
+    press(&mut rt, Key::Tab);
+    assert!(focused(&rt).is_some_and(|p| p.ends_with("confirm-close")));
+    press(&mut rt, Key::Text(" ".into()));
+    assert!(rt.state.panel.is_none());
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, "session.close_window");
+}
+
 #[test]
 fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     let mut ws = workspace();

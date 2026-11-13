@@ -18,6 +18,10 @@
 
 - **Server uptime and Stop server (partial M3.3):** Settings → Server shows a bounded running duration while connected and a local-only **Stop server…** control for Unix/SSH hosts, also in Commands. Cancel-default confirmation explains that every program in the server’s sessions ends, other clients disconnect, and Rex Rune will not start it again. Sends one request, never retries; [checks and limits](docs/parity-2026-11/M3.3-server-controls.md).
 
+### Fixed
+
+- **Enter on a focused button in a dialog.** On Linux and Windows, Return now presses the button that has the keyboard in Rex Rune's confirmations and forms, as other dialogs there do. Tab to **Close and end programs** in the close confirmation and Return ends the programs; before, Return took **Keep running**, the default, and closed the dialog without doing anything. With no button focused, Return still presses the default button (**Keep running** in a confirmation, **Save** in a form), and Space still presses the focused one. macOS keeps its own convention: Return is the default button's and Space presses the focused one. Windows shares this code; its UI is still untested. ([#106](https://github.com/shuv1337/rex-rune/issues/106), reported by [@julio-Cortes](https://github.com/julio-Cortes))
+
 ## 0.8.0 - 2026-11-12
 
 **Rex Linux is now Rex Rune.** Existing `install.sh` and in-app **Update now** users need no migration steps: update normally and restart. Pacman replaces `rex-linux-bin` with `rex-rune-bin` automatically on update; the repository configuration stays the same. For `.deb` installs, take **`rex-rune_*.deb`**, even if the old client's notice names `rex-linux_*.deb`. The new client keeps one launcher, moves settings and update state, and leaves `rex-linux` as a link to `rex-rune`.
