@@ -156,13 +156,15 @@ fn pending_partial_refused_and_unknown_fields_remain_distinct() {
     ws.hosts[0].model.protocol.api_revision = 0;
     let mut rt = open(ws, (1024., 700.));
     assert!(shows(&rt, "Waiting for report"));
-    for label in [
-        "Built-in Tailscale",
-        "Tailscale HTTPS",
-        "Tailscale address · Pair device",
-    ] {
+    for label in ["Built-in Tailscale", "Tailscale HTTPS", "Tailscale address"] {
         assert!(page_text(&rt).contains(&format!("{label}\nWaiting for report")));
     }
+    // Pairing says what it needs, and offers nothing to press.
+    assert!(
+        page_text(&rt)
+            .contains("Pair device\nNeeds a Tailscale HTTPS address reported by this server.")
+    );
+    assert!(!has(&rt, "server-pair"));
     assert!(shows(&rt, "Not reported") && !shows(&rt, "Not connected"));
     assert!(!has(&rt, "server-copy-tailnet"));
     rt.update(|s, _| {
@@ -420,7 +422,8 @@ fn settings_search_history_keyboard_and_copy_are_local_even_over_a_live_pane() {
             "Session count",
             "Listeners",
             "Built-in Tailscale",
-            "Tailscale address · Pair device",
+            "Tailscale address",
+            "Pair device",
         ] {
             click(&mut rt, "settings-search");
             rt.update(|s, _| {
@@ -676,6 +679,9 @@ fn pair_code_copy_and_text_hold_exactly_the_same_sanitized_address_and_return() 
         clipboard.text().as_ref().map(|s| s.as_str()),
         Some(expected)
     );
+    // The code holds the bare origin, as Rex for macOS's does: the page's address less
+    // the slash a URL writer puts after a host. Nothing else differs.
+    let expected = "https://build.tail1234.ts.net";
     tap(&mut rt, "server-pair");
     assert_eq!(pair_data(&rt.state).address, expected);
     assert_eq!(
@@ -686,7 +692,8 @@ fn pair_code_copy_and_text_hold_exactly_the_same_sanitized_address_and_return() 
     assert!(
         rt.elements()
             .iter()
-            .any(|e| e.text.as_deref() == Some(expected))
+            .any(|e| e.path.contains("pair-address") && e.text.as_deref() == Some(expected)),
+        "the text under the code is exactly what the code holds"
     );
     assert!(!rt.elements().iter().filter(|e| !e.exiting).any(|e| {
         e.text
@@ -756,7 +763,7 @@ fn pair_host_switch_disconnect_epoch_or_changed_report_hides_old_code() {
         tap(&mut rt, "server-pair");
         assert_eq!(
             pair_data(&rt.state).address,
-            "https://host0-rex.tail1234.ts.net/"
+            "https://host0-rex.tail1234.ts.net"
         );
         rt.update(|s, _| match change {
             0 => s.active = 1,
@@ -771,7 +778,7 @@ fn pair_host_switch_disconnect_epoch_or_changed_report_hides_old_code() {
         if change == 0 {
             tap(&mut rt, "server-pair");
             let d = pair_data(&rt.state);
-            assert_eq!(d.address, "https://host1-rex.tail1234.ts.net/");
+            assert_eq!(d.address, "https://host1-rex.tail1234.ts.net");
             assert_eq!(d.symbol, rex_rune::qr::encode(d.address.as_bytes()));
         }
     }
@@ -791,8 +798,7 @@ fn pair_search_and_command_use_the_same_dialog_without_host_commands() {
             .settings_nav
             .hits()
             .iter()
-            .any(|h| h.page == SettingsSection::Server
-                && h.label == "Tailscale address · Pair device")
+            .any(|h| h.page == SettingsSection::Server && h.label == "Pair device")
     );
     rt.update(|s, _| s.picker(false));
     let entry = rt
@@ -915,4 +921,33 @@ fn pair_device_draw() {
     assert!(done[1] + done[3] <= dialog[1] + dialog[3]);
     assert!((code[0] + code[2] / 2. - size.0 / 2.).abs() < 1.);
     camera.snap(&mut rt, "pair-dialog");
+}
+
+#[test]
+fn pairing_drops_only_a_bare_origins_slash_and_says_why_it_is_not_offered() {
+    let mut ws = fixture();
+    pair_report(&mut ws, 0, "available", "https://build.tail1234.ts.net/rex");
+    assert_eq!(
+        ws.pair_address().as_deref(),
+        Some("https://build.tail1234.ts.net/rex"),
+        "a path is part of the address"
+    );
+    pair_report(&mut ws, 0, "available", "https://build.tail1234.ts.net");
+    assert_eq!(
+        ws.pair_address().as_deref(),
+        Some("https://build.tail1234.ts.net")
+    );
+    let mut rt = open(ws, (1024., 700.));
+    assert!(has(&rt, "server-pair"));
+    assert!(
+        page_text(&rt).contains(
+            "Pair device\nA QR code of the Tailscale address, for Rex on another device."
+        )
+    );
+    // The address stays on the page as last reported, but a host that dropped is not paired.
+    rt.update(|s, _| s.hosts[0].model.connected = false);
+    settle(&mut rt);
+    assert_eq!(rt.state.pair_address(), None);
+    assert!(!has(&rt, "server-pair"));
+    assert!(page_text(&rt).contains("Pair device\nAvailable while this host is connected."));
 }

@@ -6,7 +6,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::connection::server_info::Answer;
-use rune::{El, col, row, text};
+use rune::{El, col, text};
 
 const MISSING: &str = "Not reported";
 
@@ -68,33 +68,35 @@ fn fact(label: &str, value: impl Into<String>, control: Option<El>) -> El {
 }
 
 fn address_row(key: &str, label: &str, address: Option<String>, fallback: &str) -> El {
-    address_row_with_pair(key, label, address, fallback, false)
-}
-
-fn address_row_with_pair(
-    key: &str,
-    label: &str,
-    address: Option<String>,
-    fallback: &str,
-    pair: bool,
-) -> El {
     let control = address.as_ref().map(|address| {
         let address = address.clone();
-        let copy = button(key, "Copy", Pill::Neutral, move |s, tx| {
+        button(key, "Copy", Pill::Neutral, move |s, tx| {
             tx.copy(address.clone());
             s.inform("Copied address to clipboard.");
         })
-        .help(format!("Copy {}", label.to_lowercase()));
-        if pair {
-            row().gap(6.).child(copy).child(
-                button("server-pair", "Pair", Pill::Neutral, |s, _| s.pair_device())
-                    .help("Pair device"),
-            )
-        } else {
-            copy
-        }
+        .help(format!("Copy {}", label.to_lowercase()))
     });
     fact(label, address.unwrap_or_else(|| fallback.into()), control)
+}
+
+/// Its own row, so it can be found by name and says why it is not offered: pairing shows
+/// only an address this server reports now, never one last heard from a host that has
+/// since dropped.
+fn pair_row(available: bool, reported: bool) -> El {
+    fact(
+        "Pair device",
+        if available {
+            "A QR code of the Tailscale address, for Rex on another device."
+        } else if reported {
+            "Available while this host is connected."
+        } else {
+            "Needs a Tailscale HTTPS address reported by this server."
+        },
+        available.then(|| {
+            button("server-pair", "Pair", Pill::Neutral, |s, _| s.pair_device())
+                .help("Show the address as a QR code")
+        }),
+    )
 }
 
 pub(super) fn tailscale_address(model: &rex_rune::connection::HostModel) -> Option<String> {
@@ -278,13 +280,13 @@ pub fn section(s: &Workspace) -> El {
                     last_state(https_state, model.connected),
                     None,
                 ),
-                address_row_with_pair(
+                address_row(
                     "server-copy-tailnet",
-                    "Tailscale address · Pair device",
-                    remote,
+                    "Tailscale address",
+                    remote.clone(),
                     p_missing,
-                    model.connected,
                 ),
+                pair_row(model.connected && remote.is_some(), remote.is_some()),
             ]),
             footnote(
                 "Last reported by this Rex server, not this client's local Tailscale. Missing data does not mean disabled.",

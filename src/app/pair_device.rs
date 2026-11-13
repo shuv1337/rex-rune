@@ -30,7 +30,14 @@ impl Workspace {
         if !host.model.connected {
             return None;
         }
-        super::server_page::tailscale_address(&host.model)
+        let address = super::server_page::tailscale_address(&host.model)?;
+        // A bare origin is written with a trailing slash. The code Rex for macOS shows
+        // holds the origin alone (`https://name.tailnet.ts.net`), so this one does too;
+        // an address with a path is kept as it is.
+        Some(match url::Url::parse(&address) {
+            Ok(url) if url.path() == "/" => address.trim_end_matches('/').to_owned(),
+            _ => address,
+        })
     }
 
     pub fn pair_device(&mut self) {

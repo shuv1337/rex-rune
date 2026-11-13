@@ -13,7 +13,7 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("--binary", type=Path, default=ROOT / "target/debug/examples/qr_dump")
 p.add_argument("--out", type=Path, default=Path.home() / ".cache/agent-ws/rex-m33-pair/decodes")
 p.add_argument("--capture", type=Path, action="append", default=[])
-p.add_argument("--address", default="https://build.tail1234.ts.net/")
+p.add_argument("--address", default="https://build.tail1234.ts.net")
 a = p.parse_args()
 a.out.mkdir(parents=True, exist_ok=True)
 
