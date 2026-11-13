@@ -160,7 +160,14 @@ os.execv("/usr/bin/curl", ["curl", *args])
             dest = build / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.symlink_to(ROOT / name, target_is_directory=True)
-        for name in ("LICENSE", "README.md", "CHANGELOG.md", "vendor/rune/LICENSE", "vendor/ghostty-vt/LICENSE-GHOSTTY"):
+        for name in (
+            "LICENSE",
+            "README.md",
+            "CHANGELOG.md",
+            "vendor/rune/LICENSE",
+            "vendor/ghostty-vt/LICENSE-GHOSTTY",
+            "packaging/keys/rex-linux-archive-key.asc",
+        ):
             dest = build / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, dest)
