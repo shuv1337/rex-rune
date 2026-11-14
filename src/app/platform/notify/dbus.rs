@@ -9,7 +9,8 @@ use zbus::{Connection, Proxy, Variant};
 const DEST: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 /// The picture each notification shows. GNOME draws only a small, plain app icon without one.
-const IMAGE: &[u8] = include_bytes!("../../../resources/icons/128x128/apps/dev.shuv.rex-rune.png");
+const IMAGE: &[u8] =
+    include_bytes!("../../../../resources/icons/128x128/apps/dev.shuv.rex-rune.png");
 
 const DISCONNECTED: &str = "Session bus disconnected";
 

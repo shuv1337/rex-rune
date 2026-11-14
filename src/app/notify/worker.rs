@@ -28,6 +28,7 @@ pub enum Service {
     Rejected,
     /// Nothing here can post notifications, and why: a platform without a desktop
     /// service, or macOS withholding permission (or nobody having answered it yet).
+    #[allow(dead_code)]
     Unavailable(String),
 }
 
