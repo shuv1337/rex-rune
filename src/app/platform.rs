@@ -8,6 +8,7 @@
 pub mod chrome;
 pub mod fonts;
 pub mod keys;
+pub mod notify;
 pub mod open;
 pub mod selection;
 

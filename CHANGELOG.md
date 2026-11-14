@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Desktop notifications on macOS (M11).** Notifications go through the system's notification centre, so a tab you aren't looking at that needs you, fails or finishes asks macOS for a native banner, and clicking one shows its tab. Activity notes replace the previous note for that tab, seeing the tab removes it, and banners still show while Rex is frontmost; the existing per-kind switches, mute and closing rules are unchanged. macOS only posts for a bundled, signed, registered app, so `scripts/macos-app.py` now wraps the release binary in `target/release/Rex Rune.app` (bundle id `dev.shuv.rex-rune`, the Rex icon, ad-hoc signature, LaunchServices registration): a bare `target/release/rex-rune` runs everything else and Settings says to start the app instead. The first request asks for alert permission (no badge or sound: Rex has its own sounds); Settings reports waiting for permission, turned off in System Settings, or available, in macOS's own words rather than D-Bus's. Settings wording and the backend now come from `app::platform::notify`, so the freedesktop service on Linux and the BSDs is unchanged and Windows says notifications are not available. Verified on this Mac: the bare-binary refusal, the waiting and turned-off states, and the test notification's failure reason. Posting, replacing, closing on a seen tab and a click are hand checks after permission is allowed. See the [record](docs/parity-2026-11/M11-macos-notifications.md).
+
 ## 0.9.0 - 2026-11-13
 
 Fonts from the system's own list on macOS and Windows with Nerd Font symbols built in, Rex's own program icons, a Mac toolbar that is the title bar, Update now for pacman installs, server uptime and Stop server, and dialogs that press the focused button.

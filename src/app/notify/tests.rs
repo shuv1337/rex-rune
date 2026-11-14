@@ -15,51 +15,6 @@ fn note(window: &str, kind: Kind) -> Note {
 }
 
 #[test]
-fn dbus_missing_service_errors_are_not_found() {
-    for error in [
-        zbus::fdo::Error::ServiceUnknown("not installed".into()),
-        zbus::fdo::Error::NameHasNoOwner("not running".into()),
-    ] {
-        assert_eq!(failure(error.into()), Service::NotFound);
-    }
-}
-
-#[test]
-fn only_an_error_reply_from_the_service_counts_as_its_answer() {
-    // The service replied with an error: it is there, and its reason is not shown.
-    let refused: zbus::Error = zbus::fdo::Error::Failed("private daemon details".into()).into();
-    assert!(answered(&refused));
-    assert_eq!(Service::Rejected.reason(), "Service rejected the request");
-    // Nothing answered, or the bus answered for a service that is not there.
-    for error in [
-        zbus::fdo::Error::NoReply("slow".into()).into(),
-        zbus::fdo::Error::TimedOut("slow".into()).into(),
-        zbus::fdo::Error::ServiceUnknown("gone".into()).into(),
-        zbus::fdo::Error::Disconnected("bus".into()).into(),
-        zbus::fdo::Error::SpawnChildExited("daemon failed to start".into()).into(),
-        zbus::fdo::Error::SpawnExecFailed("daemon missing".into()).into(),
-        zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::other("closed"))),
-    ] {
-        assert!(!answered(&error), "{error:?}");
-    }
-    // Finding or starting the service never reads as its refusal: a daemon that failed
-    // to start is unreachable, and its diagnostics stay out of Settings.
-    for error in [
-        zbus::fdo::Error::SpawnChildExited("private daemon details".into()),
-        zbus::fdo::Error::Failed("private daemon details".into()),
-    ] {
-        assert_eq!(
-            failure(error.into()),
-            Service::Unreachable("Could not reach the service".into())
-        );
-    }
-    assert_eq!(
-        failure(zbus::fdo::Error::NoReply("slow".into()).into()),
-        Service::Unreachable("Service did not respond".into())
-    );
-}
-
-#[test]
 fn a_refused_close_is_not_trouble_but_an_unanswered_one_is() {
     let n = note("one", Kind::Activity(Blocked));
     // The daemon no longer has the notification: closed is what was wanted.
