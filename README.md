@@ -236,7 +236,7 @@ CI builds the app and runs the unit and headless UI tests on macOS for every pul
 
 ### Building on Windows
 
-A source build only, for `x86_64-pc-windows-msvc`. There is no Windows release or installer. Nobody has run the client UI on Windows or checked attachment to a real server there. CI on `windows-2025` compiles the probes and app, links and runs the Ghostty VT integration tests, checks platform functions, and runs `--version` and `--help`. That is the extent of the Windows runtime checks.
+A source build only, for `x86_64-pc-windows-msvc`. There is no Windows release or installer. Nobody has run the client UI on Windows or checked attachment to a real server there. CI on `windows-2025` compiles the probes and app, runs the full unit and headless UI suite (including platform and DirectWrite font tests), separately runs the no-UI Ghostty VT and keymap integration tests, and checks Clippy, `--version` and `--help`. Headless tests do not validate a native window, real input, clipboard/IME, display scaling or server attachment.
 
 Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with the **Desktop development with C++** workload and its Windows SDK. Install [rustup](https://rustup.rs/) and [Zig](https://ziglang.org/) 0.17.x (CI uses 0.17.1). Put Zig on `PATH`, then use a Developer PowerShell for Visual Studio:
 
@@ -245,6 +245,7 @@ rustup toolchain install 1.96.1-x86_64-pc-windows-msvc
 rustup override set 1.96.1-x86_64-pc-windows-msvc
 cargo build --locked --no-default-features --bins
 cargo test --locked --no-default-features --test cursor_policy --test prompt_navigation --test keymap_fixture
+cargo test --locked --all-features
 cargo build --locked --bin rex-rune
 .\target\debug\rex-rune.exe --version
 .\target\debug\rex-rune.exe --help
@@ -276,7 +277,7 @@ cargo build --locked --bin rex-rune
 | Uploads | Compile with portable random IDs; end-to-end uploads are untested |
 | Folders | Settings in `%APPDATA%\rex-rune`, state in `%LOCALAPPDATA%\rex-rune`, home from `USERPROFILE`, else `HOMEDRIVE` with `HOMEPATH`. Missing AppData variables fall back to `<home>\AppData\Roaming` and `<home>\AppData\Local`. The default download folder is `<home>\Downloads`, though downloads are refused |
 | Fonts | Listed and resolved through DirectWrite by the code macOS uses with Core Text; a missing family falls back to Cascadia Mono, then Consolas. CI lists and resolves Consolas through DirectWrite; no window or rendering check |
-| Window chrome, input, clipboard and IME | Not tested on Windows |
+| Window chrome, input, clipboard and IME | Headless UI behavior is tested in CI; native interaction is not tested on Windows |
 | Primary selection | Windows has none; the setting is not shown |
 | Notifications, sounds, opening links, Show in folder | Not available yet. Opening a link or a folder fails with the system's "program not found"; Settings reports no notification service and no sound player |
 | Updates | Source builds only; no installer or restart after an update |
