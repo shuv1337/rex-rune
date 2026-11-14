@@ -1,7 +1,7 @@
 use super::*;
 use crate::{PhysicalInput, PhysicalKeyCode};
 
-pub(super) struct Fallback { key: KeyEvent, base: Option<char>, unhandled: Option<Unhandled> }
+pub(super) struct Fallback { key: KeyEvent, base: Option<char>, alt: crate::AltKeys, unhandled: Option<Unhandled> }
 
 /// What a window does with a logical key no handler took: close or minimize as its title-bar
 /// button would, or run a menu item. A standard ⌘W or ⌘M item, or an app's item marked
@@ -53,8 +53,12 @@ impl<S: 'static> Runtime<S> {
     /// character (`Tx::key_base`), as a native host sends them. Public for headless drivers
     /// that need layout, repeat and release fidelity; uses the same routing as native input.
     pub fn physical_key_input(&mut self, event: PhysicalInput, key: KeyEvent, base: Option<char>) {
+        self.physical_key_input_alt(event, key, base, crate::AltKeys::default());
+    }
+    /// [`Runtime::physical_key_input`] with the Alt (Option) keys held, by side (`Tx::alt_keys`).
+    pub fn physical_key_input_alt(&mut self, event: PhysicalInput, key: KeyEvent, base: Option<char>, alt: crate::AltKeys) {
         self.observe_mods(&event);
-        self.physical_then(event, Some(key), base, None);
+        self.physical_then_alt(event, Some(key), base, alt, None);
     }
     /// Return whether the native host needs to request a frame for this event.
     #[cfg_attr(any(target_os = "windows", target_os = "ios", target_os = "android"), allow(dead_code))]
@@ -64,12 +68,17 @@ impl<S: 'static> Runtime<S> {
     /// `physical_with_fallback`, with the key's unmodified character (`Tx::key_base`), and
     /// `unhandled` happens when no handler takes the logical key.
     pub(crate) fn physical_then(&mut self, event: PhysicalInput, key: Option<KeyEvent>, base: Option<char>, unhandled: Option<Unhandled>) -> bool {
+        self.physical_then_alt(event, key, base, crate::AltKeys::default(), unhandled)
+    }
+    /// `physical_then`, with the Alt keys held with the key (`Tx::alt_keys`).
+    pub(crate) fn physical_then_alt(&mut self, event: PhysicalInput, key: Option<KeyEvent>, base: Option<char>, alt: crate::AltKeys,
+        unhandled: Option<Unhandled>) -> bool {
         if self.cancel_drag_key(&event) { return true; }
         if key.is_none() && matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
             return self.physical_observation(event);
         }
         if !matches!(event, PhysicalInput::Key { pressed: false, .. }) { self.dismiss_help(); }
-        self.queue.push(Action::Physical(event, key.map(|key| Fallback { key, base, unhandled })));
+        self.queue.push(Action::Physical(event, key.map(|key| Fallback { key, base, alt, unhandled })));
         true
     }
     /// Modifier/release events have no logical action. When input is already queued,
@@ -146,21 +155,21 @@ impl<S: 'static> Runtime<S> {
         let modifier = self.modifier_dispatch(&event, consumed, tx, &mut live);
         let ran = consumed || modifier | match fallback {
             // A release's logical key, for `on_key_up`.
-            Some(Fallback { key, base, .. }) if matches!(event, PhysicalInput::Key { pressed: false, .. }) => {
-                let mut one = Tx { physical_key: code, key_base: base, ..self.transaction() };
+            Some(Fallback { key, base, alt, .. }) if matches!(event, PhysicalInput::Key { pressed: false, .. }) => {
+                let mut one = Tx { physical_key: code, key_base: base, alt_keys: alt, ..self.transaction() };
                 let ran = self.route_key_up(&key, &mut one);
                 fold_live(&mut live, ran, &one);
                 merge(tx, one);
                 ran
             }
-            Some(Fallback { key, base, unhandled }) => {
+            Some(Fallback { key, base, alt, unhandled }) => {
                 if key.edit_command() == Some('v') && self.accepts_paste() {
                     // Capture the target in event order, before another queued click can
                     // change focus. An empty/image clipboard still consumes the command.
                     self.paste_request = Some(self.paste_target());
                     false
                 } else {
-                    let mut one = Tx { physical_key: code, key_base: base, ..self.transaction() };
+                    let mut one = Tx { physical_key: code, key_base: base, alt_keys: alt, ..self.transaction() };
                     let ran = self.route_key(&key, repeat, &mut one);
                     // A held key repeats a menu item, as AppKit's own equivalents do, but closes once.
                     let unhandled = unhandled.filter(|u| !ran && (!repeat || matches!(u, Unhandled::Menu(_))));

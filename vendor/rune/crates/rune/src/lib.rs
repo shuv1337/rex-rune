@@ -96,6 +96,7 @@ pub use edit::Mark;
 pub use edit::MarkRange;
 pub use edit::Modifier;
 pub use edit::Mods;
+pub use edit::{AltKeys, OptionAsAlt};
 pub use edit::ParagraphInfo;
 pub use edit::RichStyle;
 pub use edit::TextEdit;

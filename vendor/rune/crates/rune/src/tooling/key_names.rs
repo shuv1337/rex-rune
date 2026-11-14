@@ -39,6 +39,18 @@ pub(crate) fn script_mods(e: &serde_json::Value) -> crate::Mods {
     crate::Mods { shift: flag("shift"), cmd, alt: flag("alt"), ctrl: flag("ctrl") || (cmd && !mac), logo: flag("logo") || (cmd && mac) }
 }
 
+/// A script key's `Tx::alt_keys`: its `"alt_side"`, `"left"`, `"right"` or `"both"`; none
+/// without one.
+pub(crate) fn script_alt_keys(e: &serde_json::Value) -> crate::AltKeys {
+    match e["alt_side"].as_str() {
+        None => crate::AltKeys::default(),
+        Some("left") => crate::AltKeys { left: true, right: false },
+        Some("right") => crate::AltKeys { left: false, right: true },
+        Some("both") => crate::AltKeys { left: true, right: true },
+        Some(other) => super::die(&format!("alt_side must be left, right or both, not {other}")),
+    }
+}
+
 /// A script key's `Tx::key_base`: its `"base"`, else a one-character name typed without Shift
 /// or Option (which change the character the key types), lowercased.
 pub(crate) fn script_key_base(e: &serde_json::Value, name: &str, mods: crate::Mods) -> Option<char> {

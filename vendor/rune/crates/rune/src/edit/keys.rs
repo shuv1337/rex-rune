@@ -23,6 +23,28 @@ impl Mods {
     pub fn primary(self) -> bool { self.cmd }
 }
 
+/// Which Alt keys (Option on macOS) were held with a key, by side: [`Tx::alt_keys`](crate::Tx::alt_keys).
+/// Both false where the platform doesn't say which Alt is held, even with `Mods::alt` set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct AltKeys {
+    pub left: bool,
+    pub right: bool,
+}
+
+/// Which of macOS's Option keys act as Alt in a window: [`Tx::set_option_alt`](crate::Tx::set_option_alt).
+/// winit's `OptionAsAlt`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum OptionAsAlt {
+    /// Both Option keys type the characters they compose.
+    #[default]
+    Neither,
+    /// The left Option key is Alt; the right one composes.
+    Left,
+    /// The right Option key is Alt; the left one composes.
+    Right,
+    Both,
+}
+
 /// A logical key. More keys may come, so a `match` needs a `_` arm.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]

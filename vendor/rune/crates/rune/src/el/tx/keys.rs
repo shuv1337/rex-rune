@@ -29,6 +29,13 @@ impl Tx {
     /// `"code"`) and outside key handlers.
     pub fn key_base(&self) -> Option<char> { self.key_base }
 
+    /// In a key handler, which Alt keys (Option on macOS) were held with the key, by side, as
+    /// the window last heard before it: what decides whether a window with
+    /// [`Tx::set_option_alt`] made Option Alt for this key. Both false where the platform
+    /// doesn't say (winit says on macOS), for a key with no physical origin and outside key
+    /// handlers.
+    pub fn alt_keys(&self) -> crate::AltKeys { self.alt_keys }
+
     /// The modifier keys held as this handler runs, so a click can tell Shift-click (extend a
     /// list's selection) and Cmd-click (toggle a row) from a plain one. A key handler reads
     /// the key's own [`KeyEvent::mods`](crate::KeyEvent) instead.

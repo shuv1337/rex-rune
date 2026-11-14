@@ -238,7 +238,7 @@ impl<S: 'static> Host<S> {
             cursor: crate::cursor::os::OsCursor::new(event_loop),
             alpha,
             timer_frame: TimerFrame::default(),
-            option_as_alt: false,
+            option_as_alt: crate::OptionAsAlt::Neither,
             presented: None,
             #[cfg(target_os = "windows")]
             steady: Steady::Rest,

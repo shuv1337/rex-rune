@@ -429,6 +429,7 @@ impl<S: 'static> Host<S> {
         self.files = FileDrop::default();
         if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); }
         self.mods = ModifiersState::empty();
+        self.alt_keys = crate::AltKeys::default();
         if let Some(w) = &self.win { w.hide(); }
     }
 

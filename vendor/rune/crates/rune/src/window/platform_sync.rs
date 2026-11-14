@@ -44,8 +44,8 @@ impl Win {
     /// (covered or occluded windows) set it too.
     pub(super) fn sync_option<S>(&mut self, rt: &Runtime<S>) {
         #[cfg(target_os = "macos")]
-        if rt.option_as_alt() != self.option_as_alt {
-            self.option_as_alt = rt.option_as_alt();
+        if rt.option_alt() != self.option_as_alt {
+            self.option_as_alt = rt.option_alt();
             super::chrome::option_as_alt(&self.window, self.option_as_alt);
         }
         #[cfg(not(target_os = "macos"))]

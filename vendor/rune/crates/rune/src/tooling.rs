@@ -176,7 +176,7 @@ pub use args::{Args, is_headless};
 pub(crate) use args::*;
 pub use headless::headless;
 pub(crate) use headless::*;
-pub(crate) use key_names::{key_named, script_key_base, script_mods};
+pub(crate) use key_names::{key_named, script_alt_keys, script_key_base, script_mods};
 use script::parse_script;
 pub(crate) use strip::*;
 pub(crate) use trace::{FrameTiming, Trace, tree_json};
@@ -331,7 +331,7 @@ pub(crate) enum Kind {
     /// The key and whether it is an auto-repeat.
     Key(KeyEvent, bool),
     /// A key press with its physical code (`{"type": "key", "code": …}`), as a native host sends it.
-    PhysicalKey(crate::PhysicalInput, KeyEvent, Option<char>),
+    PhysicalKey(crate::PhysicalInput, KeyEvent, Option<char>, crate::AltKeys),
     Paste(crate::ClipboardContent),
     /// A wheel delta (dx, dy) in points.
     Wheel(f32, f32),
@@ -373,7 +373,7 @@ pub(crate) fn canvas_input<S: 'static>(rt: &mut Runtime<S>, kind: &Kind, (x, y):
         Kind::ButtonDown(b) => rt.button_down(x, y, *b),
         Kind::ButtonUp(b) => rt.button_up(x, y, *b),
         Kind::KeyUp(k) => { rt.key_up(k.clone()); }
-        Kind::PhysicalKey(event, k, base) => rt.physical_key_input(*event, k.clone(), *base),
+        Kind::PhysicalKey(event, k, base, alt) => rt.physical_key_input_alt(*event, k.clone(), *base, *alt),
         _ => return false,
     }
     true
@@ -438,7 +438,7 @@ impl Ev {
             Kind::SecondaryDown => pointer(PointerAction::SecondaryDown),
             Kind::SecondaryUp => pointer(PointerAction::SecondaryUp),
             Kind::Key(key, repeat) => ScriptEvent::Key { key: key.clone(), repeat: *repeat },
-            Kind::PhysicalKey(event, key, _) => ScriptEvent::Key {
+            Kind::PhysicalKey(event, key, ..) => ScriptEvent::Key {
                 key: key.clone(), repeat: matches!(event, crate::PhysicalInput::Key { repeat: true, .. }),
             },
             Kind::Paste(content) if content.is_rich() => ScriptEvent::PasteContent(content.clone()),
