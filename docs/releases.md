@@ -244,7 +244,7 @@ For the offline alternative in plan question 6 (key custody), keep building, att
    gh release edit "$tag" --repo "$repo" --draft=false --latest
    ```
 
-Do not use `--clobber`; if a draft already exists, follow recovery below rather than creating another. [README verification instructions](../README.md#verify-a-download) cover manual downloads and `gh attestation verify`.
+Do not use `--clobber`; if a draft already exists, follow recovery below rather than creating another. [Install verification instructions](install.md#verify-a-download) cover manual downloads and `gh attestation verify`.
 
 ## Recovery and rotation
 
