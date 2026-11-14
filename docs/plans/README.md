@@ -1,0 +1,9 @@
+# Plans
+
+Plans and design notes for particular pieces of work, one line each; every plan states its own status, quoted here from its text. The rest of the docs folder is listed in [the docs index](../index.md).
+
+- [Cross-platform Rex: how far from a macOS and a Windows source build](cross-platform.md): an exploratory study of what it would take to clone the repository on macOS, then on Windows, follow documented steps, run `cargo build` and get a client that connects to a Rex server and runs terminal sessions. Status: "**findings and a proposed order of work.** Items marked **Done** below have been implemented since; the others are not tracked here."
+- [M2.7 — focused toolbar visibility slice](m2.7-toolbar-visibility.md): the part of M2.7 in the parity roadmap that adds Toolbar visibility to Settings → Interface. Status: "Implemented on `fd55bca` (Settings search/history #62), recovering the toolbar behavior and focused tests from preserved W2 `cc8bdad`. This is **not all of M2.7**".
+- [Update now for pacman installs: design note](pacman-update-now.md): compares the ways to let a pacman install update from Settings → Updates without pasting a sudo command, and recommends one. Status: "**option (a) is built**".
+- [Remote control: carrying out `client.perform` requests](remote-ui-execution.md): the plan for issue #12, which carries out a small set of `client.perform` requests under a setting the user turns on per host. Status: "implemented and tested for 0.5.0; awaiting review, not merged or released."
+- [Roadmap from 0.5.2](roadmap-0.5.2.md): re-orders the approved auto-update plan so that Arch packaging comes first, together with a GitHub-hosted install script, and the APT repository moves later. Status: "This is a plan only: nothing here is built, no release was cut and no setting was changed."
