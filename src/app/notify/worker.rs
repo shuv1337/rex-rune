@@ -1,5 +1,5 @@
-//! Decisions shared by the D-Bus worker and the headless outbox. Failed commands are
-//! consumed once; only a later command can establish another connection.
+//! Decisions shared by every desktop backend and the headless outbox. Failed commands
+//! are consumed once; only a later command can establish another connection.
 use super::{Kind, Note, NoteTarget};
 
 /// Notifications remembered for replacing, closing and clicking. Past this the oldest is
@@ -20,10 +20,16 @@ pub enum Service {
     #[default]
     Unchecked,
     Available,
+    /// Only the freedesktop service reports this: its name has no owner.
+    #[allow(dead_code)]
     NotFound,
     Unreachable(String),
     /// The service answered and refused the request: it is there, and reachable.
     Rejected,
+    /// Nothing here can post notifications, and why: a platform without a desktop
+    /// service, or macOS withholding permission (or nobody having answered it yet).
+    #[allow(dead_code)]
+    Unavailable(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,16 +53,41 @@ impl Service {
             Self::NotFound => "No notification service",
             Self::Unreachable(reason) => reason,
             Self::Rejected => "Service rejected the request",
+            Self::Unavailable(reason) => reason,
             _ => "",
         }
     }
 }
 
-pub(super) trait Backend {
+/// What the desktop reports without being asked. Each platform's backend constructs the
+/// ones it has; the activation token, for one, exists only on the freedesktop service.
+#[allow(dead_code)]
+pub(crate) enum Event {
+    /// Some desktops send a token just before a click, so the window may take focus.
+    ActivationToken(u32, String),
+    /// The default action: show the note's tab.
+    Click(u32),
+    /// Gone: dismissed by the person, or withdrawn. The id is no longer ours.
+    Closed(u32),
+    /// The service went away. Not every platform can report this.
+    Lost(String),
+}
+
+pub(crate) trait Backend {
     /// A successful answer, plus the bus/daemon identity that owns notification ids.
     async fn ready(&mut self) -> Result<String, Service>;
     async fn send(&mut self, note: &Note, replaces: u32) -> Result<u32, Service>;
     async fn close(&mut self, id: u32) -> Result<(), Service>;
+}
+
+/// A backend that also reports what the desktop does with the notes it was given.
+pub(crate) trait Session: Backend {
+    /// The identity that owns ids right now, if anything does. A change means ids from
+    /// before it must not be reused or closed.
+    fn identity(&self) -> Option<String>;
+    /// The next thing the desktop reports. Pends while there is nothing to wait for, so
+    /// commands still run.
+    async fn event(&mut self) -> Event;
 }
 
 #[derive(Default)]

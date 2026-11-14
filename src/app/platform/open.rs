@@ -54,8 +54,10 @@ pub fn reveal(path: &Path) -> Result<(), String> {
         reveal.arg(path);
         run(reveal)
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let selected = show_items(path);
+    #[cfg(not(unix))]
+    let selected: Result<(), String> = Err("no call selects a file here".into());
     // Failing that, its folder.
     selected.or_else(|_| {
         let folder = path.parent().unwrap_or(Path::new("/"));
@@ -65,7 +67,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
 
 /// `org.freedesktop.FileManager1.ShowItems`: the file manager opens the folder with the file
 /// selected.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[cfg_attr(test, allow(dead_code))]
 fn show_items(path: &Path) -> Result<(), String> {
     let uri = url::Url::from_file_path(path).map_err(|()| "not an absolute path".to_owned())?;
