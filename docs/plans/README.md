@@ -1,6 +1,6 @@
 # Plans
 
-Plans and design notes for particular pieces of work, one line each; every plan states its own status, quoted here from its text. The rest of the docs folder is listed in [the docs index](../index.md).
+Plans and design notes for particular pieces of work, one line each; every plan states its own status, quoted here from its text. The rest of the docs folder is listed in [the docs index](../README.md).
 
 - [Cross-platform Rex: how far from a macOS and a Windows source build](cross-platform.md): an exploratory study of what it would take to clone the repository on macOS, then on Windows, follow documented steps, run `cargo build` and get a client that connects to a Rex server and runs terminal sessions. Status: "**findings and a proposed order of work.** Items marked **Done** below have been implemented since; the others are not tracked here."
 - [M2.7 — focused toolbar visibility slice](m2.7-toolbar-visibility.md): the part of M2.7 in the parity roadmap that adds Toolbar visibility to Settings → Interface. Status: "Implemented on `fd55bca` (Settings search/history #62), recovering the toolbar behavior and focused tests from preserved W2 `cc8bdad`. This is **not all of M2.7**".
