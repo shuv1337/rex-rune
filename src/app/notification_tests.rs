@@ -59,7 +59,7 @@ fn notification_settings_search_test_and_health_are_local_and_fit() {
         let (note, replaces, _) = &outbox.sent[0];
         assert_eq!(note.summary, "Rex test notification");
         assert!(note.target.is_none());
-        assert_eq!((*replaces, note.kind.urgency()), (0, 1));
+        assert_eq!((*replaces, note.kind), (0, crate::app::notify::Kind::Test));
         rt.update(|s, _| s.notification_outbox.failure = Some(Service::NotFound));
         click(&mut rt, "notification-test");
         settle(&mut rt);
