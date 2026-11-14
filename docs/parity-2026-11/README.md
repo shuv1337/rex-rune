@@ -20,6 +20,7 @@ Implementation follow-up records, each with scope and verification. They do not 
 - M3.7: [prompt navigation verified and implemented](prompt-navigation.md).
 - M4.4: [recovery: shortcut recorder](M4.4.md).
 - M7: [terminal fonts without fontconfig, and bundled Nerd Font symbols](M7-fonts.md).
+- M11: [macOS notifications through the notification centre](M11-macos-notifications.md).
 - No milestone: [Pane header on a single pane](single-pane-header.md).
 
 ## Layout

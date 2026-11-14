@@ -352,6 +352,7 @@ fn notify_switch(key: &str, label: &str, on: bool, disabled: bool, field: Field)
 
 fn notifications(s: &Workspace) -> El {
     use super::notify::{Command, Service, TestResult};
+    use super::platform::notify::{SERVICE_DETAIL, SERVICE_SECTION, TEST_FOOTNOTE};
     use super::settings_kit::{ChipTone, state_chip};
     let health = &s.notification_health;
     let (status, tone) = match &health.service {
@@ -360,6 +361,13 @@ fn notifications(s: &Workspace) -> El {
         Service::NotFound => ("Not found", ChipTone::Attention),
         Service::Unreachable(_) => ("Unreachable", ChipTone::Attention),
         Service::Rejected => ("Rejected", ChipTone::Attention),
+        Service::Unavailable(_) => ("Unavailable", ChipTone::Attention),
+    };
+    // A platform that cannot post says why in the row itself: a bare macOS executable and
+    // a withheld permission are things the person acts on, not tooltips.
+    let service_detail = match &health.service {
+        Service::Unavailable(reason) => reason.clone(),
+        _ => SERVICE_DETAIL.to_owned(),
     };
     let test = match &health.test {
         TestResult::None => "No test sent yet.".to_owned(),
@@ -464,12 +472,12 @@ fn notifications(s: &Workspace) -> El {
             )])],
         ),
         section(
-            "Desktop service",
+            SERVICE_SECTION,
             [
                 card([
                     setting(
                         "Notification service",
-                        "Last check, not a delivery receipt.",
+                        &service_detail,
                         state_chip("notification-health", status, tone, health.service.reason()),
                     ),
                     setting(
@@ -496,7 +504,7 @@ fn notifications(s: &Workspace) -> El {
                             )),
                     ),
                 ]),
-                footnote("Tests work even when desktop notifications are off."),
+                footnote(TEST_FOOTNOTE),
             ],
         ),
     ])
