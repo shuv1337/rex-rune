@@ -207,6 +207,7 @@ pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
                 &icons,
                 active,
                 s.settings.interface.tab_icon_color,
+                1.,
             );
             tab_el = tab_el.child(
                 text(label.clone())

@@ -89,6 +89,7 @@ fn title(s: &Workspace, merged: bool) -> El {
         &icons,
         lit,
         s.settings.interface.tab_icon_color,
+        1.,
     );
     let mut words = row().min_w(0.).shrink().gap(6.).center_y().child(
         text(name.clone())

@@ -36,6 +36,8 @@ mod nerd_symbols_tests;
 mod notification_tests;
 #[path = "pane_ergonomics_tests.rs"]
 mod pane_ergonomics_tests;
+#[path = "pane_header_icon_tests.rs"]
+mod pane_header_icon_tests;
 #[path = "pane_header_tests.rs"]
 mod pane_header_tests;
 #[path = "pane_verb_tests.rs"]

@@ -36,8 +36,71 @@ const REVEAL_AFTER: Duration = Duration::from_millis(90);
 const HIDE_AFTER: Duration = Duration::from_millis(220);
 /// An action that cannot run now keeps its place at this opacity.
 pub const UNAVAILABLE: f32 = 0.35;
-/// Below this width a header keeps Zoom and Close only; the pane menu has the splits.
+/// A header row's leading and trailing pads and the gap between its children, which `panes`
+/// lays it out with: [`glyph_fits`] counts the same numbers.
+pub const HEADER_LEAD: f32 = 14.;
+pub const HEADER_TAIL: f32 = 8.;
+pub const HEADER_GAP: f32 = 8.;
+/// A program glyph's slot in a header.
+const GLYPH: f32 = 15.;
+/// The first letters of the name, which a header keeps beside the glyph: a glyph with no room
+/// for them beside it is not worth pushing the name out for.
+const NAME_ROOM: f32 = 11.;
+/// The Zoomed chip: its 10.5 pt label and 7 pt pads. The progress bar is pinned across the row,
+/// out of its flow, so it takes no room from anything beside it.
+const CHIP_ROOM: f32 = 56.;
+/// What the reconnecting strip keeps when it shrinks: its 10 and 3 pt pads, and its Retry pill
+/// with that pill's 10 pt pads either side of the label.
+const STRIP_PADS: f32 = 10. + 3. + 2. * 10.;
+/// Below [`ROOMY`] a header keeps Zoom and Close only; the pane menu has the splits.
 const ROOMY: f32 = 200.;
+
+/// The room a header needs beside its name to keep its glyph: its leading pad, the glyph, the
+/// buttons it draws, its trailing pad and a gap between each of its children. `extras` is what
+/// else in the row cannot shrink.
+const fn glyph_room(lead: f32, buttons: usize, extras: f32) -> f32 {
+    lead + GLYPH + NAME_ROOM + BUTTON * buttons as f32 + HEADER_TAIL + HEADER_GAP * 3. + extras
+}
+
+/// How many trailing buttons a header `width` wide draws: Split right and Split down join Zoom
+/// and Close from [`ROOMY`] up.
+pub fn buttons(width: f32) -> usize {
+    if width >= ROOMY { 4 } else { 2 }
+}
+
+/// The room a header's activity `word`, Zoomed chip and reconnecting strip take, each with the
+/// gap before it. The word and the Retry label are measured with Rune's own text measurement,
+/// which rounds widths up, at the size they are drawn. `strip` is the pane's name when the
+/// strip is drawn: beside a strip the name and the strip share what the row has left, and Retry
+/// cannot shrink, so the glyph also gives up the name's room (`NAME_ROOM` is already counted
+/// below) rather than push Retry over the buttons.
+pub fn extras(word: Option<&str>, chip: bool, strip: Option<&str>) -> f32 {
+    let width = |text: &str, size: f32| rune::text::measure(text, &[], medium(size), None).0;
+    let word_room = word.map_or(0., |word| width(word, 11.));
+    let chip_room = if chip { CHIP_ROOM } else { 0. };
+    let strip_room = strip.map_or(0., |name| {
+        STRIP_PADS + width("Retry", 11.5) + (width(name, 11.5) - NAME_ROOM).max(0.)
+    });
+    let children = u8::from(word.is_some()) + u8::from(chip) + u8::from(strip.is_some());
+    word_room + chip_room + strip_room + HEADER_GAP * f32::from(children)
+}
+
+/// Whether a header `width` wide can keep its glyph: `lead` is its leading pad, `buttons` how
+/// many it draws and `extras` what else is in the row. False where the glyph would push the
+/// buttons or anything beside them past the room the row has without it.
+pub fn glyph_fits(width: f32, lead: f32, buttons: usize, extras: f32) -> bool {
+    width >= glyph_room(lead, buttons, extras)
+}
+
+/// A header's leading pad: clear of a card's 12 pt corner, or lined up with the terminal's text
+/// under a header drawn edge to edge.
+pub fn lead(s: &Workspace, window: &Window) -> f32 {
+    if full_bleed(s, window) {
+        s.settings.padding().0.max(8.)
+    } else {
+        HEADER_LEAD
+    }
+}
 
 /// Gentle extra fading, not the disabled-button cue. Hover restores enabled icons.
 pub const FADE: f32 = 0.85;
@@ -247,7 +310,7 @@ pub fn actions(s: &Workspace, window: &Window, block: &str, width: f32, lit: boo
     };
     let on = |action: PaneAction| Some((block.to_owned(), action));
     let mut cluster = row().key(format!("pane-actions:{block}")).center_y();
-    if width >= ROOMY {
+    if buttons(width) == 4 {
         cluster = cluster
             .child(button(
                 format!("pane-split-right:{block}"),

@@ -3,7 +3,7 @@ use super::{
     activity::PaneProgram,
     program_icons::{ProgramIcon, shell},
     theme::*,
-    widgets::program_glyph,
+    widgets::program_glyph_hovering,
     workspace::Workspace,
 };
 use rex_rune::settings::interface::{InterfaceConfig, TabIconColor};
@@ -45,31 +45,61 @@ pub fn leading_width(count: usize) -> f32 {
 }
 
 /// Append directly to the existing 8pt-gap row: one keeps the original toolbar tree
-/// and geometry, and zero has no spacer. Preview and both tab surfaces share this.
+/// and geometry, and zero has no spacer. Preview and both tab surfaces share this, and a
+/// pane header too, which passes its own fading as `fade`: it multiplies the glyph's
+/// resting colour and nothing else.
 pub fn append(
+    parent: El,
+    key: &str,
+    icons: &[TabIcon],
+    active: bool,
+    mode: TabIconColor,
+    fade: f32,
+) -> El {
+    each(parent, key, icons, active, mode, fade, false)
+}
+
+/// As [`append`], and each glyph returns to its own resting colour while a hover group around
+/// it is hovered, as the pane header's name beside it does under the pointer.
+pub fn append_restoring(
+    parent: El,
+    key: &str,
+    icons: &[TabIcon],
+    active: bool,
+    mode: TabIconColor,
+    fade: f32,
+) -> El {
+    each(parent, key, icons, active, mode, fade, true)
+}
+
+fn each(
     mut parent: El,
     key: &str,
     icons: &[TabIcon],
     active: bool,
     mode: TabIconColor,
+    fade: f32,
+    restore: bool,
 ) -> El {
     for (index, icon) in icons.iter().enumerate() {
+        let rest = if in_color(mode, active, index == 0) {
+            icon.icon.tint
+        } else if active {
+            ink()
+        } else {
+            muted()
+        };
         let mut cell = el()
             .key(if index == 0 {
                 key.to_owned()
             } else {
                 format!("{key}:{index}")
             })
-            .child(program_glyph(
+            .child(program_glyph_hovering(
                 icon.icon,
                 15.,
-                rgb(if in_color(mode, active, index == 0) {
-                    icon.icon.tint
-                } else if active {
-                    ink()
-                } else {
-                    muted()
-                }),
+                rgb(rest).alpha(fade),
+                restore.then(|| rgb(rest)),
             ));
         if let Some(program) = &icon.program {
             cell = cell.help(program.clone());
@@ -136,6 +166,7 @@ pub fn preview(s: &Workspace) -> El {
             &icons,
             active,
             s.settings.interface.tab_icon_color,
+            1.,
         )
         .child(text(label).font(medium(12.5)).color(rgb(if active {
             ink()

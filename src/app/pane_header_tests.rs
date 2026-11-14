@@ -233,8 +233,10 @@ fn auto_gives_a_single_pane_a_header_row_edge_to_edge_and_compact_none() {
         !has(&rt, "pane-header-band:block:a"),
         "a row, so nothing to hover"
     );
-    // Edge to edge, the name lines up with the terminal's text under it.
-    assert_eq!(rect(&rt, "pane-name:block:a")[0], grid[0]);
+    // Edge to edge, its program's glyph lines up with the terminal's text under it and the
+    // name follows it.
+    assert_eq!(rect(&rt, "pane-icon:block:a")[0], grid[0]);
+    assert_eq!(rect(&rt, "pane-name:block:a")[0], grid[0] + 23.);
     // The same four buttons a split pane has, in the same order, at the trailing end.
     let at: Vec<f32> = BUTTONS
         .iter()
