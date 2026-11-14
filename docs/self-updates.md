@@ -165,7 +165,7 @@ One limit: a start with a different `XDG_DATA_HOME` from the install's does not 
 the receipt, so the rename waits for a start that has it.
 
 Settings and update state are moved separately, for every install method: see
-[Renamed from Rex Linux](../README.md#renamed-from-rex-linux).
+[Renamed from Rex Linux](legacy-rex-linux.md).
 
 ## Pacman installs
 
