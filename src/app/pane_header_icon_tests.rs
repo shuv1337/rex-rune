@@ -2,7 +2,7 @@
 //! does, under the same count and colour settings as tabs, without moving the terminal.
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::*;
-use crate::app::{activity::PaneProgram, tab_icons, theme::*};
+use crate::app::{activity::PaneProgram, pane_header, tab_icons, theme::*};
 use rex_rune::settings::interface::TabIconColor;
 use rex_rune::settings::{PaneDensity, PaneHeader};
 
@@ -35,17 +35,26 @@ fn glyph(rt: &Runtime<Workspace>, key: &str) -> rune::ElementInfo {
         .unwrap_or_else(|| panic!("no glyph under {key}"))
 }
 
-fn slug(rt: &Runtime<Workspace>, block: &str) -> &'static str {
-    tab_icons::icons_of(&[PaneProgram::of(rt.state.model(), block)], 1)[0]
-        .icon
-        .slug
-}
-
 /// `nvim` and `git` are distinct glyphs, so a header showing its neighbour's would show.
 fn programmes(ws: &mut Workspace) {
     let model = &mut ws.hosts[0].model;
     model.programs.insert("block:b".into(), "nvim".into());
     model.programs.insert("block:c".into(), "git".into());
+}
+
+/// The glyph cells inside one header, whatever their keys.
+fn glyph_cells(rt: &Runtime<Workspace>, header: &str) -> usize {
+    let path = format!("{}/", element(rt, header).path);
+    rt.elements()
+        .into_iter()
+        .filter(|e| {
+            !e.exiting
+                && e.path.starts_with(&path)
+                && e.key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("pane-icon:"))
+        })
+        .count()
 }
 
 #[test]
@@ -59,15 +68,15 @@ fn split_headers_draw_their_own_panes_program_glyph() {
     }
     let mut rt = runtime(ws);
     settle(&mut rt);
-    for (block, program, icon) in [("block:b", "nvim", "neovim"), ("block:c", "git", "git")] {
+    for (block, program) in [("block:b", "nvim"), ("block:c", "git")] {
         let key = format!("pane-icon:{block}");
         let cell = element(&rt, &key);
         assert_eq!(
             cell.help.as_deref(),
             Some(program),
-            "the glyph is the program it stands for"
+            "the glyph names the program it was drawn for"
         );
-        assert_eq!(slug(&rt, block), icon, "each header uses its own pane");
+        assert_eq!(glyph_cells(&rt, &format!("pane-header:{block}")), 1);
         let header = rect(&rt, &format!("pane-header:{block}"));
         let name = element(&rt, &format!("pane-name:{block}"));
         let [x, y, w, h] = cell.rect;
@@ -259,9 +268,10 @@ fn tab_icon_count_governs_the_glyph_and_never_moves_the_grid() {
                 shown,
                 "count {count}: 0 hides the glyph, any count draws one"
             );
-            assert!(
-                !has(&rt, &format!("pane-icon:{block}:1")),
-                "a header shows one glyph, not the tab's count"
+            assert_eq!(
+                glyph_cells(&rt, &format!("pane-header:{block}")),
+                usize::from(shown),
+                "count {count}: a header shows one glyph, not the tab's count"
             );
             let name = rect(&rt, &format!("pane-name:{block}"));
             let expected = header[0] + 14. + if shown { 23. } else { 0. };
@@ -335,7 +345,16 @@ fn a_narrow_header_keeps_its_buttons_and_drops_the_glyph() {
     let mut rt = runtime_at(ws, (640., 480.));
     settle(&mut rt);
     let pane = rect(&rt, "pane:block:b");
-    assert!(pane[2] < crate::app::pane_header::GLYPH_ROOMY, "{pane:?}");
+    assert!(pane[2] < 120., "{pane:?}");
+    assert!(
+        !pane_header::glyph_fits(
+            pane[2],
+            pane_header::HEADER_LEAD,
+            pane_header::buttons(pane[2]),
+            0.
+        ),
+        "the glyph has no room beside the name and Zoom and Close: {pane:?}"
+    );
     assert!(
         !has(&rt, "pane-icon:block:b"),
         "the glyph gives way before the buttons do"
@@ -351,6 +370,57 @@ fn a_narrow_header_keeps_its_buttons_and_drops_the_glyph() {
         "the wide pane keeps its glyph"
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// A header's activity word and the buttons it draws decide the glyph's room. With a Blocked
+/// record on a 25% and a 33% pane of a 640×480 split — about 151 pt and 200 pt, where the word
+/// and the buttons alone just fit — the glyph gives way instead of pushing Close past the
+/// pane's edge, and Close stays where a header without a glyph has it.
+#[test]
+fn an_activity_word_drops_the_glyph_before_it_pushes_close_out() {
+    use rex_rune::connection::activity::ProgramState;
+    let _families = rune::text::with_families("Inter", "Inter");
+    for ratio in [0.25, 0.33] {
+        let (mut ws, _host) = tabbed_workspace("split");
+        programmes(&mut ws);
+        // More than one record decides the pane's program, and the newest is Blocked.
+        set_activity(
+            &mut ws,
+            "block:b",
+            &[("", record(ProgramState::Blocked, true))],
+        );
+        let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+        let layout = serde_json::json!({"split": {"direction": "horizontal", "ratio": ratio,
+            "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}});
+        view.windows[1].layers[0].layout = serde_json::from_value(layout).unwrap();
+        let (sender, _sent) = flume::unbounded();
+        framed_terminal(&mut ws, "block:b", &sender, b"$ prompt");
+        let mut rt = runtime_at(ws, (640., 480.));
+        settle(&mut rt);
+        let pane = rect(&rt, "pane:block:b");
+        assert!(
+            has(&rt, "pane-word:block:b"),
+            "{ratio}: the whole word is drawn beside the buttons"
+        );
+        let inside = |rt: &Runtime<Workspace>| {
+            let close = rect(rt, "pane-close:block:b");
+            close[0] + close[2] <= pane[0] + pane[2]
+        };
+        assert!(
+            !has(&rt, "pane-icon:block:b"),
+            "{ratio}: no room for the glyph beside the word: {pane:?}"
+        );
+        assert!(inside(&rt), "{ratio}: Close ends inside the pane");
+        // Count 0 draws the same row without a glyph: the glyph never makes the row worse.
+        rt.update(|s, _| s.settings.interface.tab_icon_count = 0);
+        settle(&mut rt);
+        assert!(!has(&rt, "pane-icon:block:b"));
+        assert!(
+            inside(&rt),
+            "{ratio}: the header without a glyph keeps Close inside too"
+        );
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
 }
 
 /// Real-font evidence: run each individually with `REX_TEST_SNAP_DIR`.

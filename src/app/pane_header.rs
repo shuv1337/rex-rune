@@ -36,11 +36,61 @@ const REVEAL_AFTER: Duration = Duration::from_millis(90);
 const HIDE_AFTER: Duration = Duration::from_millis(220);
 /// An action that cannot run now keeps its place at this opacity.
 pub const UNAVAILABLE: f32 = 0.35;
-/// Below this width a header keeps its name and buttons alone: its program's glyph beside
-/// Zoom and Close would push Close past a narrow pane's edge.
-pub const GLYPH_ROOMY: f32 = 120.;
-/// Below this width a header keeps Zoom and Close only; the pane menu has the splits.
+/// A header row's leading and trailing pads and the gap between its children, which `panes`
+/// lays it out with: [`glyph_fits`] counts the same numbers.
+pub const HEADER_LEAD: f32 = 14.;
+pub const HEADER_TAIL: f32 = 8.;
+pub const HEADER_GAP: f32 = 8.;
+/// A program glyph's slot in a header.
+const GLYPH: f32 = 15.;
+/// The first letters of the name, which a header keeps beside the glyph: a glyph with no room
+/// for them beside it is not worth pushing the name out for.
+const NAME_ROOM: f32 = 11.;
+/// Rune cannot measure text while a header builds its row, so an activity word is reserved at
+/// about 6.2 pt a character (`Needs you` at 11 pt is 55 pt) and the Zoomed chip at its 10.5 pt
+/// label and 7 pt pads. The progress bar is pinned across the row, out of its flow, so it takes
+/// no room from anything beside it.
+const WORD_CHAR: f32 = 6.2;
+const CHIP_ROOM: f32 = 56.;
+/// Below [`ROOMY`] a header keeps Zoom and Close only; the pane menu has the splits.
 const ROOMY: f32 = 200.;
+
+/// The room a header needs beside its name to keep its glyph: its leading pad, the glyph, the
+/// buttons it draws, its trailing pad and a gap between each of its children. `extras` is what
+/// else in the row cannot shrink.
+const fn glyph_room(lead: f32, buttons: usize, extras: f32) -> f32 {
+    lead + GLYPH + NAME_ROOM + BUTTON * buttons as f32 + HEADER_TAIL + HEADER_GAP * 3. + extras
+}
+
+/// How many trailing buttons a header `width` wide draws: Split right and Split down join Zoom
+/// and Close from [`ROOMY`] up.
+pub fn buttons(width: f32) -> usize {
+    if width >= ROOMY { 4 } else { 2 }
+}
+
+/// The room a header's activity `word` and Zoomed chip take, each with the gap before it.
+pub fn extras(word: Option<&str>, chip: bool) -> f32 {
+    let text = word.map_or(0., |word| word.chars().count() as f32 * WORD_CHAR);
+    let children = u8::from(word.is_some()) + u8::from(chip);
+    text + if chip { CHIP_ROOM } else { 0. } + HEADER_GAP * f32::from(children)
+}
+
+/// Whether a header `width` wide can keep its glyph: `lead` is its leading pad, `buttons` how
+/// many it draws and `extras` what else is in the row. False where the glyph would push Close
+/// past the pane's edge, so it never makes a header worse than one without it.
+pub fn glyph_fits(width: f32, lead: f32, buttons: usize, extras: f32) -> bool {
+    width >= glyph_room(lead, buttons, extras)
+}
+
+/// A header's leading pad: clear of a card's 12 pt corner, or lined up with the terminal's text
+/// under a header drawn edge to edge.
+pub fn lead(s: &Workspace, window: &Window) -> f32 {
+    if full_bleed(s, window) {
+        s.settings.padding().0.max(8.)
+    } else {
+        HEADER_LEAD
+    }
+}
 
 /// Gentle extra fading, not the disabled-button cue. Hover restores enabled icons.
 pub const FADE: f32 = 0.85;
@@ -250,7 +300,7 @@ pub fn actions(s: &Workspace, window: &Window, block: &str, width: f32, lit: boo
     };
     let on = |action: PaneAction| Some((block.to_owned(), action));
     let mut cluster = row().key(format!("pane-actions:{block}")).center_y();
-    if width >= ROOMY {
+    if buttons(width) == 4 {
         cluster = cluster
             .child(button(
                 format!("pane-split-right:{block}"),

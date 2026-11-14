@@ -23,6 +23,7 @@ use rex_rune::{
 };
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, el, row, text};
+use std::borrow::Cow;
 
 /// The area cards are laid out in, in the pane area's own points.
 fn inner(s: &Workspace) -> [f32; 4] {
@@ -91,14 +92,12 @@ fn header(
 ) -> El {
     let label = s.pane_name(block);
     let activity = pane_activity(s.model(), block);
-    let word = pane_word(s, block, 11.);
+    let word = pane_word_of(s, block);
+    let chip = pane_header::zoomed_chip(window, block);
     let id = block.to_owned();
     let menu_id = block.to_owned();
-    let icons = tab_icons::icons_of(
-        &[PaneProgram::of(s.model(), block)],
-        s.settings.interface.tab_icon_count.min(1),
-    );
     let fade = pane_header::header_opacity(s, block);
+    let lead = pane_header::lead(s, window);
     let h = row()
         .key(format!("pane-header:{block}"))
         .hover_group()
@@ -106,15 +105,11 @@ fn header(
         .h(CARD_HEADER)
         // On a card the glyph clears the corner; edge to edge it lines up with the
         // terminal's text under it, and the name follows it.
-        .pl(if pane_header::full_bleed(s, window) {
-            s.settings.padding().0.max(8.)
-        } else {
-            14.
-        })
+        .pl(lead)
         // The trailing buttons stay clear of the card's 12 pt corner, where a hover fill
         // 4 pt from the edge all but touched the curve of the border.
-        .pr(8.)
-        .gap(8.)
+        .pr(pane_header::HEADER_TAIL)
+        .gap(pane_header::HEADER_GAP)
         .center_y()
         .preserve_focus_on_press(true)
         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
@@ -129,10 +124,17 @@ fn header(
             s.pane_menu(menu_id.clone(), Some((p.x, p.y)))
         });
     // The pane's own program before its name, as the title row draws the lone pane's: the
-    // tab glyph rule, lit with its pane, and faded with the name where headers fade. A
-    // narrow header keeps its buttons and name instead, where the glyph would push Close out.
-    let h = if width >= pane_header::GLYPH_ROOMY {
-        tab_icons::append(
+    // tab glyph rule, lit with its pane, and faded with the name where headers fade. The
+    // glyph is decided from the room the row will have: its pads and gaps, the buttons it
+    // draws, and the word and chip beside the name. A header too narrow for all of them
+    // keeps its name and buttons instead, where the glyph would push Close out of the pane.
+    let extras = pane_header::extras(word.as_ref().map(|(word, _)| word.as_ref()), chip.is_some());
+    let h = if pane_header::glyph_fits(width, lead, pane_header::buttons(width), extras) {
+        let icons = tab_icons::icons_of(
+            &[PaneProgram::of(s.model(), block)],
+            s.settings.interface.tab_icon_count.min(1),
+        );
+        tab_icons::append_restoring(
             h,
             &format!("pane-icon:{block}"),
             &icons,
@@ -153,13 +155,13 @@ fn header(
             .help_when_truncated(label)
             .shrink(),
     );
-    let h = match pane_header::zoomed_chip(window, block) {
+    let h = match chip {
         Some(chip) => h.child(chip),
         None => h,
     };
     // The label truncates first; the word always stays whole.
-    let h = match word {
-        Some(word) => h.child(word),
+    let h = match &word {
+        Some(word) => h.child(pane_word_el(s, block, word, 11.)),
         None => h,
     }
     .child(el().grow(1.));
@@ -181,19 +183,32 @@ fn header(
 /// The tab's words for this pane alone, at `size`; Done and Bell stay with the tab, which
 /// they latch.
 pub(super) fn pane_word(s: &Workspace, block: &str, size: f32) -> Option<El> {
-    let activity = pane_activity(s.model(), block);
-    tab_word(&activity, false, false)
+    let word = pane_word_of(s, block)?;
+    Some(pane_word_el(s, block, &word, size))
+}
+
+/// The word this pane's header draws beside its name, with its colour, when **Show activity in
+/// tabs** shows words at all.
+fn pane_word_of(s: &Workspace, block: &str) -> Option<(Cow<'static, str>, u32)> {
+    tab_word(&pane_activity(s.model(), block), false, false)
         .filter(|_| s.settings.notifications.show_in_tabs)
-        .map(|(word, colour)| {
-            let w = text(word)
-                .key(format!("pane-word:{block}"))
-                .font(medium(size))
-                .color(rgb(colour));
-            match activity.msg.clone() {
-                Some(msg) => w.help(msg),
-                None => w,
-            }
-        })
+}
+
+/// That word as an element, with the program's message as its tooltip.
+fn pane_word_el(
+    s: &Workspace,
+    block: &str,
+    (word, colour): &(Cow<'static, str>, u32),
+    size: f32,
+) -> El {
+    let w = text(word.clone())
+        .key(format!("pane-word:{block}"))
+        .font(medium(size))
+        .color(rgb(*colour));
+    match pane_activity(s.model(), block).msg.clone() {
+        Some(msg) => w.help(msg),
+        None => w,
+    }
 }
 
 /// The exception strip for a pane that is reconnecting, with its Retry action.

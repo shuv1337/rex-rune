@@ -12,11 +12,24 @@ pub fn glyph(i: &'static Icon, size: f32, color: Color) -> El {
 /// A program's glyph in one colour, in a `slot`-point square: the set's glyphs fill their
 /// square, where Rex's own icons leave a margin, so it is drawn a little smaller.
 pub fn program_glyph(program: &'static ProgramIcon, slot: f32, color: Color) -> El {
-    el().size(slot, slot).center().child(
-        icon(&program.glyph, (slot * 0.87).round())
-            .color(color)
-            .icon_one_color(),
-    )
+    program_glyph_hovering(program, slot, color, None)
+}
+
+/// A program glyph that returns to `hover` while a hover group around it is hovered, as the
+/// pane header's name does under the pointer. `None` keeps its colour at rest.
+pub fn program_glyph_hovering(
+    program: &'static ProgramIcon,
+    slot: f32,
+    color: Color,
+    hover: Option<Color>,
+) -> El {
+    let mut image = icon(&program.glyph, (slot * 0.87).round())
+        .color(color)
+        .icon_one_color();
+    if let Some(hover) = hover {
+        image = image.group_color(hover);
+    }
+    el().size(slot, slot).center().child(image)
 }
 
 /// The tile before a session's name in the sidebar and the switcher.
