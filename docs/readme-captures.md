@@ -57,7 +57,7 @@ autostart off. It does not use the personal environment inherited by
   link, image and anchor across the 99 non-vendored Markdown files with GitHub
   heading slugs, which preserve repeated hyphens: **0 broken**. An earlier check
   reported 34, all false positives from collapsing hyphens in headings such as
-  `A. Settings → Shortcuts page`. Existing historical docs and product
+  `A. Settings > Shortcuts page`. Existing historical docs and product
   references to coding tools are outside this screenshot refresh; required
   contributor credits and bespoke prose are preserved. No changelog, version
   stamps, security report or vendor files were rewritten.
