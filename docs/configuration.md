@@ -383,3 +383,27 @@ test notification**; see [notification quality](parity-2026-11/M3.4-notification
 On macOS it reports the bundle and permission state in macOS's own words; see
 [the M11 record](parity-2026-11/M11-macos-notifications.md). Optional sounds are
 described in [sounds](parity-2026-11/M3.4-sounds.md).
+
+## Activity
+
+Open **Show activity…** from Commands or click the toolbar's activity chip when
+it is visible. Choose **Show activity by priority…** or **Show activity by
+session…**, or press Tab while filtering the list, to switch views without
+losing the filter or selected tab. The plain command and chip use the remembered
+view. Filter by tab, session, host or state, then choose a row to show that tab.
+Opening the list does not mark tabs seen; muted tabs are omitted.
+
+An age such as `4m` measures a state this client watched begin. **`reported 4m`**
+means the baseline report arrived four minutes ago, not that the state began
+then. The state may be older. Unknown ages are omitted; only the open list
+refreshes its elapsed labels, and those ages pause while the computer sleeps.
+See [elapsed-time meaning](parity-2026-11/M3.2-elapsed-time.md).
+
+The chip counts known, unmuted, out-of-sight tabs that need you or have errors.
+**An absent chip is not an all-clear:** muted or hidden activity and events this
+client never received remain unknown or undisplayed. Read failures and coverage
+in progress appear in the list. Sidebar and switcher session rows show their
+most pressing activity word. See [view ordering](parity-2026-11/M3.2-activity-by-session.md),
+[chip display rules](parity-2026-11/M3.2-activity-chip.md),
+[background coverage](parity-2026-11/M3.2-status-sweep.md) and
+[session words](parity-2026-11/M3.2-session-words.md).

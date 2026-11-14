@@ -50,9 +50,10 @@ client, launcher and icons, never the `rex` server.
   keys, dead keys and IME, bracketed paste, mouse reporting, scrollback,
   cursor/underline/overline styles, device-pixel box drawing, static Kitty
   graphics and synchronized output.
-- **Search and links.** `Ctrl Shift F` searches screen and scrollback and marks
-  every match; Ctrl+click (⌘-click) opens http, https, ftp and mailto links with
-  a target tooltip, where the platform can.
+- **Search, prompts and links.** `Ctrl Shift F` searches screen and scrollback;
+  `Ctrl Shift Up/Down` moves between shell prompt marks without sending input.
+  Ctrl+click (⌘-click) opens http, https, ftp and mailto links with a target
+  tooltip, where the platform can.
 - **Selection and clipboard.** Word and line selection, drag autoscroll, Shift
   selection over mouse-reporting programs, copy on selection, opt-in PRIMARY
   ownership and focused-pane OSC 52 copies that never answer reads.
@@ -69,15 +70,17 @@ client, launcher and icons, never the `rex` server.
   header fading, tab icon count and colour, tab fill, toolbar visibility, full
   screen, and a Linux borderless window; on macOS the toolbar is the title row
   and Option can act as Alt, compose, or differ by side.
-- **Activity.** OSC 7501 marks Needs you, Error, Done or Bell; OSC 9;4 draws
-  progress; Rex program icons mark tabs and headers. Activity groups by priority
-  or session with filters, ages, a chip and unopened-session coverage.
+- **Activity.** OSC 7501 reports program status; terminal BEL separately marks
+  unseen bells. OSC 9;4 draws progress; program icons mark tabs and headers.
+  Activity groups by priority or session with filters, ages, a chip and
+  unopened-session coverage. Sidebar and switcher rows show session activity
+  words. See [Activity](docs/configuration.md#activity).
 - **Notifications and sounds.** Desktop notifications on Linux/BSD and macOS,
   including program-sent OSC 9 and OSC 777. Optional default-off activity
   sounds, per-kind switches, tab mute, service check and test.
 - **Shortcuts.** Layered keymaps from defaults, `init.lua`, `shortcuts.json` and
-  recording; Commands lists every action; Rex action compatibility is a focused
-  subset, not Mac parity.
+  recording, with host-defined modes and multi-key sequences. Commands lists
+  actions; Rex action compatibility is a focused subset, not Mac parity.
 - **Remote control.** Off by default for every host; exactly eight navigation
   actions can zoom panes and switch the display to the requesting host, but none
   can type, use the clipboard, open dialogs, change interface zoom or act on

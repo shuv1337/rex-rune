@@ -70,6 +70,10 @@ scroll local history when a fullscreen TUI owns the mouse. Without Shift,
 ordinary TUI mouse reporting is unchanged. **Select all** in the pane menu or
 Commands selects the terminal's screen and scrollback; a copy is limited to 8 MiB.
 
+Right-click opens that pane's menu, even when a terminal program tracks the
+mouse. **Shift+right-click** sends the click to the program instead, while it is
+live and tracks the mouse. This is separate from Shift+drag for local selection.
+
 **Copy on selection** copies only a completed pointer selection, on release.
 **Primary selection** additionally owns the desktop's PRIMARY selection and pastes
 it on a middle click, never during a drag or over a mouse-reporting program. Both
