@@ -8,6 +8,12 @@ pub(crate) fn map_mods(m: ModifiersState) -> Mods {
         alt: m.alt_key(), ctrl: m.control_key(), logo: m.super_key() }
 }
 
+/// `Tx::alt_keys`: which Alt keys winit says are down. A side it doesn't know is not held.
+pub(crate) fn alt_keys(m: &winit::event::Modifiers) -> crate::AltKeys {
+    use winit::keyboard::ModifiersKeyState::Pressed;
+    crate::AltKeys { left: m.lalt_state() == Pressed, right: m.ralt_state() == Pressed }
+}
+
 pub(crate) fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
     let mods = map_mods(m);
     let key = match key {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Left sends Alt and Right sends Alt** for the Option key on macOS (Settings → Terminal → Option key), as in Rex for macOS. One Option key acts as Alt and the other keeps typing the characters it composes, dead keys included, so a German or French layout can keep @ and [ ] on one Option and send Alt+B (ESC b) from the other. With both held, the key is Alt. Option with Control or Command, and with a key that types nothing, stays Alt on either side, as in the other modes. Saved as `terminal.option_key` `left_sends_alt` or `right_sends_alt`; older versions read those as Automatic. A small Rune patch tells the window which Option to treat as Alt and the app which Option was held with each key. Checked through the built client on a private Rex server with keys sent as the window delivers them; real presses of each Option key have not been tried by hand.
+
 ## 0.9.0 - 2026-11-13
 
 Fonts from the system's own list on macOS and Windows with Nerd Font symbols built in, Rex's own program icons, a Mac toolbar that is the title bar, Update now for pacman installs, server uptime and Stop server, and dialogs that press the focused button.

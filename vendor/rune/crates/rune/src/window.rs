@@ -52,7 +52,7 @@ mod platform_sync;
 use platform_sync::sync_platform;
 mod shell_requests;
 mod keys;
-pub(crate) use keys::{key_base, map_key_event, map_mods};
+pub(crate) use keys::{alt_keys, key_base, map_key_event, map_mods};
 mod any_host;
 mod app_events;
 mod event_loop;
@@ -456,6 +456,8 @@ struct Host<S: 'static> {
     clock: FrameClock,
     idle: bool,
     mods: ModifiersState,
+    /// Which Alt keys `mods` holds, by side, where winit says (`Tx::alt_keys`).
+    alt_keys: crate::AltKeys,
     control_click: bool,
     /// Off macOS, a press on a drag region waits for the pointer to travel before handing the
     /// window to the window manager, so the region's double-click still reaches Rune (an X11
@@ -603,6 +605,7 @@ impl<S: 'static> Host<S> {
             clock: FrameClock::new(Instant::now()),
             idle: true,
             mods: ModifiersState::empty(),
+            alt_keys: crate::AltKeys::default(),
             control_click: false,
             pending_window_drag: None,
             files: FileDrop::default(),

@@ -83,9 +83,9 @@ pub(super) struct Win {
     /// The frame a due timer asked for, until the window draws it, and whether only it asked
     /// (`TimerFrame`).
     pub(super) timer_frame: TimerFrame,
-    /// What `Tx::set_option_as_alt` last made Option in this window: winit starts it at `None`.
+    /// What `Tx::set_option_alt` last made Option in this window: winit starts it at `None`.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(super) option_as_alt: bool,
+    pub(super) option_as_alt: crate::OptionAsAlt,
     /// The last frame presented, while the window rests.
     pub(super) presented: Option<Presented>,
     /// The window's steady run after a change (`STEADY`).

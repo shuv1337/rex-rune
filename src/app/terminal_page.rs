@@ -172,7 +172,8 @@ fn keyboard(s: &Workspace) -> El {
         select_row(
             "option-key",
             "Option key",
-            "Automatic sends Alt on a U.S. layout and types characters on others.",
+            "Automatic sends Alt on a U.S. layout and types characters on others. Left sends \
+             Alt and Right sends Alt keep the other Option for characters.",
             &OptionKey::ALL.map(OptionKey::name),
             OptionKey::ALL
                 .iter()

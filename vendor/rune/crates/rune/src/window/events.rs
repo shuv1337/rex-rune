@@ -348,6 +348,7 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
+                self.alt_keys = alt_keys(&m);
                 if rt.physical_observation(crate::PhysicalInput::Modifiers(map_mods(self.mods))) {
                     l.request_redraw();
                 }
@@ -395,9 +396,9 @@ impl<S: 'static> Host<S> {
                         .map(|_| crate::runtime::Unhandled::WindowMenu)
                 });
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
-                    redraw = rt.physical_then(crate::PhysicalInput::Key {
+                    redraw = rt.physical_then_alt(crate::PhysicalInput::Key {
                         key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
-                    }, logical, key_base(&event), unhandled);
+                    }, logical, key_base(&event), self.alt_keys, unhandled);
                 } else if let Some(ev) = logical {
                     if !pressed { redraw = rt.key_up(ev); }
                     else if ev.edit_command() == Some('v') && rt.accepts_paste() { self.clipboard.read(rt); }
