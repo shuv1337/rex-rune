@@ -1855,23 +1855,40 @@ async fn searching_needs_no_server_while_the_host_reconnects() {
             .unwrap();
     };
     let notice = || host.model.lock().unwrap().notice.clone();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A refused TCP connection takes longer on Windows. Observe the retry state rather
+    // than assuming the first connection attempt has finished after 200 ms.
+    until(&host, |m| m.status.starts_with("Disconnected")).await;
     send(Command::Search("needle".into()));
     send(Command::SearchStep(true));
     send(Command::PromptStep(true));
     send(Command::PromptStep(false));
     send(Command::Search(String::new()));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A reply to the next command proves the preceding searches were consumed.
+    let (reply, ticket) = tokio::sync::oneshot::channel();
+    host.commands
+        .send(HostCommand::Ticket {
+            session: "s".into(),
+            block: "b".into(),
+            reply,
+        })
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(8), ticket)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
     assert_eq!(notice(), None, "a search is this client's own");
 
     // Input still isn't taken for later.
     send(Command::Reconnect);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        notice().is_some_and(|n| n.contains("not sent while disconnected")),
-        "{:?}",
-        notice()
-    );
+    until(&host, |m| {
+        m.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("not sent while disconnected"))
+    })
+    .await;
     drop(host);
 }
 

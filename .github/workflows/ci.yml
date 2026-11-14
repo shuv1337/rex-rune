@@ -120,5 +120,6 @@ jobs:
       # Includes the former library, app-platform and DirectWrite filters, plus every
       # other supported unit/headless test. No filter or pipe can hide a test failure.
       # Keep the no-UI integration runs above to also exercise that feature configuration.
+      # Fail at the end so a library failure does not prevent the app suite from running.
       - name: Unit and headless UI tests
-        run: cargo test --locked --all-features
+        run: cargo test --locked --all-features --no-fail-fast
