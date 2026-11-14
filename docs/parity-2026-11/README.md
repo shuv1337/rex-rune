@@ -4,7 +4,23 @@ This folder holds the November 2026 comparison of Rex Linux (Rust on Rune, commi
 
 **Start with [GAP-REPORT.md](GAP-REPORT.md).** It is the master report: verdict, scorecard, full inventory, UI quality, blocked items, roadmap and an evidence index. Everything else is the material it was built from.
 
-Implementation follow-up: [M2.1 read-only Shortcuts recovery](M2.1.md), with scope and verification. This does not revise the baseline counts below.
+Implementation follow-up records, each with scope and verification. They do not revise the baseline counts below.
+
+- M2.1: [recovery: searchable, read-only Shortcuts](M2.1.md).
+- M2.3: [recovery: Settings search and navigation](M2.3.md).
+- M2.5: [Terminal display and selection recovery](M2.5.md).
+- M2.6: [focused font and typography recovery](M2.6.md).
+- M2.7: [panes, first piece only](M2.7-panes.md); [header-only fading](M2.7-header-fading.md).
+- M2.8: [toolbar tabs fill available space](M2.8-tab-fill.md); [tab icon count (small second slice)](M2.8-tab-icons.md); [tab icon colour policy (small third slice)](M2.8-tab-icon-colours.md).
+- M2.10: [generated titles (unreleased)](generated-titles.md).
+- M3.1: [Insert path (focused slice)](M3.1-insert-path.md); [Go to directory](M3.1-go-to-directory.md); [Recently used paths](M3.1-recent-paths.md).
+- M3.2: [Activity list (partial)](M3.2-activity-list.md); [Activity by session (partial)](M3.2-activity-by-session.md); [elapsed time on Activity rows](M3.2-elapsed-time.md); [conditional Activity toolbar chip](M3.2-activity-chip.md); [one status pass per connection](M3.2-status-sweep.md); [session activity words in the sidebar (partial)](M3.2-session-words.md).
+- M3.3: [first, read-only Server settings slice](M3.3-server-settings.md); [running duration and confirmed Stop server (partial)](M3.3-server-controls.md); [Pair device (partial)](M3.3-pair-device.md).
+- M3.4: [notification quality and health (partial)](M3.4-notification-quality.md); [optional activity sounds (partial)](M3.4-sounds.md).
+- M3.7: [prompt navigation verified and implemented](prompt-navigation.md).
+- M4.4: [recovery: shortcut recorder](M4.4.md).
+- M7: [terminal fonts without fontconfig, and bundled Nerd Font symbols](M7-fonts.md).
+- No milestone: [Pane header on a single pane](single-pane-header.md).
 
 ## Layout
 
