@@ -41,8 +41,8 @@ client, launcher and icons, never the `rex` server.
   directory titles.
 - **Panes.** Splits right, left, down, up or best fit; resize, balance, move to a
   tab, zoom, swap, rename, copy the pane ID, close and focus by direction.
-  Headers show the pane's program icon, activity word and buttons, with
-  configurable placement.
+  Headers show the pane's own program icon before its name, its activity word
+  and buttons, with configurable placement.
 - **Attachment only.** Attaching, reconnecting and prefetching never start, stop
   or change a server or create or destroy a session; a missing SSH server offers
   one confirmed start. Failed input pauses and is never replayed.
