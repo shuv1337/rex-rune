@@ -2,7 +2,7 @@ name: CI
 
 # Every pull request and every push to master, on the three platforms the client builds
 # for. Linux is the released platform and runs everything. macOS builds the app and runs
-# the tests. Windows builds the probes and app and runs the VT and platform tests.
+# the tests. Windows builds the probes and app and runs the full unit/headless suite.
 # Native Windows UI and server attachment are not tested (docs/plans/cross-platform.md).
 on:
   pull_request:
@@ -108,16 +108,6 @@ jobs:
         run: cargo test --locked --no-default-features --test cursor_policy --test prompt_navigation
       - name: Keymap fixture
         run: cargo test --locked --no-default-features --test keymap_fixture
-      # Everything in the library known to run here: Ghostty decoding, search and frames
-      # (terminal::), the platform boundary, upload ids and the update lock. One invocation,
-      # and a floor on how many ran, because a filter that matches nothing also passes.
-      - name: Library tests that run on Windows
-        shell: bash
-        run: |
-          cargo test --locked --no-default-features --lib -- terminal:: platform:: upload::tests:: update::tests::update_state_lock 2>&1 | tee "$RUNNER_TEMP/lib-tests.log"
-          ran="$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/lib-tests.log" | head -n 1)"
-          echo "library tests run: ${ran:-0}"
-          test "${ran:-0}" -ge 25
       - name: Lint every target and feature
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Build the app
@@ -127,14 +117,9 @@ jobs:
         run: |
           test "$(target/debug/rex-rune.exe --version)" = "rex-rune $(python -c 'import sys,tomllib; sys.stdout.write(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           target/debug/rex-rune.exe --help > /dev/null
-      - name: App platform boundary
-        run: cargo test --locked --bin rex-rune app::platform::tests
-      # The font stack, the bundled symbols font, and DirectWrite's list and lookup. A floor
-      # on how many ran, as above.
-      - name: Fonts through DirectWrite
-        shell: bash
-        run: |
-          cargo test --locked --bin rex-rune -- app::fonts:: app::platform::fonts:: 2>&1 | tee "$RUNNER_TEMP/font-tests.log"
-          ran="$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/font-tests.log" | head -n 1)"
-          echo "font tests run: ${ran:-0}"
-          test "${ran:-0}" -ge 12
+      # Includes the former library, app-platform and DirectWrite filters, plus every
+      # other supported unit/headless test. No filter or pipe can hide a test failure.
+      # Keep the no-UI integration runs above to also exercise that feature configuration.
+      # Fail at the end so a library failure does not prevent the app suite from running.
+      - name: Unit and headless UI tests
+        run: cargo test --locked --all-features --no-fail-fast

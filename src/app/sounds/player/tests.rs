@@ -102,10 +102,11 @@ fn selection_order_exact_vectors_and_xdg_file_search() {
         "/usr/share".into(),
     ];
     for sound in [Sound::NeedsYou, Sound::Error, Sound::Done] {
-        let file = PathBuf::from(format!(
-            "/custom/sounds/freedesktop/stereo/{}.oga",
-            sound.id()
-        ));
+        // Arguments are OsStrings, so preserve the native separators from each join,
+        // not just paths that compare equal as PathBufs on Windows.
+        let file = Path::new("/custom")
+            .join("sounds/freedesktop/stereo")
+            .join(format!("{}.oga", sound.id()));
         let mut tree = Tree(vec![
             "/two/canberra-gtk-play".into(),
             "/one/pw-play".into(),
@@ -149,45 +150,54 @@ fn selection_order_exact_vectors_and_xdg_file_search() {
 
 #[test]
 fn xdg_defaults_overrides_and_first_matching_file() {
-    assert_eq!(
-        data_dirs(Some("/home/person".into()), None, None),
-        vec![
-            PathBuf::from("/home/person/.local/share"),
-            "/usr/local/share".into(),
-            "/usr/share".into()
-        ]
-    );
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let mine = root.path().join("mine");
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    // The home default works for native absolute paths. Unix system defaults have no
+    // drive prefix on Windows and are correctly excluded there.
+    let defaults: Vec<_> = [
+        home.join(".local/share"),
+        PathBuf::from("/usr/local/share"),
+        PathBuf::from("/usr/share"),
+    ]
+    .into_iter()
+    .filter(|path| path.is_absolute())
+    .collect();
+    assert_eq!(data_dirs(Some(home.clone()), None, None), defaults);
     let data = data_dirs(
-        Some("/home/person".into()),
-        Some("/mine".into()),
-        Some("relative:/first:/second".into()),
+        Some(home),
+        Some(mine.clone()),
+        Some(std::env::join_paths([Path::new("relative"), &first, &second]).unwrap()),
     );
-    assert_eq!(
-        data,
-        vec![PathBuf::from("/mine"), "/first".into(), "/second".into()]
-    );
-    let tree = Tree(vec![
-        "/bin/paplay".into(),
-        "/first/sounds/freedesktop/stereo/complete.oga".into(),
-        "/second/sounds/freedesktop/stereo/complete.oga".into(),
-    ]);
+    assert_eq!(data, vec![mine, first.clone(), second.clone()]);
+    let file = |dir: &Path| dir.join("sounds/freedesktop/stereo").join("complete.oga");
+    let tree = Tree(vec!["/bin/paplay".into(), file(&first), file(&second)]);
     assert_eq!(
         select(&tree, &["/bin".into()], &data, Sound::Done)
             .unwrap()
             .args,
-        vec![OsString::from(
-            "/first/sounds/freedesktop/stereo/complete.oga"
-        )]
+        vec![file(&first).into_os_string()]
     );
 }
 
 #[test]
 fn a_relative_path_entry_is_never_searched_for_a_player() {
     // `.`, an empty entry and `bin` all mean "wherever the app was started".
-    assert_eq!(
-        search_path(Some(".::bin:/usr/bin:relative/dir:/opt/tools".into())),
-        vec![PathBuf::from("/usr/bin"), "/opt/tools".into()]
-    );
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    let tools = root.path().join("tools");
+    let path = std::env::join_paths([
+        Path::new("."),
+        Path::new(""),
+        Path::new("bin"),
+        &bin,
+        Path::new("relative/dir"),
+        &tools,
+    ])
+    .unwrap();
+    assert_eq!(search_path(Some(path)), vec![bin, tools]);
     assert!(search_path(None).is_empty());
     assert!(search_path(Some(".".into())).is_empty());
 }
@@ -264,7 +274,7 @@ fn a_mac_plays_its_own_alert_sounds_with_afplay_when_no_linux_player_is_there() 
         (Sound::Done, "Glass"),
     ];
     for (sound, name) in sounds {
-        let file = PathBuf::from(format!("/System/Library/Sounds/{name}.aiff"));
+        let file = Path::new("/System/Library/Sounds").join(format!("{name}.aiff"));
         let tree = Tree(vec!["/usr/bin/afplay".into(), file.clone()]);
         assert_eq!(
             select(&tree, &paths, &[], sound),

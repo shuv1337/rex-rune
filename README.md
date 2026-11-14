@@ -236,7 +236,7 @@ CI builds the app and runs the unit and headless UI tests on macOS for every pul
 
 ### Building on Windows
 
-A source build only, for `x86_64-pc-windows-msvc`. There is no Windows release or installer. Nobody has run the client UI on Windows or checked attachment to a real server there. CI on `windows-2025` compiles the probes and app, links and runs the Ghostty VT integration tests, checks platform functions, and runs `--version` and `--help`. That is the extent of the Windows runtime checks.
+A source build only, for `x86_64-pc-windows-msvc`. There is no Windows release or installer. Nobody has run the native client UI on Windows or checked attachment to a real server there. CI on `windows-2025` compiles the probes and app, runs the full unit and headless UI suite (including platform and DirectWrite font tests), separately runs the no-UI Ghostty VT and keymap integration tests, and checks Clippy, `--version` and `--help`. Headless tests do not validate a native window, real input, clipboard/IME, display scaling or server attachment. Existing platform exclusions remain: Unix download-store/SSH fixtures and the Linux installer do not run on Windows; tests that need a private display, bus or server, or special font setup remain opt-in.
 
 Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with the **Desktop development with C++** workload and its Windows SDK. Install [rustup](https://rustup.rs/) and [Zig](https://ziglang.org/) 0.17.x (CI uses 0.17.1). Put Zig on `PATH`, then use a Developer PowerShell for Visual Studio:
 
@@ -245,6 +245,7 @@ rustup toolchain install 1.96.1-x86_64-pc-windows-msvc
 rustup override set 1.96.1-x86_64-pc-windows-msvc
 cargo build --locked --no-default-features --bins
 cargo test --locked --no-default-features --test cursor_policy --test prompt_navigation --test keymap_fixture
+cargo test --locked --all-features --no-fail-fast
 cargo build --locked --bin rex-rune
 .\target\debug\rex-rune.exe --version
 .\target\debug\rex-rune.exe --help
@@ -268,15 +269,15 @@ cargo build --locked --bin rex-rune
 
 | Area | On Windows |
 | --- | --- |
-| VT decoding and command-line startup | Linked and run in CI; no window or rendering check |
+| VT decoding and command-line startup | Linked and run in CI; no native window check |
 | `https://`, `wss://`, `http://`, `ws://` hosts | The unchanged TCP and Rustls path compiles; real server attachment is untested |
 | Local host and `unix://` | Refused with a message suggesting an `https://` host. `REX_SERVER` overrides the default; otherwise Local keeps an unsupported `unix://` placeholder, which stays in the sidebar as disconnected and is retried every few seconds, also when you start with `--endpoint`. Named pipes are not implemented |
 | `ssh://` hosts | Refused before starting SSH; no loopback TCP forwarding |
-| Downloads | The code refuses one before it creates a file or asks the server for a ticket. That path has not run on Windows |
+| Downloads | Refused before creating a file or asking the server for a ticket; CI tests the refusal boundary, not a working download store |
 | Uploads | Compile with portable random IDs; end-to-end uploads are untested |
 | Folders | Settings in `%APPDATA%\rex-rune`, state in `%LOCALAPPDATA%\rex-rune`, home from `USERPROFILE`, else `HOMEDRIVE` with `HOMEPATH`. Missing AppData variables fall back to `<home>\AppData\Roaming` and `<home>\AppData\Local`. The default download folder is `<home>\Downloads`, though downloads are refused |
-| Fonts | Listed and resolved through DirectWrite by the code macOS uses with Core Text; a missing family falls back to Cascadia Mono, then Consolas. CI lists and resolves Consolas through DirectWrite; no window or rendering check |
-| Window chrome, input, clipboard and IME | Not tested on Windows |
+| Fonts | Listed and resolved through DirectWrite by the code macOS uses with Core Text; a missing family falls back to Cascadia Mono, then Consolas. CI lists and resolves Consolas through DirectWrite and runs the headless UI suite; native window rendering remains untested |
+| Window chrome, input, clipboard and IME | Headless UI behavior is tested in CI; native interaction is not tested on Windows |
 | Primary selection | Windows has none; the setting is not shown |
 | Notifications, sounds, opening links, Show in folder | Not available yet. Opening a link or a folder fails with the system's "program not found"; Settings reports no notification service and no sound player |
 | Updates | Source builds only; no installer or restart after an update |

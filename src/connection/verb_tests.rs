@@ -170,18 +170,17 @@ async fn a_reset_asked_while_disconnected_is_refused_not_kept() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
     let host = HostConnection::spawn(endpoint, None, None, None, true, None);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Connection refusal is not immediate on every OS; wait for the retry state.
+    until(&host, |m| m.status.starts_with("Disconnected")).await;
     for command in [Command::Reset, Command::Clear] {
         host.model.lock().unwrap().notice = None;
         verb(&host, "block:a", command);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let notice = host.model.lock().unwrap().notice.clone();
-        assert!(
-            notice
+        until(&host, |m| {
+            m.notice
                 .as_deref()
-                .is_some_and(|n| n.contains("not sent while disconnected")),
-            "{notice:?}"
-        );
+                .is_some_and(|n| n.contains("not sent while disconnected"))
+        })
+        .await;
     }
     drop(host);
 }
