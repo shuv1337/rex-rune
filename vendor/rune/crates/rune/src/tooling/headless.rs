@@ -294,7 +294,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
-                    Kind::Key(key, _) | Kind::PhysicalKey(_, key, _) => ov.key(e.t, key),
+                    Kind::Key(key, _) | Kind::PhysicalKey(_, key, ..) => ov.key(e.t, key),
                     Kind::Shortcut(chord) => ov.chord(e.t, chord),
                     &Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed: true, .. }) => {
                         if let Ok(chord) = crate::Shortcut::from_physical_key(key, mods) { ov.chord(e.t, &chord) }

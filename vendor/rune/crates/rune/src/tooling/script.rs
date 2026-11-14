@@ -185,11 +185,12 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
                 if let Some(code) = e["code"].as_str() {
                     let code = code.parse::<crate::Shortcut>().unwrap_or_else(|e| die(&e.to_string())).physical_key();
                     let base = script_key_base(&e, name, mods);
+                    let alt = script_alt_keys(&e);
                     let press = |pressed| crate::PhysicalInput::Key { key: code, mods, pressed, repeat: repeat && pressed };
                     if ty == "key-up" {
-                        out.push(Ev { t, kind: Kind::PhysicalKey(press(false), KeyEvent { key, mods }, base), pos: Pos::Rel(0.0, 0.0) });
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(false), KeyEvent { key, mods }, base, alt), pos: Pos::Rel(0.0, 0.0) });
                     } else {
-                        out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }, base), pos: Pos::Rel(0.0, 0.0) });
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }, base, alt), pos: Pos::Rel(0.0, 0.0) });
                         out.push(Ev { t, kind: Kind::Physical(press(false)), pos: Pos::Rel(0.0, 0.0) });
                     }
                     continue;

@@ -75,6 +75,12 @@ pub enum OptionKey {
     Characters,
     /// Option is Alt (Meta): Option+B reaches the program as Alt+B.
     Alt,
+    /// The left Option is Alt and the right one types the character it composes.
+    #[serde(rename = "left_sends_alt")]
+    LeftAlt,
+    /// The right Option is Alt and the left one types the character it composes.
+    #[serde(rename = "right_sends_alt")]
+    RightAlt,
     /// Alt on a U.S. layout, where Option is seldom needed for characters, and characters
     /// on every other layout.
     #[default]
@@ -82,22 +88,70 @@ pub enum OptionKey {
     Automatic,
 }
 impl OptionKey {
-    /// In the order the control lists them.
-    pub const ALL: [OptionKey; 3] = [OptionKey::Automatic, OptionKey::Characters, OptionKey::Alt];
+    /// In the order the control lists them, as Rex for macOS does.
+    pub const ALL: [OptionKey; 5] = [
+        OptionKey::Automatic,
+        OptionKey::Characters,
+        OptionKey::Alt,
+        OptionKey::LeftAlt,
+        OptionKey::RightAlt,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             OptionKey::Automatic => "Automatic (by keyboard layout)",
             OptionKey::Characters => "Composes characters",
             OptionKey::Alt => "Acts as Alt",
+            OptionKey::LeftAlt => "Left sends Alt",
+            OptionKey::RightAlt => "Right sends Alt",
         }
     }
-    /// Whether Option is Alt with the keyboard layout in use.
+    /// Whether both Option keys are Alt with the keyboard layout in use.
     pub fn acts_as_alt(self, us_layout: bool) -> bool {
+        self.alt_sides(us_layout) == OptionSides::BOTH
+    }
+    /// Which Option keys are Alt with the keyboard layout in use.
+    pub fn alt_sides(self, us_layout: bool) -> OptionSides {
         match self {
-            OptionKey::Automatic => us_layout,
-            OptionKey::Characters => false,
-            OptionKey::Alt => true,
+            OptionKey::Automatic if us_layout => OptionSides::BOTH,
+            OptionKey::Automatic | OptionKey::Characters => OptionSides::NEITHER,
+            OptionKey::Alt => OptionSides::BOTH,
+            OptionKey::LeftAlt => OptionSides::LEFT,
+            OptionKey::RightAlt => OptionSides::RIGHT,
         }
+    }
+}
+
+/// A set of a Mac's two Option keys: those that act as Alt, or those held with a key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct OptionSides {
+    pub left: bool,
+    pub right: bool,
+}
+impl OptionSides {
+    pub const NEITHER: OptionSides = OptionSides {
+        left: false,
+        right: false,
+    };
+    pub const LEFT: OptionSides = OptionSides {
+        left: true,
+        right: false,
+    };
+    pub const RIGHT: OptionSides = OptionSides {
+        left: false,
+        right: true,
+    };
+    pub const BOTH: OptionSides = OptionSides {
+        left: true,
+        right: true,
+    };
+    /// Whether a key typed with the `held` Option keys is Alt with the key, where these are the
+    /// keys that act as Alt, rather than the character Option composes. With both held it is
+    /// Alt if either of them acts as Alt. A key whose sides are unknown (`held` empty) is Alt
+    /// only when both Option keys act as Alt, as the window decides it then.
+    pub fn alt_with(self, held: OptionSides) -> bool {
+        (self.left && held.left)
+            || (self.right && held.right)
+            || (self == OptionSides::BOTH && held == OptionSides::NEITHER)
     }
 }
 
@@ -283,5 +337,60 @@ mod tests {
         chosen.terminal.option_key = OptionKey::Characters;
         let saved = serde_json::to_value(&chosen).unwrap();
         assert_eq!(saved["terminal"]["option_key"], "characters");
+    }
+
+    #[test]
+    fn one_option_key_alone_is_saved_read_back_and_sends_alt_on_its_side() {
+        let path =
+            std::env::temp_dir().join(format!("rex-option-sides-{}.json", std::process::id()));
+        for (key, value) in [
+            (OptionKey::LeftAlt, "left_sends_alt"),
+            (OptionKey::RightAlt, "right_sends_alt"),
+        ] {
+            let mut chosen = Settings::default();
+            chosen.terminal.option_key = key;
+            let saved = serde_json::to_value(&chosen).unwrap();
+            assert_eq!(saved["terminal"]["option_key"], value);
+            chosen.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap().terminal.option_key, key);
+        }
+        std::fs::remove_file(path).ok();
+        assert_eq!(OptionKey::ALL.len(), 5);
+        assert_eq!(
+            OptionKey::ALL.map(OptionKey::name)[3..],
+            ["Left sends Alt", "Right sends Alt"]
+        );
+
+        // Neither, left, right, both: whether a key typed with those Options held is Alt.
+        let held = [
+            OptionSides::NEITHER,
+            OptionSides::LEFT,
+            OptionSides::RIGHT,
+            OptionSides::BOTH,
+        ];
+        for (key, us, other) in [
+            (OptionKey::Automatic, [true; 4], [false; 4]),
+            (OptionKey::Characters, [false; 4], [false; 4]),
+            (OptionKey::Alt, [true; 4], [true; 4]),
+            (
+                OptionKey::LeftAlt,
+                [false, true, false, true],
+                [false, true, false, true],
+            ),
+            (
+                OptionKey::RightAlt,
+                [false, false, true, true],
+                [false, false, true, true],
+            ),
+        ] {
+            for (layout, want) in [(true, us), (false, other)] {
+                let sides = key.alt_sides(layout);
+                assert_eq!(held.map(|h| sides.alt_with(h)), want, "{key:?} us={layout}");
+            }
+        }
+        // One side alone is neither "always Alt" nor "never".
+        for key in [OptionKey::LeftAlt, OptionKey::RightAlt] {
+            assert!(!key.acts_as_alt(true) && !key.acts_as_alt(false));
+        }
     }
 }

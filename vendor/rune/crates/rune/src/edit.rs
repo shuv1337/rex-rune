@@ -22,7 +22,7 @@ mod ime;
 pub use ime::Ime;
 mod input;
 mod keys;
-pub use keys::{Key, KeyEvent, KeySide, Modifier, Mods};
+pub use keys::{AltKeys, Key, KeyEvent, KeySide, Modifier, Mods, OptionAsAlt};
 mod marks;
 mod model;
 pub use model::{Block, MAX_LIST_LEVEL, Mark, MarkRange, ParagraphInfo, RichStyle};

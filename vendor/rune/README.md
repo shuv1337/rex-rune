@@ -69,6 +69,19 @@ maximized. The patch adds the following without changing existing behavior on ma
   which the app cannot undo afterwards. A no-op elsewhere. A window Rune creates again gets the
   request too. `Runtime::option_as_alt` (hidden) is what the window gets now, for headless
   tests.
+- `Tx::set_option_alt(OptionAsAlt)` asks for one Option key alone as well: `OptionAsAlt` is
+  `Neither`, `Left`, `Right` or `Both`, mapped to winit's `None`, `OnlyLeft`, `OnlyRight` and
+  `Both` on the same path as above; `set_option_as_alt(bool)` is now `Both` or `Neither` through
+  it, unchanged for its callers. winit rewrites a key only when an Option it was told to treat as
+  Alt is down, so with both held the key is Alt. `Tx::alt_keys()` returns an `AltKeys { left,
+  right }`: which Alt keys were held with the key a handler sees, from winit's
+  `ModifiersChanged` (`lalt_state`/`ralt_state`) before it, carried with the queued key so a
+  later modifier change doesn't alter it. Both are false where winit doesn't say (it does on
+  macOS), for overlays, for keys without a physical origin and outside key handlers, so nothing
+  changes for existing callers. `Runtime::physical_key_input_alt` is `physical_key_input` with
+  the held Alt keys, for headless tests, and a script's `{"type":"key","code":…}` takes
+  `"alt_side": "left" | "right" | "both"` for them. `Runtime::option_alt` (hidden) is what the
+  window gets now, by side.
 - `Pixels::rgba()` (hidden) is public instead of test-only, so the app's tests can check that
   each program icon `TextSystem::color_icon` rasterizes actually paints something.
 - `text::installed_family_files(name)` is public (it was the private lookup behind

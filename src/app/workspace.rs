@@ -11,7 +11,10 @@ use super::{
 use rex_rune::{
     connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
     layout::{Divider, shell_layout},
-    settings::{ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice, validate_host},
+    settings::{
+        ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice, terminal::OptionSides,
+        validate_host,
+    },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
 use rexrs::api::terminal::SetTheme;
@@ -104,9 +107,9 @@ pub struct Workspace {
     pub option_choice: bool,
     /// Whether the layout in use is U.S., read again when the person picks another one.
     pub us_layout: Option<bool>,
-    /// The panes' Option, as last asked of Rune (`Tx::set_option_as_alt`); Rune drops it while
-    /// a field has focus.
-    pub option_as_alt: Option<bool>,
+    /// The panes' Option keys, as last asked of Rune (`Tx::set_option_alt`); Rune drops them
+    /// while a field has focus.
+    pub option_as_alt: Option<rune::OptionAsAlt>,
     /// The pane a file drag from another app is over.
     pub drop_hover: Option<String>,
     /// Pane headers brought out by the pointer or by Reveal pane headers.
@@ -1013,22 +1016,31 @@ impl Workspace {
         }
         // Rune keeps Option's characters for whichever of Rex's own fields has focus (@ in an
         // address, é in a search), so this is the panes' Option.
-        let alt = self.option_is_alt();
+        let alt = match self.option_sides() {
+            OptionSides::BOTH => rune::OptionAsAlt::Both,
+            OptionSides::LEFT => rune::OptionAsAlt::Left,
+            OptionSides::RIGHT => rune::OptionAsAlt::Right,
+            _ => rune::OptionAsAlt::Neither,
+        };
         if self.option_as_alt != Some(alt) {
-            tx.set_option_as_alt(alt);
+            tx.set_option_alt(alt);
             self.option_as_alt = Some(alt);
         }
     }
 
-    /// Whether Terminal settings make Option Alt with the layout in use.
-    fn option_is_alt(&self) -> bool {
-        (self.settings.terminal.option_key).acts_as_alt(self.us_layout != Some(false))
+    /// The Option keys Terminal settings make Alt with the layout in use.
+    fn option_sides(&self) -> OptionSides {
+        (self.settings.terminal.option_key).alt_sides(self.us_layout != Some(false))
     }
 
-    /// Whether Option composes the text of a key typed with it, which the program then gets
-    /// without Alt.
-    pub fn option_composes(&self) -> bool {
-        self.option_choice && !self.option_is_alt()
+    /// Whether Option composes the text of a key typed with the `held` Option keys
+    /// (`Tx::alt_keys`), which the program then gets without Alt.
+    pub fn option_composes(&self, held: rune::AltKeys) -> bool {
+        let held = OptionSides {
+            left: held.left,
+            right: held.right,
+        };
+        self.option_choice && !self.option_sides().alt_with(held)
     }
 
     /// A drag writes preferences once, after the window has kept its size for a second.
