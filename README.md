@@ -797,7 +797,7 @@ The `scripts/` directory holds integration checks; each script's docstring lists
 
 ## Contributing
 
-This repository does not accept pull requests from outside contributors. If you hit a bug, have a feature idea, or have a change on a fork branch or commit you want considered, open an issue and link to it. Maintainers harvest changes from forks, cherry-pick or rewrite what fits, and credit the author with a `Co-authored-by:` trailer and in [CHANGELOG.md](CHANGELOG.md). See [AGENTS.md](AGENTS.md) for the code layout and contributor conventions, and [DESIGN.md](DESIGN.md) / [PRODUCT.md](PRODUCT.md) for the design system and product intent.
+This repository does not accept pull requests from outside contributors. If you hit a bug, have a feature idea, or have a change on a fork branch or commit you want considered, open an issue and link to it. Maintainers harvest changes from forks, cherry-pick or rewrite what fits, and credit the author with a `Co-authored-by:` trailer and in [CHANGELOG.md](CHANGELOG.md). See [AGENTS.md](AGENTS.md) for the code layout and contributor conventions, and [DESIGN.md](DESIGN.md) / [PRODUCT.md](PRODUCT.md) for the design system and product intent. [docs/README.md](docs/README.md) lists the documents in `docs/`, one line each.
 
 ## Vendored dependencies
 
