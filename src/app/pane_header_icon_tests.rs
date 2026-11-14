@@ -372,10 +372,58 @@ fn a_narrow_header_keeps_its_buttons_and_drops_the_glyph() {
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
+/// The same rule for the longest words a header draws: “Needs sign-in” at 29% (about 170 pt,
+/// two buttons) and “Paused 100%” at 36% (about 219 pt, four), both wider than the row without
+/// the glyph needs and narrower than the measured word lets it keep.
+#[test]
+fn the_longest_activity_words_drop_the_glyph_and_leave_close_where_it_was() {
+    use rex_rune::connection::activity::{BlockedKind, ProgramState, TerminalProgress};
+    let _families = rune::text::with_families("Inter", "Inter");
+    for (ratio, word) in [(0.29, "Needs sign-in"), (0.36, "Paused 100%")] {
+        let (mut ws, _host) = tabbed_workspace("split");
+        programmes(&mut ws);
+        if word == "Needs sign-in" {
+            let mut blocked = record(ProgramState::Blocked, true);
+            blocked.kind = Some(BlockedKind::Auth);
+            set_activity(&mut ws, "block:b", &[("", blocked)]);
+        } else {
+            ws.hosts[0]
+                .model
+                .progress
+                .insert("block:b".into(), TerminalProgress::Paused(Some(100)));
+        }
+        let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+        let layout = serde_json::json!({"split": {"direction": "horizontal", "ratio": ratio,
+            "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}});
+        view.windows[1].layers[0].layout = serde_json::from_value(layout).unwrap();
+        let (sender, _sent) = flume::unbounded();
+        framed_terminal(&mut ws, "block:b", &sender, b"$ prompt");
+        framed_terminal(&mut ws, "block:c", &sender, b"$ prompt");
+        let mut rt = runtime_at(ws, (640., 480.));
+        settle(&mut rt);
+        let pane = rect(&rt, "pane:block:b");
+        let close = rect(&rt, "pane-close:block:b");
+        assert!(has(&rt, "pane-word:block:b"), "{word}: the word is drawn");
+        assert!(
+            !has(&rt, "pane-icon:block:b"),
+            "{word}: no room for the glyph beside the word: {pane:?}"
+        );
+        assert!(
+            close[0] + close[2] <= pane[0] + pane[2],
+            "{word}: Close ends inside the pane: {pane:?}"
+        );
+        // Count 0 draws the same row without a glyph: the glyph never moves Close.
+        rt.update(|s, _| s.settings.interface.tab_icon_count = 0);
+        settle(&mut rt);
+        assert_eq!(rect(&rt, "pane-close:block:b"), close);
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+}
+
 /// A header's activity word and the buttons it draws decide the glyph's room. With a Blocked
-/// record on a 25% and a 33% pane of a 640×480 split — about 151 pt and 200 pt, where the word
-/// and the buttons alone just fit — the glyph gives way instead of pushing Close past the
-/// pane's edge, and Close stays where a header without a glyph has it.
+/// record drawing “Needs input” on a 25% and a 33% pane of a 640×480 split — about 151 pt and
+/// 200 pt, where the word and the buttons alone just fit — the glyph gives way instead of
+/// pushing Close past the pane's edge, and Close stays where a header without a glyph has it.
 #[test]
 fn an_activity_word_drops_the_glyph_before_it_pushes_close_out() {
     use rex_rune::connection::activity::ProgramState;
@@ -423,6 +471,55 @@ fn an_activity_word_drops_the_glyph_before_it_pushes_close_out() {
     }
 }
 
+/// The reconnecting strip's Retry pill cannot shrink, so the glyph gives way for it too. On a
+/// 31% and a 40% pane of a 640×480 split — about 188 pt with two buttons and 244 pt with four,
+/// where Retry just clears the buttons without a glyph — Retry still clears them.
+#[test]
+fn the_reconnecting_strip_drops_the_glyph_before_retry_meets_the_buttons() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    for ratio in [0.31, 0.4] {
+        let (mut ws, _host) = tabbed_workspace("split");
+        programmes(&mut ws);
+        let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+        let layout = serde_json::json!({"split": {"direction": "horizontal", "ratio": ratio,
+            "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}});
+        view.windows[1].layers[0].layout = serde_json::from_value(layout).unwrap();
+        let (sender, _sent) = flume::unbounded();
+        framed_terminal(&mut ws, "block:b", &sender, b"$ prompt");
+        framed_terminal(&mut ws, "block:c", &sender, b"$ prompt");
+        ws.terminals[&ws.term_key("block:b")]
+            .connection
+            .model
+            .lock()
+            .unwrap()
+            .connected = false;
+        let mut rt = runtime_at(ws, (640., 480.));
+        settle(&mut rt);
+        let clear = |rt: &Runtime<Workspace>| {
+            let retry = rect(rt, "strip-action:block:b");
+            let first = if has(rt, "pane-split-right:block:b") {
+                rect(rt, "pane-split-right:block:b")
+            } else {
+                rect(rt, "pane-zoom:block:b")
+            };
+            retry[0] + retry[2] <= first[0]
+        };
+        let pane = rect(&rt, "pane:block:b");
+        assert!(
+            !has(&rt, "pane-icon:block:b"),
+            "{ratio}: no room for the glyph beside Retry: {pane:?}"
+        );
+        assert!(clear(&rt), "{ratio}: Retry ends before the buttons");
+        rt.update(|s, _| s.settings.interface.tab_icon_count = 0);
+        settle(&mut rt);
+        assert!(
+            clear(&rt),
+            "{ratio}: the header without a glyph clears them too"
+        );
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+}
+
 /// Real-font evidence: run each individually with `REX_TEST_SNAP_DIR`.
 #[test]
 fn pane_header_icon_draw_large() {
@@ -432,6 +529,42 @@ fn pane_header_icon_draw_large() {
 #[test]
 fn pane_header_icon_draw_minimum() {
     draw((640., 480.), "pane-header-icon-minimum");
+}
+
+/// Real-font evidence of the room rule: run individually with `REX_TEST_SNAP_DIR`.
+#[test]
+fn pane_header_icon_draw_reconnect() {
+    let Some(mut camera) = Camera::new() else {
+        return;
+    };
+    let fonts = crate::app::fonts::load("IBM Plex Mono", &[]);
+    let _families = rune::text::with_families("Inter", "IBM Plex Mono");
+    let (mut ws, _host) = tabbed_workspace("split");
+    programmes(&mut ws);
+    let layout = serde_json::json!({"split": {"direction": "horizontal", "ratio": 0.31,
+        "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}});
+    ws.hosts[0].model.views.get_mut("s").unwrap().windows[1].layers[0].layout =
+        serde_json::from_value(layout).unwrap();
+    let (sender, _sent) = flume::unbounded();
+    framed_terminal(&mut ws, "block:b", &sender, b"$ nvim src/main.rs");
+    framed_terminal(&mut ws, "block:c", &sender, b"$ git log --oneline");
+    ws.terminals[&ws.term_key("block:b")]
+        .connection
+        .model
+        .lock()
+        .unwrap()
+        .connected = false;
+    let mut rt = Runtime::with_text(
+        ws,
+        view,
+        (640., 480.),
+        Env::new(true, 1.),
+        rune::text::TextSystem::new(fonts.files, fonts.families),
+    );
+    rt.on_key = Some(crate::app::input::on_key);
+    settle(&mut rt);
+    camera.snap(&mut rt, "pane-header-icon-reconnect");
+    std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
 fn draw(size: (f32, f32), prefix: &str) {

@@ -126,9 +126,15 @@ fn header(
     // The pane's own program before its name, as the title row draws the lone pane's: the
     // tab glyph rule, lit with its pane, and faded with the name where headers fade. The
     // glyph is decided from the room the row will have: its pads and gaps, the buttons it
-    // draws, and the word and chip beside the name. A header too narrow for all of them
-    // keeps its name and buttons instead, where the glyph would push Close out of the pane.
-    let extras = pane_header::extras(word.as_ref().map(|(word, _)| word.as_ref()), chip.is_some());
+    // draws, and the word, chip and reconnecting strip beside the name. A header too narrow
+    // for all of them keeps its name and buttons instead, where the glyph would push Close out
+    // of the pane or Retry over the buttons.
+    let strip = strip(s, block, width, m);
+    let extras = pane_header::extras(
+        word.as_ref().map(|(word, _)| word.as_ref()),
+        chip.is_some(),
+        strip.as_ref().map(|_| label.as_str()),
+    );
     let h = if pane_header::glyph_fits(width, lead, pane_header::buttons(width), extras) {
         let icons = tab_icons::icons_of(
             &[PaneProgram::of(s.model(), block)],
@@ -165,7 +171,7 @@ fn header(
         None => h,
     }
     .child(el().grow(1.));
-    let h = match strip(s, block, width, m) {
+    let h = match strip {
         Some(strip) => h.child(strip),
         None => h,
     };
