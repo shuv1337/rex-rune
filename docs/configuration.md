@@ -3,19 +3,10 @@
 ## Command-line options
 
 ```sh
-# Create a persistent session on the local Rex server.
 rex-rune --new work
-
-# Reattach to an existing session by exact label or ID.
 rex-rune --session work
-
-# Attach to a remote server (for example one exposed over Tailscale).
 rex-rune --endpoint https://my-host.example.ts.net --session work
-
-# Attach to the Rex server on another machine through its SSH login.
 rex-rune --endpoint ssh://me@my-host.example.ts.net --session work
-
-# Choose a terminal font and size.
 rex-rune --session work --font 'JetBrainsMono Nerd Font' --font-size 15
 ```
 
@@ -119,15 +110,15 @@ version’s release notes, the MIT license or the issue tracker from the same pa
 Source archives without Git show `unknown` for build metadata.
 
 **Stop server…** in Settings → Server and Commands (`host.stop_server`, unbound
-and local-only) is offered only while connected through `unix://` or `ssh://`.
-**Stop server ends every program in the server’s sessions**, disconnects other
-clients, and Rex Rune will not start it again. The confirmation names the host and
-the last reported session count, with **Cancel** as the default. Confirmation
-sends one `server.stop` without `if_idle`; failures are shown and never retried.
-Ordinary reconnect only tries to attach. **Running for** uses the reported start
-time and this client’s clock (`now`, whole `m`, `h`, `d`), refreshes locally once a
-minute only on this page, and disappears while disconnected or when the time is
-unusable. [Checks and limits](parity-2026-11/M3.3-server-controls.md).
+and local-only) is offered only over `unix://` or `ssh://`. **Stop server ends
+every program in the server’s sessions**, disconnects other clients, and Rex Rune
+will not start it again. The confirmation names the host and the last reported
+session count, with **Cancel** as the default. It sends one `server.stop` without
+`if_idle`; failures are shown and never retried, and ordinary reconnect only
+attaches. **Running for** uses the reported start time and this client’s clock
+(`now`, whole `m`, `h`, `d`), refreshes locally once a minute on this page only,
+and disappears while disconnected or when the time is unusable. [Checks and
+limits](parity-2026-11/M3.3-server-controls.md).
 
 **Pair device…** in Commands (unbound by default) opens the same local-only dialog
 as Server → Pair. It shows a black-on-white QR code and, under it, exactly what the
@@ -151,6 +142,14 @@ Escape clears the active search before closing. The separate Shortcuts filter
 still searches actions and key chords; Search Settings links to that page rather
 than filtering its actions. Search and history start fresh each time Settings
 opens.
+
+**Prefer generated titles** (Settings → Terminal → Titles, local
+`generated_titles`, default off including files written before the setting
+existed) shows the foreground program and directory (`vim - ~/rex`) on unnamed
+tabs and panes instead of shell-set titles. A program-set title still wins, and
+user renames always win. It changes display only: no label, title, output,
+ownership or layout change, and no server request. See [generated
+titles](parity-2026-11/generated-titles.md).
 
 ## Interface
 
@@ -299,10 +298,9 @@ choice is kept for other hosts.
 
 Headed cards include steady typography, cursor and selection previews. Cursor
 style chooses Block, Bar or Underline as the local default; explicit program
-requests win unless **Force style** is on. **Copy on selection** copies only a
-completed pointer selection, on release. **Primary selection** additionally owns
-the desktop's PRIMARY selection and pastes it on a middle click, never during a
-drag or over a mouse-reporting program. Both copy options default off. Selection
+requests win unless **Force style** is on. **Copy on selection** and **Primary
+selection** work as described in [Terminal, search, selection and
+clipboard](terminal.md#selection-and-local-history); both default off. Selection
 foreground/background each offer Theme, Cell foreground and Cell background; equal
 cell-derived colours use the cell's other colour for legibility. Rounded corners
 are opt-in, preserving existing square selections. **Show key sequence hints**
@@ -310,10 +308,10 @@ controls both toolbar and floating chips without changing key dispatch. On macOS
 **Option key** chooses whether Option, or only the left or right one, acts as Alt
 or types characters ([Shortcuts on
 macOS](shortcuts.md#shortcuts-on-macos)). These preferences are saved under
-`terminal`; existing top-level font and `generated_titles` keys are unchanged.
-Nothing changes ordinary output colours, server layout or ownership. X11 clipboard
-acceptance is verified; Wayland PRIMARY depends on compositor support and is not
-yet validated. The settings-file path is in About. See [M2.5 evidence and
+`terminal`; existing top-level font keys and the default-off `generated_titles`
+preference are unchanged.
+Nothing changes ordinary output colours, server layout or ownership. The
+settings-file path is in About. See [M2.5 evidence and
 limits](parity-2026-11/M2.5.md).
 
 **Fonts:** in Terminal settings, **Terminal font → Choose…** opens an anchored
@@ -330,18 +328,16 @@ spacing (−3 to +12 points, or −30% to +100%), program bold/italic rendering,
 ordered fallback list with Add, Move up/down and Remove. The new subpage
 participates in Settings search and Back/Forward history. Family changes take
 effect when you reopen the client; they do not restart the server or its sessions.
-The initial family is `JetBrainsMono Nerd Font`. If it (or the family you chose) is
-not installed, terminals use SF Mono, else Menlo, on macOS, Cascadia Mono, else
-Consolas, on Windows, and bundled IBM Plex Mono on Linux; the saved choice is kept
-for when it is installed. Missing glyphs come from the named fallbacks in order,
+The initial family is `JetBrainsMono Nerd Font`. An unavailable family uses SF
+Mono, else Menlo, on macOS; Cascadia Mono, else Consolas, on Windows; and bundled
+IBM Plex Mono on Linux, keeping the saved choice for when it is installed. Missing glyphs come from the named fallbacks in order,
 then bundled IBM Plex Mono, then the bundled Symbols Nerd Font, then automatic
 system fallbacks for other scripts and symbols; an empty fallback list uses only
 the latter three. The symbols font draws Powerline and Nerd Font icons in a prompt
 when the terminal font has none; its wide icons (a folder, say) extend into the
 next cell, as in a Nerd Font, so prompts leave a space after them, and Powerline
 separators are a little shorter than the row. The launch font stack resolves only
-the families you name; picker samples lazily load the highlighted family through
-Rune, not every installed font file. Font files are memory-mapped rather than
+the families you name. Font files are memory-mapped rather than
 copied. Linux discovery of the automatic fallbacks includes fontconfig's fonts,
 including fonts installed through Nix. Fallback faces supply missing glyphs
 without changing the primary font's grid metrics; install a suitable CJK font,

@@ -164,6 +164,40 @@ the clipboard and primary-selection copy. Neither workaround sets
 the server's own clipboard (Neovim 0.11 and later) from using it while `DISPLAY`
 or `WAYLAND_DISPLAY` is set there.
 
+## Insert path and Go to directory
+
+**Insert path…** in Commands browses files and folders on the focused terminal's
+machine. **Go to directory…** uses the same browser over folders only. Type a
+directory path, filter its last component (start with `.` for hidden entries),
+move with Up/Down and press Tab on a folder to descend. Enter or a click pastes
+the choice into the captured pane; Escape returns to the terminal.
+
+- **Insert path** inserts one absolute path, quoted for a POSIX shell, with no
+  Enter or trailing space. Home paths show as `~` but insert as absolute paths.
+- **Go to directory** types `cd` followed by the quoted folder. It never presses
+  Enter: the client cannot see whether the prompt already holds text, so you run
+  the line yourself.
+- The text goes to whatever program is in the foreground. It is not right inside
+  an already-open quote, and it assumes POSIX quoting; fish and csh quote
+  differently.
+- Names with control characters, line separators or invisible formatting
+  characters (bidirectional controls, zero-width space) are refused; look-alike
+  letters are not detected.
+- The server must support `terminal.list_dir`. Older-server refusals and other
+  errors stay in the browser.
+- The first listing offers up to ten recently used paths per saved host, shared
+  across its sessions on this computer; editing the field hides them. Recent
+  folders share that history, and file recents are hidden in Go to directory.
+  Settings → Terminal → **Show recently used paths** is on by default; turning
+  it off forgets the history. The lists are plain text in `workspace.json`. A
+  recent path may no longer exist; choosing it does not check.
+- `pane.insert_path` and `pane.go_to_directory` are local-only and unbound by
+  default; assign removable bindings in Settings → Shortcuts.
+
+See [browser checks](parity-2026-11/M3.1-insert-path.md), [Go to directory
+scope](parity-2026-11/M3.1-go-to-directory.md) and [recent
+paths](parity-2026-11/M3.1-recent-paths.md).
+
 ## Uploading files
 
 Drop files on a pane, or paste with Ctrl Shift V when the clipboard holds copied

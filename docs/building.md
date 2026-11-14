@@ -145,8 +145,8 @@ installer. Nobody has run the native client UI on Windows or checked attachment
 to a real server there. CI on `windows-2025` compiles the probes and app, runs the
 full unit and headless UI suite (including platform and DirectWrite font tests),
 separately runs the no-UI Ghostty VT and keymap integration tests, and checks
-Clippy, `--version` and `--help`. On 2026-11-14 that suite reported **993 passed,
-0 failed, 4 ignored**. Headless tests do not validate a native window, real
+Clippy, `--version` and `--help`. On 2026-11-13 (PST) that suite reported **993
+passed, 0 failed, 4 ignored**. Headless tests do not validate a native window, real
 input, clipboard/IME, display scaling or server attachment. Existing platform
 exclusions remain: Unix download-store/SSH fixtures and the Linux installer do
 not run on Windows; tests that need a private display, bus or server, or special

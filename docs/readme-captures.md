@@ -53,14 +53,23 @@ autostart off. It does not use the personal environment inherited by
 - Reviewed all four images and their OCR text: only fictional project/host
   labels, generic paths and the product's built-in preview text appear.
   No personal hosts, usernames, paths, IP addresses or credentials appear.
-- Ran WTFM scrub, PII and README link/style lint reports. Existing historical
-  docs and product references to coding tools are outside this screenshot
-  refresh; required contributor credits and bespoke prose are preserved.
-  No changelog, version stamps, security report or vendor files were rewritten.
+- Ran WTFM scrub, PII and README link/style lint reports. Checked every local
+  link, image and anchor across the 99 non-vendored Markdown files with GitHub
+  heading slugs, which preserve repeated hyphens: **0 broken**. An earlier check
+  reported 34, all false positives from collapsing hyphens in headings such as
+  `A. Settings → Shortcuts page`. Existing historical docs and product
+  references to coding tools are outside this screenshot refresh; required
+  contributor credits and bespoke prose are preserved. No changelog, version
+  stamps, security report or vendor files were rewritten.
 
 The existing `.wtfm.yaml` remains the command manifest. WTFM's capture planner
 supports `capture.web`, not desktop windows, and returns no pages for this
-project even with `--force`. Its browser capture/record phase is therefore
-skipped, not treated as a successful capture. This file and
-[`images/readme-captures.json`](images/readme-captures.json) record the native
-capture source, sizes and hashes instead.
+project even with `--force`. A `needed: false` result therefore says nothing
+about screenshot freshness and is not evidence for it. Its browser
+capture/record phase is skipped, not treated as a successful capture. The hero
+was inspected and its SHA-256 matches
+[`images/readme-captures.json`](images/readme-captures.json)
+(`b6e3e16f21b0f70c92a669bfc4802bbaef7c77f615a18b5be21cadf77d66165b`). It
+remains representative of the default chrome and layout, but it is a 0.7.4
+capture: it does not demonstrate 0.10 pane-header icons or later tab-icon
+settings.

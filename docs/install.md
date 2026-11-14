@@ -15,32 +15,58 @@ a second server.
 
 ## Arch Linux and Omarchy (pacman)
 
-Install `rex-rune-bin` from the Rex package repository:
+The package is signed; trust the key and add the repository before installing.
 
-```sh
-sudo pacman -Syu rex-rune-bin
-```
+1. Download the archive key and check its primary fingerprint against the value
+   committed in [`packaging/keys/README.md`](../packaging/keys/README.md):
 
-The repository section is still named `[rex-linux]` so existing `pacman.conf`
-files keep working. Add it once to `/etc/pacman.conf`:
+   ```sh
+   curl --proto '=https' --tlsv1.2 -fsSLo rex-linux-archive-key.asc https://pkg.shuv.dev/rex-linux-archive-key.asc
+   gpg --show-keys --with-colons rex-linux-archive-key.asc | awk -F: '/^fpr:/ {print $10; exit}'
+   ```
 
-```ini
-[rex-linux]
-SigLevel = Required DatabaseRequired
-Server = https://pkg.shuv.dev/arch/$arch
-```
+   The command must print
+   `4BC4B85F4AF37FA0D834B0B52B192F3817340BAB`. A different value means the
+   download is not the repository key; stop and do not trust it.
 
-Trust the archive key first:
+2. Add the key to pacman's keyring and verify the full fingerprint again:
 
-```sh
-curl --proto '=https' --tlsv1.2 -fsSLo rex-linux-archive-key.asc https://pkg.shuv.dev/rex-linux-archive-key.asc
-sudo pacman-key --add rex-linux-archive-key.asc
-```
+   ```sh
+   sudo pacman-key --init
+   sudo pacman-key --add rex-linux-archive-key.asc
+   sudo pacman-key --finger 4BC4B85F4AF37FA0D834B0B52B192F3817340BAB
+   ```
 
-Both package and database signatures are mandatory. On Omarchy, `omarchy update`
-updates Rex Rune with the rest of the system. After installing,
-`command -v rex-rune` should print `/usr/bin/rex-rune`, and `pacman -Qi
-rex-rune-bin` should say `Validated By : Signature`.
+3. Locally sign that key. Signing the full primary fingerprint, not a short ID,
+   is what makes pacman trust the repository's packages and database:
+
+   ```sh
+   sudo pacman-key --lsign-key 4BC4B85F4AF37FA0D834B0B52B192F3817340BAB
+   ```
+
+4. Add the repository once to `/etc/pacman.conf`. Keep the literal `$arch`:
+
+   ```ini
+   [rex-linux]
+   SigLevel = Required DatabaseRequired
+   Server = https://pkg.shuv.dev/arch/$arch
+   ```
+
+   The section is still named `[rex-linux]` so existing `pacman.conf` files keep
+   working.
+
+5. Refresh the databases and install:
+
+   ```sh
+   sudo pacman -Syu rex-rune-bin
+   ```
+
+Package and database signatures are mandatory: keep `SigLevel = Required`. Future
+upgrades use `sudo pacman -Syu` without an AUR helper; on Omarchy, `omarchy
+update` updates Rex Rune with the rest of the system. After installing,
+`command -v rex-rune` should print `/usr/bin/rex-rune`, `pacman -Qi rex-rune-bin`
+should say `Validated By : Signature`, and `/usr/share/rex-rune/channel` should
+contain `channel=pacman`.
 
 A `rex-linux-bin` install needs no change to `pacman.conf`: its next
 `sudo pacman -Syu` asks to replace it with `rex-rune-bin`. See
@@ -195,34 +221,19 @@ With mise, `mise run install` builds the release binary and runs the script with
 
 ## Updates and uninstalling
 
-Official and Nix builds check the signed GitHub release manifest (`latest.json`
-and `latest.json.minisig`) against embedded CI and backup Minisign public keys
-about 30 seconds after launch and at most once every 24 hours while running. When
-a newer stable release is verified, a non-blocking toast offers **What's new**
-(opening the GitHub release page in your browser), **Updates…** and **Dismiss for
-this version**. Guidance matches the detected install channel
-(`REX_RUNE_CHANNEL`, `/usr/share/rex-rune/channel` and
-`~/.local/share/rex-rune/install.json`): `sudo pacman -Syu rex-rune-bin` on Arch
-(`omarchy update` on Omarchy), with **Update now** there too once the installed
-`rex-rune-bin` carries its update helper and polkit's `pkexec` is present (it
-asks for an administrator's password and upgrades that one package; see
-[pacman installs](self-updates.md#pacman-installs)), **Update now** (with **Copy
-command** fallback) for verified, user-writable tarball/script installs under
-`~/.local`, `.deb` upgrade instructions for Debian/Ubuntu, and `nix flake update
-rex-rune` / `nix profile upgrade rex-rune` for Nix. Source builds never check
-automatically; turn automatic checks off in Settings → Updates (`updates.check`
-in `workspace.json`) or with `REX_RUNE_NO_UPDATE_CHECK=1`, or check on demand with
-**Check now** or `rex-rune --check-update`. Background check failures are silent.
-Installer updates verify the signed tarball, replace the client and desktop files
-with rollback on failure, then offer **Restart to finish**. **Install updates
-automatically** is a separate default-off preference
-(`updates.install_automatically`); it offers restart rather than interrupting
-work. See [self-updates](self-updates.md).
-
-Settings → Updates checks the signed release manifest and offers channel-specific
-guidance. **Update now** is available for verified, user-writable install.sh
-installs and for pacman installs that ship the update helper. See
-[self-updates](self-updates.md) for eligibility, rollback and pacman details.
+Official and Nix builds check the signed release manifest (`latest.json` and
+`latest.json.minisig`) about 30 seconds after launch and at most once every 24
+hours; source builds never check automatically. A verified newer release offers
+**What's new**, **Updates…** and **Dismiss for this version**, with guidance for
+the detected channel: pacman (including **Update now** where the package carries
+the helper), user-writable install.sh/tarball installs (**Update now** with
+**Copy command**), `.deb` and Nix. Turn checks off in Settings → Updates
+(`updates.check`) or with `REX_RUNE_NO_UPDATE_CHECK=1`, or check on demand with
+**Check now** or `rex-rune --check-update`; background failures are silent.
+Installer updates verify the signed tarball, replace files with rollback and
+offer **Restart to finish**; **Install updates automatically** is a separate
+default-off preference. See [self-updates](self-updates.md) for eligibility,
+rollback and pacman details.
 
 Uninstalling does not remove preferences or change any Rex server:
 
