@@ -14,6 +14,7 @@ signed with a Developer ID or published, and the ad-hoc signature changes with e
 build. Start it with `open "target/release/Rex Rune.app" --args ...`.
 
 Usage: scripts/macos-app.py [--quiet]
+       scripts/macos-app.py --unregister   (unregister the bundle and remove it)
 REX_BIN names the binary to wrap (default target/release/rex-rune).
 """
 import os
@@ -30,7 +31,8 @@ BINARY = Path(os.environ.get("REX_BIN", ROOT / "target/release/rex-rune"))
 APP = ROOT / "target/release/Rex Rune.app"
 ICONS = ROOT / "resources/icons"
 ICONSET = [
-    # (name in the iconset, pixels across, source pixels available)
+    # (name in the iconset, pixels across, source pixels available). The largest source
+    # is 256 px, so the iconset stops there; iconutil takes any subset of sizes.
     ("icon_16x16.png", 16, 32),
     ("icon_16x16@2x.png", 32, 32),
     ("icon_32x32.png", 32, 32),
@@ -38,10 +40,10 @@ ICONSET = [
     ("icon_128x128.png", 128, 128),
     ("icon_128x128@2x.png", 256, 256),
     ("icon_256x256.png", 256, 256),
-    ("icon_256x256@2x.png", 512, 256),
-    ("icon_512x512.png", 512, 256),
-    ("icon_512x512@2x.png", 1024, 256),
 ]
+# UNUserNotificationCenter needs macOS 10.14, and the banner presentation the client asks
+# for while it is frontmost needs 11.0.
+NOTIFICATIONS_MACOS = "11.0"
 LSREGISTER = ("/System/Library/Frameworks/CoreServices.framework/Frameworks/"
               "LaunchServices.framework/Support/lsregister")
 
@@ -55,21 +57,36 @@ def version():
         return tomllib.load(file)["package"]["version"]
 
 
+def release(text):
+    return tuple(int(part) for part in text.split("."))
+
+
 def minimum_macos():
-    """The minimum the built binary declares, so the bundle does not claim another."""
+    """The later of the binary's own minimum and what notifications need, so the bundle
+    claims neither an older system than the binary loads on (Apple Silicon builds say
+    11.0) nor one without the notification calls (an Intel build says 10.12)."""
     try:
         lines = run("otool", "-l", str(BINARY)).stdout.splitlines()
     except (OSError, subprocess.CalledProcessError):
-        return "12.0"
+        sys.exit(f"could not read the minimum macOS of {BINARY} with otool")
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("minos "):
-            return stripped.split()[1]
-    return "12.0"
+            return max(stripped.split()[1], NOTIFICATIONS_MACOS, key=release)
+    sys.exit(f"{BINARY} declares no minimum macOS (no minos in otool -l)")
+
+
+def unregister():
+    if APP.exists():
+        run(LSREGISTER, "-u", str(APP))
+        shutil.rmtree(APP)
+        print(f"unregistered and removed {APP}")
+    else:
+        print(f"no bundle at {APP}")
 
 
 def make_icon(destination):
-    """An .icns from the PNGs the desktop entry uses. iconutil wants every icon size."""
+    """An .icns from the PNGs the desktop entry uses, only ever scaled down."""
     iconset = Path(tempfile.mkdtemp(prefix="rex-rune-")) / "Rex Rune.iconset"
     iconset.mkdir()
     try:
@@ -78,6 +95,7 @@ def make_icon(destination):
             if not png.exists():
                 sys.exit(f"missing icon source {png}")
             target = iconset / name
+            assert pixels <= source, f"{name} would upscale a {source} px icon"
             if pixels == source:
                 shutil.copy(png, target)
             else:
@@ -91,6 +109,9 @@ def main():
     quiet = "--quiet" in sys.argv[1:]
     if sys.platform != "darwin":
         sys.exit("macos-app.py makes a macOS app bundle; run it on a Mac")
+    if "--unregister" in sys.argv[1:]:
+        unregister()
+        return
     if not BINARY.is_file():
         sys.exit(f"no release binary at {BINARY}; run `cargo build --locked --release --bin rex-rune`")
 

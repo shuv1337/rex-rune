@@ -1,7 +1,7 @@
 //! The freedesktop notification service over D-Bus, on a worker thread so the bus never
 //! blocks the UI. Calls and signals are pinned to the service's current owner, so ids
 //! from a replaced service are never reused.
-use crate::app::notify::{Backend, Event, Note, Service, Session};
+use crate::app::notify::{Backend, Event, Kind, Note, Service, Session};
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use zbus::{Connection, Proxy, Variant};
@@ -13,6 +13,16 @@ const IMAGE: &[u8] =
     include_bytes!("../../../../resources/icons/128x128/apps/dev.shuv.rex-rune.png");
 
 const DISCONNECTED: &str = "Session bus disconnected";
+
+/// The spec's urgency: critical for a tab waiting on the person or one that failed.
+fn urgency(kind: Kind) -> u8 {
+    use rex_rune::connection::activity::ProgramState::{Blocked, Error};
+    if matches!(kind, Kind::Activity(Blocked | Error)) {
+        2
+    } else {
+        1
+    }
+}
 
 /// `IMAGE` as the spec's `image-data` hint, `(iiibiiay)`: width, height, row stride, alpha,
 /// bits per sample, channels and RGBA bytes. Sent with every notification, so it needs no
@@ -183,7 +193,7 @@ impl Backend for Desktop {
         let bus = self.bus.as_ref().expect("ready before send");
         let mut hints = HashMap::from([
             ("desktop-entry", Variant::from("dev.shuv.rex-rune")),
-            ("urgency", Variant::from(note.kind.urgency())),
+            ("urgency", Variant::from(urgency(note.kind))),
         ]);
         if let Some(image) = self.image.as_ref().and_then(|i| i.try_clone().ok()) {
             hints.insert("image-data", image);
@@ -302,6 +312,23 @@ pub fn restart_failure(message: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urgency_is_critical_only_for_blocked_and_error() {
+        use rex_rune::connection::activity::ProgramState::*;
+        for state in [Idle, Working, Blocked, Error, Done] {
+            assert_eq!(
+                urgency(Kind::Activity(state)),
+                if matches!(state, Blocked | Error) {
+                    2
+                } else {
+                    1
+                }
+            );
+        }
+        assert_eq!(urgency(Kind::Program), 1);
+        assert_eq!(urgency(Kind::Test), 1);
+    }
 
     #[test]
     fn dbus_missing_service_errors_are_not_found() {

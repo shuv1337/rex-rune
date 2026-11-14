@@ -184,22 +184,6 @@ fn missing_service_and_lost_bus_recover_only_on_a_later_command() {
 }
 
 #[test]
-fn urgency_is_critical_only_for_blocked_and_error() {
-    for state in [Idle, Working, Blocked, Error, Done] {
-        assert_eq!(
-            Kind::Activity(state).urgency(),
-            if matches!(state, Blocked | Error) {
-                2
-            } else {
-                1
-            }
-        );
-    }
-    assert_eq!(Kind::Program.urgency(), 1);
-    assert_eq!(Kind::Test.urgency(), 1);
-}
-
-#[test]
 fn dismissed_and_restarted_daemon_ids_are_not_reused_or_closed() {
     let mut out = Outbox::default();
     let n = note("one", Kind::Activity(Blocked));

@@ -2,9 +2,9 @@
 //! Linux and the BSDs use the freedesktop notification service; macOS the system's
 //! notification centre; other platforms (Windows) have none yet, and say so.
 //!
-//! Choosing here keeps every call site free of an operating-system `cfg`, and lets a
-//! platform that cannot post notifications leave the feature out instead of offering
-//! something that does nothing.
+//! Choosing here keeps every call site free of an operating-system `cfg`. A platform or a
+//! copy of the app that cannot post says why through its backend, and Settings →
+//! Notifications shows that reason in the service row beside the unchanged switches.
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod dbus;

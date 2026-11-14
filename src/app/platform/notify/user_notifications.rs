@@ -19,14 +19,12 @@ use objc2_user_notifications::{
     UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use rex_rune::connection::activity::ProgramState;
+use std::hash::BuildHasher;
 use std::ptr::NonNull;
 use std::time::Duration;
 
-/// There is one Notification Center, so its ids belong to one owner for the app's life.
+/// There is one Notification Center, so its ids belong to one owner for the process's life.
 const OWNER: &str = "macos-notification-centre";
-/// Request identifiers. Posting with one that is live replaces that notification, and
-/// removing one removes what it holds.
-const IDENTIFIER: &str = "rex-";
 
 const NOT_BUNDLED: &str = "Start Rex Rune.app to allow notifications";
 const DENIED: &str = "Turned off in System Settings";
@@ -57,21 +55,45 @@ fn allowed(status: UNAuthorizationStatus) -> Result<(), Service> {
     }
 }
 
-/// The request identifier for a ledger id; the same id always replaces the same note.
-fn request_identifier(id: u32) -> String {
-    format!("{IDENTIFIER}{id}")
+/// What a permission request's completion handler reports: granted, and whether the request
+/// itself failed.
+type Answer = (bool, bool);
+
+fn answered((granted, failed): Answer) -> Result<(), Service> {
+    match (granted, failed) {
+        (true, _) => Ok(()),
+        // The request itself failed (an unsigned or unregistered copy of the app).
+        (false, true) => Err(Service::Unavailable(REFUSED.into())),
+        (false, false) => Err(Service::Unavailable(DENIED.into())),
+    }
 }
 
-/// The ledger id a clicked notification came from, if it is one of ours.
-fn note_id(identifier: &str) -> Option<u32> {
+/// Notes left in Notification Center outlive the process, and ledger ids start again at 1,
+/// so every request identifier carries this launch's own prefix, `rex-<launch>-`. Posting
+/// with a live identifier replaces that note and removing one removes it; a note from an
+/// earlier launch matches neither, and its click or dismissal is not ours.
+fn launch_prefix() -> String {
+    let launch = std::collections::hash_map::RandomState::new()
+        .hash_one((std::time::SystemTime::now(), std::process::id()));
+    format!("rex-{launch:016x}-")
+}
+
+/// The request identifier for a ledger id; the same id always replaces the same note.
+fn request_identifier(prefix: &str, id: u32) -> String {
+    format!("{prefix}{id}")
+}
+
+/// The ledger id a clicked notification came from, if this launch sent it.
+fn note_id(prefix: &str, identifier: &str) -> Option<u32> {
     identifier
-        .strip_prefix(IDENTIFIER)
+        .strip_prefix(prefix)
         .and_then(|rest| rest.parse().ok())
         .filter(|id| *id != 0)
 }
 
 struct Ivars {
     events: flume::Sender<Event>,
+    prefix: String,
 }
 
 declare_class!(
@@ -119,7 +141,7 @@ declare_class!(
             let action = unsafe { response.actionIdentifier() };
             let default = unsafe { UNNotificationDefaultActionIdentifier };
             let identifier = unsafe { response.notification().request().identifier() };
-            if let Some(id) = note_id(&identifier.to_string()) {
+            if let Some(id) = note_id(&self.ivars().prefix, &identifier.to_string()) {
                 let event = if &*action == default {
                     Event::Click(id)
                 } else {
@@ -133,8 +155,8 @@ declare_class!(
 );
 
 impl Delegate {
-    fn new(events: flume::Sender<Event>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(Ivars { events });
+    fn new(events: flume::Sender<Event>, prefix: String) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(Ivars { events, prefix });
         unsafe { msg_send_id![super(this), init] }
     }
 }
@@ -144,9 +166,12 @@ pub struct Desktop {
     problem: Option<Service>,
     center: Option<Retained<UNUserNotificationCenter>>,
     /// The notification centre's delegate is weak; this keeps ours alive.
-    #[allow(dead_code)]
-    delegate: Option<Retained<Delegate>>,
+    _delegate: Option<Retained<Delegate>>,
     events: flume::Receiver<Event>,
+    /// This launch's request identifier prefix.
+    prefix: String,
+    /// The answer to a permission prompt that is still up, while a person has not answered.
+    asking: Option<flume::Receiver<Answer>>,
     next_id: u32,
 }
 
@@ -161,8 +186,10 @@ impl Desktop {
         let mut desktop = Self {
             problem,
             center: None,
-            delegate: None,
+            _delegate: None,
             events: receiver,
+            prefix: launch_prefix(),
+            asking: None,
             next_id: 0,
         };
         if desktop.problem.is_none() {
@@ -175,10 +202,14 @@ impl Desktop {
     /// raises before this returns.
     fn install(&mut self, events: flume::Sender<Event>) {
         let center = unsafe { UNUserNotificationCenter::currentNotificationCenter() };
-        let delegate = Delegate::new(events);
+        let delegate = Delegate::new(events, self.prefix.clone());
         unsafe { center.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
         self.center = Some(center);
-        self.delegate = Some(delegate);
+        self._delegate = Some(delegate);
+    }
+
+    fn owner(&self) -> String {
+        format!("{OWNER}:{}", self.prefix)
     }
 
     fn center(&self) -> &UNUserNotificationCenter {
@@ -197,7 +228,8 @@ impl Desktop {
         let (tx, rx) = flume::bounded(1);
         let block = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
             let status = unsafe { settings.as_ref().authorizationStatus() };
-            let _ = tx.send(status);
+            // Never block the framework's callback thread, even if it calls twice.
+            let _ = tx.try_send(status);
         });
         unsafe {
             self.center()
@@ -207,11 +239,12 @@ impl Desktop {
     }
 
     /// Ask, alert only: badges and sounds are not Rex's (it has sounds of its own). A
-    /// person answers the system prompt, so this can outlast the bound.
-    async fn ask(&self) -> Result<(), Service> {
+    /// person answers the system prompt, so the answer can outlast the bound; it is then
+    /// kept for later commands, and macOS is not asked again while the prompt is up.
+    async fn ask(&mut self) -> Result<(), Service> {
         let (tx, rx) = flume::bounded(1);
         let block = RcBlock::new(move |granted: Bool, error: *mut NSError| {
-            let _ = tx.send((granted.as_bool(), !error.is_null()));
+            let _ = tx.try_send((granted.as_bool(), !error.is_null()));
         });
         unsafe {
             self.center()
@@ -221,15 +254,28 @@ impl Desktop {
                 );
         }
         match tokio::time::timeout(Duration::from_secs(3), rx.recv_async()).await {
-            Ok(Ok((true, _))) => Ok(()),
-            // The request itself failed (an unsigned or unregistered copy of the app).
-            Ok(Ok((false, true))) => Err(Service::Unavailable(REFUSED.into())),
-            Ok(Ok((false, false))) => Err(Service::Unavailable(DENIED.into())),
+            Ok(Ok(answer)) => answered(answer),
+            Ok(Err(_)) => Err(Service::Unavailable(WAITING.into())),
             // A person has not answered the system prompt yet: a state to report, not a
-            // failed call. The next command reads the answer.
-            Ok(Err(_)) | Err(_) => Err(Service::Unavailable(WAITING.into())),
+            // failed call.
+            Err(_) => {
+                self.asking = Some(rx);
+                Err(Service::Unavailable(WAITING.into()))
+            }
         }
     }
+}
+
+/// The answer to a prompt left up by an earlier command, without waiting for it. `None`
+/// once there is nothing left to wait for, so the caller reads the settings again.
+fn pending(asking: &mut Option<flume::Receiver<Answer>>) -> Option<Result<(), Service>> {
+    let answer = match asking.as_ref()?.try_recv() {
+        Err(flume::TryRecvError::Empty) => return Some(Err(Service::Unavailable(WAITING.into()))),
+        Ok(answer) => Some(answered(answer)),
+        Err(flume::TryRecvError::Disconnected) => None,
+    };
+    *asking = None;
+    answer
 }
 
 /// Wait for a completion handler, with the same three-second bound as every desktop call.
@@ -245,13 +291,16 @@ impl Backend for Desktop {
         if let Some(problem) = &self.problem {
             return Err(problem.clone());
         }
+        if let Some(answer) = pending(&mut self.asking) {
+            return answer.map(|()| self.owner());
+        }
         let status = self.settings().await?;
         match allowed(status) {
-            Ok(()) => Ok(OWNER.into()),
+            Ok(()) => Ok(self.owner()),
             Err(_) if status == UNAuthorizationStatus::NotDetermined => {
                 // First need, including Send test notification.
                 self.ask().await?;
-                Ok(OWNER.into())
+                Ok(self.owner())
             }
             Err(problem) => Err(problem),
         }
@@ -271,7 +320,7 @@ impl Backend for Desktop {
             content.setTitle(&NSString::from_str(&note.summary));
             content.setBody(&NSString::from_str(&note.body));
         }
-        let identifier = NSString::from_str(&request_identifier(id));
+        let identifier = NSString::from_str(&request_identifier(&self.prefix, id));
         let request = unsafe {
             UNNotificationRequest::requestWithIdentifier_content_trigger(
                 &identifier,
@@ -281,7 +330,7 @@ impl Backend for Desktop {
         };
         let (tx, rx) = flume::bounded(1);
         let block = RcBlock::new(move |error: *mut NSError| {
-            let _ = tx.send(!error.is_null());
+            let _ = tx.try_send(!error.is_null());
         });
         unsafe {
             self.center()
@@ -298,7 +347,7 @@ impl Backend for Desktop {
         if let Some(problem) = &self.problem {
             return Err(problem.clone());
         }
-        let identifier = NSString::from_str(&request_identifier(id));
+        let identifier = NSString::from_str(&request_identifier(&self.prefix, id));
         let identifiers = NSArray::from_vec(vec![identifier.clone()]);
         unsafe {
             self.center()
@@ -310,7 +359,7 @@ impl Backend for Desktop {
 
 impl Session for Desktop {
     fn identity(&self) -> Option<String> {
-        self.problem.is_none().then(|| OWNER.to_string())
+        self.problem.is_none().then(|| self.owner())
     }
 
     async fn event(&mut self) -> Event {
@@ -360,24 +409,103 @@ mod tests {
 
     #[test]
     fn a_request_identifier_round_trips_through_a_click() {
+        let prefix = launch_prefix();
         for id in [1, 2, 64, u32::MAX] {
-            assert_eq!(note_id(&request_identifier(id)), Some(id));
+            assert_eq!(note_id(&prefix, &request_identifier(&prefix, id)), Some(id));
         }
     }
 
     #[test]
+    fn identifiers_carry_this_launch_and_no_other() {
+        let prefix = launch_prefix();
+        let identifier = request_identifier(&prefix, 1);
+        let launch = identifier
+            .strip_prefix("rex-")
+            .and_then(|rest| rest.strip_suffix("-1"))
+            .expect("rex-<launch>-<id>");
+        assert_eq!(launch.len(), 16);
+        assert!(launch.chars().all(|c| c.is_ascii_hexdigit()));
+        // An earlier launch's note keeps its click and close to itself, though its ledger
+        // id is one this launch uses too.
+        let earlier = launch_prefix();
+        assert_ne!(earlier, prefix);
+        assert_eq!(note_id(&prefix, &request_identifier(&earlier, 1)), None);
+        let desktop = Desktop {
+            problem: None,
+            center: None,
+            _delegate: None,
+            events: flume::unbounded().1,
+            prefix: prefix.clone(),
+            asking: None,
+            next_id: 0,
+        };
+        assert_eq!(desktop.owner(), format!("{OWNER}:{prefix}"));
+        assert_eq!(desktop.identity(), Some(desktop.owner()));
+    }
+
+    #[test]
     fn only_rex_identifiers_are_ours() {
+        let prefix = launch_prefix();
         for other in [
-            "",
-            "rex-",
-            "rex-0",
-            "rex-one",
-            "notifications.rex-1",
-            "Rex-1",
-            "1",
+            String::new(),
+            prefix.clone(),
+            format!("{prefix}0"),
+            format!("{prefix}one"),
+            format!("notifications.{prefix}1"),
+            "rex-1".into(),
+            "Rex-1".into(),
+            "1".into(),
         ] {
-            assert_eq!(note_id(other), None, "{other:?}");
+            assert_eq!(note_id(&prefix, &other), None, "{other:?}");
         }
+    }
+
+    #[test]
+    fn an_unanswered_prompt_is_waited_on_without_asking_again() {
+        let waiting = Err(Service::Unavailable(WAITING.into()));
+        let mut asking = None;
+        assert_eq!(
+            pending(&mut asking),
+            None,
+            "nothing asked yet: read the settings"
+        );
+        let (tx, rx) = flume::bounded::<Answer>(1);
+        asking = Some(rx);
+        // Every command while the prompt is up says so at once and keeps the request.
+        for _ in 0..3 {
+            assert_eq!(pending(&mut asking), Some(waiting.clone()));
+            assert!(asking.is_some());
+        }
+        tx.try_send((true, false)).expect("one answer");
+        assert!(
+            tx.try_send((false, false)).is_err(),
+            "a second call never blocks"
+        );
+        assert_eq!(pending(&mut asking), Some(Ok(())));
+        assert!(
+            asking.is_none(),
+            "answered: the next command reads the settings"
+        );
+        assert_eq!(pending(&mut asking), None);
+        // A handler that was dropped unanswered leaves nothing to wait for.
+        let (tx, rx) = flume::bounded::<Answer>(1);
+        asking = Some(rx);
+        drop(tx);
+        assert_eq!(pending(&mut asking), None);
+        assert!(asking.is_none());
+    }
+
+    #[test]
+    fn a_prompt_answer_has_its_own_reason() {
+        assert_eq!(answered((true, false)), Ok(()));
+        assert_eq!(
+            answered((false, false)),
+            Err(Service::Unavailable(DENIED.into()))
+        );
+        assert_eq!(
+            answered((false, true)),
+            Err(Service::Unavailable(REFUSED.into()))
+        );
     }
 
     #[test]

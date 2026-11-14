@@ -2,24 +2,37 @@
 """Desktop notifications on macOS, through the built client and a private Rex server.
 
 Requires macOS, a built release binary (REX_BIN, default target/release/rex-rune), the
-app bundle scripts/macos-app.py makes (target/release/Rex Rune.app), and a Rex server
-binary (REX_SERVER_BIN, default the one inside Rex Beta.app or Rex.app, run in place).
-The server, every client run and the shells they start get their own HOME, socket, state
-and settings under a fresh /tmp/rex-notifications-* folder; the server is stopped by PID,
-and the script checks that the real ~/.zsh_history did not change.
+app bundle scripts/macos-app.py makes (REX_APP, default target/release/Rex Rune.app), and
+a Rex server binary (REX_SERVER_BIN, default the one inside Rex Beta.app or Rex.app, run
+in place). The server, every client run and the shells they start get their own HOME,
+socket, state and settings under a fresh /tmp/rex-notifications-* folder; the server is
+stopped by PID, and the script checks that the real ~/.zsh_history did not change.
+
+The real bundle is never launched. Its permission belongs to the person, and a prompt left
+unanswered when the app quits can turn it off. The script copies the bundle under
+target/notification-acceptance/ with a fresh identifier,
+dev.shuv.rex-rune.acceptance.<random>, re-signs the copy ad hoc and registers it, runs
+only the copy, and finally unregisters and deletes it. macOS keeps an entry for each
+such identifier in System Settings → Notifications; nothing here edits it.
 
 Checks:
 1. The bare binary (no app bundle) opens Settings → Notifications without crashing, and
    says to start Rex Rune.app.
-2. The app bundle's copy reports macOS's notification state. The first request raises the
-   system permission prompt, which only a person may answer: this script never clicks it,
-   records the waiting state, and exits without answering.
+2. The copy, whose identifier macOS has never seen, raises the system permission prompt
+   when the page opens. Nobody answers it (this script never clicks it), so after the
+   request's three-second bound the page says Unavailable: Waiting for permission from
+   macOS.
+3. Send test notification, pressed while that prompt is still up, fails at once with the
+   same reason instead of asking macOS again (which would show "Sending test…" for three
+   more seconds).
 
 Usage: scripts/notification-macos-private.py [capture dir].
 """
 import json
 import os
 from pathlib import Path
+import plistlib
+import secrets
 import shutil
 import signal
 import subprocess
@@ -30,12 +43,16 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 BARE = Path(os.environ.get("REX_BIN", ROOT / "target/release/rex-rune"))
 APP = Path(os.environ.get("REX_APP", ROOT / "target/release/Rex Rune.app"))
+REAL_ID = "dev.shuv.rex-rune"
 SERVERS = [
     "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
     "/Applications/Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
 ]
 SERVER = os.environ.get("REX_SERVER_BIN") or next((s for s in SERVERS if Path(s).exists()), None)
 PATH = "/usr/bin:/bin"
+LSREGISTER = ("/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+              "LaunchServices.framework/Support/lsregister")
+WAITING = "Waiting for permission from macOS"
 
 if sys.platform != "darwin":
     sys.exit("notification-macos-private.py checks macOS notifications; run it on a Mac")
@@ -75,8 +92,41 @@ def walk(node, found):
     return found
 
 
+def throwaway_copy():
+    """The bundle under a fresh identifier, outside /var/folders (where macOS refuses
+    notification requests), signed and registered like the real one."""
+    token = secrets.token_hex(6)
+    copy = ROOT / "target/notification-acceptance" / token / "Rex Rune Acceptance.app"
+    copy.parent.mkdir(parents=True)
+    shutil.copytree(APP, copy, symlinks=True)
+    info = copy / "Contents/Info.plist"
+    with info.open("rb") as file:
+        plist = plistlib.load(file)
+    plist.update({"CFBundleIdentifier": f"{REAL_ID}.acceptance.{token}",
+                  "CFBundleName": "Rex Rune Acceptance", "CFBundleDisplayName": "Rex Rune Acceptance"})
+    with info.open("wb") as file:
+        plistlib.dump(plist, file)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(copy)], check=True, capture_output=True)
+    signed = subprocess.run(["codesign", "-dv", str(copy)], check=True, capture_output=True, text=True)
+    identifier = next(line.split("=", 1)[1] for line in signed.stderr.splitlines()
+                      if line.startswith("Identifier="))
+    assert identifier == plist["CFBundleIdentifier"] != REAL_ID, identifier
+    subprocess.run([LSREGISTER, "-f", str(copy)], check=True, capture_output=True)
+    return copy, identifier
+
+
+def remove_copy(copy):
+    subprocess.run([LSREGISTER, "-u", str(copy)], capture_output=True)
+    shutil.rmtree(copy.parent, ignore_errors=True)
+    try:
+        copy.parent.parent.rmdir()
+    except OSError:
+        pass
+
+
 class Run:
     def __init__(self, name, binary, steps, at, config, size="1100x760"):
+        assert APP not in Path(binary).parents, "the real bundle is never launched"
         self.dir = work / "runs" / name
         self.dir.mkdir(parents=True)
         (self.dir / "script.json").write_text(json.dumps(steps))
@@ -116,6 +166,7 @@ def config(path):
 
 history = Path.home() / ".zsh_history"
 history_before = history.read_bytes() if history.exists() else b""
+copy = None
 server = subprocess.Popen(
     [SERVER, "server", "run", "--listen", endpoint, "--restore=false", "--config", "/dev/null",
      "--state-dir", str(work / "state")], env=env, cwd=work,
@@ -131,6 +182,7 @@ try:
                       "options": {"shell": str(shell)}}}}]})))
     sid = created["session_id"]
 
+    # Opening the page checks once on the worker, which asks macOS on a first need.
     page = [tap(1.0, "settings"), tap(1.6, "settings-section:notifications"),
             wheel(2.2, "settings-scroll:notifications", 400)]
 
@@ -140,22 +192,31 @@ try:
     print(f"1. bare binary: exit 0, Settings says {bare.keys['notification-health']!r}: "
           f"{bare.find('Start Rex Rune.app')[0]!r} ({bare.seconds:.1f} s)")
 
-    # The first request raises the system prompt and outlasts the worker's 3 s bound:
-    # wait past it to record what Settings then says.
-    bundle = Run("M11-app-bundle", APP / "Contents/MacOS/rex-rune", page, 8.0,
+    copy, identifier = throwaway_copy()
+    print(f"   throwaway bundle {identifier} at {copy}")
+    # The page's check asks at about 1.6 s and gives up waiting at about 4.6 s. The test
+    # is pressed at 6.0 s and the page read at 6.8 s: asking again would still be sending.
+    steps = page + [tap(6.0, "notification-test")]
+    bundle = Run("M11-waiting-and-send-test", copy / "Contents/MacOS/rex-rune", steps, 6.8,
                  config(work / "bundle.json"))
-    said = bundle.find("permission") + bundle.find("Turned off") + bundle.find("refused")
-    print(f"2. app bundle: exit 0, Settings says {bundle.keys.get('notification-health')!r}: {said}")
-    print(f"   (the system permission prompt, if shown, was not answered by this script)")
-
-    # Send test notification. A platform that cannot post reports the same reason as failed.
-    testing = Run("M11-send-test", APP / "Contents/MacOS/rex-rune", page + [tap(3.0, "notification-test")],
-                  6.5, config(work / "send.json"))
-    print(f"3. Send test notification: {testing.find('Last test') or testing.find('Sending test')}")
+    health = bundle.keys.get("notification-health")
+    assert health == "Unavailable" and bundle.find(WAITING), (health, bundle.names())
+    print(f"2. new bundle id: exit 0, Settings says {health!r}: {WAITING!r} "
+          f"(the system permission prompt was not answered by this script)")
+    tested = f"Last test failed: {WAITING}."
+    assert tested in bundle.names() and not bundle.find("Sending test"), bundle.names()
+    print(f"3. Send test notification while the prompt is up, read 0.8 s later: {tested!r}")
     print(f"captures: {out}")
 finally:
+    if copy is not None:
+        remove_copy(copy)
+        print(f"unregistered and removed {copy}")
     os.killpg(server.pid, signal.SIGTERM)
-    server.wait(10)
+    try:
+        server.wait(10)
+    except subprocess.TimeoutExpired:
+        os.killpg(server.pid, signal.SIGKILL)
+        server.wait(5)
     shutil.rmtree(work / "state", ignore_errors=True)
     print(f"work folder: {work}")
     after = history.read_bytes() if history.exists() else b""

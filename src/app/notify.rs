@@ -40,20 +40,6 @@ pub enum Kind {
     Test,
 }
 
-impl Kind {
-    /// The freedesktop spec's urgency: critical for a tab waiting on the person or one that
-    /// failed. Other platforms present the same note without it.
-    #[allow(dead_code)]
-    pub(super) fn urgency(self) -> u8 {
-        use rex_rune::connection::activity::ProgramState::{Blocked, Error};
-        if matches!(self, Self::Activity(Blocked | Error)) {
-            2
-        } else {
-            1
-        }
-    }
-}
-
 impl Note {
     fn test() -> Self {
         Self {

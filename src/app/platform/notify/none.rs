@@ -1,5 +1,6 @@
-//! No desktop notification service: Windows has none of the ones this client speaks, and
-//! says so in Settings instead of offering a switch that does nothing.
+//! No desktop notification service: Windows has none of the ones this client speaks.
+//! Every call fails with the same reason, which Settings → Notifications shows in the
+//! service row; the Desktop notifications switch stays, and sends nothing.
 use crate::app::notify::{Backend, Event, Note, Service, Session};
 
 /// Shown instead of a service state. The wording is the platform's, not a daemon's.
