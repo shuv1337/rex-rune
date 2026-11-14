@@ -5,8 +5,8 @@ Requires macOS, a built release binary (REX_BIN, default target/release/rex-rune
 app bundle scripts/macos-app.py makes (REX_APP, default target/release/Rex Rune.app), and
 a Rex server binary (REX_SERVER_BIN, default the one inside Rex Beta.app or Rex.app, run
 in place). The server, every client run and the shells they start get their own HOME,
-socket, state and settings under a fresh /tmp/rex-notifications-* folder; the server is
-stopped by PID, and the script checks that the real ~/.zsh_history did not change.
+socket, state and settings under a fresh /tmp/rex-notifications-* folder; the server's
+process group is stopped at the end, and the script checks that the real ~/.zsh_history did not change.
 
 The real bundle is never launched. Its permission belongs to the person, and a prompt left
 unanswered when the app quits can turn it off. The script copies the bundle under
@@ -98,20 +98,24 @@ def throwaway_copy():
     token = secrets.token_hex(6)
     copy = ROOT / "target/notification-acceptance" / token / "Rex Rune Acceptance.app"
     copy.parent.mkdir(parents=True)
-    shutil.copytree(APP, copy, symlinks=True)
-    info = copy / "Contents/Info.plist"
-    with info.open("rb") as file:
-        plist = plistlib.load(file)
-    plist.update({"CFBundleIdentifier": f"{REAL_ID}.acceptance.{token}",
-                  "CFBundleName": "Rex Rune Acceptance", "CFBundleDisplayName": "Rex Rune Acceptance"})
-    with info.open("wb") as file:
-        plistlib.dump(plist, file)
-    subprocess.run(["codesign", "--force", "--sign", "-", str(copy)], check=True, capture_output=True)
-    signed = subprocess.run(["codesign", "-dv", str(copy)], check=True, capture_output=True, text=True)
-    identifier = next(line.split("=", 1)[1] for line in signed.stderr.splitlines()
-                      if line.startswith("Identifier="))
-    assert identifier == plist["CFBundleIdentifier"] != REAL_ID, identifier
-    subprocess.run([LSREGISTER, "-f", str(copy)], check=True, capture_output=True)
+    try:
+        shutil.copytree(APP, copy, symlinks=True)
+        info = copy / "Contents/Info.plist"
+        with info.open("rb") as file:
+            plist = plistlib.load(file)
+        plist.update({"CFBundleIdentifier": f"{REAL_ID}.acceptance.{token}",
+                      "CFBundleName": "Rex Rune Acceptance", "CFBundleDisplayName": "Rex Rune Acceptance"})
+        with info.open("wb") as file:
+            plistlib.dump(plist, file)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(copy)], check=True, capture_output=True)
+        signed = subprocess.run(["codesign", "-dv", str(copy)], check=True, capture_output=True, text=True)
+        identifier = next(line.split("=", 1)[1] for line in signed.stderr.splitlines()
+                          if line.startswith("Identifier="))
+        assert identifier == plist["CFBundleIdentifier"] != REAL_ID, identifier
+        subprocess.run([LSREGISTER, "-f", str(copy)], check=True, capture_output=True)
+    except BaseException:
+        remove_copy(copy)
+        raise
     return copy, identifier
 
 
@@ -126,7 +130,7 @@ def remove_copy(copy):
 
 class Run:
     def __init__(self, name, binary, steps, at, config, size="1100x760"):
-        assert APP not in Path(binary).parents, "the real bundle is never launched"
+        assert APP.resolve() not in Path(binary).resolve().parents, "the real bundle is never launched"
         self.dir = work / "runs" / name
         self.dir.mkdir(parents=True)
         (self.dir / "script.json").write_text(json.dumps(steps))
