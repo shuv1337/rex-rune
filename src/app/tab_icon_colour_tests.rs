@@ -160,7 +160,7 @@ fn modes_change_only_real_glyph_colours_not_geometry_content_or_channels() {
                                 ),
                                 "{size:?} sidebar={sidebar} fill={fill} count={count} mode={mode:?}"
                             );
-                            if !a.path.contains("tab-icon:") {
+                            if !a.path.contains("tab-icon:") && !a.path.contains("pane-icon:") {
                                 assert_eq!(a.text_color, b.text_color, "non-icon {}", a.path);
                             }
                         }

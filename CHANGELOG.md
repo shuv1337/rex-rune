@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Every pane header shows its program's icon**, before the pane's name, as Rex for macOS does: the same glyph and mapping as its tab, its own pane's rather than the focused pane's, in split headers, a single pane's row or card, and a floating header. It follows **Show tab icons** (0 hides it) and **Use colour for tab icons**, fades with the name where header fading is on, and gives way in a header too narrow to keep its buttons; the 30 pt row, buttons, activity and terminal grid are unchanged. macOS's title row already had it. See [checks and captures](docs/parity-2026-11/pane-header-icon.md).
+
 ## 0.9.0 - 2026-11-13
 
 Fonts from the system's own list on macOS and Windows with Nerd Font symbols built in, Rex's own program icons, a Mac toolbar that is the title bar, Update now for pacman installs, server uptime and Stop server, and dialogs that press the focused button.

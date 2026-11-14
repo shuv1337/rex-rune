@@ -1,14 +1,15 @@
 //! The pane area: server-placed terminals as floating cards in 8pt gutters, each with a header
-//! (label, activity, exception pill and the pane's buttons), drag handles in the gutters, and
-//! empty states. A tab with a single pane draws it edge to edge instead. Compact density
-//! removes card decorations and gaps from every placement. Where a header is, and whether it
-//! is a row or floats over the terminal, is `pane_header`'s to say.
+//! (its program's glyph, label, activity, exception pill and the pane's buttons), drag handles
+//! in the gutters, and empty states. A tab with a single pane draws it edge to edge instead.
+//! Compact density removes card decorations and gaps from every placement. Where a header is,
+//! and whether it is a row or floats over the terminal, is `pane_header`'s to say.
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
-    activity::{pane_activity, progress_bar, tab_progress, tab_word},
+    activity::{PaneProgram, pane_activity, progress_bar, tab_progress, tab_word},
     find,
     pane_header::{self, Placement, full_bleed},
     panel::{Form, Intent, PanelKind},
+    tab_icons,
     term::{self, CursorLook, GridLook, Metrics, MouseGesture},
     theme::*,
     widgets::{Pill, pill},
@@ -93,13 +94,18 @@ fn header(
     let word = pane_word(s, block, 11.);
     let id = block.to_owned();
     let menu_id = block.to_owned();
+    let icons = tab_icons::icons_of(
+        &[PaneProgram::of(s.model(), block)],
+        s.settings.interface.tab_icon_count.min(1),
+    );
+    let fade = pane_header::header_opacity(s, block);
     let h = row()
         .key(format!("pane-header:{block}"))
         .hover_group()
         .w_full()
         .h(CARD_HEADER)
-        // On a card the name clears the corner; edge to edge it lines up with the
-        // terminal's text under it.
+        // On a card the glyph clears the corner; edge to edge it lines up with the
+        // terminal's text under it, and the name follows it.
         .pl(if pane_header::full_bleed(s, window) {
             s.settings.padding().0.max(8.)
         } else {
@@ -121,20 +127,32 @@ fn header(
         })
         .on_secondary_press(move |s: &mut Workspace, p, _| {
             s.pane_menu(menu_id.clone(), Some((p.x, p.y)))
-        })
-        .child(
-            text(label.clone())
-                .key(format!("pane-name:{block}"))
-                .font(medium(11.5))
-                .color(
-                    rgb(if focused { ink() } else { muted() })
-                        .alpha(pane_header::header_opacity(s, block)),
-                )
-                .group_color(rgb(if focused { ink() } else { muted() }))
-                .truncate()
-                .help_when_truncated(label)
-                .shrink(),
-        );
+        });
+    // The pane's own program before its name, as the title row draws the lone pane's: the
+    // tab glyph rule, lit with its pane, and faded with the name where headers fade. A
+    // narrow header keeps its buttons and name instead, where the glyph would push Close out.
+    let h = if width >= pane_header::GLYPH_ROOMY {
+        tab_icons::append(
+            h,
+            &format!("pane-icon:{block}"),
+            &icons,
+            focused,
+            s.settings.interface.tab_icon_color,
+            fade,
+        )
+    } else {
+        h
+    }
+    .child(
+        text(label.clone())
+            .key(format!("pane-name:{block}"))
+            .font(medium(11.5))
+            .color(rgb(if focused { ink() } else { muted() }).alpha(fade))
+            .group_color(rgb(if focused { ink() } else { muted() }))
+            .truncate()
+            .help_when_truncated(label)
+            .shrink(),
+    );
     let h = match pane_header::zoomed_chip(window, block) {
         Some(chip) => h.child(chip),
         None => h,

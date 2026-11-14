@@ -36,6 +36,9 @@ const REVEAL_AFTER: Duration = Duration::from_millis(90);
 const HIDE_AFTER: Duration = Duration::from_millis(220);
 /// An action that cannot run now keeps its place at this opacity.
 pub const UNAVAILABLE: f32 = 0.35;
+/// Below this width a header keeps its name and buttons alone: its program's glyph beside
+/// Zoom and Close would push Close past a narrow pane's edge.
+pub const GLYPH_ROOMY: f32 = 120.;
 /// Below this width a header keeps Zoom and Close only; the pane menu has the splits.
 const ROOMY: f32 = 200.;
 

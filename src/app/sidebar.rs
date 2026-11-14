@@ -313,6 +313,7 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
         &icons,
         active,
         s.settings.interface.tab_icon_color,
+        1.,
     )
     .child(
         text(label)

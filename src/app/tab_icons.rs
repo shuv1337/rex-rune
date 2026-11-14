@@ -45,13 +45,16 @@ pub fn leading_width(count: usize) -> f32 {
 }
 
 /// Append directly to the existing 8pt-gap row: one keeps the original toolbar tree
-/// and geometry, and zero has no spacer. Preview and both tab surfaces share this.
+/// and geometry, and zero has no spacer. Preview and both tab surfaces share this, and a
+/// pane header too, which passes its own fading as `fade`: it multiplies the glyph's
+/// resting colour and nothing else.
 pub fn append(
     mut parent: El,
     key: &str,
     icons: &[TabIcon],
     active: bool,
     mode: TabIconColor,
+    fade: f32,
 ) -> El {
     for (index, icon) in icons.iter().enumerate() {
         let mut cell = el()
@@ -69,7 +72,8 @@ pub fn append(
                     ink()
                 } else {
                     muted()
-                }),
+                })
+                .alpha(fade),
             ));
         if let Some(program) = &icon.program {
             cell = cell.help(program.clone());
@@ -136,6 +140,7 @@ pub fn preview(s: &Workspace) -> El {
             &icons,
             active,
             s.settings.interface.tab_icon_color,
+            1.,
         )
         .child(text(label).font(medium(12.5)).color(rgb(if active {
             ink()

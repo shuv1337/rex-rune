@@ -198,6 +198,7 @@ fn header_fading_matrix_changes_only_names_and_enabled_icons() {
                                         let name =
                                             a.key.as_deref() == Some(&format!("pane-name:{block}"));
                                         let icon = [
+                                            "pane-icon:",
                                             "pane-close:",
                                             "pane-split-right:",
                                             "pane-split-down:",
