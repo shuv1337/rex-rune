@@ -102,6 +102,22 @@ session's menu. Removing a host only stops this client connecting to it; its
 sessions keep running on the server. A changed endpoint connects to that server as
 a new host. How hosts are added is described in [Hosts and connections](hosts.md).
 
+**About** shows the app icon, version and how it was installed, the build commit
+and date, and for the active host, when connected, its Rex server's version, the
+negotiated API revision and the range of revisions the server supports. The
+server's version comes from one read-only `server.version` request on each
+connection (its status arrives with the session list); nothing is attached,
+created or changed, and a server that doesn't answer is shown as not reported
+rather than guessed. **Copy version info** copies the client version, commit,
+build date, build channel (`official`, `nix` or `source`), OS and architecture,
+and the server version and API revisions. **Copy debug info** adds the install
+channel, display server, desktop, interface theme and zoom, terminal font, and for
+each saved host its kind (Unix socket, HTTPS, SSH), connection state, API revision
+and server version. Both are in Commands too, and neither contains a host name,
+address, session name, client id or credential. Open the repository, this
+version’s release notes, the MIT license or the issue tracker from the same page.
+Source archives without Git show `unknown` for build metadata.
+
 **Stop server…** in Settings → Server and Commands (`host.stop_server`, unbound
 and local-only) is offered only while connected through `unix://` or `ssh://`.
 **Stop server ends every program in the server’s sessions**, disconnects other

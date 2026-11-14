@@ -195,6 +195,30 @@ With mise, `mise run install` builds the release binary and runs the script with
 
 ## Updates and uninstalling
 
+Official and Nix builds check the signed GitHub release manifest (`latest.json`
+and `latest.json.minisig`) against embedded CI and backup Minisign public keys
+about 30 seconds after launch and at most once every 24 hours while running. When
+a newer stable release is verified, a non-blocking toast offers **What's new**
+(opening the GitHub release page in your browser), **Updates…** and **Dismiss for
+this version**. Guidance matches the detected install channel
+(`REX_RUNE_CHANNEL`, `/usr/share/rex-rune/channel` and
+`~/.local/share/rex-rune/install.json`): `sudo pacman -Syu rex-rune-bin` on Arch
+(`omarchy update` on Omarchy), with **Update now** there too once the installed
+`rex-rune-bin` carries its update helper and polkit's `pkexec` is present (it
+asks for an administrator's password and upgrades that one package; see
+[pacman installs](self-updates.md#pacman-installs)), **Update now** (with **Copy
+command** fallback) for verified, user-writable tarball/script installs under
+`~/.local`, `.deb` upgrade instructions for Debian/Ubuntu, and `nix flake update
+rex-rune` / `nix profile upgrade rex-rune` for Nix. Source builds never check
+automatically; turn automatic checks off in Settings → Updates (`updates.check`
+in `workspace.json`) or with `REX_RUNE_NO_UPDATE_CHECK=1`, or check on demand with
+**Check now** or `rex-rune --check-update`. Background check failures are silent.
+Installer updates verify the signed tarball, replace the client and desktop files
+with rollback on failure, then offer **Restart to finish**. **Install updates
+automatically** is a separate default-off preference
+(`updates.install_automatically`); it offers restart rather than interrupting
+work. See [self-updates](self-updates.md).
+
 Settings → Updates checks the signed release manifest and offers channel-specific
 guidance. **Update now** is available for verified, user-writable install.sh
 installs and for pacman installs that ship the update helper. See
