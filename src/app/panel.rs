@@ -37,7 +37,7 @@ pub enum Intent {
     Layer(LayerTarget, LayerAction),
     /// The floating-layer verbs for a captured pane: the row marked with a chevron in the
     /// pane menu.
-    LayerMenu(PaneTarget),
+    LayerMenu(LayerTarget),
     Session(SessionTarget, SessionAction),
     /// A tab action on a named tab of any host and session.
     Window(TabTarget, TabAction),
@@ -237,10 +237,11 @@ pub struct LayerTarget {
     pub layer: String,
     /// The pane an action names: the focused pane, the menu's pane, or the layer's first block.
     pub block: String,
-    /// Every block in the layer, in layout order, when it was captured.
-    pub panes: Vec<String>,
-    /// Those panes' screen names, in the same order.
-    pub pane_names: Vec<String>,
+    /// Block IDs and screen names in opening order.
+    pub panes: Vec<(String, String)>,
+    pub host_name: String,
+    pub tab: String,
+    pub pane: String,
     /// What the layer is called on screen: its first pane, and `+N` for the rest.
     pub name: String,
     /// Whether the view says this layer floats (an unknown kind floats too).
@@ -400,7 +401,7 @@ pub enum PanelKind {
     SwitchHost,
     MovePane,
     Pane,
-    /// The floating-layer verbs for the pane the panel's `target` names, opened from the
+    /// The floating-layer verbs for the layer the panel captured, opened from the
     /// pane menu's one Floating layer row.
     Layer,
     Session,
@@ -467,8 +468,9 @@ pub struct Panel {
     pub error: Option<String>,
     pub target: Option<PaneTarget>,
     pub session: Option<SessionTarget>,
-    /// The floating layer a layer verb, its confirmation, acts on.
+    /// Opening intent shared by the pane menu, layer submenu and close confirmation.
     pub layer: Option<LayerTarget>,
+    pub layer_invalid: bool,
     /// The tab a tab menu, its rename form or its close confirmations act on.
     pub tab: Option<TabTarget>,
     pub back: Option<Box<Panel>>,
@@ -507,6 +509,7 @@ impl Panel {
             target: None,
             session: None,
             layer: None,
+            layer_invalid: false,
             tab: None,
             back: None,
             anchor: None,
@@ -917,7 +920,7 @@ impl Workspace {
             }
             return entries;
         }
-        // The floating-layer menu: one verb per row, for the layer it captured when it opened.
+        // The floating-layer menu: one verb per row, for the layer the root menu captured.
         // Rebuilding the list and Enter both validate that same snapshot, so a pane another
         // client moved to another tab, or a new connection, is refused rather than retargeted.
         // A verb that cannot run now says why in its hint column.
@@ -927,15 +930,18 @@ impl Workspace {
             };
             let mut entries = Vec::new();
             let mut rows: Vec<(&str, u8, LayerAction)> = Vec::new();
-            if !layer.floating {
+            let live = self.current_layer(&layer);
+            let floating = live.map(layers::floating).unwrap_or(layer.floating);
+            let minimized = live.map(layers::minimized).unwrap_or(layer.minimized);
+            if !floating {
                 rows.push(("Float pane", 0, LayerAction::Float));
             }
             rows.push(("New floating pane", 0, LayerAction::NewFloating));
-            if layer.floating {
+            if floating {
                 rows.extend([
                     ("Minimize layer", 1, LayerAction::Minimize),
                     (
-                        if layer.minimized {
+                        if minimized {
                             "Restore layer"
                         } else {
                             "Focus layer"
@@ -1019,10 +1025,21 @@ impl Workspace {
             // destructive close below the fold at 640×480 (see floating_pane_menu draws).
             // A host before API revision 13 has no floating layers, and Commands carries
             // that reason, so this menu stays exactly as it was there.
-            if self.layer_gate().is_none() && self.layer_target(&target).is_some() {
-                let mut entry =
-                    Entry::new("Floating layer…", "", "", Intent::LayerMenu(target.clone()))
-                        .in_section(1);
+            if let Some(layer) = &panel.layer
+                && !matches!(
+                    self.captured_layer_gate(layer),
+                    Some(layers::Blocked::NotConnected | layers::Blocked::OldServer(_))
+                )
+            {
+                let blocked = self.layer_root_blocked(panel, layer);
+                let mut entry = Entry::new(
+                    "Floating layer…",
+                    blocked.map(layers::Blocked::hint).unwrap_or_default(),
+                    "",
+                    Intent::LayerMenu(layer.clone()),
+                )
+                .in_section(1);
+                entry.enabled = blocked.is_none();
                 entry.followup = true;
                 // Above the menu's destructive rows, which stay last.
                 let at = entries

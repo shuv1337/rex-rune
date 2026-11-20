@@ -195,43 +195,67 @@ fn form(s: &Workspace, form: &Form) -> El {
     )
 }
 
-fn confirm(panel_title: &str, description: &str) -> El {
-    confirm_with(
+fn confirm(panel_title: &str, description: &str, blocked: Option<&str>) -> El {
+    confirmation(
         panel_title,
         description,
         "Keep running",
         "Close and end programs",
+        blocked,
     )
 }
 
 fn confirm_with(panel_title: &str, description: &str, keep: &str, danger: &str) -> El {
-    col()
-        .gap(12.)
-        .child(title(panel_title))
-        .child(
-            text(description.to_owned())
+    confirmation(panel_title, description, keep, danger, None)
+}
+
+fn confirmation(
+    panel_title: &str,
+    description: &str,
+    keep: &str,
+    danger: &str,
+    blocked: Option<&str>,
+) -> El {
+    let body = col().gap(12.).child(title(panel_title)).child(
+        text(description.to_owned())
+            .font(ui(13.))
+            .color(rgb(muted()))
+            .wrap(),
+    );
+    let body = if let Some(reason) = blocked {
+        body.child(
+            text(reason.to_owned())
                 .font(ui(13.))
                 .color(rgb(muted()))
                 .wrap(),
         )
-        .child(
-            row()
-                .gap(8.)
-                .justify_end()
-                .child(
-                    pill("cancel-close", keep, Pill::Neutral, 32., |s, tx| {
-                        s.cancel_panel(tx)
-                    })
-                    .default_button()
-                    .tab_index(1),
-                )
-                .child(
-                    pill("confirm-close", danger, Pill::Danger, 32., |s, tx| {
-                        s.submit(tx)
-                    })
-                    .tab_index(2),
-                ),
-        )
+    } else {
+        body
+    };
+    let disabled = blocked.is_some();
+    let close = pill("confirm-close", danger, Pill::Danger, 32., move |s, tx| {
+        if !disabled {
+            s.submit(tx);
+        }
+    })
+    .tab_index(2);
+    body.child(
+        row()
+            .gap(8.)
+            .justify_end()
+            .child(
+                pill("cancel-close", keep, Pill::Neutral, 32., |s, tx| {
+                    s.cancel_panel(tx)
+                })
+                .default_button()
+                .tab_index(1),
+            )
+            .child(if disabled {
+                close.disabled(true).opacity(0.5)
+            } else {
+                close
+            }),
+    )
 }
 
 pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
@@ -245,7 +269,11 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
         } if method == "server.stop" => {
             confirm_with(&panel.title, description, "Cancel", "Stop server")
         }
-        PanelKind::Confirm { description, .. } => confirm(&panel.title, description),
+        PanelKind::Confirm { description, .. } => confirm(
+            &panel.title,
+            description,
+            panel.layer.as_ref().and(panel.error.as_deref()),
+        ),
         PanelKind::Settings => return Some(super::settings_view::settings(s, viewport)),
         PanelKind::RemoveHost(host) => {
             let label = &s.settings.hosts[*host].label;

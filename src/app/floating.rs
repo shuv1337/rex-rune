@@ -5,12 +5,14 @@
 //! matches the view is reported, with nothing sent. Pointer drag and edge resize are not here.
 use super::{
     activity,
-    panel::{LayerAction, LayerTarget, PaneTarget},
+    panel::{LayerAction, LayerTarget, PaneTarget, Panel, PanelKind},
     workspace::Workspace,
 };
 use rex_rune::{connection::HostCommand, layers};
 use rexrs::api::session::{Layer, Window};
+use rune::Tx;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 impl Workspace {
     /// The reason floating-layer actions cannot run on the host on screen, decided from the
@@ -21,7 +23,7 @@ impl Workspace {
     }
 
     /// The layer holding the pane of a captured target, as a target for a layer verb.
-    pub fn layer_target(&self, target: &PaneTarget) -> Option<LayerTarget> {
+    pub(super) fn capture_pane_layer(&self, target: &PaneTarget) -> Option<LayerTarget> {
         let window = self.pane_window(target)?;
         let layer = layers::layer_of(window, &target.block)?;
         self.layer_target_in(target.host, &target.session, window, layer, &target.block)
@@ -68,6 +70,18 @@ impl Workspace {
         block: &str,
     ) -> Option<LayerTarget> {
         let state = self.hosts.get(host)?;
+        let generated = self.generated_titles();
+        let panes: Vec<_> = layer
+            .blocks
+            .iter()
+            .map(|b| {
+                Some((
+                    b.block_id.clone()?,
+                    activity::pane_name(&state.model, b, generated),
+                ))
+            })
+            .collect::<Option<_>>()?;
+        let pane = panes.iter().find(|(id, _)| id == block)?.1.clone();
         Some(LayerTarget {
             host,
             host_id: state.id,
@@ -76,16 +90,10 @@ impl Workspace {
             window: window.window_id.clone()?,
             layer: layer.layer_id.clone()?,
             block: block.into(),
-            panes: layer
-                .blocks
-                .iter()
-                .filter_map(|b| b.block_id.clone())
-                .collect(),
-            pane_names: layer
-                .blocks
-                .iter()
-                .map(|b| activity::pane_name(&self.hosts[host].model, b, self.generated_titles()))
-                .collect(),
+            panes,
+            host_name: self.settings.hosts[host].label.clone(),
+            tab: activity::tab_name(&state.model, window, generated),
+            pane,
             name: self.layer_name(host, layer),
             floating: layers::floating(layer),
             minimized: layers::minimized(layer),
@@ -107,17 +115,80 @@ impl Workspace {
         }
     }
 
-    /// The window a captured layer target names, while it is still the one the view shows on the
-    /// same connection: the host's ID, connection epoch, session and window must all match.
+    fn layer_host(&self, target: &LayerTarget) -> Option<usize> {
+        self.hosts
+            .get(target.host)
+            .filter(|host| host.id == target.host_id)
+            .map(|_| target.host)
+            .or_else(|| self.host_index(target.host_id))
+    }
+
+    pub(super) fn captured_layer_gate(&self, target: &LayerTarget) -> Option<layers::Blocked> {
+        let Some(index) = self.layer_host(target) else {
+            return Some(layers::Blocked::Stale);
+        };
+        let model = &self.hosts[index].model;
+        layers::unsupported(model.connected, model.protocol.api_revision)
+    }
+
     fn layer_window(&self, target: &LayerTarget) -> Option<&Window> {
-        let host = self.hosts.get(target.host)?;
-        if host.id != target.host_id || host.model.connection_epoch != target.epoch {
+        let model = &self.hosts[self.layer_host(target)?].model;
+        if model.connection_epoch != target.epoch
+            || !model
+                .sessions
+                .iter()
+                .any(|s| s.session_id == target.session)
+        {
             return None;
         }
-        let view = host.model.views.get(&target.session)?;
+        let view = model.views.get(&target.session)?;
         view.windows
             .iter()
             .find(|w| w.window_id.as_deref() == Some(target.window.as_str()))
+    }
+
+    pub(super) fn current_layer(&self, target: &LayerTarget) -> Option<&Layer> {
+        let layer = layers::layer_of(self.layer_window(target)?, &target.block)?;
+        (layer.layer_id.as_deref() == Some(&target.layer)).then_some(layer)
+    }
+
+    fn layer_context_blocked(&self, target: &LayerTarget) -> Option<layers::Blocked> {
+        self.captured_layer_gate(target).or_else(|| {
+            self.layer_window(target)
+                .and_then(|w| layers::layer_of(w, &target.block))
+                .is_none()
+                .then_some(layers::Blocked::Stale)
+        })
+    }
+
+    pub(super) fn layer_root_blocked(
+        &self,
+        panel: &Panel,
+        target: &LayerTarget,
+    ) -> Option<layers::Blocked> {
+        if panel.layer_invalid || panel.layer.as_ref() != Some(target) {
+            Some(layers::Blocked::Stale)
+        } else {
+            self.layer_context_blocked(target)
+        }
+    }
+
+    pub(super) fn sync_layer_menu(&mut self, tx: &mut Tx) {
+        let Some(panel) = &self.panel else { return };
+        let Some(target) = &panel.layer else { return };
+        if let Some(reason) = self.layer_context_blocked(target) {
+            if matches!(panel.kind, PanelKind::Pane) {
+                self.panel.as_mut().unwrap().layer_invalid = true;
+            } else {
+                self.close_panel(tx);
+                self.inform(reason.sentence());
+            }
+        } else if matches!(panel.kind, PanelKind::Confirm { .. }) {
+            let error = self
+                .layer_blocked(Some(target), LayerAction::Close)
+                .map(layers::Blocked::sentence);
+            self.panel.as_mut().unwrap().error = error;
+        }
     }
 
     /// What stops `action` on this target now, checked against the cached view. None means it
@@ -127,40 +198,28 @@ impl Workspace {
         target: Option<&LayerTarget>,
         action: LayerAction,
     ) -> Option<layers::Blocked> {
-        if let Some(gate) = self.layer_gate() {
-            return Some(gate);
-        }
         let Some(target) = target else {
+            if let Some(gate) = self.layer_gate() {
+                return Some(gate);
+            }
             return match action {
                 LayerAction::NewFloating => self.new_floating_blocked(),
                 _ => Some(layers::Blocked::NoPane),
             };
         };
-        let Some(window) = self.layer_window(target) else {
-            return Some(layers::Blocked::Stale);
-        };
+        if let Some(reason) = self.layer_context_blocked(target) {
+            return Some(reason);
+        }
         // `New floating pane` from a captured menu starts its pane in that menu's tab and
         // folder, not the ones on screen now, so only that pane still has to be there: another
         // client may have changed which tab is active without invalidating the menu.
         if action == LayerAction::NewFloating {
-            return layers::layer_of(window, &target.block)
-                .is_none()
-                .then_some(layers::Blocked::Stale);
+            return None;
         }
-        let Some(layer) = window
-            .layers
-            .iter()
-            .find(|l| l.layer_id.as_deref() == Some(target.layer.as_str()))
-        else {
+        let window = self.layer_window(target).expect("validated window");
+        let Some(layer) = self.current_layer(target) else {
             return Some(layers::Blocked::Stale);
         };
-        if !layer
-            .blocks
-            .iter()
-            .any(|b| b.block_id.as_deref() == Some(target.block.as_str()))
-        {
-            return Some(layers::Blocked::Stale);
-        }
         let floating = layers::floating(layer);
         match action {
             LayerAction::NewFloating => None,
@@ -201,13 +260,10 @@ impl Workspace {
                 if !floating {
                     Some(layers::Blocked::NotFloating)
                 } else {
-                    let now: Vec<&str> = layer
-                        .blocks
-                        .iter()
-                        .filter_map(|b| b.block_id.as_deref())
-                        .collect();
-                    let captured: Vec<&str> = target.panes.iter().map(String::as_str).collect();
-                    (now != captured).then_some(layers::Blocked::Stale)
+                    let now: Option<HashSet<&str>> =
+                        layer.blocks.iter().map(|b| b.block_id.as_deref()).collect();
+                    let captured = target.panes.iter().map(|(id, _)| id.as_str()).collect();
+                    (now != Some(captured)).then_some(layers::Blocked::Stale)
                 }
             }
         }
@@ -251,7 +307,7 @@ impl Workspace {
         match action {
             // The menu's own tab, session and folder, never the ones on screen now.
             LayerAction::NewFloating => self.new_floating_layer(
-                target.host,
+                self.layer_host(&target).expect("validated host"),
                 &target.session,
                 &target.window,
                 Some(&target.block),
@@ -307,7 +363,7 @@ impl Workspace {
         let mut payload = payload;
         payload["session_id"] = json!(target.session);
         self.send(
-            target.host,
+            self.layer_host(target).expect("validated host"),
             HostCommand::Request {
                 method: method.into(),
                 payload,
@@ -318,9 +374,8 @@ impl Workspace {
     /// Ask before closing a floating layer: its name, every pane in it and what ends. Declining
     /// sends nothing; a target that changed by the time it is confirmed closes nothing.
     fn confirm_layer_close(&mut self, target: LayerTarget) {
-        let host = self.settings.hosts[target.host].label.clone();
         let title = format!("Close {}?", target.name);
-        let description = close_words(&target, &host);
+        let description = close_words(&target);
         self.confirm(
             &title,
             "session.close_layer",
@@ -337,13 +392,10 @@ impl Workspace {
             self.inform(blocked.sentence());
             return;
         }
-        let payload = json!({"session_id":target.session,"layer_id":target.layer});
-        self.send(
-            target.host,
-            HostCommand::Request {
-                method: "session.close_layer".into(),
-                payload,
-            },
+        self.layer_request(
+            target,
+            "session.close_layer",
+            json!({"layer_id":target.layer}),
         );
     }
 
@@ -385,9 +437,10 @@ impl Workspace {
 
 /// The words a floating-layer close confirmation shows: every pane in the layer and what the
 /// call ends, for a layer another client may have made with several panes.
-fn close_words(target: &LayerTarget, host: &str) -> String {
-    let mut names = target.pane_names.iter();
-    match target.pane_names.len() {
+fn close_words(target: &LayerTarget) -> String {
+    let host = &target.host_name;
+    let mut names = target.panes.iter().map(|(_, name)| name.as_str());
+    match target.panes.len() {
         0 => format!(
             "Closes this empty floating layer on {host}. Closing the app itself keeps programs \
              running."
@@ -395,11 +448,11 @@ fn close_words(target: &LayerTarget, host: &str) -> String {
         1 => format!(
             "Ends the program in the floating pane {} on {host}. Closing the app itself keeps \
              programs running.",
-            names.next().map(String::as_str).unwrap_or("Terminal")
+            names.next().unwrap_or("Terminal")
         ),
         n => {
-            let first = names.next().map(String::as_str).unwrap_or("Terminal");
-            let rest: Vec<&str> = names.map(String::as_str).collect();
+            let first = names.next().unwrap_or("Terminal");
+            let rest: Vec<_> = names.collect();
             format!(
                 "Ends the programs in {n} floating panes on {host}: {first}, {}. Closing the app \
                  itself keeps programs running.",
@@ -420,20 +473,25 @@ fn close_words_name_every_pane_and_the_host() {
         window: "w".into(),
         layer: "l".into(),
         block: "b".into(),
-        panes: names.iter().map(|n| n.to_string()).collect(),
-        pane_names: names.iter().map(|n| n.to_string()).collect(),
+        panes: names
+            .iter()
+            .map(|n| (n.to_string(), n.to_string()))
+            .collect(),
+        host_name: "test-0".into(),
+        tab: "tab".into(),
+        pane: "one".into(),
         name: "one".into(),
         floating: true,
         minimized: false,
     };
-    let one = close_words(&target(&["one"]), "test-0");
+    let one = close_words(&target(&["one"]));
     assert!(one.contains("floating pane one"), "{one}");
     assert!(one.contains("test-0"), "{one}");
     assert!(
         one.contains("Closing the app itself keeps programs running"),
         "{one}"
     );
-    let three = close_words(&target(&["one", "two", "three"]), "test-0");
+    let three = close_words(&target(&["one", "two", "three"]));
     assert!(three.contains("3 floating panes"), "{three}");
     for name in ["one", "two", "three"] {
         assert!(three.contains(name), "{three}");

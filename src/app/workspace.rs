@@ -667,6 +667,7 @@ impl Workspace {
         self.restore_activity_selection(activity_selection);
         self.restore_row_selection();
         self.deliver_program_notices(index, notices);
+        self.sync_layer_menu(tx);
         if self
             .panel
             .as_ref()
@@ -1433,7 +1434,10 @@ impl Workspace {
         if let Some(panel) = &mut self.panel {
             if !matches!(
                 action,
-                Intent::Pane(..) | Intent::MovePaneTo(_) | Intent::InsertPath(_)
+                Intent::Pane(..)
+                    | Intent::LayerMenu(_)
+                    | Intent::MovePaneTo(_)
+                    | Intent::InsertPath(_)
             ) {
                 panel.target = None;
             }
@@ -1695,17 +1699,25 @@ impl Workspace {
 
     /// The floating-layer verbs for a captured pane, anchored where the pane menu was: the
     /// second page behind the pane menu's one layer row.
-    pub fn layer_menu(&mut self, target: PaneTarget) {
-        let title = format!("{} · {}", target.tab, target.name);
-        let anchor = self.panel.as_ref().and_then(|p| p.anchor);
-        // The layer this menu is about, captured once with its host, connection epoch and tab.
-        // Every later rebuild and Enter validate this snapshot; they never recapture the pane
-        // from wherever it has moved to since.
-        let layer = self.layer_target(&target);
+    fn layer_menu(&mut self, layer: LayerTarget) {
+        let Some(root) = self
+            .panel
+            .as_ref()
+            .filter(|p| matches!(p.kind, PanelKind::Pane))
+        else {
+            return;
+        };
+        if let Some(reason) = self.layer_root_blocked(root, &layer) {
+            self.inform(reason.sentence());
+            return;
+        }
+        let title = format!("{} · {}", layer.tab, layer.pane);
+        let anchor = root.anchor;
+        let target = root.target.clone();
         self.open_panel(PanelKind::Layer, &title, &[]);
         let panel = self.panel.as_mut().expect("the layer menu");
-        panel.target = Some(target);
-        panel.layer = layer;
+        panel.target = target;
+        panel.layer = Some(layer);
         panel.anchor = anchor;
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
@@ -1717,10 +1729,15 @@ impl Workspace {
         let Some(target) = self.target(&block) else {
             return;
         };
-        let title = format!("{} · {}", target.tab, target.name);
+        let layer = self.capture_pane_layer(&target);
+        let title = match &layer {
+            Some(layer) => format!("{} · {}", layer.tab, layer.pane),
+            None => format!("{} · {}", target.tab, target.name),
+        };
         self.open_panel(PanelKind::Pane, &title, &[]);
         let panel = self.panel.as_mut().unwrap();
         panel.target = Some(target);
+        panel.layer = layer;
         panel.anchor = anchor;
         // The rows' availability is the target's (Copy needs its selection), known only now.
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {

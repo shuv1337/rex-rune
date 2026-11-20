@@ -8,6 +8,8 @@ Proves, with real native input through the built client:
   * a minimized layer keeps running (a loop prints every second while it is hidden), and
     restore-and-focus is one operation that also raises it;
   * the floating-layer list restores layers by name;
+  * New floating, reached from the pane menu, starts one shell in the named pane's window
+    and inherits its shell directory;
   * `Bring floating layer to front` changes only the order (focus and bounds stay);
   * `Return pane to tiles` docks beside the tab's real tiled pane, and with no tiled pane the
     row is disabled with its reason and sends nothing;
@@ -24,8 +26,9 @@ commands that were run. The run root is removed on every exit, including a missi
 failed check and a failed receipt copy; every process this run starts is terminated and waited
 for before those files go away.
 """
-import hashlib, importlib.util, json, os, shutil, subprocess, sys, tempfile, time
+import csv, hashlib, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
+from shlex import quote
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,6 +107,11 @@ def text(block):
     return accept.terminal_text(sid, block)
 
 
+def cwd(block):
+    process = accept.api("com.superlogical.terminal.process", session_id=sid, block_id=block)
+    return (process.get("child") or {}).get("cwd")
+
+
 def command(desk, needle, settle=1.0):
     focus_window(desk, window_a)
     desk.key("ctrl+shift+p")
@@ -137,6 +145,33 @@ def ocr(desk, window, name):
         for image in (path, big))
     (work / "captures" / f"{name}.txt").write_text(words)
     return words
+
+
+def click_menu_row(phrase, name):
+    ocr(desk, window_a, name)
+    image = work / "captures" / f"{name}-ocr.png"
+    tsv = subprocess.check_output(
+        ["tesseract", str(image), "stdout", "tsv"], text=True, stderr=subprocess.DEVNULL)
+    lines = {}
+    for row in csv.DictReader(io.StringIO(tsv), delimiter="\t"):
+        if row["text"].strip():
+            key = tuple(row[k] for k in ("page_num", "block_num", "par_num", "line_num"))
+            lines.setdefault(key, []).append(row)
+    for words in lines.values():
+        if " ".join(row["text"] for row in words).lower().startswith(phrase.lower()):
+            first = words[0]
+            x = (int(first["left"]) + int(first["width"]) // 2) // 3
+            y = (int(first["top"]) + int(first["height"]) // 2) // 3
+            desk.x("mousemove", "--window", window_a, x, y, "click", 1)
+            time.sleep(0.5)
+            return
+    raise AssertionError(f"{phrase!r} was not visible in {name}")
+
+
+def floating_menu(name):
+    desk.key("ctrl+shift+space")
+    time.sleep(0.5)
+    click_menu_row("Floating layer", f"{name}-pane")
 
 
 def config(path, sid):
@@ -326,8 +361,18 @@ try:
           window_of(v3).get("focused_block_id") == alpha
           and [l["layer_id"] for l in floating_layers(v3)][-1] == layer["layer_id"])
 
-    # A second floating layer: front, and the list shows both.
-    command(desk, "new floating pane")
+    # Open the focused pane's menu and follow its floating branch with real input.
+    source_dir = work / "source-cwd"
+    source_dir.mkdir()
+    desk.type(f"cd {quote(str(source_dir))}")
+    desk.key("Return")
+    wait(lambda: cwd(alpha) == str(source_dir), "source shell did not change directory")
+    before_new = view()
+    floating_menu("client-a-new")
+    words = ocr(desk, window_a, "client-a-layer-menu")
+    check("pane menu opens the floating submenu with New floating pane",
+          "new floating pane" in words.lower(), words[:600])
+    desk.key("Return")
     v4 = wait(lambda: len(floating_layers(view())) == 2 and view(), "no second floating layer")
     beta = next(b for b in floating_layers(v4)[-1]["blocks"])["block_id"]
     accept.api("session.set_block_label", session_id=sid, block_id=beta, label="beta")
@@ -335,6 +380,9 @@ try:
     check("New floating pane starts exactly one new block in front",
           len(blocks(v4)) == 3 and window_of(v4).get("focused_block_id") == beta
           and floating_layers(v4)[-1]["blocks"][0]["block_id"] == beta)
+    check("the menu starts the new shell in the captured pane's window and directory",
+          window_of(v4)["window_id"] == window_of(before_new)["window_id"]
+          and wait(lambda: cwd(beta) == str(source_dir), "new shell did not inherit the source folder"))
     check("the new block's layer asks for the same rectangle",
           floating_layers(v4)[-1]["bounds"] == REQUESTED)
 
@@ -369,8 +417,8 @@ try:
     command(desk, "show beta")
     wait(lambda: window_of(view()).get("focused_block_id") == beta, "beta did not focus")
     time.sleep(0.6)
-    command(desk, "close floating layer")
-    time.sleep(0.6)
+    floating_menu("client-a-keep")
+    click_menu_row("Close floating layer", "client-a-keep-layer-menu")
     words = ocr(desk, window_a, "client-a-close-layer")
     results["close_words"] = words
     check("the confirmation names the layer it will end", "beta" in words, words[:600])
@@ -380,8 +428,8 @@ try:
     v10 = view()
     results["close_cancelled"] = {"view": v10, "revision_before": revision}
     check("Keep running closes nothing", v10["revision"] == revision and beta in blocks(v10))
-    command(desk, "close floating layer")
-    time.sleep(0.6)
+    floating_menu("client-a-close")
+    click_menu_row("Close floating layer", "client-a-close-layer-menu")
     desk.key("Tab")
     desk.key("Return")  # Close and end programs
     v11 = wait(lambda: beta not in blocks(view()) and view(), "the layer did not close")

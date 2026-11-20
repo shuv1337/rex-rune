@@ -10,6 +10,9 @@ use crate::app::{
 use rex_rune::layers;
 use serde_json::{Value, json};
 
+#[path = "floating_tests/history.rs"]
+mod history;
+
 /// The payload's keys, sorted: the layer methods reject a property they do not declare.
 fn keys(payload: &Value) -> Vec<&str> {
     let mut keys: Vec<&str> = payload
@@ -576,7 +579,13 @@ fn closing_a_layer_names_every_pane_and_sends_one_close_only_on_confirm() {
         "{description}"
     );
     let target = panel.layer.clone().expect("the layer it would close");
-    assert_eq!(target.panes, ["block:f", "block:g"]);
+    assert_eq!(
+        target.panes,
+        [
+            ("block:f".into(), "f".into()),
+            ("block:g".into(), "g".into())
+        ]
+    );
 
     // Keep running: nothing is sent.
     ws.cancel_panel(&mut tx());
@@ -1470,6 +1479,55 @@ fn open_layer_menu_from_keyboard(rt: &mut Runtime<Workspace>) {
     assert_eq!(highlighted(rt), "New floating pane");
 }
 
+fn move_f_to_other_window(ws: &mut Workspace) {
+    let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+    let moved = view.windows[0].layers.remove(1);
+    view.windows[1].layers.push(moved);
+    view.windows.remove(0);
+    view.windows[0].focused_block_id = Some("block:f".into());
+    view.active_window_id = Some("other".into());
+}
+
+fn pane_actions_key(rt: &mut Runtime<Workspace>) {
+    rt.key(KeyEvent {
+        key: Key::Command(' '),
+        mods: Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    draw(rt);
+}
+
+#[test]
+fn the_root_menu_cannot_recapture_a_pane_moved_to_another_window() {
+    let (ws, rx) = tiled_and_floating("block:f");
+    let mut rt = runtime(ws);
+    rt.update(|s, _| wake(s));
+    pane_actions_key(&mut rt);
+    assert_eq!(rt.state.panel.as_ref().unwrap().title, "dev · f");
+    highlight(&mut rt, "Floating layer…");
+    rt.update(|s, _| {
+        move_f_to_other_window(s);
+        wake(s);
+    });
+    draw(&mut rt);
+    assert_eq!(rt.state.panel.as_ref().unwrap().title, "dev · f");
+    press(&mut rt, Key::Enter);
+    if matches!(
+        rt.state.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Layer)
+    ) {
+        assert_eq!(highlighted(&rt), "New floating pane");
+    }
+    rt.update(|s, _| wake(s));
+    press(&mut rt, Key::Enter);
+    rt.update(|s, _| wake(s));
+    let sent = requests(&rx);
+    assert!(sent.is_empty(), "a stale root must send nothing: {sent:?}");
+}
+
 #[test]
 fn the_open_layer_menu_refuses_a_pane_another_client_moved_to_another_window() {
     let (mut ws, rx) = tiled_and_floating("block:a");
@@ -1501,24 +1559,7 @@ fn the_open_layer_menu_refuses_a_pane_another_client_moved_to_another_window() {
     });
     rt.update(|s, _| wake(s));
     draw(&mut rt);
-    assert!(
-        matches!(
-            rt.state.panel.as_ref().map(|panel| &panel.kind),
-            Some(PanelKind::Layer)
-        ),
-        "the pane is still in the session, so its menu stays"
-    );
-    assert_eq!(
-        rt.state.panel.as_ref().unwrap().title,
-        "dev · f",
-        "the open menu still names the tab it was opened on"
-    );
-    let (entries, at) = find_row(&rt.state, "New floating pane");
-    assert!(
-        !entries[at].enabled,
-        "the captured tab is gone; its row cannot run"
-    );
-    assert_eq!(entries[at].detail, layers::Blocked::Stale.hint());
+    assert!(rt.state.panel.is_none(), "the captured window is gone");
     press(&mut rt, Key::Enter);
     let sent = requests(&rx);
     assert!(
@@ -1553,19 +1594,7 @@ fn the_open_layer_menu_refuses_a_new_epoch_and_a_pane_or_tab_that_is_gone() {
         });
         rt.update(|s, _| wake(s));
         draw(&mut rt);
-        if change == "epoch" {
-            let (entries, at) = find_row(&rt.state, "New floating pane");
-            assert!(
-                !entries[at].enabled,
-                "a new connection invalidates the menu"
-            );
-            assert_eq!(entries[at].detail, layers::Blocked::Stale.hint());
-        } else {
-            assert!(
-                rt.state.panel.is_none(),
-                "{change}: the menu's pane is gone, so the menu closes"
-            );
-        }
+        assert!(rt.state.panel.is_none(), "{change}: the submenu closes");
         press(&mut rt, Key::Enter);
         let sent = requests(&rx);
         assert!(
