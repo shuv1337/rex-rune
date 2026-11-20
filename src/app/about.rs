@@ -111,13 +111,12 @@ fn kind(endpoint: &str) -> &'static str {
 pub(super) fn state(host: &HostModel) -> &'static str {
     if host.connected {
         "connected"
-    } else if let Some(key) = host.ssh_key_problem {
-        match key {
-            rex_rune::ssh::KeyProblem::Unknown => "host key not trusted",
-            rex_rune::ssh::KeyProblem::Changed => "host key changed",
+    } else if let Some(problem) = &host.ssh_problem {
+        match problem {
+            rex_rune::ssh::Problem::UnknownKey => "host key not trusted",
+            rex_rune::ssh::Problem::ChangedKey => "host key changed",
+            rex_rune::ssh::Problem::NoServer(_) => "no server found over SSH",
         }
-    } else if host.ssh_server_missing {
-        "no server found over SSH"
     } else if host.status.starts_with("Connecting") {
         "connecting"
     } else if host.status.starts_with("Reconnecting") {
@@ -551,7 +550,7 @@ mod tests {
             host.status = status.into();
             assert_eq!(state(&host), word);
         }
-        host.ssh_server_missing = true;
+        host.ssh_problem = Some(crate::app::tests::ssh_facts("Linux", 1000, true));
         assert_eq!(state(&host), "no server found over SSH");
         assert_eq!(kind("buildbox:7297"), "other endpoint");
         assert_eq!(kind("http://127.0.0.1:7297"), "HTTP");

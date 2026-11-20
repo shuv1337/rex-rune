@@ -2,7 +2,7 @@
 use super::{panel::PanelKind, workspace::Workspace};
 use rex_rune::{
     connection::HostCommand,
-    ssh::{Target, setup},
+    ssh::{Problem, SetupOffer, Target, setup},
 };
 use rune::Tx;
 
@@ -16,19 +16,18 @@ pub struct Setup {
 }
 
 impl Workspace {
+    pub(super) fn ssh_offer(&self, host: usize) -> Option<SetupOffer> {
+        rex_rune::platform::local::require_ssh().ok()?;
+        let state = &self.hosts.get(host)?.model;
+        if state.connected {
+            return None;
+        }
+        let target = Target::parse(&self.settings.hosts.get(host)?.endpoint).ok()??;
+        target.setup_offer(state.ssh_problem.as_ref()?)
+    }
+
     pub fn can_start_ssh(&self, host: usize) -> bool {
-        self.settings
-            .hosts
-            .get(host)
-            .zip(self.hosts.get(host))
-            .is_some_and(|(saved, state)| {
-                !state.model.connected
-                    && state.model.ssh_server_missing
-                    && Target::parse(&saved.endpoint)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|t| t.socket.is_none())
-            })
+        self.ssh_offer(host) == Some(SetupOffer::Start)
     }
 
     pub fn preview_ssh_start(&mut self, host: usize) {
@@ -216,6 +215,17 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
         .and_then(|t| setup::command_preview(t).ok())
         .unwrap_or_default();
     let host = target.as_ref().map_or("the host", |t| t.host.as_str());
+    let linux = s.settings.hosts.iter().position(|h| h.endpoint == endpoint)
+        .and_then(|i| s.hosts.get(i))
+        .is_some_and(|h| matches!(&h.model.ssh_problem, Some(Problem::NoServer(facts)) if facts.os == "Linux"));
+    let install_hint = if linux {
+        format!(
+            "\n\nFor a server that starts on demand and survives logout, run rex server install {} from this computer. The installer needs systemd on the host; accept its prompt to enable lingering.",
+            setup::quote_arg(endpoint)
+        )
+    } else {
+        "\n\nFor other server setups, see docs/hosts.md.".into()
+    };
     let mut body = col().gap(12.).min_h(0.).shrink().child(
         text(panel.title.clone())
             .font(strong(17.))
@@ -224,10 +234,19 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
     );
     if let Some(error) = &panel.error {
         body = body.child(
-            text(error.clone())
-                .font(ui(12.))
-                .color(rgb(danger()))
-                .wrap(),
+            col()
+                .max_h(140.)
+                .min_h(0.)
+                .shrink()
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(
+                    text(error.clone())
+                        .font(ui(12.))
+                        .color(rgb(danger()))
+                        .wrap(),
+                ),
         );
     }
     body = body
@@ -240,8 +259,7 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
                 .scroll_edge_fade(10.)
                 .child(text(format!(
                     "Uses your SSH configuration and the Rex executable already installed on both machines (preview.14 or newer). Starts a personal server as the SSH login user only if none is running. No packages, system services or sessions are created. The server may create its own user config/state files.\n\n\
-                     The server keeps running after this app closes, until it is stopped or the host restarts. On Linux with systemd, logging out of {host} also ends it and every session in it unless lingering is on for that login (loginctl enable-linger). This action does not turn lingering on.\n\n\
-                     For a server that starts at boot and survives logout, run rex server install 'ssh://[user@]host' from this computer. The installer needs systemd on the host; accept its prompt to enable lingering.\n\n\
+                     The server keeps running after this app closes, until it is stopped or the host restarts. On Linux with systemd, logging out of {host} also ends it and every session in it unless lingering is on for that login (loginctl enable-linger). This action does not turn lingering on.{install_hint}\n\n\
                      This is one attempt, not permission to auto-start on reconnect. SSH must already work without a password prompt."
                 )).font(ui(12.)).color(rgb(muted())).wrap()),
         )

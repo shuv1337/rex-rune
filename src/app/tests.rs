@@ -4088,11 +4088,14 @@ fn open_add_host(rt: &mut Runtime<Workspace>) {
 
 #[test]
 fn ssh_key_dialog_defaults_to_not_now_and_only_reconnects_after_self_check() {
-    use rex_rune::ssh::KeyProblem;
+    use rex_rune::ssh::Problem;
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
     let mut ws = workspace();
     let endpoint = "ssh://work-alias";
     ws.settings.hosts[0].endpoint = endpoint.into();
-    ws.hosts[0].model.ssh_key_problem = Some(KeyProblem::Unknown);
+    ws.hosts[0].model.ssh_problem = Some(Problem::UnknownKey);
     let commands = capture_host(&mut ws, 0);
     let mut rt = runtime(ws);
     click(&mut rt, "offer-ssh-key");
@@ -4119,7 +4122,7 @@ fn ssh_key_dialog_defaults_to_not_now_and_only_reconnects_after_self_check() {
     assert!(matches!(commands.try_recv(), Ok(HostCommand::Reconnect)));
     assert!(commands.try_recv().is_err());
     press(&mut rt, Key::Escape);
-    rt.update(|s, _| s.hosts[0].model.ssh_key_problem = Some(KeyProblem::Changed));
+    rt.update(|s, _| s.hosts[0].model.ssh_problem = Some(Problem::ChangedKey));
     click(&mut rt, "offer-ssh-key");
     assert!(!has(&rt, "trust-host-key"));
     assert!(
@@ -4130,11 +4133,23 @@ fn ssh_key_dialog_defaults_to_not_now_and_only_reconnects_after_self_check() {
     assert!(commands.try_recv().is_err());
 }
 
+pub(super) fn ssh_facts(os: &str, uid: u32, rex: bool) -> rex_rune::ssh::Problem {
+    rex_rune::ssh::Problem::NoServer(rex_rune::ssh::Facts {
+        user: "tester".into(),
+        os: os.into(),
+        uid,
+        rex,
+    })
+}
+
 #[test]
 fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
     let mut ws = workspace();
     ws.settings.hosts[0].endpoint = "ssh://work-alias".into();
-    ws.hosts[0].model.ssh_server_missing = true;
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
     let commands = capture_host(&mut ws, 0);
     let mut rt = runtime(ws);
     assert!(has(&rt, "offer-ssh-start"));
@@ -4147,6 +4162,7 @@ fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
     let copy = element_text(&rt, "dialog").join("\n");
     assert!(
         copy.contains("loginctl enable-linger")
+            && copy.contains("rex server install ssh://work-alias")
             && copy.contains("logging out of work-alias")
             && !copy.contains("10 seconds")
             && !copy.contains("temporary"),
@@ -4209,6 +4225,9 @@ fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
 #[test]
 fn ssh_start_states_fit_at_minimum_size() {
     use rex_rune::ssh::setup::Attachment;
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
 
     let mut camera = pane_verb_tests::Camera::new();
     let _families = camera
@@ -4217,7 +4236,7 @@ fn ssh_start_states_fit_at_minimum_size() {
     let mut ws = workspace();
     let endpoint = "ssh://work-alias";
     ws.settings.hosts[0].endpoint = endpoint.into();
-    ws.hosts[0].model.ssh_server_missing = true;
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
     ws.preview_ssh_start(0);
     let size = (640., 480.);
     let mut rt = if camera.is_some() {
@@ -4306,9 +4325,12 @@ fn ssh_start_states_fit_at_minimum_size() {
 
 #[test]
 fn ssh_setup_offers_explicit_socket_without_reconnecting_or_starting_again() {
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
     let mut ws = workspace();
     ws.settings.hosts[0].endpoint = "ssh://box".into();
-    ws.hosts[0].model.ssh_server_missing = true;
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
     ws.preview_ssh_start(0);
     ws.ssh_setup.running = Some("ssh://box".into());
     let commands = capture_host(&mut ws, 0);
@@ -4386,13 +4408,16 @@ fn ssh_setup_completion_does_not_reconnect_removed_or_connected_hosts() {
 
 #[test]
 fn ssh_setup_does_not_offer_for_auth_errors_custom_sockets_or_stale_hosts() {
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
     let mut ws = workspace();
     ws.settings.hosts[0].endpoint = "ssh://box".into();
     assert!(
         !ws.can_start_ssh(0),
         "a generic disconnected host is not a missing server"
     );
-    ws.hosts[0].model.ssh_server_missing = true;
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
     assert!(ws.can_start_ssh(0));
     ws.preview_ssh_start(0);
     ws.settings.hosts[0].endpoint = "ssh://different".into();

@@ -180,7 +180,7 @@ fn debug_info_names_no_host_address_session_or_client() {
     remote.status =
         "Disconnected · error connecting to https://buildbox.tail1234.ts.net: refused".into();
     remote.notice = Some("buildbox.tail1234.ts.net closed the connection".into());
-    ws.hosts[2].model.ssh_server_missing = true;
+    ws.hosts[2].model.ssh_problem = Some(crate::app::tests::ssh_facts("Linux", 1000, true));
     ws.hosts[2].model.status = "No Rex server on admin@vault.example".into();
 
     let text = about::debug_info(&ws);

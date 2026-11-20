@@ -53,13 +53,81 @@ fn key_problem(stderr: &str) -> Option<KeyProblem> {
     }
 }
 
-/// Socket discovery succeeded over SSH, but found no server. Authentication and
-/// transport failures deliberately do not carry this opt-in setup signal.
+/// Facts from the last line of the read-only remote lookup. Legacy replies carry
+/// only the user; an unknown OS or uid cannot authorize an installation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Facts {
+    pub user: String,
+    pub os: String,
+    pub uid: u32,
+    pub rex: bool,
+}
+
+impl Facts {
+    fn parse(line: &str) -> Result<Self> {
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        match fields.as_slice() {
+            [user, os, uid, rex @ ("rex" | "norex")] => Ok(Self {
+                user: (*user).into(),
+                os: (*os).into(),
+                uid: uid.parse()?,
+                rex: *rex == "rex",
+            }),
+            [user] => Ok(Self {
+                user: (*user).into(),
+                os: String::new(),
+                uid: 0,
+                rex: false,
+            }),
+            _ => bail!("The SSH host did not report usable setup facts."),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Problem {
+    NoServer(Facts),
+    UnknownKey,
+    ChangedKey,
+}
+
+impl Problem {
+    pub fn from_error(error: &anyhow::Error) -> Option<Self> {
+        if let Some(missing) = error.downcast_ref::<MissingServer>() {
+            return Some(Self::NoServer(missing.facts.clone()));
+        }
+        match error.downcast_ref::<KeyProblem>()? {
+            KeyProblem::Unknown => Some(Self::UnknownKey),
+            KeyProblem::Changed => Some(Self::ChangedKey),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupOffer {
+    Start,
+    Install,
+    Key,
+}
+
+impl SetupOffer {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start personal server…",
+            Self::Install => "Install Rex on this host…",
+            Self::Key => "Check host key…",
+        }
+    }
+}
+
 #[derive(Debug)]
-pub struct MissingServer(pub String);
+pub struct MissingServer {
+    pub facts: Facts,
+    message: String,
+}
 impl std::fmt::Display for MissingServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for MissingServer {}
@@ -153,17 +221,34 @@ impl Target {
         out
     }
 
-    fn missing_server_message(&self, user: &str) -> String {
-        let install_target = Target {
-            socket: None,
-            ..self.clone()
+    pub fn setup_offer(&self, problem: &Problem) -> Option<SetupOffer> {
+        match problem {
+            Problem::UnknownKey | Problem::ChangedKey => Some(SetupOffer::Key),
+            Problem::NoServer(facts) if self.socket.is_none() && facts.rex => {
+                Some(SetupOffer::Start)
+            }
+            Problem::NoServer(facts)
+                if self.socket.is_none() && facts.os == "Linux" && facts.uid != 0 =>
+            {
+                Some(SetupOffer::Install)
+            }
+            _ => None,
         }
-        .endpoint()
-        .replace('\'', "'\\''");
-        format!(
-            "No Rex server found on {} for {user}: nothing in {user}'s runtime directory, /run/rex or /var/run/rex. Attachment never starts a server. Choose Start personal server… to review a one-time start, or run rex server install '{install_target}' yourself (Rex preview.14 or newer; asks before changes). If a server already runs elsewhere, name its socket in the SSH endpoint.",
+    }
+
+    fn missing_server(&self, facts: Facts) -> MissingServer {
+        let user = &facts.user;
+        let guide = match self.setup_offer(&Problem::NoServer(facts.clone())) {
+            Some(offer @ (SetupOffer::Start | SetupOffer::Install)) => {
+                format!("Choose {} to review setup.", offer.label())
+            }
+            _ => "Set up Rex on the host by hand; see docs/hosts.md.".into(),
+        };
+        let message = format!(
+            "No Rex server found on {} for {user}: nothing in {user}'s runtime directory, /run/rex or /var/run/rex. Attachment never starts a server. {guide} If a server already runs elsewhere, name its socket in the SSH endpoint.",
             self.host
-        )
+        );
+        MissingServer { facts, message }
     }
 
     /// The host as a URL writes it: an IPv6 address in brackets.
@@ -253,8 +338,8 @@ fn tunnels_directory() -> PathBuf {
 /// reports, the login user's own server in the runtime directory (Linux) or under
 /// Application Support (macOS), then a shared server's `/run/rex/server.sock` or FreeBSD's
 /// `/var/run/rex/server.sock`. Prints `sock <path>` for the first that is a socket, else
-/// `none <user>`. It is wrapped in `sh -c '…'`, so it holds no single quote.
-const RESOLVE: &str = "p=\"\"; for c in \"$(rex server status --autostart=false 2>/dev/null | grep -o \"unix:///[^[:space:]]*\\.sock\" | head -n 1 | sed \"s#^unix://##\")\" \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rex/server.sock\" \"$HOME/Library/Application Support/rex/server.sock\" /run/rex/server.sock /var/run/rex/server.sock; do if [ -n \"$c\" ] && [ -S \"$c\" ]; then p=\"$c\"; break; fi; done; if [ -n \"$p\" ]; then printf \"sock %s\\n\" \"$p\"; else printf \"none %s\\n\" \"$(id -un)\"; fi";
+/// `none <user> <os> <uid> <rex|norex>`. Wrapped in `sh -c '…'`, so no single quotes.
+const RESOLVE: &str = r#"p=""; for c in "$(rex server status --autostart=false 2>/dev/null | grep -o "unix:///[^[:space:]]*\.sock" | head -n 1 | sed "s#^unix://##")" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rex/server.sock" "$HOME/Library/Application Support/rex/server.sock" /run/rex/server.sock /var/run/rex/server.sock; do if [ -n "$c" ] && [ -S "$c" ]; then p="$c"; break; fi; done; if [ -n "$p" ]; then printf "sock %s\n" "$p"; else r=norex; if command -v rex >/dev/null 2>&1 || [ -x "$HOME/.local/bin/rex" ]; then r=rex; fi; printf "none %s %s %s %s\n" "$(id -un)" "$(uname -s)" "$(id -u)" "$r"; fi"#;
 
 /// The check for a socket the user named: `sock <path>` when it is one, else `missing <path>`.
 fn check_script(socket: &str) -> String {
@@ -476,7 +561,7 @@ async fn resolve_with(target: &Target, ssh: &std::ffi::OsStr) -> Result<String> 
     });
     match answer {
         Some(Answer::Sock(path)) => Ok(path),
-        Some(Answer::None(user)) => Err(MissingServer(target.missing_server_message(&user)).into()),
+        Some(Answer::None(line)) => Err(target.missing_server(Facts::parse(&line)?).into()),
         Some(Answer::Missing(path)) => bail!(
             "{path} on {} is not a socket. Is Rex running there?",
             target.host
@@ -620,26 +705,36 @@ mod tests {
     }
 
     #[test]
-    fn missing_server_hint_preserves_ssh_config_user_port_and_ipv6() {
-        for endpoint in [
-            "ssh://work-alias",
-            "ssh://ops@box:2222",
-            "ssh://me@[fd7a::1]:22",
+    fn facts_from_current_and_legacy_replies_guide_setup() {
+        let target = Target::parse("ssh://ops@box:2222").unwrap().unwrap();
+        for (last, expected) in [
+            ("ops Linux 1000 norex", Some(SetupOffer::Install)),
+            ("ops Linux 0 norex", None),
+            ("ops Darwin 1000 norex", None),
+            ("ops FreeBSD 1000 rex", Some(SetupOffer::Start)),
+            ("ops", None),
         ] {
-            let target = Target::parse(endpoint).unwrap().unwrap();
-            let message = target.missing_server_message("remote-user");
-            assert!(message.contains(&format!("rex server install '{endpoint}'")));
+            let facts = Facts::parse(last).unwrap();
+            assert_eq!(facts.user, "ops");
+            assert_eq!(
+                target.setup_offer(&Problem::NoServer(facts.clone())),
+                expected
+            );
+            let message = target.missing_server(facts).to_string();
             assert!(message.contains("Attachment never starts a server"));
-            assert!(message.contains("asks before changes"));
+            assert!(message.contains(expected.map_or("docs/hosts.md", SetupOffer::label)));
         }
-        let target = Target::parse("ssh://box/path/to/server.sock")
-            .unwrap()
-            .unwrap();
-        assert!(
-            target
-                .missing_server_message("me")
-                .contains("rex server install 'ssh://box'")
+        assert_eq!(
+            Facts::parse("me Linux 1009 rex").unwrap(),
+            Facts {
+                user: "me".into(),
+                os: "Linux".into(),
+                uid: 1009,
+                rex: true
+            }
         );
+        assert!(Facts::parse("ops Linux -1 norex").is_err());
+        assert!(Facts::parse("ops Linux 1000 maybe").is_err());
     }
 
     #[test]

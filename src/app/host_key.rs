@@ -5,7 +5,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::ssh::{
-    KeyProblem, Target,
+    KeyProblem, Problem, SetupOffer, Target,
     hostkey::{self, Offer},
 };
 use rune::{El, Tx, col, row, text};
@@ -29,10 +29,14 @@ enum Phase {
 
 impl Workspace {
     pub(super) fn can_check_key(&self, host: usize) -> Option<KeyProblem> {
-        let state = &self.hosts.get(host)?.model;
-        (!state.connected)
-            .then_some(state.ssh_key_problem)
-            .flatten()
+        if self.ssh_offer(host) != Some(SetupOffer::Key) {
+            return None;
+        }
+        match self.hosts.get(host)?.model.ssh_problem.as_ref()? {
+            Problem::UnknownKey => Some(KeyProblem::Unknown),
+            Problem::ChangedKey => Some(KeyProblem::Changed),
+            Problem::NoServer(_) => None,
+        }
     }
 
     pub(super) fn preview_host_key(&mut self, host: usize) {
