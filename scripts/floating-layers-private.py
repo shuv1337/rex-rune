@@ -33,8 +33,8 @@ from shlex import quote
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-rune"))
-RECEIPTS_ROOT = Path(os.environ.get("REX_FLOAT_OUT", str(Path.home() / ".cache/agent-ws/issue136-slice1-receipts")))
-BASE = Path.home() / ".cache/agent-ws"
+BASE = (Path.home() / ".cache/agent-ws").resolve()
+RECEIPTS_ROOT = Path(os.environ.get("REX_FLOAT_OUT", str(BASE / "issue136-slice1-receipts")))
 
 
 def sha256(path):
