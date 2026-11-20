@@ -28,6 +28,7 @@ mod notify;
 mod server_page;
 mod sounds;
 pub use notify::notify_restart_failure;
+mod host_key;
 mod pair_device;
 mod pane_header;
 mod pane_moves;

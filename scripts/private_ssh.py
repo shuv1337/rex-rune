@@ -58,10 +58,12 @@ AllowStreamLocalForwarding yes
   IdentitiesOnly yes
   UserKnownHostsFile {work}/known_hosts
   GlobalKnownHostsFile /dev/null
-  StrictHostKeyChecking accept-new
+  StrictHostKeyChecking yes
   BatchMode yes
   ConnectTimeout 2
 """)
+    key = (work / "host-key.pub").read_text().split()
+    (work / "known_hosts").write_text(f"[127.0.0.1]:{port} {key[0]} {key[1]}\n")
     server = subprocess.Popen([sshd, "-D", "-e", "-f", str(server_config)],
                               stdout=(work / "sshd.log").open("w"), stderr=subprocess.STDOUT)
     time.sleep(.4)

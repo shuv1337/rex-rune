@@ -125,7 +125,7 @@ pub fn command_preview(target: &Target) -> Result<String> {
     ))
 }
 
-fn quote_arg(arg: &str) -> String {
+pub fn quote_arg(arg: &str) -> String {
     if arg == "{}"
         || (!arg.is_empty()
             && arg
@@ -192,6 +192,7 @@ fn require_api12(version: &str, location: &str) -> Result<()> {
 pub async fn start_personal(endpoint: &str) -> Result<Attachment, Failure> {
     crate::platform::local::require_ssh()?;
     let target = Target::parse(endpoint)?.context("Setup requires an ssh:// host")?;
+    super::hostkey::require_safe_config(&target).await?;
     start_with(&target, local_rex().as_os_str(), OsStr::new("ssh")).await
 }
 

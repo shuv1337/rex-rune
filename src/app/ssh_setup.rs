@@ -100,7 +100,7 @@ impl Workspace {
     }
 
     /// One read-only lookup, only while this saved host still needs a connection.
-    fn reconnect_ssh_if_needed(&mut self, endpoint: &str) -> &'static str {
+    pub(super) fn reconnect_ssh_if_needed(&mut self, endpoint: &str) -> &'static str {
         let Some(host) = self
             .settings
             .hosts

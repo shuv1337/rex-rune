@@ -293,6 +293,7 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
             "Reset all",
         ),
         PanelKind::StartSsh { endpoint } => super::ssh_setup::dialog(s, endpoint),
+        PanelKind::HostKey { endpoint } => super::host_key::dialog(s, endpoint),
         PanelKind::Download(d) => super::downloads_view::dialog(s, d),
         PanelKind::AgentChange { change, steps } => {
             super::integrations::confirm(s, &panel.title, change, steps)

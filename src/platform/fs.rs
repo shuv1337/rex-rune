@@ -3,6 +3,48 @@ use std::io;
 #[cfg(unix)]
 use std::{ffi::CStr, os::fd::RawFd};
 
+/// Append one known_hosts record, without rewriting or following a symlink.
+pub fn append_ssh_key(path: &std::path::Path, record: &str, make_parent: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        if make_parent && let Some(parent) = path.parent() {
+            match std::fs::DirBuilder::new().mode(0o700).create(parent) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(io::Error::other("not a regular file"));
+        }
+        let mut tail = [b'\n'];
+        if meta.len() != 0 {
+            file.seek(SeekFrom::End(-1))?;
+            file.read_exact(&mut tail)?;
+        }
+        let newline = if tail == [b'\n'] { "" } else { "\n" };
+        file.write_all(format!("{newline}{record}\n").as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, record, make_parent);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SSH is unavailable",
+        ))
+    }
+}
+
 /// Rename `from` to `to`, both names in the open directory `dir`, in one step and only if
 /// `to` does not exist. `EEXIST` when it does.
 ///

@@ -4087,6 +4087,50 @@ fn open_add_host(rt: &mut Runtime<Workspace>) {
 }
 
 #[test]
+fn ssh_key_dialog_defaults_to_not_now_and_only_reconnects_after_self_check() {
+    use rex_rune::ssh::KeyProblem;
+    let mut ws = workspace();
+    let endpoint = "ssh://work-alias";
+    ws.settings.hosts[0].endpoint = endpoint.into();
+    ws.hosts[0].model.ssh_key_problem = Some(KeyProblem::Unknown);
+    let commands = capture_host(&mut ws, 0);
+    let mut rt = runtime(ws);
+    click(&mut rt, "offer-ssh-key");
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.panel.is_none());
+    assert!(commands.try_recv().is_err());
+    click(&mut rt, "offer-ssh-key");
+    rt.state.finish_key_check_for_test(
+        endpoint,
+        Err(anyhow::anyhow!(
+            "Appended to known_hosts, but OpenSSH still does not trust this host."
+        )),
+    );
+    rt.frame(1. / 60.);
+    assert!(
+        element_text(&rt, "dialog")
+            .join(" ")
+            .contains("still does not trust")
+    );
+    assert!(commands.try_recv().is_err());
+    press(&mut rt, Key::Escape);
+    click(&mut rt, "offer-ssh-key");
+    rt.state.finish_key_check_for_test(endpoint, Ok(()));
+    assert!(matches!(commands.try_recv(), Ok(HostCommand::Reconnect)));
+    assert!(commands.try_recv().is_err());
+    press(&mut rt, Key::Escape);
+    rt.update(|s, _| s.hosts[0].model.ssh_key_problem = Some(KeyProblem::Changed));
+    click(&mut rt, "offer-ssh-key");
+    assert!(!has(&rt, "trust-host-key"));
+    assert!(
+        element_text(&rt, "dialog")
+            .join(" ")
+            .contains("Rex Rune will not connect")
+    );
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
 fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
     let mut ws = workspace();
     ws.settings.hosts[0].endpoint = "ssh://work-alias".into();

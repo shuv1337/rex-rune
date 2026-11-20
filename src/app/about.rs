@@ -111,6 +111,11 @@ fn kind(endpoint: &str) -> &'static str {
 pub(super) fn state(host: &HostModel) -> &'static str {
     if host.connected {
         "connected"
+    } else if let Some(key) = host.ssh_key_problem {
+        match key {
+            rex_rune::ssh::KeyProblem::Unknown => "host key not trusted",
+            rex_rune::ssh::KeyProblem::Changed => "host key changed",
+        }
     } else if host.ssh_server_missing {
         "no server found over SSH"
     } else if host.status.starts_with("Connecting") {

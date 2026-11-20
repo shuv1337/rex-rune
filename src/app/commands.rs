@@ -827,6 +827,17 @@ impl Workspace {
                 .detail(name.clone()),
             );
         }
+        if self.can_check_key(host).is_some() {
+            rows.push(
+                Command::new(
+                    "host.check_key",
+                    G,
+                    "Check host key…",
+                    Intent::HostKey(host),
+                )
+                .detail(name.clone()),
+            );
+        }
         rows.extend([
             Command::action(
                 "host.collapse_others",

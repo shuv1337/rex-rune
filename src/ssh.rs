@@ -13,7 +13,45 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 
+pub mod hostkey;
 pub mod setup;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyProblem {
+    Unknown,
+    Changed,
+}
+
+impl std::fmt::Display for KeyProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "SSH host key not trusted. Choose Check host key… before connecting.",
+            Self::Changed => {
+                "SSH host key changed. Connection refused. Choose Check host key… for details."
+            }
+        })
+    }
+}
+
+impl std::error::Error for KeyProblem {}
+
+fn key_problem(stderr: &str) -> Option<KeyProblem> {
+    if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+        || stderr.contains("REVOKED HOST KEY DETECTED")
+    {
+        Some(KeyProblem::Changed)
+    } else if stderr
+        .lines()
+        .any(|line| line.starts_with("No ") && line.contains(" host key is known for "))
+        || stderr
+            .lines()
+            .any(|line| line == "Host key verification failed.")
+    {
+        Some(KeyProblem::Unknown)
+    } else {
+        None
+    }
+}
 
 /// Socket discovery succeeded over SSH, but found no server. Authentication and
 /// transport failures deliberately do not carry this opt-in setup signal.
@@ -145,13 +183,33 @@ impl Target {
         }
     }
 
-    /// The options every `ssh` run uses: never prompt, trust a machine's key the first time
-    /// (and refuse a changed one), notice a dead link within a minute, and keep clear of a
+    /// Known-hosts spelling before SSH config is applied; users of aliases
+    /// should also inspect OpenSSH's original warning.
+    pub fn direct_key_name(&self) -> String {
+        match self.port {
+            Some(port) if port != 22 => format!("[{}]:{port}", self.host),
+            _ => self.host.clone(),
+        }
+    }
+
+    /// The options every `ssh` run uses: never prompt or update known hosts, refuse unknown
+    /// and changed keys, notice a dead link within a minute, and keep clear of a
     /// `ControlMaster` in the user's configuration, which would take the forward over and keep
     /// it after this `ssh` ends, so the next forward of that path never listens. Logging stays
     /// at its default so a server's banner (how Tailscale SSH explains a refused login) is
     /// seen.
     fn options(&self) -> Vec<String> {
+        let mut args = self.config_options();
+        args.extend([
+            "-o".into(),
+            "StrictHostKeyChecking=yes".into(),
+            "-o".into(),
+            "UpdateHostKeys=no".into(),
+        ]);
+        args
+    }
+
+    fn config_options(&self) -> Vec<String> {
         let mut args = vec![
             "-o".into(),
             "ControlMaster=no".into(),
@@ -161,8 +219,6 @@ impl Target {
             "BatchMode=yes".into(),
             "-o".into(),
             "ConnectTimeout=10".into(),
-            "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
             "-o".into(),
             "ServerAliveInterval=15".into(),
             "-o".into(),
@@ -266,7 +322,7 @@ impl Tunnel {
         let started = std::time::Instant::now();
         loop {
             if let Some(status) = tunnel.child.try_wait()? {
-                bail!("{}", tunnel.exit_message(status));
+                return Err(tunnel.exit_error(status));
             }
             if crate::platform::local::connect(&tunnel.local).await.is_ok() {
                 return Ok(tunnel);
@@ -304,9 +360,17 @@ impl Tunnel {
     /// Resolves once the forward ends, with why.
     pub async fn closed(&mut self) -> anyhow::Error {
         match self.child.wait().await {
-            Ok(status) => anyhow::anyhow!("{}", self.exit_message(status)),
+            Ok(status) => self.exit_error(status),
             Err(error) => anyhow::Error::from(error).context("waiting for ssh"),
         }
+    }
+
+    fn exit_error(&self, status: std::process::ExitStatus) -> anyhow::Error {
+        let problem = key_problem(&self.stderr.lock().expect("ssh stderr"));
+        problem.map_or_else(
+            || anyhow::anyhow!("{}", self.exit_message(status)),
+            Into::into,
+        )
     }
 
     fn exit_message(&self, status: std::process::ExitStatus) -> String {
@@ -388,39 +452,17 @@ fn ssh_error(error: std::io::Error) -> anyhow::Error {
 /// Ask the other machine where its Rex server listens, or whether the socket the user named
 /// is there.
 async fn resolve(target: &Target) -> Result<String> {
-    let script = match &target.socket {
-        Some(socket) => check_script(socket),
-        None => RESOLVE.to_owned(),
-    };
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::process::Command::new("ssh")
-            .args(target.options())
-            .arg("--")
-            .arg(target.destination())
-            .arg(format!("sh -c '{script}'"))
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .with_context(|| format!("ssh {} did not answer", target.destination()))?
-    .map_err(ssh_error)?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        bail!(
-            "ssh {}: {}",
-            target.destination(),
-            last_line(&stderr).unwrap_or_else(|| format!("exited ({})", output.status))
-        );
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    resolve_with(target, std::ffi::OsStr::new("ssh")).await
+}
+
+async fn resolve_with(target: &Target, ssh: &std::ffi::OsStr) -> Result<String> {
+    let (stdout, stderr) = lookup(target, ssh).await?;
     enum Answer {
         Sock(String),
         None(String),
         Missing(String),
     }
-    let answer = stdout.lines().find_map(|l| {
+    let answer = stdout.lines().rev().find_map(|l| {
         l.strip_prefix("sock ")
             .map(|p| Answer::Sock(p.to_owned()))
             .or_else(|| {
@@ -447,10 +489,75 @@ async fn resolve(target: &Target) -> Result<String> {
     }
 }
 
+async fn lookup(target: &Target, ssh: &std::ffi::OsStr) -> Result<(String, String)> {
+    crate::platform::local::require_ssh()?;
+    let script = match &target.socket {
+        Some(socket) => check_script(socket),
+        None => RESOLVE.to_owned(),
+    };
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(ssh)
+            .args(target.options())
+            .arg("--")
+            .arg(target.destination())
+            .arg(format!("sh -c '{script}'"))
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("ssh {} did not answer", target.destination()))?
+    .map_err(ssh_error)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        if let Some(problem) = key_problem(&stderr) {
+            return Err(problem.into());
+        }
+        bail!(
+            "ssh {}: {}",
+            target.destination(),
+            last_line(&stderr).unwrap_or_else(|| format!("exited ({})", output.status))
+        );
+    }
+    Ok((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr.into_owned(),
+    ))
+}
+
 // Tunnel fixtures execute Unix shells and depend on Unix socket paths.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_key_errors_are_classified_and_change_takes_priority() {
+        assert_eq!(
+            key_problem(
+                "No ED25519 host key is known for box and you have requested strict checking.\nHost key verification failed."
+            ),
+            Some(KeyProblem::Unknown)
+        );
+        assert_eq!(
+            key_problem(
+                "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.\n"
+            ),
+            Some(KeyProblem::Changed)
+        );
+        assert_eq!(key_problem("box: Permission denied (publickey)."), None);
+        assert_eq!(
+            key_problem("ssh: connect to host box port 22: Connection refused"),
+            None
+        );
+        assert!(
+            Target::parse("ssh://box")
+                .unwrap()
+                .unwrap()
+                .options()
+                .contains(&"StrictHostKeyChecking=yes".into())
+        );
+    }
 
     #[test]
     fn targets_parse_and_print() {

@@ -179,6 +179,7 @@ pub struct Workspace {
     pub notification_outbox: super::notify::Outbox,
     pub integrations: super::integrations::Integrations,
     pub ssh_setup: super::ssh_setup::Setup,
+    pub(super) host_key: super::host_key::Check,
     /// The tailnet's machines, for Add host.
     pub discovery: super::discover::Discovery,
     /// The terminal theme this client declares, from Settings; none is Follow server.
@@ -342,6 +343,7 @@ impl Workspace {
             notification_outbox: Default::default(),
             integrations: Default::default(),
             ssh_setup: Default::default(),
+            host_key: Default::default(),
             discovery: Default::default(),
             term_theme,
             theme_dirs,
@@ -1530,6 +1532,7 @@ impl Workspace {
             Intent::Session(target, action) => self.session_action(target, action, tx),
             Intent::AddHost => self.open_add_host(),
             Intent::StartSsh(host) => self.preview_ssh_start(host),
+            Intent::HostKey(host) => self.preview_host_key(host),
             Intent::AddMachine(index) => self.add_machine(index, tx),
             Intent::MachineForm(index) => self.machine_form(index),
             Intent::AddHostManually => self.open_panel(
