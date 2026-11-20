@@ -102,13 +102,13 @@ authentication/transport failures, an already connected host, or a missing
 explicitly named socket.
 
 The dialog names the host and full `ssh://` endpoint, previews the command and
-explains what changes: Rex starts a personal server as that SSH login, may create
-its user config/state. The server is temporary: it stops about 10 seconds after
-its last session ends and its last connection closes. On Linux, logging out of
-the host ends it and every session unless lingering is on for that login
-(`loginctl enable-linger`); **Start personal server** does not turn lingering on.
-`rex server install`, run on the host, sets up a server that stays. The setup
-action creates no sessions, installs no packages and creates no system services.
+explains what changes: Rex starts a personal server as that SSH login and may
+create its user config/state. The server keeps running after the app closes,
+until it is stopped or the host restarts. On Linux with systemd, logging out of
+the host also ends it and every session in it unless lingering is on for that
+login (`loginctl enable-linger`). **Start personal server** does not turn
+lingering on. The setup action creates no sessions, installs no packages and
+creates no system services.
 **Not now** is the default (including Enter); only **Start personal server**
 authorizes a single attempt. Closing the busy dialog does not cancel that
 already-authorized start.
@@ -125,11 +125,12 @@ call server.status '{}'`. Using `api call server.status`, rather than `rex serve
 status`, matters: the latter deliberately does not auto-start even with the flag.
 This read-only API call creates no session.
 
-Installation is deliberately not automated: if Rex is missing, run `rex server
-install 'ssh://host'` yourself in a terminal. Rex's installer asks before each
-change and adds the host; the app neither answers its prompts nor installs
-packages/services. You can instead edit the endpoint to an existing custom socket
-and remain attachment-only.
+For a server that starts at boot and survives logout, run
+`rex server install 'ssh://[user@]host'` from this computer. The installer needs
+systemd on the host; accept its prompt to enable lingering. You can also use it
+if Rex is missing. Rex's installer asks before each change and adds the host; the
+app neither answers its prompts nor installs packages or services. You can
+instead edit the endpoint to an existing custom socket and remain attachment-only.
 
 ## Remote control
 

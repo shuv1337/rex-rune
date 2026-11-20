@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- **SSH setup explains that a personal server is temporary.** The preview and host docs explain idle shutdown, Linux logout and lingering, and how to install a persistent server. The success notice says no session was created and when the server will stop without one.
+- **SSH setup explains when a personal server stops (#147).** Closing the client leaves the server running. The preview and host docs explain Linux systemd logout and lingering, and point to `rex server install` for boot-time startup. The explanation scrolls in small windows while setup status and actions remain visible.
 
 ## 0.10.1 - 2026-11-14
 

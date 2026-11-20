@@ -2,9 +2,10 @@
 
 Rex Rune is an unofficial, independent native client for [Rex](https://www.superlogical.com/rex),
 the terminal multiplexer from Superlogical. It attaches to an existing Rex
-server. Closing the app detaches; sessions, panes and programs live on the
-server for as long as it runs. A [personal server started over SSH](docs/hosts.md#ssh-setup)
-is temporary.
+server. Closing the app detaches without stopping the server or its sessions.
+A [personal server started over SSH](docs/hosts.md#ssh-setup) runs until it is
+stopped or the host restarts. On Linux with systemd, logging out of the host
+also ends the server and its sessions unless lingering is enabled for that login.
 It is written in Rust on [Rune](https://github.com/anomalyco/rune) with
 libghostty-vt for terminal emulation and the
 [`rexrs`](https://github.com/a10y/rexrs) control SDK. Published binaries are
