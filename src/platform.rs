@@ -23,6 +23,7 @@ pub mod downloads;
 pub mod fs;
 pub mod local;
 pub mod net;
+pub mod pty;
 // Process identity is only needed by Unix tunnel and download cleanup.
 #[cfg(unix)]
 pub mod process;

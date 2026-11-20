@@ -1,194 +1,207 @@
 #!/usr/bin/env python3
-"""Opt-in SSH setup through the real UI, on a private localhost sshd.
+"""Opt-in SSH setup UI checks on private X11/sshd with fake Rex only.
 
-Requires sshd (runnable as this user), ssh-keygen, Xvfb, openbox, xdotool and
-ImageMagick. Set REX_CLI to a preview.14+ binary and REX_BIN to a built client.
-No root, containers, package installs or changes to ~/.ssh are needed. The
-private sshd uses a generated key and forced HOME/XDG/PATH under
-~/.cache/agent-ws. A test-only ssh shim applies its private config to both the
-native Rex start and the client's existing ssh -L path. All processes are
-stopped by PID, including the personal server; artifacts remain for inspection.
-Never run against a normal SSH host: the endpoint is fixed to this fixture.
+Requires sshd, Xvfb, openbox, xdotool, ImageMagick and Tesseract. Set REX_BIN to
+a built client and REX_CAPTURE_OUT to an artifact directory. The captured labels
+locate the real X11 buttons; the fake's files assert what the clicks did.
 """
+import csv
 import importlib.util
 import json
 import os
 from pathlib import Path
-import shlex
-import shutil
-import signal
-import socket
 import subprocess
-import tempfile
+import sys
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
-REX = str(Path(os.environ["REX_CLI"]).resolve())
-BINARY = str(Path(os.environ["REX_BIN"]).resolve())
-for tool in ("sshd", "ssh-keygen", "ssh", "Xvfb", "openbox", "xdotool", "import"):
-    assert shutil.which(tool), f"{tool} required"
-scratch = Path.home() / ".cache/agent-ws"
-scratch.mkdir(parents=True, exist_ok=True)
-work = Path(tempfile.mkdtemp(prefix="rex-ssh-", dir=scratch))
-for directory in ("home", "config", "state", "runtime", "cache", "bin", "remote-bin", "captures", "local-home"):
-    (work / directory).mkdir(mode=0o700)
-assert len(str(work / "runtime/rex/login-server.sock")) < 104, "scratch path too long for Unix sockets"
-for name in ("hostkey", "clientkey"):
-    subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(work / name)], check=True, stdout=subprocess.DEVNULL)
-with socket.socket() as reserved:
-    reserved.bind(("127.0.0.1", 0))
-    port = reserved.getsockname()[1]
+from ssh_install_fixture import fixture, new_folder, reset
+
+spec = importlib.util.spec_from_file_location("accept", Path(__file__).with_name("rune-acceptance-x11.py"))
+accept = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(accept)
 
 
-def executable(path, body):
-    path.write_text("#!/bin/sh\n" + body + "\n")
-    path.chmod(0o700)
-
-
-# No login shell reads the real user's profile, and no Rex command sees their
-# state/runtime/config directories. Log commands to verify attachment stays read-only.
-executable(work / "force", f"""export HOME={shlex.quote(str(work / 'home'))}
-export XDG_CONFIG_HOME={work}/config XDG_STATE_HOME={work}/state XDG_RUNTIME_DIR={work}/runtime XDG_CACHE_HOME={work}/cache
-export PATH={work}/remote-bin:/usr/bin:/bin
-unset REX_SERVER REX_CONFIG DBUS_SESSION_BUS_ADDRESS
-printf '%s\\n' "$SSH_ORIGINAL_COMMAND" >> {work}/remote-commands.log
-exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"
-""")
-(work / "bin/rex").symlink_to(REX)
-(work / "remote-bin/rex").symlink_to(REX)
-(work / "sshd.conf").write_text(f"""Port {port}
-ListenAddress 127.0.0.1
-HostKey {work}/hostkey
-PidFile {work}/sshd.pid
-AuthorizedKeysFile {work}/clientkey.pub
-StrictModes no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-UsePAM no
-AllowUsers {os.environ['USER']}
-ForceCommand {work}/force
-""")
-(work / "client.conf").write_text(f"""Host rex-setup-private
- HostName 127.0.0.1
- Port {port}
- User {os.environ['USER']}
- IdentityFile {work}/clientkey
- IdentitiesOnly yes
- UserKnownHostsFile {work}/known_hosts
- StrictHostKeyChecking accept-new
- BatchMode yes
-""")
-executable(work / "bin/ssh", f"exec {shlex.quote(shutil.which('ssh'))} -F {work}/client.conf \"$@\"")
-# Avoid any real tailnet access, even if a test accidentally opens Add host.
-executable(work / "bin/tailscale", "exit 1")
-endpoint = "ssh://rex-setup-private"
-unix = "unix://" + str(work / "runtime/rex/server.sock")
-for key in list(os.environ):
-    if key.startswith("REX_") or key in ("DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY"):
-        del os.environ[key]
-os.environ.update(HOME=str(work / "local-home"), XDG_CONFIG_HOME=str(work / "config-local"),
-                  XDG_STATE_HOME=str(work / "state-local"), XDG_RUNTIME_DIR=str(work / "runtime"),
-                  XDG_CACHE_HOME=str(work / "cache"), PATH=f"{work}/bin:" + os.environ["PATH"],
-                  REX_SERVER=endpoint, REX_BIN=BINARY, REX_CAPTURE_OUT=str(work / "captures"))
-
-
-def wait(predicate, message, timeout=40):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(.1)
-    raise AssertionError(message)
-
-
-def status():
-    return json.loads(subprocess.check_output([REX, "--autostart=false", "-S", unix,
-                                              "server", "status", "--json"], timeout=10))
-
-
-sshd = subprocess.Popen([shutil.which("sshd"), "-D", "-e", "-f", str(work / "sshd.conf")],
-                        stdout=(work / "sshd.log").open("w"), stderr=subprocess.STDOUT)
-desk = None
-server_pid = None
-try:
-    time.sleep(.4)
-    assert sshd.poll() is None, (work / "sshd.log").read_text()
-    spec = importlib.util.spec_from_file_location("accept", ROOT / "scripts/rune-acceptance-x11.py")
-    accept = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(accept)
-    desk = accept.Desktop()
-    (work / "workspace.json").write_text(json.dumps({"hosts":[{"label":"SSH lab", "endpoint":endpoint}]}))
-    app = subprocess.Popen([BINARY, "--endpoint", endpoint, "--config", str(work / "workspace.json"),
-                            "--window-size", "1200x800"], env=desk.env,
-                           stdout=(work / "client.log").open("w"), stderr=subprocess.STDOUT)
-    desk.apps.append(app)
-    window = desk.x("search", "--sync", "--pid", app.pid)
-    desk.x("windowfocus", window)
-    wait(lambda: (work / "remote-commands.log").exists(), "SSH lookup never ran")
-    time.sleep(3)
-    assert not (work / "runtime/rex/server.sock").exists(), "ordinary attachment started a server"
-    desk.capture(window, "ssh-missing")
-
-    def preview():
-        desk.key("ctrl+shift+p")
-        desk.type("Start personal server")
-        desk.key("Return")
-        time.sleep(.4)
-
-    preview()
-    desk.capture(window, "ssh-start-preview")
-    desk.x("windowsize", window, 640, 480)
-    time.sleep(.4)
-    desk.capture(window, "ssh-start-preview-small")
-    desk.x("windowsize", window, 1200, 800)
-    time.sleep(.4)
-    desk.key("Return")  # The safe default is Not now.
-    time.sleep(.4)
-    assert not (work / "runtime/rex/server.sock").exists(), "default Return started a server"
-    # A real SSH preflight must reject an old remote CLI without invoking auto-start.
-    remote_rex = work / "remote-bin/rex"
-    remote_rex.unlink()
-    executable(remote_rex, 'if [ "$1" = version ]; then echo \'{"api_revision":11}\'; else exit 1; fi')
-    preview()
-    desk.x("mousemove", "--window", window, 755, 540)
-    desk.x("click", 1)
-    wait(lambda: "rex version --json" in (work / "remote-commands.log").read_text(), "remote version check never ran")
-    time.sleep(1)
-    assert not (work / "runtime/rex/server.sock").exists(), "old remote Rex was started"
-    assert "rex server start" not in (work / "remote-commands.log").read_text()
-    desk.x("windowsize", window, 640, 480)
-    time.sleep(.4)
-    desk.capture(window, "ssh-old-remote-error-small")
-    desk.x("windowsize", window, 1200, 800)
-    desk.key("Escape")
-    remote_rex.unlink()
-    remote_rex.symlink_to(REX)
-    preview()
-    # Explicitly press the named Start button in the fixed 1200x800 fixture.
-    # Default Return above must never authorize setup.
-    desk.x("mousemove", "--window", window, 755, 540)
-    desk.x("click", 1)
-    wait(lambda: (work / "runtime/rex/server.sock").exists(), "confirmed start did not create the private socket")
-    reply = status()
-    server_pid = reply["pid"]
-    assert reply["api_revision"] >= 12 and reply["session_count"] == 0
-    time.sleep(3)
-    desk.capture(window, "ssh-started")
-    # Native command used only for setup; the subsequent attachment uses ssh -L.
-    commands = (work / "remote-commands.log").read_text()
-    assert "cat" in commands.splitlines(), "client did not attach via its socket forward"
-    assert reply["session_count"] == 0, "setup created a session"
-    print(f"PASS opt-in start, Not now, SSH alias/config, zero sessions, ssh -L attachment: {work}")
-finally:
-    if desk:
-        desk.close()
-    # Read only our explicit socket, never a CLI default or the user's server.
-    if server_pid is None and (work / "runtime/rex/server.sock").exists():
-        server_pid = status()["pid"]
-    if server_pid is not None:
+def smoke(work):
+    with fixture(work) as (endpoint, env, _):
+        (work / "known_hosts").write_text("")
+        desktop = accept.Desktop()
         try:
-            os.kill(server_pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    sshd.terminate()
-    sshd.wait(timeout=10)
+            env.update(DISPLAY=desktop.display, REX_RUNE_NO_UPDATE_CHECK="1", WGPU_BACKEND="vulkan",
+                       LP_NUM_THREADS="4")
+            if os.environ.get("VK_DRIVER_FILES"):
+                env["VK_DRIVER_FILES"] = os.environ["VK_DRIVER_FILES"]
+            config = work / "workspace.json"
+            config.write_text(json.dumps({"hosts": [{"label": "SSH lab", "endpoint": endpoint}]}))
+            with (work / "client.log").open("w") as log:
+                app = subprocess.Popen([accept.BIN, "--endpoint", endpoint, "--config", config,
+                                        "--window-size", "1200x800"], env=env, stdout=log, stderr=subprocess.STDOUT)
+            desktop.apps.append(app)
+            def find_window():
+                try:
+                    return desktop.x("search", "--pid", app.pid)
+                except subprocess.CalledProcessError:
+                    return None
+            window = wait(find_window, "app window")
+            desktop.x("windowfocus", window)
+
+            def words():
+                image = subprocess.check_output(["import", "-window", window, "png:-"], env=desktop.env, timeout=5)
+                tsv = subprocess.check_output(["tesseract", "stdin", "stdout", "--psm", "11", "tsv"],
+                                              input=image, stderr=subprocess.DEVNULL, timeout=5).decode()
+                return [r for r in csv.DictReader(tsv.splitlines(), delimiter="\t") if r["text"].strip()]
+
+            def find(label):
+                tokens = label.casefold().split()
+                rows = words()
+                matches = []
+                for i in range(len(rows) - len(tokens) + 1):
+                    group = rows[i:i + len(tokens)]
+                    seen = [r["text"].strip(".,…?!:()").casefold() for r in group]
+                    if seen == tokens:
+                        first, last = group[0], group[-1]
+                        x = (int(first["left"]) + int(last["left"]) + int(last["width"])) // 2
+                        y = int(first["top"]) + int(first["height"]) // 2
+                        matches.append((x, y))
+                return max(matches, key=lambda point: point[1], default=None)
+
+            def click(label):
+                x, y = wait(lambda: find(label), label)
+                desktop.x("mousemove", "--window", window, x, y)
+                desktop.x("click", 1)
+                time.sleep(.3)
+
+            def primary():
+                # The primary pill has a blue fill and dark text, which full-window
+                # OCR skips on some Tesseract versions. This clicks the painted
+                # pill, not a fixed coordinate; subsequent assertions prove its effect.
+                image = subprocess.check_output(
+                    ["import", "-window", window, "-depth", "8", "ppm:-"],
+                    env=desktop.env, timeout=5)
+                _, size, _, pixels = image.split(b"\n", 3)
+                width, height = map(int, size.split())
+                for y in range(3 * height // 4, height // 2 - 60, -2):
+                    count = 0
+                    for x in range(width // 2 + 85, width - width // 8):
+                        offset = 3 * (y * width + x)
+                        r, g, b = pixels[offset:offset + 3]
+                        count = count + 1 if 90 < r < 205 and g > 145 and b > 215 else 0
+                        if count == 42:
+                            return x - 21, y
+                return None
+
+            def click_primary():
+                x, y = wait(primary, "primary dialog button")
+                desktop.x("mousemove", "--window", window, x, y)
+                desktop.x("click", 1)
+                time.sleep(.3)
+
+            def captures(name):
+                for suffix, width, height in (("", 1200, 800), ("-small", 640, 480)):
+                    desktop.x("windowsize", window, width, height)
+                    time.sleep(.4)
+                    desktop.capture(window, name + suffix)
+                desktop.x("windowsize", window, 1200, 800)
+                time.sleep(.3)
+
+            def open_install():
+                def review():
+                    if point := primary():
+                        return point
+                    if point := find("Install Rex on this host"):
+                        desktop.x("mousemove", "--window", window, *point)
+                        desktop.x("click", 1)
+                        time.sleep(.5)
+                    return None
+                wait(review, "review")
+
+            click("Check host key")
+            wait(primary, "host fingerprint")
+            captures("ssh-check-key")
+            desktop.key("Return")
+            assert not (work / "known_hosts").read_text()
+            click("Check host key")
+            click_primary()
+            wait(lambda: (work / "known_hosts").stat().st_size > 0, "confirmed key append")
+            wait(lambda: find("Host key trusted"), "trusted confirmation")
+            desktop.key("Return")
+
+            open_install()
+            captures("ssh-install-review")
+            desktop.key("Return")
+            assert not (work / "installer.pid").exists()
+
+            (work / "old").touch()
+            open_install()
+            click_primary()
+            wait(lambda: find("API 12"), "preflight refusal")
+            captures("ssh-install-refused")
+            desktop.key("Return")
+            assert not (work / "installer.pid").exists()
+            reset(work)
+
+            open_install()
+            click_primary()
+            wait(primary, "first question")
+            captures("ssh-install-asking")
+            click_primary()
+            wait(lambda: find("Enable the socket"), "second question")
+            time.sleep(.8)
+            desktop.key("Return")
+            wait(lambda: find("The installer finished"), "declined outcome")
+            captures("ssh-install-declined")
+            assert (work / "answers").read_text().splitlines() == ["Install the binary?:y", "Enable the socket?:n"]
+            assert not (work / "listener.pid").exists()
+            desktop.key("Return")
+
+            # Retain the Start preview/error checks alongside the installer cases.
+            click("Start personal server")
+            captures("ssh-start-preview")
+            desktop.key("Return")
+            (work / "old").touch()
+            click("Start personal server")
+            click_primary()
+            wait(lambda: find("too old"), "start preflight error")
+            captures("ssh-old-remote-error")
+            desktop.key("Escape")
+            reset(work, "socket")
+            desktop.key("ctrl+shift+p")
+            desktop.type("Reconnect host")
+            desktop.key("Return")
+
+            open_install()
+            click_primary()
+            wait(lambda: (work / "installer.pid").exists(), "installer start")
+            wait(lambda: find("Install the binary"), "first install question")
+            time.sleep(.8)
+            click_primary()
+            wait(lambda: find("Enable the socket"), "socket question")
+            time.sleep(.8)
+            click_primary()
+            wait(lambda: find("Socket setup failed"), "partial failure")
+            captures("ssh-install-partial")
+            assert (work / "remote/.local/bin/rex").exists()
+            assert not (work / "listener.pid").exists()
+            assert not (work / "hosts-added").exists()
+            print(f"PASS X11 key confirmation, safe defaults, consent, refusal and partial failure: {accept.OUT}")
+        except BaseException:
+            if (work / "client.log").exists():
+                print((work / "client.log").read_text(), file=sys.stderr)
+            if "window" in locals():
+                desktop.capture(window, "ssh-smoke-failure")
+            raise
+        finally:
+            desktop.close()
+
+
+def wait(predicate, label):
+    deadline = time.monotonic() + 18
+    while time.monotonic() < deadline:
+        if value := predicate():
+            return value
+        time.sleep(.25)
+    raise AssertionError(f"Timed out: {label}")
+
+
+if __name__ == "__main__":
+    with new_folder("sx-") as folder:
+        smoke(Path(folder))

@@ -50,6 +50,30 @@ jobs:
       - name: Acceptance fixture cleanup and isolation
         run: python3 scripts/test-fixture-cleanup.py
 
+  ssh-install:
+    name: Private SSH install fixture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+      - name: Provision sshd binary without installing or starting a service
+        run: |
+          if ! command -v sshd >/dev/null; then
+            mkdir "$RUNNER_TEMP/openssh"
+            cd "$RUNNER_TEMP/openssh"
+            apt-get download openssh-server
+            dpkg-deb -x openssh-server_*.deb .
+            echo "$PWD/usr/sbin" >> "$GITHUB_PATH"
+          fi
+          # OpenSSH checks its compiled-in privilege-separation directory.
+          sudo install -d -m 0755 /run/sshd
+      - run: cargo build --locked --no-default-features --bin rex-install-probe
+      - name: Run as the runner user on loopback
+        run: python3 scripts/ssh-install-private.py
+
   macos:
     name: macOS
     runs-on: macos-15

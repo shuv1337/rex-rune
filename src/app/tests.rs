@@ -4103,13 +4103,17 @@ fn ssh_key_dialog_defaults_to_not_now_and_only_reconnects_after_self_check() {
     assert!(rt.state.panel.is_none());
     assert!(commands.try_recv().is_err());
     click(&mut rt, "offer-ssh-key");
-    rt.state.finish_key_check_for_test(
-        endpoint,
-        Err(anyhow::anyhow!(
-            "Appended to known_hosts, but OpenSSH still does not trust this host."
-        )),
-    );
-    rt.frame(1. / 60.);
+    rt.update(|s, _| {
+        s.finish_key_check_for_test(
+            endpoint,
+            Err(anyhow::anyhow!(
+                "Appended to known_hosts, but OpenSSH still does not trust this host."
+            )),
+        )
+    });
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
     assert!(
         element_text(&rt, "dialog")
             .join(" ")
@@ -4140,6 +4144,202 @@ pub(super) fn ssh_facts(os: &str, uid: u32, rex: bool) -> rex_rune::ssh::Problem
         uid,
         rex,
     })
+}
+
+#[test]
+fn ssh_install_offer_table_and_local_only_command_ids() {
+    use rex_rune::ssh::Problem;
+    let allowed_here = rex_rune::platform::local::require_ssh().is_ok();
+    for (problem, endpoint, key) in [
+        (
+            Some(ssh_facts("Linux", 1000, false)),
+            "ssh://box",
+            "install",
+        ),
+        (Some(ssh_facts("Linux", 0, false)), "ssh://box", ""),
+        (Some(ssh_facts("Darwin", 1000, false)), "ssh://box", ""),
+        (Some(ssh_facts("FreeBSD", 1000, false)), "ssh://box", ""),
+        (Some(ssh_facts("Linux", 1000, true)), "ssh://box", "start"),
+        (
+            Some(ssh_facts("Linux", 1000, false)),
+            "ssh://box/manual.sock",
+            "",
+        ),
+        (Some(Problem::UnknownKey), "ssh://box", "key"),
+        (Some(Problem::ChangedKey), "ssh://box", "key"),
+        (None, "ssh://box", ""),
+    ] {
+        for (offer, label, id) in [
+            ("install", "Install Rex on this host…", "host.install_rex"),
+            ("start", "Start personal server…", "host.start_server"),
+            ("key", "Check host key…", "host.check_key"),
+        ] {
+            let expected = key == offer && allowed_here;
+            let mut rt = runtime(ws_for_ssh_offer(endpoint, problem.clone()));
+            assert_eq!(has(&rt, &format!("offer-ssh-{offer}")), expected);
+            rt.update(|s, _| s.open_panel(PanelKind::Host(0), "Host menu", &[]));
+            assert_eq!(
+                rt.state.entries().iter().any(|e| e.label == label),
+                expected
+            );
+            rt.update(|s, _| s.picker(false));
+            assert_eq!(
+                rt.state
+                    .entries()
+                    .iter()
+                    .any(|e| e.id.as_deref() == Some(id)),
+                expected
+            );
+        }
+    }
+    assert!(
+        !super::actions::declarations()
+            .iter()
+            .any(|a| matches!(a.name.as_str(), "host.install_rex" | "host.check_key"))
+    );
+}
+
+fn ws_for_ssh_offer(endpoint: &str, problem: Option<rex_rune::ssh::Problem>) -> Workspace {
+    let mut ws = workspace();
+    ws.settings.hosts[0].endpoint = endpoint.into();
+    ws.hosts[0].model.ssh_problem = problem;
+    ws
+}
+
+#[test]
+fn ssh_install_dialog_histories_gate_answers_and_reconnect() {
+    use super::ssh_install::Phase;
+    use rex_rune::ssh::{
+        Problem,
+        install::{Answer, Event},
+    };
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+    for approve in [false, true] {
+        let mut ws = workspace();
+        ws.settings.hosts[0].endpoint = "ssh://box".into();
+        let Problem::NoServer(facts) = ssh_facts("Linux", 1000, false) else {
+            unreachable!()
+        };
+        ws.hosts[0].model.ssh_problem = Some(Problem::NoServer(facts.clone()));
+        let commands = capture_host(&mut ws, 0);
+        let mut rt = runtime(ws);
+        for dismiss in [Key::Enter, Key::Escape] {
+            click(&mut rt, "offer-ssh-install");
+            assert_eq!(rt.state.ssh_install.as_ref().unwrap().phase, Phase::Review);
+            press(&mut rt, dismiss);
+            assert!(rt.state.panel.is_none());
+        }
+        click(&mut rt, "offer-ssh-install");
+        let old = rt.state.ssh_install.as_ref().unwrap().run;
+        click(&mut rt, "begin-install");
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Checking
+        );
+        rt.update(|s, _| s.install_checked(old, Err(anyhow::anyhow!("already installed"))));
+        assert!(matches!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Refused(_)
+        ));
+        press(&mut rt, Key::Escape);
+        click(&mut rt, "offer-ssh-install");
+        click(&mut rt, "begin-install");
+        let serial = rt.state.ssh_install.as_ref().unwrap().run;
+        rt.update(|s, _| s.install_checked(serial, Ok(facts)));
+        rt.update(|s, _| s.install_event(old, Event::Exited { code: Some(0) }));
+        rt.update(|s, _| s.install_event(serial, Event::Asking { serial: 1 }));
+        for _ in 0..60 {
+            rt.frame(1. / 60.);
+        }
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Asking {
+                serial: 1,
+                ready: false
+            }
+        );
+        rt.update(|s, _| s.answer_install(serial, 1, Answer::Yes));
+        press(&mut rt, Key::Enter);
+        assert!(rt.state.ssh_install.as_ref().unwrap().answers.is_empty());
+        assert!(
+            rt.state.panel.is_some(),
+            "Enter while buttons are inert does not dismiss the dialog"
+        );
+        rt.update(|s, _| s.install_event(serial, Event::Ready { serial: 1 }));
+        for _ in 0..60 {
+            rt.frame(1. / 60.);
+        }
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Asking {
+                serial: 1,
+                ready: true
+            }
+        );
+        if approve {
+            click(&mut rt, "yes-install-step");
+        } else {
+            press(&mut rt, Key::Enter);
+        }
+        let answer = if approve { Answer::Yes } else { Answer::No };
+        rt.update(|s, _| s.answer_install(serial, 1, Answer::Yes));
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().answers,
+            [(1, answer)]
+        );
+        for _ in 0..2 {
+            rt.update(|s, _| s.install_event(serial, Event::Exited { code: Some(0) }));
+        }
+        assert!(matches!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Finished { .. }
+        ));
+        assert!(rt.state.panel.is_some());
+        let sent: Vec<_> = commands.try_iter().collect();
+        if approve {
+            assert!(matches!(sent.as_slice(), [HostCommand::Reconnect]));
+        } else {
+            assert!(sent.is_empty());
+        }
+    }
+}
+
+#[test]
+fn ssh_install_closing_or_removing_host_stops_the_run() {
+    use super::ssh_install::Phase;
+    use rex_rune::ssh::{
+        Problem,
+        install::{Answer, Event},
+    };
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+    for remove in [false, true] {
+        let mut ws = workspace_hosts(if remove { 2 } else { 1 });
+        ws.settings.hosts[0].endpoint = "ssh://box".into();
+        let Problem::NoServer(facts) = ssh_facts("Linux", 1000, false) else {
+            unreachable!()
+        };
+        ws.hosts[0].model.ssh_problem = Some(Problem::NoServer(facts.clone()));
+        let _commands = capture_host(&mut ws, 0);
+        ws.preview_ssh_install(0);
+        let serial = ws.ssh_install.as_ref().unwrap().run;
+        ws.begin_install(serial);
+        ws.install_checked(serial, Ok(facts));
+        ws.install_event(serial, Event::Asking { serial: 1 });
+        ws.install_event(serial, Event::Ready { serial: 1 });
+        if remove {
+            ws.remove_host(0, &mut rune::Tx::default());
+        } else {
+            ws.close_panel(&mut rune::Tx::default());
+        }
+        ws.answer_install(serial, 1, Answer::Yes);
+        assert_eq!(ws.ssh_install.as_ref().unwrap().phase, Phase::Stopping);
+        assert!(ws.ssh_install.as_ref().unwrap().answers.is_empty());
+        assert!(ws.panel.is_none());
+    }
 }
 
 #[test]

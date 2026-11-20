@@ -14,6 +14,7 @@ use std::{
 use tokio::io::AsyncReadExt;
 
 pub mod hostkey;
+pub mod install;
 pub mod setup;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -536,7 +537,7 @@ fn ssh_error(error: std::io::Error) -> anyhow::Error {
 
 /// Ask the other machine where its Rex server listens, or whether the socket the user named
 /// is there.
-async fn resolve(target: &Target) -> Result<String> {
+pub async fn resolve(target: &Target) -> Result<String> {
     resolve_with(target, std::ffi::OsStr::new("ssh")).await
 }
 
@@ -769,7 +770,8 @@ mod tests {
             .spawn()
             .unwrap();
         let target = Target::parse("ssh://me@box").unwrap().unwrap();
-        let local = std::env::temp_dir().join(format!("rex-tunnel-{}.sock", std::process::id()));
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("rex-tunnel.sock");
         let mut tunnel = Tunnel::adopt(child, &target, local);
         assert!(
             tokio::time::timeout(Duration::from_millis(300), tunnel.closed())

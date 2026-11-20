@@ -101,6 +101,10 @@ name = "rex-download-probe"
 path = "src/bin/download_probe.rs"
 
 [[bin]]
+name = "rex-install-probe"
+path = "src/bin/install_probe.rs"
+
+[[bin]]
 name = "rex-update-probe"
 path = "src/bin/update_probe.rs"
 

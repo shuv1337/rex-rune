@@ -793,6 +793,15 @@ fn empty(s: &Workspace) -> El {
             32.,
             move |s, tx| s.perform(Intent::StartSsh(host), tx),
         )
+    } else if s.can_install_ssh(s.active) {
+        let host = s.active;
+        pill(
+            "offer-ssh-install",
+            "Install Rex on this host…",
+            Pill::Neutral,
+            32.,
+            move |s, tx| s.perform(Intent::InstallSsh(host), tx),
+        )
     } else if s.can_check_key(s.active).is_some() {
         let host = s.active;
         pill(

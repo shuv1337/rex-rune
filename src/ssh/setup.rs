@@ -138,11 +138,11 @@ pub fn quote_arg(arg: &str) -> String {
     }
 }
 
-fn local_rex() -> PathBuf {
+pub(super) fn local_rex() -> PathBuf {
     crate::platform::tools::program("rex")
 }
 
-async fn output(program: &OsStr, args: &[String]) -> Result<String> {
+pub(super) async fn output(program: &OsStr, args: &[String]) -> Result<String> {
     output_with_timeout(program, args, Duration::from_secs(45)).await
 }
 
@@ -164,7 +164,7 @@ async fn output_with_timeout(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn require_api12(version: &str, location: &str) -> Result<()> {
+pub(super) fn require_api12(version: &str, location: &str) -> Result<()> {
     // Local Rex can pretty-print JSON; SSH login banners may precede a compact reply.
     let value: serde_json::Value = serde_json::from_str(version)
         .or_else(|_| {
@@ -233,8 +233,8 @@ mod tests {
     #[tokio::test]
     async fn old_missing_and_refusing_rex_never_start_or_retry() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("rex-setup-test-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
         let rex = root.join("rex");
         let ssh = root.join("ssh");
         let log = root.join("attempts");
@@ -288,7 +288,6 @@ mod tests {
                 .is_err()
         );
         assert!(!log.exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

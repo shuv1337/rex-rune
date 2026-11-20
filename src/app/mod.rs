@@ -49,6 +49,7 @@ mod shortcuts_page;
 mod sidebar;
 mod splits;
 mod sprites;
+mod ssh_install;
 mod ssh_setup;
 mod stats;
 mod tab_icons;

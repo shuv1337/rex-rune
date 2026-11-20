@@ -2,14 +2,13 @@
 
 ## Attachment-only by default
 
-Attaching and reconnecting never start, stop, replace or reconfigure a Rex server
-and do not need a `rex` executable. A missing default server on an SSH host offers
-a separately confirmed, one-time **Start personal server…** action; it never
-enables automatic starts on future connections. Settings → Integrations runs local
-`rex skill` with `--autostart=false`. Both explicit CLI features search `PATH`,
-then `$XDG_BIN_HOME` or `~/.local/bin` for desktop launches. An unavailable server
-is shown as disconnected and retried. Closing the client leaves server programs
-running.
+Attaching and reconnecting never request a server start, stop, replacement or
+reconfiguration and do not need a local `rex` executable. An already-configured
+socket-activated service can start when something connects. SSH setup is separate
+and always explicit. Settings → Integrations runs local `rex skill` with
+`--autostart=false`. The explicit CLI features search `PATH`, then `$XDG_BIN_HOME`
+or `~/.local/bin` for desktop launches. An unavailable server is shown as
+disconnected and retried. Closing the client leaves server programs running.
 
 A saved host contains its sessions. Each session's Rex windows become tabs, and
 the server defines the terminal splits. Host endpoints must be `unix://` with an
@@ -60,15 +59,14 @@ machine to a local one with `ssh -L` (OpenSSH's Unix-socket forwarding, so only
 it is: the path `rex server status --autostart=false` prints, then the login
 user's own server (`$XDG_RUNTIME_DIR/rex/server.sock` on Linux,
 `~/Library/Application Support/rex/server.sock` on macOS), then a shared server's
-`/run/rex/server.sock` or `/var/run/rex/server.sock`; "No Rex server found on …
-for …" names those places when none is a socket and suggests a manual
-`rex server install 'ssh://[user@]host[:port]'` (preview.14 or newer) for a Linux
-host. That command asks before installing or configuring anything; the app never
-runs it.
+`/run/rex/server.sock` or `/var/run/rex/server.sock`. If none is a socket, a
+read-only lookup reports the login, operating system, numeric uid and whether Rex
+is present on `PATH` or at `~/.local/bin/rex`. Windows clients do not support
+`ssh://` yet; add an HTTPS endpoint instead.
 
 `ssh` runs with `BatchMode=yes` (it never prompts; use an agent for keys with
-passphrases), `StrictHostKeyChecking=accept-new` (a machine's key is trusted the
-first time and a changed key is refused), keep-alives and `ControlMaster=no` (a
+passphrases), `StrictHostKeyChecking=yes` (unknown and changed keys are refused),
+keep-alives and `ControlMaster=no` (a
 shared connection in your SSH configuration is not used, since it would keep the
 forward after this client lets go). The local end lives in a directory of this
 process's own under `$XDG_RUNTIME_DIR/rex-rune` (on macOS, `rex-rune-<uid>` in
@@ -81,10 +79,9 @@ reconnects through a new one like any other disconnect, and the reason `ssh` gav
 to Retry. Edit host… shows the `ssh://` endpoint, where the user name and socket
 can be changed.
 
-Ordinary attachment keeps using socket forwarding and **never auto-starts** a
-server. The separate, confirmed setup action below can invoke the Rex CLI's
-native `-S ssh://host` auto-start once. No local Rex executable or Tailscale is
-required for SSH attachment; your OpenSSH configuration and aliases still apply.
+Ordinary attachment uses socket forwarding and never asks Rex to auto-start a
+server. No local Rex executable or Tailscale is required for SSH attachment; your
+OpenSSH configuration and aliases still apply.
 Discovery uses `server.status` listener metadata after a documented tailnet
 endpoint answers; it never guesses alternate reachable addresses from wildcard,
 loopback or Unix bindings. Built-in Tailscale is not in the server's listener
@@ -94,43 +91,56 @@ The SSH user is the login on that machine, which is also the user whose Rex serv
 is forwarded; it is not a Rex account in the sense of Rex's login server, which is
 chosen in an `https://user@host` address instead.
 
+## Check the host key
+
+For an unfamiliar key, use **Check host key…** in Host unavailable, the host menu
+or Commands. Compare the displayed SHA256 fingerprint with the machine itself
+or ask its administrator. **Not now** is the default. **Trust this key** appends
+the one key you saw (ED25519 preferred, then ECDSA, then RSA) to the first
+`UserKnownHostsFile`, respecting `HostKeyAlias` and `HashKnownHosts`. It doesn't
+rewrite old keys or change your configuration. OpenSSH checks trust before the
+append and again afterwards; the client requests a reconnect only on success.
+A changed key has no Trust button. Verify the change independently and remove
+the old key yourself if the machine was legitimately reinstalled.
+
+For `ProxyJump`, `ProxyCommand`, or an unsupported `UserKnownHostsFile` list or
+missing custom parent directory, connect once with `ssh` in a terminal to check
+and trust the key. `ssh -G` loses the quotes around paths; do not use in-app trust
+if a quoted known-hosts path includes a space followed by `/`, which can look
+like the start of a second path. Setup also refuses an SSH configuration with
+`StrictHostKeyChecking no`; Rex makes its own SSH calls during setup.
+
 ## SSH setup
 
-When SSH succeeds but finds no default server, **Host unavailable**, the host's
-menu and Commands offer **Start personal server…**. It is not offered for SSH
-authentication/transport failures, an already connected host, or a missing
-explicitly named socket.
+If SSH works but finds no default socket, the same three surfaces offer:
 
-The dialog names the host and full `ssh://` endpoint, previews the command and
-explains what changes: Rex starts a personal server as that SSH login and may
-create its user config/state. The server keeps running after the app closes,
-until it is stopped or the host restarts. On Linux with systemd, logging out of
-the host also ends it and every session in it unless lingering is on for that
-login (`loginctl enable-linger`). **Start personal server** does not turn
-lingering on. The setup action creates no sessions, installs no packages and
-creates no system services.
-**Not now** is the default (including Enter); only **Start personal server**
-authorizes a single attempt. Closing the busy dialog does not cancel that
-already-authorized start.
+- **Start personal server…** if Rex is installed. The preview defaults to
+  **Not now**. Explicit confirmation checks for preview.14/API 12 locally and
+  remotely, then requests one native start; Rex uses `rex server start` as the
+  login user. The server keeps running after the app closes, until it is stopped
+  or the host restarts. On Linux with systemd, logging out also ends it and its
+  sessions unless lingering is already enabled (`loginctl enable-linger`). Start
+  does not enable lingering or install packages or services. Closing a busy
+  Start dialog doesn't cancel that one attempt.
+- **Install Rex on this host…** only for a non-root Linux login without Rex.
+  It previews `rex --color never server install <endpoint>` from this computer
+  (local preview.14/API 12 or newer), without `--yes`. You see Rex's output and
+  answer each recognized question separately; **No** is the default. Yes can
+  place Rex in `~/.local/bin` without sudo, enable the systemd user socket, turn
+  on lingering, or add the host to the local Rex CLI. Use **Stop install** or
+  close the live dialog to stop; a step already under way may finish or stop
+  part-way. If a question isn't recognized, stop and copy the command to run it
+  yourself. The dialog keeps the transcript even on success.
 
-Setup requires a local and remote `rex` reporting API 12 or newer (preview.14).
-Version checks run before starting. A missing or old executable, SSH refusal or
-failed start is shown with the command's error and never retried automatically.
-After success, the client reconnects through the original `ssh -L` path; aliases,
-optional users/ports and SSH configuration still apply. No persistent auto-start
-preference is saved.
-
-The native command is `rex --autostart=true --server ssh://host --timeout 20s api
-call server.status '{}'`. Using `api call server.status`, rather than `rex server
-status`, matters: the latter deliberately does not auto-start even with the flag.
-This read-only API call creates no session.
-
-For a server that starts at boot and survives logout, run
-`rex server install 'ssh://[user@]host'` from this computer. The installer needs
-systemd on the host; accept its prompt to enable lingering. You can also use it
-if Rex is missing. Rex's installer asks before each change and adds the host; the
-app neither answers its prompts nor installs packages or services. You can
-instead edit the endpoint to an existing custom socket and remain attachment-only.
+No setup is offered for failed authentication, transport failure or a missing
+explicitly named socket. Install is manual for root, for macOS, FreeBSD and
+Windows targets, and for Linux when Rex is already installed: choose the
+appropriate server setup for the machine, then attach to its existing socket
+or HTTPS listener. On a Linux host with systemd, run `rex server install
+'ssh://user@host'` yourself to configure socket activation and lingering.
+Setup never creates a session or retries a mutation. After an install that
+approved at least one step, the client requests a fresh read-only connection
+check if the saved host still needs one.
 
 ## Remote control
 

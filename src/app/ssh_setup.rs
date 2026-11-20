@@ -44,7 +44,8 @@ impl Workspace {
     }
 
     pub fn start_ssh(&mut self, endpoint: String) {
-        if self.ssh_setup.running.is_some()
+        if self.install_is_live()
+            || self.ssh_setup.running.is_some()
             || self.ssh_setup.attachment.contains_key(&endpoint)
             || !self.panel.as_ref().is_some_and(
                 |p| matches!(&p.kind, PanelKind::StartSsh { endpoint: e } if e == &endpoint),
@@ -236,8 +237,7 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
         body = body.child(
             col()
                 .max_h(140.)
-                .min_h(0.)
-                .shrink()
+                .pb(1.)
                 .scroll(rune::ScrollSpec {
                     stick_bottom: false,
                 })

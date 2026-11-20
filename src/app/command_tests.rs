@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 /// Every row Commands lists for `fixture()`, in order. A row leaving this list is a command
 /// someone can no longer reach: remove its id here only on purpose. `host.start_server`,
-/// `host.check_key` and `app.update` are listed only while they apply.
+/// `host.check_key`, `host.install_rex` and `app.update` are listed only while they apply.
 const IDS: &[&str] = &[
     "session.switch",
     "client.activity",
