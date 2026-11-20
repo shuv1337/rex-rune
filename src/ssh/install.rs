@@ -141,6 +141,44 @@ mod tests {
     }
 
     #[test]
+    fn stop_observes_term_exit_without_waiting_for_the_kill_deadline() {
+        let (run, recv) =
+            shell("trap 'exit 17' TERM; printf 'ready\\n'; while :; do sleep 1; done");
+        event(
+            &recv,
+            |e| matches!(e, Event::Output(text) if text.contains("ready")),
+        );
+        let started = Instant::now();
+        run.stop();
+        let exit = event(&recv, |e| matches!(e, Event::Exited { .. }));
+        assert!(matches!(exit, Event::Exited { code: Some(17) }), "{exit:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "TERM exit was not reported promptly: {:?}",
+            started.elapsed()
+        );
+        assert!(!run.shared.lock().unwrap().pty.kill_sent());
+    }
+
+    #[test]
+    fn stop_kills_a_term_ignoring_installer_after_the_grace_period() {
+        let (run, recv) = shell("trap '' TERM; printf 'ready\\n'; exec sleep 30");
+        event(
+            &recv,
+            |e| matches!(e, Event::Output(text) if text.contains("ready")),
+        );
+        let started = Instant::now();
+        run.stop();
+        let exit = event(&recv, |e| matches!(e, Event::Exited { .. }));
+        assert!(matches!(exit, Event::Exited { code: None }), "{exit:?}");
+        assert!(
+            started.elapsed() >= STOP_GRACE,
+            "KILL was sent before the grace period"
+        );
+        assert!(run.shared.lock().unwrap().pty.kill_sent());
+    }
+
+    #[test]
     fn stop_kills_group_and_drop_kills_without_waiting_for_a_question() {
         for stop in [true, false] {
             let (run, recv) = shell(
@@ -169,9 +207,23 @@ mod tests {
                 );
             } else {
                 drop(run);
-                // A killed grandchild can briefly be a zombie adopted by init;
-                // a closed PTY and joined relay prove drop did not leave a reader.
-                assert!(recv.try_iter().all(|e| matches!(e, Event::Output(_))));
+                // An orphan can briefly be a zombie; that is not a live process.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let status = Command::new("/bin/ps")
+                        .args(["-o", "stat=", "-p", &pid.to_string()])
+                        .output()
+                        .expect("read fixture child status");
+                    let state = String::from_utf8_lossy(&status.stdout);
+                    if state.trim().is_empty() || state.trim().starts_with('Z') {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "grandchild {pid} is still alive: {state}"
+                    );
+                    thread::sleep(Duration::from_millis(15));
+                }
             }
         }
     }
@@ -402,6 +454,7 @@ fn relay(shared: &Mutex<Shared>, events: impl Fn(Event)) {
     let mut tail = String::new();
     let mut cleaner = Cleaner::default();
     let mut bytes = [0; 8192];
+    let mut terminal_closed = false;
     loop {
         let mut pending = Vec::new();
         let finished = {
@@ -414,6 +467,7 @@ fn relay(shared: &Mutex<Shared>, events: impl Fn(Event)) {
                 last_output = Instant::now();
             }
             match shared.pty.read(&mut bytes) {
+                Ok(0) => terminal_closed = true,
                 Ok(n) if n > 0 => {
                     last_output = Instant::now();
                     unrecognized = false;
@@ -440,16 +494,14 @@ fn relay(shared: &Mutex<Shared>, events: impl Fn(Event)) {
                 _ => {}
             }
             let now = Instant::now();
-            let status = if let Some(stop) = shared.state.stopping {
-                if now.duration_since(stop) >= STOP_GRACE {
-                    shared.pty.kill();
-                    shared.pty.try_wait()
-                } else {
-                    Ok(None)
-                }
-            } else {
-                shared.pty.try_wait()
-            };
+            let stopping = shared.state.stopping;
+            let mut status = shared.pty.try_wait(stopping.is_some(), terminal_closed);
+            if matches!(status, Ok(None))
+                && stopping.is_some_and(|stop| now.duration_since(stop) >= STOP_GRACE)
+            {
+                shared.pty.kill();
+                status = shared.pty.try_wait(true, true);
+            }
             let code = match status {
                 Ok(Some(exit)) => Some(exit.code()),
                 Ok(None) => None,

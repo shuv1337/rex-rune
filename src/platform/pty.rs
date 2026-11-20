@@ -13,13 +13,15 @@ mod unix {
         master: File,
         child: Child,
         reaped: bool,
+        #[cfg(test)]
+        kill_sent: std::cell::Cell<bool>,
     }
 
     impl Pty {
         pub fn spawn(command: &mut Command) -> io::Result<Self> {
             let mut master = -1;
             let mut slave = -1;
-            let size = libc::winsize {
+            let mut size = libc::winsize {
                 ws_row: 40,
                 ws_col: 100,
                 ws_xpixel: 0,
@@ -32,8 +34,8 @@ mod unix {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
+                    std::ptr::null_mut(),
+                    &raw mut size,
                 )
             } == -1
             {
@@ -67,6 +69,8 @@ mod unix {
                 master,
                 child,
                 reaped: false,
+                #[cfg(test)]
+                kill_sent: std::cell::Cell::new(false),
             })
         }
 
@@ -82,7 +86,11 @@ mod unix {
             self.master.write_all(line)
         }
 
-        pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        pub fn try_wait(
+            &mut self,
+            stopping: bool,
+            terminal_closed: bool,
+        ) -> io::Result<Option<ExitStatus>> {
             let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
             // Keep the PID reserved until the whole group has been signalled,
             // even when the group leader exits on its own.
@@ -100,7 +108,15 @@ mod unix {
             if unsafe { info.assume_init().si_pid() } == 0 {
                 return Ok(None);
             }
-            self.kill();
+            // During Stop, the leader may exit before other processes sharing
+            // the terminal. Keep the group owned until they close it or the
+            // caller's deadline expires. A closed terminal needs no KILL.
+            if stopping && !terminal_closed {
+                return Ok(None);
+            }
+            if !stopping {
+                self.kill();
+            }
             let status = self.child.wait()?;
             self.reaped = true;
             Ok(Some(status))
@@ -118,7 +134,16 @@ mod unix {
         }
 
         pub fn kill(&self) {
+            #[cfg(test)]
+            if !self.reaped {
+                self.kill_sent.set(true);
+            }
             self.signal(libc::SIGKILL);
+        }
+
+        #[cfg(test)]
+        pub fn kill_sent(&self) -> bool {
+            self.kill_sent.get()
         }
     }
 
@@ -157,7 +182,7 @@ mod unsupported {
         pub fn answer(&mut self, _: &[u8]) -> io::Result<()> {
             unreachable!()
         }
-        pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        pub fn try_wait(&mut self, _: bool, _: bool) -> io::Result<Option<ExitStatus>> {
             unreachable!()
         }
         pub fn terminate(&self) {
