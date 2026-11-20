@@ -105,7 +105,7 @@ hands-on acceptance on every desktop.
 
 | Area | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Published builds | Stable x86_64 and aarch64 binaries, current **0.10.0**; pacman, `.deb`, tarball, `install.sh`, Nix | Source only; no release, installer or notarization | Source only for MSVC; no release or installer |
+| Published builds | Stable x86_64 and aarch64 binaries, [latest release](https://github.com/shuv1337/rex-rune/releases/latest); pacman, `.deb`, tarball, `install.sh`, Nix | Source only; no release, installer or notarization | Source only for MSVC; no release or installer |
 | Native UI and input | Exercised with private X11 and Wayland fixtures, not every desktop, compositor or input method | Title row and window checked by hand on macOS 27 Apple silicon; physical Option, dead keys and Finder-started acceptance not checked | Full unit/headless suite in CI (993 passed, 4 ignored); native window, physical input, clipboard, IME, HiDPI and server attachment untested |
 | Server attachment | Unix socket, HTTPS/WSS and SSH hosts | Local socket, HTTPS/WSS and SSH hosts checked from source builds | Network endpoints compile through the unchanged TCP/Rustls path; untested. Unix sockets and SSH hosts are refused; no named pipes |
 | Links and folders | `xdg-open` and the file manager | `open` and Finder | **Not available**: opening a link or Show in folder fails with the system's "program not found" |
