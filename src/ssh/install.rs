@@ -157,7 +157,7 @@ mod tests {
             "TERM exit was not reported promptly: {:?}",
             started.elapsed()
         );
-        assert!(!run.shared.lock().unwrap().pty.kill_sent());
+        assert!(!run.shared.lock().unwrap().state.deadline_kill_sent);
     }
 
     #[test]
@@ -175,7 +175,79 @@ mod tests {
             started.elapsed() >= STOP_GRACE,
             "KILL was sent before the grace period"
         );
-        assert!(run.shared.lock().unwrap().pty.kill_sent());
+        assert!(run.shared.lock().unwrap().state.deadline_kill_sent);
+    }
+
+    #[test]
+    fn stop_sweeps_a_term_ignoring_group_member_without_terminal_fds() {
+        struct Stray {
+            pid: libc::pid_t,
+            group: libc::pid_t,
+        }
+        impl Drop for Stray {
+            fn drop(&mut self) {
+                // Clean up the owned fixture process even when the assertion fails.
+                unsafe {
+                    if libc::getpgid(self.pid) == self.group {
+                        libc::kill(self.pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        let (run, recv) = shell(
+            "trap '' HUP TERM; (exec sleep 600) </dev/null >/dev/null 2>&1 & \
+             pid=$!; trap 'exit 17' TERM; printf 'stray=%s %s\\n' \"$pid\" \"$$\"; wait",
+        );
+        let mut output = String::new();
+        let stray = loop {
+            if let Event::Output(text) = event(&recv, |e| matches!(e, Event::Output(_))) {
+                output.push_str(&text);
+            }
+            if let Some((line, _)) = output.split_once('\n') {
+                let (pid, group) = line
+                    .strip_prefix("stray=")
+                    .unwrap()
+                    .split_once(' ')
+                    .unwrap();
+                break Stray {
+                    pid: pid.parse().unwrap(),
+                    group: group.parse().unwrap(),
+                };
+            }
+        };
+        assert_eq!(unsafe { libc::getpgid(stray.pid) }, stray.group);
+        let started = Instant::now();
+        run.stop();
+        let exit = event(&recv, |e| matches!(e, Event::Exited { .. }));
+        assert!(matches!(exit, Event::Exited { code: Some(17) }), "{exit:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "Stop waited for the deadline"
+        );
+        assert!(!run.shared.lock().unwrap().state.deadline_kill_sent);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if unsafe { libc::kill(stray.pid, 0) } == -1 {
+                break;
+            }
+            // The orphan may already be dead but not yet reaped by its new parent.
+            let status = Command::new("/bin/ps")
+                .args(["-o", "stat=", "-p", &stray.pid.to_string()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&status.stdout);
+            if state.trim().is_empty() || state.trim().starts_with('Z') {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stray PID {} still alive after Stop: {state}",
+                stray.pid
+            );
+            thread::sleep(Duration::from_millis(15));
+        }
     }
 
     #[test]
@@ -344,6 +416,8 @@ struct State {
     question: Option<(u32, Instant)>,
     answered: bool,
     stopping: Option<Instant>,
+    #[cfg(test)]
+    deadline_kill_sent: bool,
     dropped: bool,
     exited: bool,
 }
@@ -500,6 +574,10 @@ fn relay(shared: &Mutex<Shared>, events: impl Fn(Event)) {
                 && stopping.is_some_and(|stop| now.duration_since(stop) >= STOP_GRACE)
             {
                 shared.pty.kill();
+                #[cfg(test)]
+                {
+                    shared.state.deadline_kill_sent = true;
+                }
                 status = shared.pty.try_wait(true, true);
             }
             let code = match status {

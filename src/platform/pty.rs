@@ -13,8 +13,6 @@ mod unix {
         master: File,
         child: Child,
         reaped: bool,
-        #[cfg(test)]
-        kill_sent: std::cell::Cell<bool>,
     }
 
     impl Pty {
@@ -69,8 +67,6 @@ mod unix {
                 master,
                 child,
                 reaped: false,
-                #[cfg(test)]
-                kill_sent: std::cell::Cell::new(false),
             })
         }
 
@@ -110,13 +106,12 @@ mod unix {
             }
             // During Stop, the leader may exit before other processes sharing
             // the terminal. Keep the group owned until they close it or the
-            // caller's deadline expires. A closed terminal needs no KILL.
+            // caller's deadline expires. A closed terminal lets us finalize
+            // promptly, but other group members may have closed their fds.
             if stopping && !terminal_closed {
                 return Ok(None);
             }
-            if !stopping {
-                self.kill();
-            }
+            self.kill();
             let status = self.child.wait()?;
             self.reaped = true;
             Ok(Some(status))
@@ -134,16 +129,7 @@ mod unix {
         }
 
         pub fn kill(&self) {
-            #[cfg(test)]
-            if !self.reaped {
-                self.kill_sent.set(true);
-            }
             self.signal(libc::SIGKILL);
-        }
-
-        #[cfg(test)]
-        pub fn kill_sent(&self) -> bool {
-            self.kill_sent.get()
         }
     }
 

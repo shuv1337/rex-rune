@@ -192,7 +192,7 @@ pub(super) fn dialog(s: &Workspace, endpoint: &str) -> El {
             let mut reason = "Rex Rune will not connect. If the machine was reinstalled, check the new key independently and remove the old one yourself.".to_owned();
             if let Some(name) = name {
                 reason.push_str(&format!(
-                    " For example: ssh-keygen -R -- {}",
+                    " For example: ssh-keygen -R {}",
                     rex_rune::ssh::setup::quote_arg(name)
                 ));
             }
