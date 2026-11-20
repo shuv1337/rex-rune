@@ -34,6 +34,15 @@ fn row_enabled(rt: &Runtime<Workspace>, label: &str, enabled: bool) {
     row_rect(rt, label);
 }
 
+fn stale_root(rt: &Runtime<Workspace>) {
+    assert!(matches!(&rt.state.panel, Some(p) if matches!(p.kind, PanelKind::Pane)));
+    row_enabled(rt, ROOT, false);
+    assert_eq!(
+        rt.state.entries()[row_index(rt, ROOT)].detail,
+        "Layer changed"
+    );
+}
+
 fn choose_row(rt: &mut Runtime<Workspace>, label: &str) {
     highlight(rt, label);
     draw(rt);
@@ -207,6 +216,21 @@ fn fresh_root_after_move_names_and_creates_in_the_new_window() {
 }
 
 #[test]
+fn the_root_menu_cannot_recapture_a_pane_moved_to_another_window() {
+    let mut h = History::pane(&["block:f"]);
+    h.root("dev · f");
+    highlight(&mut h.rt, ROOT);
+    report(&mut h.rt, move_f_to_other_window);
+    title(&h.rt, "dev · f");
+    stale_root(&h.rt);
+    assert_eq!(highlighted(&h.rt), ROOT);
+    press(&mut h.rt, Key::Enter);
+    tick(&mut h.rt);
+    stale_root(&h.rt);
+    h.zero();
+}
+
+#[test]
 fn move_after_submenu_dismisses_instead_of_creating_in_the_new_window() {
     let mut h = History::pane(&["block:f"]);
     h.root("dev · f");
@@ -255,6 +279,30 @@ impl Loss {
 }
 
 #[test]
+fn disconnect_does_not_put_close_pane_under_the_highlighted_layer_row() {
+    let mut h = History::pane(&["block:f"]);
+    h.root("dev · f");
+    highlight(&mut h.rt, ROOT);
+    let selected = row_index(&h.rt, ROOT);
+    report(&mut h.rt, |s| Loss::Offline.apply(s));
+    let row =
+        h.rt.state
+            .entries()
+            .get(selected)
+            .map(|e| (e.label.clone(), e.enabled, e.detail.clone()));
+    press(&mut h.rt, Key::Enter);
+    tick(&mut h.rt);
+    h.zero();
+    assert!(
+        matches!(&h.rt.state.panel, Some(p) if matches!(p.kind, PanelKind::Pane)),
+        "Enter replaced the pane menu with {:?}; row at the original index: {row:?}",
+        h.rt.state.panel.as_ref().map(|p| &p.kind)
+    );
+    assert_eq!(row, Some((ROOT.into(), false, "Layer changed".into())));
+    row_enabled(&h.rt, ROOT, false);
+}
+
+#[test]
 fn identity_losses_on_both_sides_of_submenu_entry_and_dispatch_never_retarget_or_replay() {
     for loss in Loss::ALL {
         let mut h = History::pane(&["block:f"]);
@@ -263,16 +311,9 @@ fn identity_losses_on_both_sides_of_submenu_entry_and_dispatch_never_retarget_or
         report(&mut h.rt, |s| loss.apply(s));
         if h.rt.state.panel.is_some() {
             title(&h.rt, "dev · f");
-            if matches!(loss, Loss::Offline) {
-                assert!(h.rt.state.entries().iter().all(|e| e.label != ROOT));
-            } else {
-                row_enabled(&h.rt, ROOT, false);
-                assert_eq!(
-                    h.rt.state.entries()[row_index(&h.rt, ROOT)].detail,
-                    "Layer changed"
-                );
-                press(&mut h.rt, Key::Enter);
-            }
+            stale_root(&h.rt);
+            press(&mut h.rt, Key::Enter);
+            stale_root(&h.rt);
         }
         tick(&mut h.rt);
         h.zero();
@@ -302,12 +343,33 @@ fn offline_observation_cannot_revive_a_root_even_when_its_context_returns() {
     let mut h = History::pane(&["block:f"]);
     h.root("dev · f");
     report(&mut h.rt, |s| s.hosts[0].model.connected = false);
-    assert!(h.rt.state.entries().iter().all(|e| e.label != ROOT));
+    stale_root(&h.rt);
     report(&mut h.rt, |s| s.hosts[0].model.connected = true);
-    row_enabled(&h.rt, ROOT, false);
+    stale_root(&h.rt);
     click_row(&mut h.rt, ROOT);
     tick(&mut h.rt);
     h.zero();
+}
+
+#[test]
+fn a_root_opened_without_floating_support_keeps_the_branch_hidden() {
+    for connected in [false, true] {
+        let mut h = History::pane(&["block:f"]);
+        report(&mut h.rt, |s| {
+            s.hosts[0].model.connected = connected;
+            s.hosts[0].model.protocol.api_revision = if connected { 12 } else { 13 };
+        });
+        pane_actions_key(&mut h.rt);
+        title(&h.rt, "dev · f");
+        assert!(h.rt.state.entries().iter().all(|e| e.label != ROOT));
+        report(&mut h.rt, |s| {
+            s.hosts[0].model.connected = true;
+            s.hosts[0].model.protocol.api_revision = 13;
+        });
+        title(&h.rt, "dev · f");
+        assert!(h.rt.state.entries().iter().all(|e| e.label != ROOT));
+        h.zero();
+    }
 }
 
 #[test]

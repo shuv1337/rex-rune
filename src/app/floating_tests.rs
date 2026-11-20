@@ -1501,34 +1501,6 @@ fn pane_actions_key(rt: &mut Runtime<Workspace>) {
 }
 
 #[test]
-fn the_root_menu_cannot_recapture_a_pane_moved_to_another_window() {
-    let (ws, rx) = tiled_and_floating("block:f");
-    let mut rt = runtime(ws);
-    rt.update(|s, _| wake(s));
-    pane_actions_key(&mut rt);
-    assert_eq!(rt.state.panel.as_ref().unwrap().title, "dev · f");
-    highlight(&mut rt, "Floating layer…");
-    rt.update(|s, _| {
-        move_f_to_other_window(s);
-        wake(s);
-    });
-    draw(&mut rt);
-    assert_eq!(rt.state.panel.as_ref().unwrap().title, "dev · f");
-    press(&mut rt, Key::Enter);
-    if matches!(
-        rt.state.panel.as_ref().map(|p| &p.kind),
-        Some(PanelKind::Layer)
-    ) {
-        assert_eq!(highlighted(&rt), "New floating pane");
-    }
-    rt.update(|s, _| wake(s));
-    press(&mut rt, Key::Enter);
-    rt.update(|s, _| wake(s));
-    let sent = requests(&rx);
-    assert!(sent.is_empty(), "a stale root must send nothing: {sent:?}");
-}
-
-#[test]
 fn the_open_layer_menu_refuses_a_pane_another_client_moved_to_another_window() {
     let (mut ws, rx) = tiled_and_floating("block:a");
     ws.hosts[0]

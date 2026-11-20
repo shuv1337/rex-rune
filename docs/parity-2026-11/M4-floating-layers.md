@@ -112,8 +112,10 @@ Quoted from the live contract (identical to the pinned SDK):
 
 ## Evidence
 
-**Behavior tests** (real dispatch and the captured host commands, `src/app/floating_tests.rs`,
-24 tests; pure view rules in `src/layers.rs`, 5 tests):
+**Behavior tests** (51 tests in `src/app/floating_tests.rs` and `src/app/floating_tests/history.rs`;
+one confirmation copy test in `src/app/floating.rs`; five pure view tests in `src/layers.rs`).
+The [floating-menu ownership matrix](../plans/floating-menu-ownership.md#history-matrix-results)
+names the Runtime histories, which check both the captured and decoy host queues:
 
 - every verb is local-only, titled, under the Panes heading, with a Commands row; the remote
   allowed set stays exactly eight;
@@ -156,16 +158,18 @@ Quoted from the live contract (identical to the pinned SDK):
   rebinding follows, and removing the binding restores the refusal words on a disabled row
   (`No tiled pane beside it`) while still naming the menu's own pane.
 
-**Native acceptance** (`scripts/floating-layers-private.py`, 30 checks; own disposable Rex
+**Native acceptance at `51a0b4d`** (`scripts/floating-layers-private.py`, 32 passing checks;
+own disposable API-13 Rex
 server on a private unix socket, private HOME/XDG/TMPDIR and no desktop, bus, agent or audio
-variables, private Xvfb, two clients of the built release binary, real xdotool input): float
+variables, private Xvfb, two clients of the exact-head debug build, real xdotool input): float
 preserved the block ID, the shell's scrollback and the same shell process — asked again with
 `echo shell-pid-after=$$` **after** the float, and equal to the line printed before it — typing
 still reached the PTY, and the second client rendered the same floating pane (OCR of terminal
 text; the two clients' rectangles are not compared); minimizing handed focus to a visible pane
 and the pane's loop printed every second while hidden (7 s); the list named `Restore alpha —
 Minimized, still running` while the action row said `Not floating`; restore came back focused and
-in front; New floating started exactly one block in front at the requested rectangle;
+in front; New floating from the pane menu started exactly one block in the captured window
+and shell directory at the requested rectangle;
 `Show <name>` focused and raised a layer; focusing a lower layer did not raise it and Bring to
 front then changed only the order (bounds and focus unchanged); the close confirmation named
 `beta`, Keep running left the layer, and confirming closed only that layer's block; Return
@@ -182,13 +186,9 @@ private HOME/XDG/TMPDIR, its socket and every process the run started are gone a
 `scripts/floating-layers-private.py` allocates its root inside a `try` whose `finally` removes it,
 and through `Desktop.close`/`stop_owned` terminates **and waits for** each client, openbox and
 Xvfb (bounded, then a kill and a wait) before any file is removed, including when a receipt copy
-fails. `probe_fixture_cleanup.py` (kept with this work's receipts under
-`~/.cache/agent-ws/issue139-corr-1248315/`) proves all of that with process
-doubles and no real process: a missing tool leaves 0 run roots, a failed receipt copy still
-removes the root, the exact borrowed `Desktop.close` body terminates and waits for all four
-children (and kills then waits when one ignores terminate), and a partial `Desktop.__init__`
-releases the Xvfb it had started. Against `2253e7e` the same probe found the leaked root, zero
-waits and the leaked Xvfb.
+fails. `scripts/test-fixture-cleanup.py` exercises the cleanup paths with process doubles:
+a missing tool leaves no run root, `Desktop.close` waits for its children (kills then waits
+on timeout), and a partial `Desktop.__init__` releases the Xvfb it had started.
 
 **Renders** (real fonts, `REX_TEST_SNAP_DIR`, one test per run, `floating_pane_menu_draw`,
 `floating_layer_menu_draw`, `floating_commands_draw`, rendered at this worktree's build in
@@ -235,8 +235,8 @@ its own process-double probe — and each failure was seen before the fix.
   boundedly wait, then kill and wait for each owned child before files are removed; the
   borrowed `Desktop.__init__` also releases a partial start; receipts copy failures are
   recorded and never skip the removal; each run gets its own exclusive receipt directory and an
-  `identity.json`. `probe_fixture_cleanup.py` reproduces the leak, the zero waits and the
-  leaked Xvfb on `2253e7e` with no real process, and shows 0 leaked roots and full reaps now.
+  `identity.json`. The review's process-double probe reproduced the leak, zero waits and
+  leaked Xvfb on `2253e7e`; see `scripts/test-fixture-cleanup.py` for the checked-in coverage.
 
 Two smaller corrections: the last-visible and no-anchor refusals no longer advise something that
 does not help (minimizing another layer, or splitting a tab to make a tiled anchor — Split adds

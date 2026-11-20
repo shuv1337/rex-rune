@@ -123,7 +123,7 @@ impl Workspace {
             .or_else(|| self.host_index(target.host_id))
     }
 
-    pub(super) fn captured_layer_gate(&self, target: &LayerTarget) -> Option<layers::Blocked> {
+    fn captured_layer_gate(&self, target: &LayerTarget) -> Option<layers::Blocked> {
         let Some(index) = self.layer_host(target) else {
             return Some(layers::Blocked::Stale);
         };

@@ -241,7 +241,7 @@ def check_partial_acquisition_releases_what_it_started():
 
 def check_float_fixture_supplies_its_own_data_directory():
     with tempfile.TemporaryDirectory(prefix='rex-float-env-') as temp:
-        root = Path(temp)
+        root = Path(temp).resolve()
         home = root / 'home'
         home.mkdir()
         receipts = root / 'receipts'

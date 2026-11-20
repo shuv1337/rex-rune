@@ -1021,16 +1021,9 @@ impl Workspace {
                 entry.enabled = self.pane_verb_available(&target, action);
                 entries.push(entry);
             }
-            // Floating layers have their own small menu: six more rows here pushed the
-            // destructive close below the fold at 640×480 (see floating_pane_menu draws).
-            // A host before API revision 13 has no floating layers, and Commands carries
-            // that reason, so this menu stays exactly as it was there.
-            if let Some(layer) = &panel.layer
-                && !matches!(
-                    self.captured_layer_gate(layer),
-                    Some(layers::Blocked::NotConnected | layers::Blocked::OldServer(_))
-                )
-            {
+            // The opening capture decides whether this row exists. Disabling it in place
+            // keeps Close pane from sliding into its keyboard position on a host wake.
+            if let Some(layer) = &panel.layer {
                 let blocked = self.layer_root_blocked(panel, layer);
                 let mut entry = Entry::new(
                     "Floating layer…",

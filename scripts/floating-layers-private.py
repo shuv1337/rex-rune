@@ -243,9 +243,9 @@ try:
         "client_launcher": "scripts/rune-acceptance-x11.py Desktop.launch",
     }
 
-    server = subprocess.Popen(
-        results["identity"]["server_command"],
-        stdout=(work / "server.log").open("w"), stderr=subprocess.STDOUT)
+    with (work / "server.log").open("w") as log:
+        server = subprocess.Popen(
+            results["identity"]["server_command"], stdout=log, stderr=subprocess.STDOUT)
     wait(lambda: (work / "rex.sock").exists(), "private Rex did not start")
     wait(lambda: accept.api("server.version").get("api_revision") == 13, "private Rex is not API 13")
     results["server"] = accept.api("server.version")
@@ -263,13 +263,15 @@ try:
     desk = accept.Desktop(size="1600x1000")
     config(work / "home" / "workspace.json", sid)
     config(work / "home-b" / "workspace.json", sid)
-    app_a, window_a = desk.launch(sid, work / "home" / "workspace.json", size="1024x700",
-                                  log=(work / "client-a.log").open("w"))
-    app_b, window_b = desk.launch(sid, work / "home-b" / "workspace.json", size="1024x700",
-                                  extra_env={"HOME": str(work / "home-b"),
-                                             "XDG_CONFIG_HOME": str(work / "config-b"),
-                                             "XDG_STATE_HOME": str(work / "state-b")},
-                                  log=(work / "client-b.log").open("w"))
+    with (work / "client-a.log").open("w") as log:
+        app_a, window_a = desk.launch(sid, work / "home" / "workspace.json", size="1024x700",
+                                      log=log)
+    with (work / "client-b.log").open("w") as log:
+        app_b, window_b = desk.launch(sid, work / "home-b" / "workspace.json", size="1024x700",
+                                      extra_env={"HOME": str(work / "home-b"),
+                                                 "XDG_CONFIG_HOME": str(work / "config-b"),
+                                                 "XDG_STATE_HOME": str(work / "state-b")},
+                                      log=log)
     focus_window(desk, window_a)
     desk.key("ctrl+shift+p")  # dismiss any first-run state by closing the list again
     desk.key("Escape")

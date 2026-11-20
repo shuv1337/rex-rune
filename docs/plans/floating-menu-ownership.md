@@ -61,8 +61,8 @@ Validate on wakes, follow-ups and dispatch/confirm; dismissal never restores a p
 
 - Missing/replaced host, disconnect, epoch replacement, unavailable session/window,
   or F missing/moved outside W1: invalidate the lineage; zero floating writes.
-  Pre-13/disconnected roots keep the row hidden as today. Otherwise, if the root
-  remains open, its stale floating row stays visible-disabled with a reason;
+  Roots opened on pre-13 or disconnected hosts never show the row. If a root
+  opened with the row remains open, it stays visible-disabled with a reason;
   existing whole-root dismissal may still occur. Submenu/confirmation dismisses
   with a reason. Reconnect cannot revive the invalid capture.
 - F moves within W1 to another layer, or captured layer disappears: disable
@@ -108,6 +108,13 @@ R=root, L=submenu, C=confirmation; original context H/E/S/W1/F/L1.
 | Keyboard A → wake reorder/remove → Enter | A if present; zero if absent | `commands_keyboard_follows_the_id_on_reorder_and_never_substitutes_on_removal` |
 | Wake before/after keyboard→same-index hover; reorder/remove | Visible enabled row, not retired keyboard ID; absent row zero | `commands_same_index_hover_retires_keyboard_id_before_and_after_inventory_changes` |
 | Pointer → wake → hover B → keyboard selection A → wake | B before keyboard takeover; thereafter A by ID, or zero | `commands_pointer_keeps_position_until_keyboard_takes_back_identity` |
+
+The disconnect regression is also checked directly by
+`disconnect_does_not_put_close_pane_under_the_highlighted_layer_row`: on
+`51a0b4d`, Enter opened a `block.close` confirmation. With the fix, the disabled
+row retains its position, Enter stays in the pane root, and both hosts see zero
+writes. `a_root_opened_without_floating_support_keeps_the_branch_hidden` checks
+the inverse: a later wake does not insert a row absent at opening.
 
 ## Acceptance and gates
 

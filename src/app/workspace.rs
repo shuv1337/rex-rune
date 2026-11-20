@@ -1729,7 +1729,11 @@ impl Workspace {
         let Some(target) = self.target(&block) else {
             return;
         };
-        let layer = self.capture_pane_layer(&target);
+        let layer = if self.layer_gate().is_none() {
+            self.capture_pane_layer(&target)
+        } else {
+            None
+        };
         let title = match &layer {
             Some(layer) => format!("{} · {}", layer.tab, layer.pane),
             None => format!("{} · {}", target.tab, target.name),
