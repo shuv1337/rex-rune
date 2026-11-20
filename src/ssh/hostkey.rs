@@ -59,6 +59,7 @@ struct Config {
     alias: Option<String>,
     hash: bool,
     files: String,
+    proxied: bool,
 }
 
 impl Config {
@@ -73,6 +74,7 @@ impl Config {
     }
 
     fn file(&self, home: &Path) -> Result<(PathBuf, bool)> {
+        ensure!(!self.proxied, "{MANUAL}");
         let mut entries = self.files.split_whitespace();
         let first = entries.next().context(MANUAL)?;
         let absolute = |token: &str| token.starts_with('/') || token.starts_with("~/");
@@ -110,10 +112,6 @@ async fn config(target: &Target, ssh: &OsStr) -> Result<Config> {
             .filter(|v| !v.is_empty() && *v != "none")
     };
     ensure!(
-        get("proxyjump").is_none() && get("proxycommand").is_none(),
-        "{MANUAL}"
-    );
-    ensure!(
         !matches!(get("stricthostkeychecking"), Some("no" | "false" | "off")),
         "SSH configuration disables strict host key checking. Enable it before using SSH setup."
     );
@@ -127,12 +125,18 @@ async fn config(target: &Target, ssh: &OsStr) -> Result<Config> {
         alias: get("hostkeyalias").map(str::to_owned),
         hash: get("hashknownhosts") == Some("yes"),
         files: get("userknownhostsfile").unwrap_or_default().into(),
+        proxied: get("proxyjump").is_some() || get("proxycommand").is_some(),
     })
 }
 
 pub(super) async fn require_safe_config(target: &Target) -> Result<()> {
     config(target, system_tools().ssh).await?;
     Ok(())
+}
+
+/// The name OpenSSH uses in known_hosts, including aliases and non-default ports.
+pub async fn known_host_name(target: &Target) -> Result<String> {
+    Ok(config(target, system_tools().ssh).await?.name())
 }
 
 async fn check(target: &Target, ssh: &OsStr) -> Result<bool> {
@@ -264,7 +268,12 @@ async fn trust_with(offer: &Offer, tools: &Tools<'_>, home: &Path) -> Result<()>
     );
     crate::platform::fs::append_ssh_key(&offer.file, &offer.record, offer.make_parent)
         .with_context(|| format!("Couldn't append the key to {}", offer.file.display()))?;
-    if !check(&offer.target, tools.ssh).await? {
+    if !check(&offer.target, tools.ssh).await.with_context(|| {
+        format!(
+            "Appended the key to {}, but OpenSSH's follow-up check failed",
+            offer.file.display()
+        )
+    })? {
         bail!(
             "Appended the key to {}, but OpenSSH still does not trust this host. {MANUAL}",
             offer.file.display()
@@ -308,6 +317,9 @@ case " $* " in
   *) exit 99;;
 esac
 if [ -f changed ]; then echo 'REMOTE HOST IDENTIFICATION HAS CHANGED!' >&2; exit 255; fi
+if [ -f deny_after_append ] && grep -qs 'ssh-ed25519 cGlu' known; then
+  echo 'fixture: Permission denied (publickey).' >&2; exit 255
+fi
 if [ -f recognized ] && grep -qs 'ssh-ed25519 cGlu' .ssh/known_hosts known; then
   echo 'none tester'; exit 0
 fi
@@ -361,6 +373,22 @@ esac"#,
         async fn trust(&self, offer: &Offer) -> Result<()> {
             trust_with(offer, &self.tools(), self.dir.path()).await
         }
+    }
+
+    #[tokio::test]
+    async fn auth_failure_after_append_names_the_modified_file() {
+        let f = Fixture::new();
+        let known = f.dir.path().join("known");
+        f.config(known.to_str().unwrap(), "");
+        fs::write(f.dir.path().join("deny_after_append"), "").unwrap();
+        let offer = f.offer().await.unwrap();
+        let error = format!("{:#}", f.trust(&offer).await.unwrap_err());
+        assert!(error.contains(&format!("Appended the key to {}", known.display())));
+        assert!(error.contains("Permission denied (publickey)"));
+        assert_eq!(
+            fs::read_to_string(known).unwrap(),
+            "[parsed.example]:2201 ssh-ed25519 cGlu\n"
+        );
     }
 
     #[tokio::test]
@@ -447,6 +475,12 @@ esac"#,
         fs::remove_file(f.dir.path().join("scanned")).unwrap();
         for config in ["proxyjump bastion\n", "proxycommand ssh bastion\n"] {
             f.config(&format!("{work}/known"), config);
+            super::config(
+                &Target::parse("ssh://alias").unwrap().unwrap(),
+                f.tools().ssh,
+            )
+            .await
+            .expect("setup may use a proxy whose key is already trusted");
             assert_eq!(f.offer().await.unwrap_err().to_string(), MANUAL);
         }
         f.config(&format!("{work}/known"), "stricthostkeychecking no\n");

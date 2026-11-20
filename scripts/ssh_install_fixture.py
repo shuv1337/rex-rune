@@ -53,6 +53,13 @@ if [ "$*" = 'version --json' ]; then
     if [ -f old ]; then echo '{{"api_revision":11}}'; else echo '{{"api_revision":18}}'; fi
     exit
 fi
+if [ "$#" = 9 ] && [ "$1" = '--autostart=true' ] && [ "$2" = '--server' ] &&
+   [ "$3" = "ssh://127.0.0.1:$(cat fixture-port)" ] &&
+   [ "$4 $5 $6 $7 $8 $9" = '--timeout 20s api call server.status {{}}' ]; then
+    touch fake-personal-start
+    printf '%s\\n' '{{"pid":0,"instance_id":"fixture","started_at":"2026-01-01T00:00:00Z","exit_empty":false,"session_count":0,"config":{{"generation":0,"hash":""}},"listeners":[{{"transport":"unix","endpoint":"unix://{work}/runtime/rex/server.sock"}}]}}'
+    exit 0
+fi
 if [ "$#" != 5 ] || [ "$1 $2 $3 $4" != '--color never server install' ]; then exit 97; fi
 [ -t 0 ] && [ "$TERM" = dumb ] && [ "$NO_COLOR" = 1 ] || exit 98
 [ "$5" = "ssh://127.0.0.1:$(cat fixture-port)" ] || exit 99

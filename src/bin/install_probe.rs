@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let [mode, endpoint, work] = args.as_slice() else {
         bail!(
-            "Usage: rex-install-probe <lookup|scan|trust|install|forward> <fixture endpoint> <fixture folder>"
+            "Usage: rex-install-probe <lookup|scan|trust|start|install|forward> <fixture endpoint> <fixture folder>"
         );
     };
     let work = Path::new(work).canonicalize()?;
@@ -74,6 +74,10 @@ async fn main() -> Result<()> {
             let _connection = rex_rune::platform::local::connect(Path::new(address)).await?;
             tokio::time::sleep(Duration::from_millis(500)).await;
             println!("forwarded");
+        }
+        "start" => {
+            rex_rune::ssh::setup::start_personal(endpoint).await?;
+            println!("fake start accepted");
         }
         "install" => {
             if let Err(error) = install::preflight(&target).await {

@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 
-from ssh_install_fixture import fixture, new_folder, reset
+from ssh_install_fixture import fixture, new_folder, reset, rotate
 
 spec = importlib.util.spec_from_file_location("accept", Path(__file__).with_name("rune-acceptance-x11.py"))
 accept = importlib.util.module_from_spec(spec)
@@ -22,7 +22,7 @@ spec.loader.exec_module(accept)
 
 
 def smoke(work):
-    with fixture(work) as (endpoint, env, _):
+    with fixture(work) as (endpoint, env, server):
         (work / "known_hosts").write_text("")
         desktop = accept.Desktop()
         try:
@@ -182,7 +182,15 @@ def smoke(work):
             assert (work / "remote/.local/bin/rex").exists()
             assert not (work / "listener.pid").exists()
             assert not (work / "hosts-added").exists()
-            print(f"PASS X11 key confirmation, safe defaults, consent, refusal and partial failure: {accept.OUT}")
+            desktop.key("Return")
+            known_hosts = (work / "known_hosts").read_bytes()
+            rotate(work, server)
+            click("Check host key")
+            wait(lambda: find("Rex Rune will not connect"), "changed key refusal")
+            assert not primary(), "changed key must not show a Trust button"
+            captures("ssh-changed-key")
+            assert (work / "known_hosts").read_bytes() == known_hosts
+            print(f"PASS X11 key confirmation, changed-key refusal, safe defaults, consent and partial failure: {accept.OUT}")
         except BaseException:
             if (work / "client.log").exists():
                 print((work / "client.log").read_text(), file=sys.stderr)

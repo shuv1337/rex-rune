@@ -4141,7 +4141,7 @@ pub(super) fn ssh_facts(os: &str, uid: u32, rex: bool) -> rex_rune::ssh::Problem
     rex_rune::ssh::Problem::NoServer(rex_rune::ssh::Facts {
         user: "tester".into(),
         os: os.into(),
-        uid,
+        uid: Some(uid),
         rex,
     })
 }
@@ -4307,7 +4307,7 @@ fn ssh_install_dialog_histories_gate_answers_and_reconnect() {
 }
 
 #[test]
-fn ssh_install_closing_or_removing_host_stops_the_run() {
+fn ssh_install_closing_editing_or_removing_host_stops_the_run() {
     use super::ssh_install::Phase;
     use rex_rune::ssh::{
         Problem,
@@ -4316,8 +4316,8 @@ fn ssh_install_closing_or_removing_host_stops_the_run() {
     if rex_rune::platform::local::require_ssh().is_err() {
         return;
     }
-    for remove in [false, true] {
-        let mut ws = workspace_hosts(if remove { 2 } else { 1 });
+    for action in ["close", "remove", "edit", "settings", "updates"] {
+        let mut ws = workspace_hosts(if action == "remove" { 2 } else { 1 });
         ws.settings.hosts[0].endpoint = "ssh://box".into();
         let Problem::NoServer(facts) = ssh_facts("Linux", 1000, false) else {
             unreachable!()
@@ -4330,16 +4330,49 @@ fn ssh_install_closing_or_removing_host_stops_the_run() {
         ws.install_checked(serial, Ok(facts));
         ws.install_event(serial, Event::Asking { serial: 1 });
         ws.install_event(serial, Event::Ready { serial: 1 });
-        if remove {
-            ws.remove_host(0, &mut rune::Tx::default());
-        } else {
-            ws.close_panel(&mut rune::Tx::default());
+        match action {
+            "remove" => ws.remove_host(0, &mut rune::Tx::default()),
+            "edit" => ws.edit_host(
+                0,
+                "new name".into(),
+                "unix:///nonexistent/rex-test-edit.sock".into(),
+                None,
+            ),
+            "settings" => ws.perform(Intent::Settings, &mut rune::Tx::default()),
+            "updates" => ws.open_updates_settings(),
+            _ => ws.close_panel(&mut rune::Tx::default()),
         }
         ws.answer_install(serial, 1, Answer::Yes);
         assert_eq!(ws.ssh_install.as_ref().unwrap().phase, Phase::Stopping);
         assert!(ws.ssh_install.as_ref().unwrap().answers.is_empty());
-        assert!(ws.panel.is_none());
+        if matches!(action, "close" | "remove") {
+            assert!(ws.panel.is_none(), "{action}");
+        }
     }
+}
+
+#[test]
+fn ssh_install_unrecognized_prompt_has_only_stop_and_copy() {
+    use rex_rune::ssh::{Problem, install::Event};
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+    let problem = ssh_facts("Linux", 1000, false);
+    let Problem::NoServer(facts) = problem.clone() else {
+        unreachable!()
+    };
+    let mut ws = ws_for_ssh_offer("ssh://box", Some(problem));
+    ws.preview_ssh_install(0);
+    let serial = ws.ssh_install.as_ref().unwrap().run;
+    ws.begin_install(serial);
+    ws.install_checked(serial, Ok(facts));
+    ws.install_event(serial, Event::Unrecognized);
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "stop-install"));
+    assert!(has(&rt, "copy-install-command"));
+    assert!(!has(&rt, "yes-install-step") && !has(&rt, "no-install-step"));
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.ssh_install.as_ref().unwrap().answers.is_empty());
 }
 
 #[test]

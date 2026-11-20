@@ -81,6 +81,30 @@ def cases(work):
         assert not any((work / marker).exists() for marker in ("linger", "hosts-added", "listener.pid"))
         print("PASS No at question 2: no later changes", flush=True)
 
+        reset(work)
+        # The proxy also uses this fixture's sshd (stdio forwarding, no second
+        # login command). It cannot fall through to the real user's SSH config.
+        client_config = work / "ssh_config"
+        direct = client_config.read_text()
+        (work / "jump_config").write_text(direct)
+        port = (work / "fixture-port").read_text()
+        client_config.write_text(direct + (
+            f"  ProxyCommand /usr/bin/ssh -F {work}/jump_config -W 127.0.0.1:{port} 127.0.0.1\n"
+        ))
+        assert "Connect once with ssh in a terminal" in call("scan").stderr
+        assert run(["no"])[0] == 1
+        assert (work / "answers").read_text() == "Install the binary?:n\n"
+        with_fake_rex = work / "remote-bin/rex"
+        with_fake_rex.symlink_to(work / "remote-rex")
+        try:
+            assert output("lookup") == "offer Some(Start)"
+            assert output("start") == "fake start accepted"
+            assert (work / "fake-personal-start").exists()
+        finally:
+            with_fake_rex.unlink()
+            client_config.write_text(direct)
+        print("PASS trusted ProxyCommand: Install and Start preflights work; in-app scan refused", flush=True)
+
         for name, expected in [("darwin", "Linux hosts only"), ("root", "non-root"), ("old", "API 12"),
                                ("remote/.local/bin/rex", "already installed")]:
             reset(work)
@@ -121,6 +145,20 @@ def cases(work):
         assert not (work / "listener.pid").exists()
         assert "--yes" not in (work / "local.log").read_text()
         print("PASS key rotated mid-flow: next connection and Trust refused", flush=True)
+
+        # The same mismatch with OpenSSH configured to suppress its detailed warning.
+        known = (work / "known_hosts").read_bytes()
+        with (work / "ssh_config").open("a") as config:
+            config.write("  LogLevel FATAL\n")
+        lookup = call("lookup")
+        scan = call("scan")
+        assert (work / "known_hosts").read_bytes() == known
+        assert "key unknown" not in lookup.stdout and scan.returncode != 0, (
+            f"LogLevel FATAL: lookup={lookup.stdout.strip()!r}; "
+            f"scan offered fingerprint={scan.stdout.startswith('fingerprint ')}"
+        )
+        assert "Host key verification failed." in lookup.stderr
+        print("PASS LogLevel FATAL after rotation: no Trust offered; known_hosts unchanged", flush=True)
 
 
 if __name__ == "__main__":

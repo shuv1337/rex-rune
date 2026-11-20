@@ -22,7 +22,7 @@ enum Phase {
     Scanning,
     Offer(Offer),
     Saving,
-    Changed(String),
+    Changed(Option<String>),
     Failed(String),
     Saved(&'static str),
 }
@@ -65,7 +65,10 @@ impl Workspace {
             &[],
         );
         if problem == KeyProblem::Changed {
-            self.host_key.phase = Phase::Changed(target.direct_key_name());
+            self.host_key.phase = Phase::Changed(None);
+            self.key_work(serial, endpoint, async move {
+                Ok(Phase::Changed(hostkey::known_host_name(&target).await.ok()))
+            });
             return;
         }
         self.key_work(serial, endpoint, async move {
@@ -139,10 +142,6 @@ impl Workspace {
             Ok(Phase::Saved(_)) => Phase::Saved(self.reconnect_ssh_if_needed(endpoint)),
             Ok(phase) => phase,
             Err(e) if e.downcast_ref::<KeyProblem>() == Some(&KeyProblem::Changed) => {
-                let name = Target::parse(endpoint)
-                    .ok()
-                    .flatten()
-                    .map_or_else(String::new, |t| t.direct_key_name());
                 if self.key_panel(serial, endpoint)
                     && let Some(panel) = &mut self.panel
                 {
@@ -156,7 +155,11 @@ impl Workspace {
                             |h| format!("The key for {} changed", h.label),
                         );
                 }
-                Phase::Changed(name)
+                if e.chain().count() > 1 {
+                    Phase::Failed(format!("{e:#}"))
+                } else {
+                    Phase::Changed(None)
+                }
             }
             Err(e) => Phase::Failed(format!("{e:#}")),
         };
@@ -185,13 +188,16 @@ pub(super) fn dialog(s: &Workspace, endpoint: &str) -> El {
         ),
         Phase::Saved(check) => (format!("Host key trusted. {check}"), "Close"),
         Phase::Failed(reason) => (reason.clone(), "Close"),
-        Phase::Changed(name) => (
-            format!(
-                "Rex Rune will not connect. If the machine was reinstalled, check the new key independently and remove the old one yourself. For example: ssh-keygen -R {}",
-                rex_rune::ssh::setup::quote_arg(name)
-            ),
-            "Close",
-        ),
+        Phase::Changed(name) => {
+            let mut reason = "Rex Rune will not connect. If the machine was reinstalled, check the new key independently and remove the old one yourself.".to_owned();
+            if let Some(name) = name {
+                reason.push_str(&format!(
+                    " For example: ssh-keygen -R -- {}",
+                    rex_rune::ssh::setup::quote_arg(name)
+                ));
+            }
+            (reason, "Close")
+        }
         Phase::Offer(offer) => (
             format!(
                 "This computer does not trust this machine's key yet. It presented:\n\n{} {}\n\nCompare this with the key on the machine itself (ssh-keygen -lf /etc/ssh/ssh_host_{}_key.pub). If they differ, someone may be in between: choose Not now.\n\nTrusting adds this key to {}. A different key later is refused.",

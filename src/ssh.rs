@@ -39,15 +39,23 @@ impl std::error::Error for KeyProblem {}
 fn key_problem(stderr: &str) -> Option<KeyProblem> {
     if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
         || stderr.contains("REVOKED HOST KEY DETECTED")
+        || stderr.contains("POSSIBLE DNS SPOOFING DETECTED")
+        || stderr.lines().any(|line| {
+            line.starts_with("Host key for ")
+                && line.ends_with("has changed and you have requested strict checking.")
+        })
     {
         Some(KeyProblem::Changed)
     } else if stderr
         .lines()
-        .any(|line| line.starts_with("No ") && line.contains(" host key is known for "))
-        || stderr
-            .lines()
-            .any(|line| line == "Host key verification failed.")
+        .any(|line| line.starts_with("Certificate invalid:"))
     {
+        None
+    } else if stderr.lines().any(|line| {
+        line.starts_with("No ")
+            && line.contains(" host key is known for ")
+            && line.ends_with("and you have requested strict checking.")
+    }) {
         Some(KeyProblem::Unknown)
     } else {
         None
@@ -60,7 +68,7 @@ fn key_problem(stderr: &str) -> Option<KeyProblem> {
 pub struct Facts {
     pub user: String,
     pub os: String,
-    pub uid: u32,
+    pub uid: Option<u32>,
     pub rex: bool,
 }
 
@@ -71,13 +79,13 @@ impl Facts {
             [user, os, uid, rex @ ("rex" | "norex")] => Ok(Self {
                 user: (*user).into(),
                 os: (*os).into(),
-                uid: uid.parse()?,
+                uid: Some(uid.parse()?),
                 rex: *rex == "rex",
             }),
             [user] => Ok(Self {
                 user: (*user).into(),
                 os: String::new(),
-                uid: 0,
+                uid: None,
                 rex: false,
             }),
             _ => bail!("The SSH host did not report usable setup facts."),
@@ -229,7 +237,9 @@ impl Target {
                 Some(SetupOffer::Start)
             }
             Problem::NoServer(facts)
-                if self.socket.is_none() && facts.os == "Linux" && facts.uid != 0 =>
+                if self.socket.is_none()
+                    && facts.os == "Linux"
+                    && facts.uid.is_some_and(|uid| uid != 0) =>
             {
                 Some(SetupOffer::Install)
             }
@@ -266,15 +276,6 @@ impl Target {
         match &self.user {
             Some(user) => format!("{user}@{}", self.host),
             None => self.host.clone(),
-        }
-    }
-
-    /// Known-hosts spelling before SSH config is applied; users of aliases
-    /// should also inspect OpenSSH's original warning.
-    pub fn direct_key_name(&self) -> String {
-        match self.port {
-            Some(port) if port != 22 => format!("[{}]:{port}", self.host),
-            _ => self.host.clone(),
         }
     }
 
@@ -631,6 +632,27 @@ mod tests {
             ),
             Some(KeyProblem::Changed)
         );
+        for (stderr, expected) in [
+            ("Host key verification failed.\r\n", None),
+            (
+                "WARNING: POSSIBLE DNS SPOOFING DETECTED!\nHost key verification failed.\n",
+                Some(KeyProblem::Changed),
+            ),
+            (
+                "Host key for box has changed and you have requested strict checking.\nHost key verification failed.\n",
+                Some(KeyProblem::Changed),
+            ),
+            (
+                "Certificate invalid: name is not a listed principal\nHost key verification failed.\n",
+                None,
+            ),
+            (
+                "Certificate invalid: expired\nNo ED25519 host key is known for box and you have requested strict checking.\nHost key verification failed.\n",
+                None,
+            ),
+        ] {
+            assert_eq!(key_problem(stderr), expected, "{stderr:?}");
+        }
         assert_eq!(key_problem("box: Permission denied (publickey)."), None);
         assert_eq!(
             key_problem("ssh: connect to host box port 22: Connection refused"),
@@ -730,7 +752,7 @@ mod tests {
             Facts {
                 user: "me".into(),
                 os: "Linux".into(),
-                uid: 1009,
+                uid: Some(1009),
                 rex: true
             }
         );

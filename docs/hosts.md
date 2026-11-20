@@ -100,12 +100,15 @@ the one key you saw (ED25519 preferred, then ECDSA, then RSA) to the first
 `UserKnownHostsFile`, respecting `HostKeyAlias` and `HashKnownHosts`. It doesn't
 rewrite old keys or change your configuration. OpenSSH checks trust before the
 append and again afterwards; the client requests a reconnect only on success.
-A changed key has no Trust button. Verify the change independently and remove
+A changed key or a verification failure without an explicit unknown-key
+diagnostic has no Trust button. Verify the change independently and remove
 the old key yourself if the machine was legitimately reinstalled.
 
 For `ProxyJump`, `ProxyCommand`, or an unsupported `UserKnownHostsFile` list or
 missing custom parent directory, connect once with `ssh` in a terminal to check
-and trust the key. `ssh -G` loses the quotes around paths; do not use in-app trust
+and trust the key. Already-trusted proxied hosts can still use Start and Install.
+In-app trust also refuses a symlinked known-hosts file. `ssh -G` loses the quotes
+around paths; do not use in-app trust
 if a quoted known-hosts path includes a space followed by `/`, which can look
 like the start of a second path. Setup also refuses an SSH configuration with
 `StrictHostKeyChecking no`; Rex makes its own SSH calls during setup.
