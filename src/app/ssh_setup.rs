@@ -164,7 +164,7 @@ impl Workspace {
                 }
                 let connection = self.reconnect_ssh_if_needed(endpoint);
                 self.inform(format!(
-                    "Personal server answered on {endpoint}. {connection} No session was created."
+                    "Personal server answered on {endpoint}. {connection} No session was created; without one, the server stops about 10 seconds after the last connection closes."
                 ));
             }
             Ok(review @ setup::Attachment::Review { .. }) => {
@@ -215,15 +215,23 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
         .as_ref()
         .and_then(|t| setup::command_preview(t).ok())
         .unwrap_or_default();
-    let mut body = col().gap(12.)
-        .child(text(panel.title.clone()).font(strong(17.)).color(rgb(ink())).wrap())
-        .child(text(format!("{endpoint}\n\nUses your SSH configuration and the Rex executable already installed on both machines (preview.14 or newer). Starts a personal server as the SSH login user only if none is running. No packages, system services or sessions are created. The server may create its own user config/state files and keeps running when this app closes.\n\nThis is one attempt, not permission to auto-start on reconnect. SSH must already work without a password prompt."))
+    let mut details = col().gap(12.);
+    if let Some(error) = &panel.error {
+        details = details.child(
+            text(error.clone())
+                .font(ui(12.))
+                .color(rgb(danger()))
+                .wrap(),
+        );
+    }
+    details = details
+        .child(text(format!("{endpoint}\n\nUses your SSH configuration and the Rex executable already installed on both machines (preview.14 or newer). Starts a personal server as the SSH login user only if none is running. No packages, system services or sessions are created. The server may create its own user config/state files.\n\nThis server is temporary. It stops about 10 seconds after its last session ends and its last connection closes, so without a session it is gone soon after this app closes. On Linux, logging out of {endpoint} also ends it and every session in it unless lingering is on for that account (loginctl enable-linger). This action does not turn lingering on. For a server that stays, run rex server install on the host.\n\nThis is one attempt, not permission to auto-start on reconnect. SSH must already work without a password prompt."))
             .font(ui(12.)).color(rgb(muted())).wrap())
         .child(text(format!("On this machine: {command}")).font(ui(12.).mono()).color(rgb(ink())).wrap())
         .child(text("On host, via your SSH: rex version --json, then rex server start --json (chosen by Rex)")
             .font(ui(12.).mono()).color(rgb(ink())).wrap());
     if let Some(running) = &s.ssh_setup.running {
-        body = body.child(
+        details = details.child(
             text(format!(
                 "Starting {running}… Closing this dialog does not cancel the requested start."
             ))
@@ -232,36 +240,21 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
             .wrap(),
         );
     }
-    if let Some(error) = &panel.error {
-        body = body.child(
-            col()
-                .max_h(140.)
-                .scroll(rune::ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(
-                    text(error.clone())
-                        .font(ui(12.))
-                        .color(rgb(danger()))
-                        .wrap(),
-                ),
-        );
-    }
     if let Some(setup::Attachment::Review {
         reason,
         endpoint: proposed,
     }) = review
     {
-        body = body.child(text(reason.clone()).font(ui(12.)).color(rgb(ink())).wrap());
+        details = details.child(text(reason.clone()).font(ui(12.)).color(rgb(ink())).wrap());
         if let Some(proposed) = proposed {
-            body = body.child(
+            details = details.child(
                 text(proposed.clone())
                     .font(ui(12.).mono())
                     .color(rgb(ink()))
                     .wrap(),
             );
             let endpoint = endpoint.to_owned();
-            body = body.child(
+            details = details.child(
                 pill(
                     "save-ssh-socket",
                     "Save socket endpoint",
@@ -290,21 +283,40 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
     } else {
         start
     };
-    body.child(
-        row()
-            .gap(8.)
-            .justify_end()
-            .child(
-                pill(
-                    "cancel-ssh-start",
-                    if busy { "Close" } else { "Not now" },
-                    Pill::Neutral,
-                    32.,
-                    |s, tx| s.cancel_panel(tx),
-                )
-                .default_button()
-                .tab_index(1),
+    let actions = row()
+        .gap(8.)
+        .justify_end()
+        .child(
+            pill(
+                "cancel-ssh-start",
+                if busy { "Close" } else { "Not now" },
+                Pill::Neutral,
+                32.,
+                |s, tx| s.cancel_panel(tx),
             )
-            .child(start),
-    )
+            .default_button()
+            .tab_index(1),
+        )
+        .child(start);
+    col()
+        .gap(12.)
+        .min_h(0.)
+        .shrink()
+        .child(
+            text(panel.title.clone())
+                .font(strong(17.))
+                .color(rgb(ink()))
+                .wrap(),
+        )
+        .child(
+            col()
+                .min_h(0.)
+                .shrink()
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
+                .scroll_edge_fade(10.)
+                .child(details),
+        )
+        .child(actions)
 }

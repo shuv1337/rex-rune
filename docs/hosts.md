@@ -103,10 +103,15 @@ explicitly named socket.
 
 The dialog names the host and full `ssh://` endpoint, previews the command and
 explains what changes: Rex starts a personal server as that SSH login, may create
-its user config/state, and leaves it running after the client closes. It creates
-no sessions, installs no packages and creates no system services. **Not now** is
-the default (including Enter); only **Start personal server** authorizes a single
-attempt. Closing the busy dialog does not cancel that already-authorized start.
+its user config/state. The server is temporary: it stops about 10 seconds after
+its last session ends and its last connection closes. On Linux, logging out of
+the host ends it and every session unless lingering is on for that login
+(`loginctl enable-linger`); **Start personal server** does not turn lingering on.
+`rex server install`, run on the host, sets up a server that stays. The setup
+action creates no sessions, installs no packages and creates no system services.
+**Not now** is the default (including Enter); only **Start personal server**
+authorizes a single attempt. Closing the busy dialog does not cancel that
+already-authorized start.
 
 Setup requires a local and remote `rex` reporting API 12 or newer (preview.14).
 Version checks run before starting. A missing or old executable, SSH refusal or

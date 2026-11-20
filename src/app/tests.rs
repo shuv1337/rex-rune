@@ -4100,6 +4100,12 @@ fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
         rt.state.panel.as_ref().unwrap().kind,
         PanelKind::StartSsh { .. }
     ));
+    let copy = element_text(&rt, "dialog").join("\n");
+    assert!(
+        copy.contains("loginctl enable-linger")
+            && !copy.contains("keeps running when this app closes"),
+        "the SSH setup preview explains lingering without promising persistence"
+    );
     assert!(
         rt.state.ssh_setup.ran.is_empty(),
         "opening a preview cannot execute"
@@ -4151,6 +4157,45 @@ fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
             .iter()
             .any(|c| matches!(c, HostCommand::CreateSession { .. }))
     );
+}
+
+/// Run alone with REX_TEST_SNAP_DIR for a real-font capture at the minimum window size.
+#[test]
+fn ssh_start_preview_draw_small() {
+    let Some(mut camera) = pane_verb_tests::Camera::new() else {
+        return;
+    };
+    let fonts = super::fonts::load("IBM Plex Mono", &[]);
+    let _families = rune::text::with_families("Inter", "IBM Plex Mono");
+    let mut ws = workspace();
+    ws.settings.hosts[0].endpoint = "ssh://work-alias".into();
+    ws.hosts[0].model.ssh_server_missing = true;
+    ws.preview_ssh_start(0);
+    let mut rt = Runtime::with_text(
+        ws,
+        view,
+        (640., 480.),
+        Env::new(true, 1.),
+        rune::text::TextSystem::new(fonts.files, fonts.families),
+    );
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    camera.snap(&mut rt, "ssh-start-preview-small");
+    rt.update(|s, _| {
+        s.panel.as_mut().unwrap().error = Some(
+            "remote Rex is too old\nPreflight failed; no server start was requested. No automatic setup retry. Check the host before choosing Start personal server again.".into(),
+        );
+    });
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    camera.snap(&mut rt, "ssh-start-error-small");
+    rt.wheel(320., 300., -480.);
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    camera.snap(&mut rt, "ssh-start-error-scrolled-small");
 }
 
 #[test]
