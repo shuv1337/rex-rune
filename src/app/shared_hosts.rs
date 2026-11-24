@@ -27,7 +27,7 @@ pub struct SharedHostsState {
     pub last_reconciled: HashMap<HostId, u64>,
     /// Last `server_info.process.host_id` seen when reconciling per host id.
     pub last_host_id: HashMap<HostId, Option<String>>,
-    /// Unconnectable shared records from the latest reconcile pass (shown in Settings only).
+    /// Unconnectable/skipped shared records from the latest reconcile pass (shown in Settings only).
     pub unconnectable: Vec<UnconnectableHost>,
     /// Diagnostic/conflict sets already announced as a notice (deduped like `keymap_notices`).
     pub diagnostic_notices: HashSet<String>,
@@ -43,11 +43,11 @@ impl Workspace {
     }
 
     /// Whether saved host `index` is this machine's shared-host source.
+    /// A linked row (`shared.is_some()`) can never act as the shared-host source.
     pub fn is_shared_source(&self, index: usize) -> bool {
-        self.settings
-            .hosts
-            .get(index)
-            .is_some_and(|h| hosts::same_endpoint(&h.endpoint, &self.shared_source_endpoint()))
+        self.settings.hosts.get(index).is_some_and(|h| {
+            h.shared.is_none() && hosts::same_endpoint(&h.endpoint, &self.shared_source_endpoint())
+        })
     }
 
     /// Saved host index of this machine's shared-host source, if present.
@@ -56,32 +56,71 @@ impl Workspace {
         self.settings
             .hosts
             .iter()
-            .position(|h| hosts::same_endpoint(&h.endpoint, &source))
+            .position(|h| h.shared.is_none() && hosts::same_endpoint(&h.endpoint, &source))
     }
 
-    /// Whether saved host `index` is currently linked to Rex's shared host list.
+    /// Whether saved host `index` is actively managed by a live shared-host source.
+    /// Orphaned links whose source row is absent or whose sync is off are not locked read-only.
     pub fn is_shared_managed(&self, index: usize) -> bool {
-        self.settings
+        if !self.settings.sync_shared_hosts {
+            return false;
+        }
+        let Some(link) = self
+            .settings
             .hosts
             .get(index)
-            .is_some_and(|h| h.shared.is_some())
+            .and_then(|h| h.shared.as_ref())
+        else {
+            return false;
+        };
+        let Some(source_idx) = self.shared_source_index() else {
+            return false;
+        };
+        hosts::same_endpoint(&link.from, &self.settings.hosts[source_idx].endpoint)
+    }
+
+    /// Clear any `shared` link whose `from` endpoint does not match an active local source row
+    /// (e.g. after removing or editing the source host, or changing `XDG_RUNTIME_DIR`).
+    /// Returns whether any host row was unlinked.
+    pub fn unlink_orphaned_shared_hosts(&mut self) -> bool {
+        let active_source = self
+            .settings
+            .sync_shared_hosts
+            .then(|| self.shared_source_index())
+            .flatten()
+            .map(|i| self.settings.hosts[i].endpoint.clone());
+        let mut changed = false;
+        for host in &mut self.settings.hosts {
+            let orphaned = host.shared.as_ref().is_some_and(|link| {
+                active_source
+                    .as_deref()
+                    .is_none_or(|src| !hosts::same_endpoint(&link.from, src))
+            });
+            if orphaned {
+                host.shared = None;
+                changed = true;
+            }
+        }
+        if active_source.is_none() {
+            self.shared_hosts.unconnectable.clear();
+        }
+        changed
     }
 
     /// Cached [`SharedHost`] record for linked saved host `index`, if currently loaded.
     pub fn shared_host_record(&self, index: usize) -> Option<&SharedHost> {
         let link = self.settings.hosts.get(index)?.shared.as_ref()?;
-        let source_idx = self
-            .settings
-            .hosts
-            .iter()
-            .position(|h| hosts::same_endpoint(&h.endpoint, &link.from))?;
+        let source_idx =
+            self.settings.hosts.iter().position(|h| {
+                h.shared.is_none() && hosts::same_endpoint(&h.endpoint, &link.from)
+            })?;
         let list = self.hosts.get(source_idx)?.model.shared.list()?;
         list.hosts.iter().find(|r| r.id == link.id)
     }
 
     /// Toggle `sync_shared_hosts`. Turning it off unlinks all shared links locally with zero
     /// server commands; turning it back on reconciles from the cached list immediately (or
-    /// requests an initial read if not yet loaded).
+    /// requests/retries a read if not currently `Loaded`/`Unsupported`).
     pub fn set_sync_shared_hosts(&mut self, enabled: bool, tx: &mut Tx) {
         if self.settings.sync_shared_hosts == enabled {
             return;
@@ -102,13 +141,14 @@ impl Workspace {
             let id = self.hosts[source_idx].id;
             self.shared_hosts.last_reconciled.remove(&id);
             self.shared_hosts.last_host_id.remove(&id);
-            if matches!(
-                self.hosts[source_idx].model.shared,
+            match &self.hosts[source_idx].model.shared {
+                SharedHostState::Loaded(_) => self.sync_shared_hosts(source_idx, tx),
+                SharedHostState::Unsupported => {}
                 SharedHostState::Unloaded
-            ) {
-                self.send(source_idx, HostCommand::WatchSharedHosts);
-            } else {
-                self.sync_shared_hosts(source_idx, tx);
+                | SharedHostState::Failed(_)
+                | SharedHostState::Conflict(_) => {
+                    self.send(source_idx, HostCommand::WatchSharedHosts);
+                }
             }
         }
     }
@@ -147,6 +187,15 @@ impl Workspace {
                 if self.shared_hosts.diagnostic_notices.insert(key) {
                     self.notify(format!(
                         "Shared Rex host list could not be read: {message}. See Settings → Remote Hosts."
+                    ));
+                }
+            }
+            SharedHostState::Failed(message) => {
+                // Preserve last-known host rows; Settings card reflects the read error.
+                let key = format!("failed:{message}");
+                if self.shared_hosts.diagnostic_notices.insert(key) {
+                    self.notify(format!(
+                        "Shared Rex host list read failed: {message} See Settings → Remote Hosts."
                     ));
                 }
             }
@@ -241,16 +290,33 @@ impl Workspace {
         entries.sort();
         entries.dedup();
         let count = diagnostics.len();
+        let noun = diagnostic_noun(diagnostics);
         if self
             .shared_hosts
             .diagnostic_notices
             .insert(entries.join("\n"))
         {
             self.notify(format!(
-                "{count} shared host {} from Rex; see Settings → Remote Hosts.",
-                if count == 1 { "warning" } else { "warnings" }
+                "{count} shared host {noun} from Rex; see Settings → Remote Hosts."
             ));
         }
+    }
+}
+
+fn diagnostic_noun(diagnostics: &[SharedHostDiagnostic]) -> &'static str {
+    let errors = diagnostics
+        .iter()
+        .filter(|d| d.severity.eq_ignore_ascii_case("error"))
+        .count();
+    let single = diagnostics.len() == 1;
+    if errors == diagnostics.len() {
+        if single { "error" } else { "errors" }
+    } else if errors > 0 {
+        if single { "problem" } else { "problems" }
+    } else if single {
+        "warning"
+    } else {
+        "warnings"
     }
 }
 
@@ -311,6 +377,12 @@ fn status_summary(s: &Workspace) -> (String, String, ChipTone, String) {
             ChipTone::Attention,
             message.clone(),
         ),
+        SharedHostState::Failed(message) => (
+            format!("Could not read shared hosts: {message}"),
+            "Error".into(),
+            ChipTone::Attention,
+            message.clone(),
+        ),
         SharedHostState::Loaded(list) => {
             let synced = s
                 .settings
@@ -324,6 +396,7 @@ fn status_summary(s: &Workspace) -> (String, String, ChipTone, String) {
                 .count();
             let unusable = s.shared_hosts.unconnectable.len();
             let diags = list.diagnostics.len();
+            let diag_noun = diagnostic_noun(&list.diagnostics);
             let mut parts = Vec::new();
             if synced == 0 && unusable == 0 {
                 parts.push("No remote hosts in this server's shared list.".to_owned());
@@ -336,19 +409,13 @@ fn status_summary(s: &Workspace) -> (String, String, ChipTone, String) {
                     parts.push(format!("{unusable} unconnectable"));
                 }
                 if diags > 0 {
-                    parts.push(format!(
-                        "{diags} {}",
-                        if diags == 1 { "warning" } else { "warnings" }
-                    ));
+                    parts.push(format!("{diags} {diag_noun}"));
                 }
             }
             let detail = if synced == 0 && unusable == 0 && diags == 0 {
                 parts[0].clone()
             } else if synced == 0 && unusable == 0 {
-                format!(
-                    "No remote hosts in this server's shared list ({diags} {}).",
-                    if diags == 1 { "warning" } else { "warnings" }
-                )
+                format!("No remote hosts in this server's shared list ({diags} {diag_noun}).")
             } else {
                 format!("{}.", parts.join(" · "))
             };
@@ -415,7 +482,7 @@ pub fn section(s: &Workspace) -> El {
             );
         }
         for (idx, entry) in s.shared_hosts.unconnectable.iter().enumerate() {
-            let mut detail = format!("No usable endpoint: {}", entry.reason);
+            let mut detail = format!("Skipped: {}", entry.reason);
             if let Some(src) = &entry.source {
                 detail.push_str(&format!(" · Declared in {src}"));
             }

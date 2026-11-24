@@ -1686,7 +1686,11 @@ async fn run_host(
                         let event = event?;
                         if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
                         if event.name == "hosts_changed"
-                            && hosts::changed(&shared.model.lock().expect("host model").shared, &event.payload)
+                            && hosts::changed(
+                                &shared.model.lock().expect("host model").shared,
+                                hosts_reads.in_flight(),
+                                &event.payload,
+                            )
                         {
                             hosts_reads.reread(&mut control).await?;
                         }
@@ -1778,7 +1782,11 @@ async fn run_host(
                         let event = event?;
                         if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
                         if event.name == "hosts_changed"
-                            && hosts::changed(&shared.model.lock().expect("host model").shared, &event.payload)
+                            && hosts::changed(
+                                &shared.model.lock().expect("host model").shared,
+                                hosts_reads.in_flight(),
+                                &event.payload,
+                            )
                         {
                             hosts_reads.reread(&mut control).await?;
                         }
@@ -1901,8 +1909,13 @@ async fn run_host(
                             continue;
                         }
                         if let HostCommand::WatchSharedHosts = command {
-                            hosts_reads.want();
-                            hosts_reads.start(&mut control).await?;
+                            let retryable = shared
+                                .model
+                                .lock()
+                                .expect("host model")
+                                .shared
+                                .retryable();
+                            hosts_reads.watch(&mut control, retryable).await?;
                             continue;
                         }
                         if let HostCommand::Upload { session, block, files } = command {

@@ -393,6 +393,9 @@ impl Workspace {
         if let Some(problem) = this.settings.shortcut_file.notice.take() {
             this.notify(problem);
         }
+        if this.unlink_orphaned_shared_hosts() {
+            this.save();
+        }
         for index in 0..this.settings.hosts.len() {
             this.connect_host(index, explicit);
         }
@@ -498,6 +501,7 @@ impl Workspace {
         } else if self.active > index {
             self.active -= 1;
         }
+        self.unlink_orphaned_shared_hosts();
         self.update_visibility();
         self.save();
         self.update_title(tx);
@@ -516,6 +520,19 @@ impl Workspace {
         endpoint: String,
         shell: Option<String>,
     ) {
+        if index >= self.settings.hosts.len() {
+            return;
+        }
+        if self.is_shared_managed(index)
+            && (self.settings.hosts[index].label != label
+                || self.settings.hosts[index].endpoint != endpoint)
+        {
+            self.inform(format!(
+                "{} is managed by rex hosts (read-only). Edit its default shell locally, or turn off shared host sync in Settings → Remote Hosts.",
+                self.settings.hosts[index].label
+            ));
+            return;
+        }
         if self.settings.hosts[index].endpoint != endpoint {
             self.stop_install_for_host(index);
         }
@@ -528,6 +545,7 @@ impl Workspace {
             self.settings.sessions.remove(&old);
             // An endpoint edit means another machine, not a history migration.
             self.settings.recent_paths.remove(&old);
+            self.unlink_orphaned_shared_hosts();
             let state = self.spawn_host(index, false);
             let old = std::mem::replace(&mut self.hosts[index], state);
             self.forget_host(old);

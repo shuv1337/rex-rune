@@ -516,7 +516,7 @@ fn terminal(s: &Workspace) -> El {
 
 fn host_card(s: &Workspace, i: usize, last: bool) -> El {
     let host = &s.settings.hosts[i];
-    let managed = host.shared.is_some();
+    let managed = s.is_shared_managed(i);
     let shared_record = s.shared_host_record(i);
     let connected = s.hosts.get(i).is_some_and(|h| h.model.connected);
     let mut actions = row().gap(6.).center_y();

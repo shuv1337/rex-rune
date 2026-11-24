@@ -9,6 +9,7 @@ use rex_rune::{
     },
     hosts::{SharedHost, SharedHostDiagnostic, SharedHostList},
     settings::{MutedTab, SharedLink, recent_paths::RecentPath},
+    ssh::setup,
 };
 use serde_json::json;
 
@@ -99,7 +100,7 @@ fn linking_and_renaming_preserve_all_local_preferences_and_suppress_self() {
 
     // Pre-existing local host with every local preference populated.
     ws.settings.hosts[1].label = "My Old Studio".into();
-    ws.settings.hosts[1].endpoint = "https://studio.tail.ts.net:443/".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid:443/".into();
     ws.settings.hosts[1].shell = Some("/bin/zsh".into());
     ws.settings.hosts[1].collapsed = true;
     ws.settings.hosts[1].remote_control = true;
@@ -130,7 +131,7 @@ fn linking_and_renaming_preserve_all_local_preferences_and_suppress_self() {
                 host_record(
                     "host:self",
                     "This Machine",
-                    &["self.ts.net"],
+                    &["self.invalid"],
                     Some("local-uuid"),
                     None,
                 ),
@@ -138,12 +139,12 @@ fn linking_and_renaming_preserve_all_local_preferences_and_suppress_self() {
                 host_record(
                     "host:studio",
                     "Studio",
-                    &["studio.tail.ts.net"],
+                    &["studio.invalid"],
                     Some("remote-1"),
                     Some("init.lua:2"),
                 ),
                 // New shared host appended automatically.
-                host_record("host:lab", "Lab", &["lab.ts.net"], Some("remote-2"), None),
+                host_record("host:lab", "Lab", &["lab.invalid"], Some("remote-2"), None),
                 // Unconnectable host stays out of settings.hosts (no broken worker).
                 host_record(
                     "host:bad",
@@ -194,7 +195,7 @@ fn linking_and_renaming_preserve_all_local_preferences_and_suppress_self() {
     // Appended host is linked and uses first valid expanded endpoint.
     let lab = &ws.settings.hosts[2];
     assert_eq!(lab.label, "Lab");
-    assert_eq!(lab.endpoint, "https://lab.ts.net");
+    assert_eq!(lab.endpoint, "https://lab.invalid");
     assert_eq!(
         lab.shared,
         Some(SharedLink {
@@ -213,11 +214,11 @@ fn linking_and_renaming_preserve_all_local_preferences_and_suppress_self() {
                 host_record(
                     "host:studio",
                     "Studio Primary",
-                    &["studio.tail.ts.net"],
+                    &["studio.invalid"],
                     Some("remote-1"),
                     Some("init.lua:2"),
                 ),
-                host_record("host:lab", "Lab", &["lab.ts.net"], Some("remote-2"), None),
+                host_record("host:lab", "Lab", &["lab.invalid"], Some("remote-2"), None),
             ],
             diagnostics: Vec::new(),
         }),
@@ -241,7 +242,7 @@ fn endpoint_change_resets_remote_control_and_drops_sessions_and_recent_paths() {
     let _rx0 = stub_host(&mut ws, 0);
     let _rx1 = stub_host(&mut ws, 1);
 
-    let old_ep = "https://old-box.ts.net".to_owned();
+    let old_ep = "https://old-box.invalid".to_owned();
     ws.settings.hosts[1].label = "Box".into();
     ws.settings.hosts[1].endpoint = old_ep.clone();
     ws.settings.hosts[1].shell = Some("fish".into());
@@ -271,7 +272,7 @@ fn endpoint_change_resets_remote_control_and_drops_sessions_and_recent_paths() {
             hosts: vec![host_record(
                 "host:box",
                 "Box Moved",
-                &["new-box.ts.net"],
+                &["new-box.invalid"],
                 None,
                 None,
             )],
@@ -282,7 +283,7 @@ fn endpoint_change_resets_remote_control_and_drops_sessions_and_recent_paths() {
 
     let host = &ws.settings.hosts[1];
     assert_eq!(host.label, "Box Moved");
-    assert_eq!(host.endpoint, "https://new-box.ts.net");
+    assert_eq!(host.endpoint, "https://new-box.invalid");
     assert!(
         !host.remote_control,
         "remote_control must reset on endpoint change"
@@ -306,7 +307,7 @@ fn departed_shared_host_unlinks_and_keeps_local_with_notice_and_conflict_preserv
     let _rx1 = stub_host(&mut ws, 1);
 
     ws.settings.hosts[1].label = "Studio".into();
-    ws.settings.hosts[1].endpoint = "https://studio.ts.net".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
     ws.settings.hosts[1].shared = Some(SharedLink {
         id: "host:studio".into(),
         from: source_ep.clone(),
@@ -361,7 +362,7 @@ fn toggle_off_unlinks_locally_with_zero_server_commands_and_toggle_on_reconciles
     let rx1 = stub_host(&mut ws, 1);
 
     ws.settings.hosts[1].label = "Studio".into();
-    ws.settings.hosts[1].endpoint = "https://studio.ts.net".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
     push_shared_state(
         &mut ws,
         0,
@@ -370,7 +371,7 @@ fn toggle_off_unlinks_locally_with_zero_server_commands_and_toggle_on_reconciles
             hosts: vec![host_record(
                 "host:studio",
                 "Studio",
-                &["studio.ts.net"],
+                &["studio.invalid"],
                 None,
                 None,
             )],
@@ -416,6 +417,24 @@ fn toggle_off_unlinks_locally_with_zero_server_commands_and_toggle_on_reconciles
         rx0.is_empty(),
         "reconciling from cached list sends zero commands"
     );
+
+    // When cached state is Failed, toggling off->on sends WatchSharedHosts to retry!
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Failed("hosts.list request timed out.".into()),
+        None,
+    );
+    rx0.drain();
+    ws.set_sync_shared_hosts(false, &mut tx);
+    assert!(rx0.is_empty());
+    ws.set_sync_shared_hosts(true, &mut tx);
+    let cmds: Vec<_> = rx0.try_iter().collect();
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, HostCommand::WatchSharedHosts)),
+        "toggling back on after Failed must send WatchSharedHosts to retry"
+    );
 }
 
 #[test]
@@ -427,7 +446,7 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
     let _rx1 = stub_host(&mut ws, 1);
 
     ws.settings.hosts[1].label = "Studio".into();
-    ws.settings.hosts[1].endpoint = "https://studio.ts.net".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
     ws.settings.hosts[1].shared = Some(SharedLink {
         id: "host:studio".into(),
         from: source_ep,
@@ -446,6 +465,24 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
         2,
         "linked host must not be removed"
     );
+
+    // Direct edit_host call changing label or endpoint is also refused (shell-only still works).
+    ws.edit_host(
+        1,
+        "Renamed".into(),
+        "https://other.invalid".into(),
+        Some("fish".into()),
+    );
+    assert_eq!(ws.settings.hosts[1].label, "Studio");
+    assert_eq!(ws.settings.hosts[1].endpoint, "https://studio.invalid");
+    assert_eq!(ws.settings.hosts[1].shell, None);
+    ws.edit_host(
+        1,
+        "Studio".into(),
+        "https://studio.invalid".into(),
+        Some("fish".into()),
+    );
+    assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("fish"));
 
     // Sidebar host menu disables Edit host… and Remove host… while keeping Default shell… enabled.
     ws.host_menu(1, (100., 100.));
@@ -490,7 +527,164 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
 }
 
 #[test]
-fn settings_card_shows_diagnostics_provenance_conflict_search_and_fits_640x480() {
+fn save_ssh_socket_and_stale_edit_form_cannot_mutate_a_linked_shared_host() {
+    let mut ws = workspace_hosts(2);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let _rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+
+    // (a) save_ssh_socket on an offline linked SSH host must not overwrite endpoint or reset
+    // remote_control / reconnect.
+    let ssh_ep = "ssh://me@studio.invalid".to_owned();
+    ws.settings.hosts[1].label = "Studio".into();
+    ws.settings.hosts[1].endpoint = ssh_ep.clone();
+    ws.settings.hosts[1].remote_control = true;
+    ws.settings.hosts[1].shared = Some(SharedLink {
+        id: "host:studio".into(),
+        from: source_ep.clone(),
+    });
+    ws.hosts[1].model.connected = false;
+    let id_before = ws.hosts[1].id;
+    ws.ssh_setup.attachment.insert(
+        ssh_ep.clone(),
+        setup::Attachment::Review {
+            reason: "custom socket".into(),
+            endpoint: Some("ssh://me@studio.invalid/run/custom.sock".into()),
+        },
+    );
+    let mut tx = rune::Tx::default();
+    ws.save_ssh_socket(&ssh_ep, &mut tx);
+    assert_eq!(ws.settings.hosts[1].endpoint, ssh_ep);
+    assert!(ws.settings.hosts[1].remote_control);
+    assert_eq!(ws.hosts[1].id, id_before);
+    assert!(
+        ws.notices
+            .iter()
+            .any(|n| n.text.contains("managed by rex hosts")),
+        "expected read-only notice, got {:?}",
+        ws.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+    assert!(
+        !ws.notices
+            .iter()
+            .any(|n| n.text.contains("Saved the reported socket endpoint"))
+    );
+
+    // (b) Form::EditHost opened BEFORE a refresh links the host, then submitted AFTER linking.
+    ws.settings.hosts[1].shared = None;
+    ws.settings
+        .sessions
+        .insert(ssh_ep.clone(), "session:keep".into());
+    ws.perform(Intent::EditHost(1), &mut tx);
+    assert!(matches!(
+        ws.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Form(Form::EditHost(1)))
+    ));
+    // Refresh links host 1 while the edit form is open!
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h-link".into(),
+            hosts: vec![host_record(
+                "host:studio",
+                "Studio From Rex",
+                &[&ssh_ep],
+                None,
+                None,
+            )],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    assert!(ws.is_shared_managed(1));
+    // User edits name and endpoint in the stale open form and clicks Save.
+    {
+        let panel = ws.panel.as_mut().unwrap();
+        panel.inputs[0].text = "Local Override".into();
+        panel.inputs[1].text = "https://hijack.invalid".into();
+    }
+    ws.submit(&mut tx);
+    assert_eq!(ws.settings.hosts[1].label, "Studio From Rex");
+    assert_eq!(ws.settings.hosts[1].endpoint, ssh_ep);
+    assert!(ws.settings.hosts[1].remote_control);
+    assert_eq!(
+        ws.settings.sessions.get(&ssh_ep).map(String::as_str),
+        Some("session:keep")
+    );
+    assert_eq!(ws.hosts[1].id, id_before);
+}
+
+#[test]
+fn orphaned_shared_links_unlink_when_source_disappears_changes_or_on_startup() {
+    // 1. Removing the source host unlinks hosts previously linked to it.
+    let mut ws = workspace_hosts(2);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let _rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+    ws.settings.hosts[1].label = "Studio".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
+    ws.settings.hosts[1].shared = Some(SharedLink {
+        id: "host:studio".into(),
+        from: source_ep.clone(),
+    });
+    assert!(ws.is_shared_managed(1));
+
+    let mut tx = rune::Tx::default();
+    ws.remove_host(0, &mut tx);
+    assert_eq!(ws.settings.hosts.len(), 1);
+    assert_eq!(
+        ws.settings.hosts[0].shared, None,
+        "removing source host must unlink orphaned shared hosts"
+    );
+    assert!(!ws.is_shared_managed(0));
+
+    // 2. Editing the source host's endpoint unlinks hosts linked to the old source.
+    let mut ws2 = workspace_hosts(2);
+    let source_ep2 = ws2.settings.hosts[0].endpoint.clone();
+    ws2.shared_hosts.source_override = Some(source_ep2.clone());
+    let _rx0 = stub_host(&mut ws2, 0);
+    let _rx1 = stub_host(&mut ws2, 1);
+    ws2.settings.hosts[1].label = "Studio".into();
+    ws2.settings.hosts[1].endpoint = "https://studio.invalid".into();
+    ws2.settings.hosts[1].shared = Some(SharedLink {
+        id: "host:studio".into(),
+        from: source_ep2,
+    });
+    ws2.edit_host(
+        0,
+        "Moved Local".into(),
+        "unix:///nonexistent/other-local.sock".into(),
+        None,
+    );
+    assert_eq!(
+        ws2.settings.hosts[1].shared, None,
+        "editing source endpoint must unlink orphaned shared hosts"
+    );
+    assert!(!ws2.is_shared_managed(1));
+
+    // 3. Launching with a saved linked host whose `from` doesn't match the current source
+    // unlinks it on startup so it is never permanently locked read-only.
+    let mut ws3 = workspace_hosts(2);
+    ws3.settings.hosts[1].endpoint = "https://studio.invalid".into();
+    ws3.settings.hosts[1].shared = Some(SharedLink {
+        id: "host:studio".into(),
+        from: "unix:///nonexistent/old-vanished-source.sock".into(),
+    });
+    ws3.save();
+    let relaunched = relaunch(&ws3);
+    assert_eq!(
+        relaunched.settings.hosts[1].shared, None,
+        "startup must unlink orphaned links from a vanished source"
+    );
+    assert!(!relaunched.is_shared_managed(1));
+}
+
+#[test]
+fn settings_card_shows_diagnostics_error_severity_provenance_conflict_failed_search_and_fits_640x480()
+ {
     let mut ws = workspace_hosts(2);
     let source_ep = ws.settings.hosts[0].endpoint.clone();
     ws.shared_hosts.source_override = Some(source_ep.clone());
@@ -498,7 +692,7 @@ fn settings_card_shows_diagnostics_provenance_conflict_search_and_fits_640x480()
     let _rx1 = stub_host(&mut ws, 1);
 
     ws.settings.hosts[1].label = "Studio".into();
-    ws.settings.hosts[1].endpoint = "https://studio.ts.net".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
     push_shared_state(
         &mut ws,
         0,
@@ -508,28 +702,29 @@ fn settings_card_shows_diagnostics_provenance_conflict_search_and_fits_640x480()
                 host_record(
                     "host:studio",
                     "Studio",
-                    &["studio.ts.net"],
+                    &["studio.invalid"],
                     None,
                     Some("init.lua:2"),
                 ),
                 host_record("host:bad", "UnreachableBox", &[], None, Some("init.lua:9")),
             ],
             diagnostics: vec![SharedHostDiagnostic {
-                severity: "warning".into(),
-                message: "rex.host: endpoints is empty".into(),
+                severity: "error".into(),
+                message: "rex.host: invalid label".into(),
                 source: Some("init.lua:9".into()),
             }],
         }),
         None,
     );
 
-    // Diagnostic notice announced once per distinct set.
-    let notice_count = ws
-        .notices
-        .iter()
-        .filter(|n| n.text.contains("shared host warning"))
-        .count();
-    assert_eq!(notice_count, 1);
+    // Error diagnostic notice reflects error severity (not "warning"), announced once.
+    assert!(
+        ws.notices
+            .iter()
+            .any(|n| n.text.contains("1 shared host error from Rex")),
+        "expected error wording in notices: {:?}",
+        ws.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
 
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     ws.open_section(SettingsSection::Hosts);
@@ -562,9 +757,7 @@ fn settings_card_shows_diagnostics_provenance_conflict_search_and_fits_640x480()
         "missing provenance text in {texts:?}"
     );
     assert!(
-        texts
-            .iter()
-            .any(|t| t.contains("rex.host: endpoints is empty")),
+        texts.iter().any(|t| t.contains("rex.host: invalid label")),
         "missing diagnostic message in {texts:?}"
     );
     assert!(
@@ -605,5 +798,27 @@ fn settings_card_shows_diagnostics_provenance_conflict_search_and_fits_640x480()
     assert!(
         conflict_texts.iter().any(|t| t == "Conflict"),
         "Conflict chip not shown"
+    );
+
+    // Failed state renders Error chip and reason (never stuck on Loading).
+    rt.update(|s, _| {
+        push_shared_state(
+            s,
+            0,
+            SharedHostState::Failed("hosts.list request timed out.".into()),
+            None,
+        );
+    });
+    settle(&mut rt);
+    let failed_texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(
+        failed_texts
+            .iter()
+            .any(|t| t.contains("hosts.list request timed out.")),
+        "failed message not shown: {failed_texts:?}"
+    );
+    assert!(
+        failed_texts.iter().any(|t| t == "Error"),
+        "Error chip not shown"
     );
 }

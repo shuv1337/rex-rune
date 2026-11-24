@@ -140,6 +140,13 @@ impl Workspace {
         }
         let saved = self.settings.hosts[host].clone();
         self.close_panel(tx);
+        if self.is_shared_managed(host) {
+            self.inform(format!(
+                "{} is managed by rex hosts (read-only). Update its endpoint with rex hosts, or turn off shared host sync in Settings → Remote Hosts.",
+                saved.label
+            ));
+            return;
+        }
         self.edit_host(host, saved.label, proposed, saved.shell);
         self.ssh_setup.attachment.remove(endpoint);
         self.inform(

@@ -777,7 +777,7 @@ impl Workspace {
         use Group::Host as G;
         let host = self.active;
         let saved = &self.settings.hosts[host];
-        let managed = saved.shared.is_some();
+        let managed = self.is_shared_managed(host);
         let name = &saved.label;
         let mut edit = Command::new(
             "host.edit",

@@ -127,6 +127,8 @@ fn trimmed_str(value: Option<&Value>) -> Option<String> {
 /// - Bare `host:port` (including bracketed IPv6 `[::1]:7297`) expands to `https://host:port`
 ///   then `http://host:port`.
 /// - Bare `host` expands to `https://host`, `https://host:7297`, `http://host:7297`.
+/// - Trailing `/` on bare hostnames is trimmed; bare values containing internal `/` are
+///   rejected so malformed `host/path:7297` candidates are never produced.
 pub fn expand_endpoint(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -135,13 +137,17 @@ pub fn expand_endpoint(raw: &str) -> Vec<String> {
     if trimmed.contains("://") {
         return vec![trimmed.to_owned()];
     }
-    if has_bare_port(trimmed) {
-        vec![format!("https://{trimmed}"), format!("http://{trimmed}")]
+    let bare = trimmed.trim_end_matches('/');
+    if bare.is_empty() || bare.contains('/') {
+        return Vec::new();
+    }
+    if has_bare_port(bare) {
+        vec![format!("https://{bare}"), format!("http://{bare}")]
     } else {
         vec![
-            format!("https://{trimmed}"),
-            format!("https://{trimmed}:7297"),
-            format!("http://{trimmed}:7297"),
+            format!("https://{bare}"),
+            format!("https://{bare}:7297"),
+            format!("http://{bare}:7297"),
         ]
     }
 }
@@ -263,8 +269,8 @@ pub struct HostUnlink {
     pub id: String,
 }
 
-/// A shared host record with no endpoint accepted by [`validate_host`] (rule 4 fallback).
-/// Shown in Settings → Remote Hosts only; never spawns a host worker.
+/// A shared host record with no usable/unused endpoint accepted by [`validate_host`] (rule 2/4
+/// fallback). Shown in Settings → Remote Hosts only; never spawns a broken or duplicate worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnconnectableHost {
     pub id: String,
@@ -294,17 +300,66 @@ impl ReconcilePlan {
     }
 }
 
+/// Pick the first usable endpoint for `record` that does not point at `source_canon` and does
+/// not overlap any canonical endpoint already owned in `used_endpoints`. Returns `Err(reason)`
+/// when no unused valid endpoint exists.
+fn pick_unused_endpoint(
+    record: &SharedHost,
+    source_canon: &str,
+    used_endpoints: &HashSet<String>,
+) -> Result<String, String> {
+    let mut saw_duplicate = false;
+    for raw in &record.endpoints {
+        let expanded = expand_endpoint(raw);
+        if expanded.is_empty() {
+            continue;
+        }
+        let canons: Vec<String> = expanded.iter().map(|e| canonical_endpoint(e)).collect();
+        if canons.iter().any(|c| c == source_canon) {
+            continue;
+        }
+        let valid = expanded
+            .into_iter()
+            .find(|ep| validate_host(&record.label, ep).is_ok());
+        if canons.iter().any(|c| used_endpoints.contains(c)) {
+            if valid.is_some() {
+                saw_duplicate = true;
+            }
+            continue;
+        }
+        if let Some(ep) = valid {
+            return Ok(ep);
+        }
+    }
+    if saw_duplicate {
+        Err("endpoint already in workspace".into())
+    } else {
+        Err(unconnectable_reason(record))
+    }
+}
+
+/// Non-source canonical expanded endpoints for `record`.
+fn non_source_expanded_canon(record: &SharedHost, source_canon: &str) -> Vec<String> {
+    record
+        .expanded_endpoints()
+        .into_iter()
+        .map(|ep| canonical_endpoint(&ep))
+        .filter(|c| c != source_canon)
+        .collect()
+}
+
 /// Reconcile Rex Rune's saved `local_hosts` against a successfully read `list` from
 /// `source_endpoint`, applying the five rules in exact order:
-/// 1. Suppress any shared record whose `host_id` equals `local_host_id`.
+/// 1. Suppress any shared record whose `host_id` equals `local_host_id` OR whose endpoints all
+///    resolve to `source_endpoint` itself (e.g. an `init.lua` declaration omitting `host_id`).
 /// 2. Match existing rows linked by `shared.id` (from `source_endpoint`): update label to
-///    Rex's label; if the saved endpoint is no longer in the record's expanded endpoints,
-///    switch to the first valid endpoint and mark `endpoint_changed = true`.
+///    Rex's label; if the saved endpoint is no longer in the record's non-source expanded
+///    endpoints, switch to the first unused valid endpoint and mark `endpoint_changed = true`.
 /// 3. Match unlinked local rows (other than `source_endpoint` itself) whose canonical endpoint
 ///    appears in an unmatched record's expanded endpoints: link and adopt Rex's label while
 ///    preserving all local preferences.
-/// 4. For remaining unmatched records: append a linked host if a valid endpoint exists, else
-///    report in `unconnectable`.
+/// 4. For remaining unmatched records: append a linked host if an unused valid endpoint exists,
+///    else report in `unconnectable` (preserving one-row-per-canonical-endpoint).
 /// 5. Any row linked to `source_endpoint` whose `shared.id` is absent from the active list is
 ///    unlinked and kept as a local host (never silently deleted).
 pub fn reconcile(
@@ -316,29 +371,42 @@ pub fn reconcile(
     let source_canon = canonical_endpoint(source_endpoint);
     let local_id = local_host_id.map(str::trim).filter(|s| !s.is_empty());
 
-    // Rule 1: suppress any record referring to this machine itself.
+    // Rule 1: suppress any record referring to this machine itself, either by `host_id` or
+    // because every configured endpoint resolves to `source_endpoint`.
     let active: Vec<&SharedHost> = list
         .hosts
         .iter()
         .filter(|record| {
-            !local_id.is_some_and(|local| {
+            let matches_host_id = local_id.is_some_and(|local| {
                 record
                     .host_id
                     .as_deref()
                     .is_some_and(|rid| rid.eq_ignore_ascii_case(local))
-            })
+            });
+            if matches_host_id {
+                return false;
+            }
+            let expanded = record.expanded_endpoints();
+            let all_are_source = !expanded.is_empty()
+                && expanded
+                    .iter()
+                    .all(|ep| canonical_endpoint(ep) == source_canon);
+            !all_are_source
         })
         .collect();
 
     let expanded_canon: Vec<Vec<String>> = active
         .iter()
-        .map(|r| {
-            r.expanded_endpoints()
-                .iter()
-                .map(|ep| canonical_endpoint(ep))
-                .collect()
-        })
+        .map(|r| non_source_expanded_canon(r, &source_canon))
         .collect();
+
+    // Track every canonical endpoint owned by an existing row or an earlier planned addition,
+    // plus `source_canon`, so Rules 2 and 4 never produce duplicate rows for one endpoint.
+    let mut used_endpoints: HashSet<String> = local_hosts
+        .iter()
+        .map(|h| canonical_endpoint(&h.endpoint))
+        .collect();
+    used_endpoints.insert(source_canon.clone());
 
     let mut plan = ReconcilePlan::default();
     let mut matched_records = vec![false; active.len()];
@@ -360,19 +428,29 @@ pub fn reconcile(
             let still_present = expanded_canon[rec_idx].iter().any(|ep| ep == &host_canon);
             let (next_endpoint, endpoint_changed) = if still_present {
                 (host.endpoint.clone(), false)
-            } else if let Some(first_valid) = record.first_valid_endpoint() {
-                (first_valid, true)
             } else {
-                // Record has no usable endpoint left; keep existing saved endpoint untouched
-                // rather than spawning a broken worker, and surface the unusable record.
-                plan.unconnectable.push(UnconnectableHost {
-                    id: record.id.clone(),
-                    label: record.label.clone(),
-                    endpoints: record.endpoints.clone(),
-                    source: record.source.clone(),
-                    reason: unconnectable_reason(record),
-                });
-                (host.endpoint.clone(), false)
+                match pick_unused_endpoint(record, &source_canon, &used_endpoints) {
+                    Ok(first_valid) => {
+                        let next_canon = canonical_endpoint(&first_valid);
+                        if host_canon != source_canon {
+                            used_endpoints.remove(&host_canon);
+                        }
+                        used_endpoints.insert(next_canon);
+                        (first_valid, true)
+                    }
+                    Err(reason) => {
+                        // Keep existing saved endpoint untouched rather than colliding or
+                        // spawning a broken worker, and surface the unusable/duplicate record.
+                        plan.unconnectable.push(UnconnectableHost {
+                            id: record.id.clone(),
+                            label: record.label.clone(),
+                            endpoints: record.endpoints.clone(),
+                            source: record.source.clone(),
+                            reason,
+                        });
+                        (host.endpoint.clone(), false)
+                    }
+                }
             };
             if record.label != host.label || endpoint_changed {
                 plan.updates.push(HostUpdate {
@@ -424,13 +502,14 @@ pub fn reconcile(
         }
     }
 
-    // Rule 4: unmatched shared records -> append if a valid endpoint exists, else unconnectable.
+    // Rule 4: unmatched shared records -> append if an unused valid endpoint exists, else report.
     for (rec_idx, record) in active.iter().enumerate() {
         if matched_records[rec_idx] {
             continue;
         }
-        match record.first_valid_endpoint() {
-            Some(endpoint) => {
+        match pick_unused_endpoint(record, &source_canon, &used_endpoints) {
+            Ok(endpoint) => {
+                used_endpoints.insert(canonical_endpoint(&endpoint));
                 plan.additions.push(HostAddition {
                     label: record.label.clone(),
                     endpoint,
@@ -440,13 +519,13 @@ pub fn reconcile(
                     },
                 });
             }
-            None => {
+            Err(reason) => {
                 plan.unconnectable.push(UnconnectableHost {
                     id: record.id.clone(),
                     label: record.label.clone(),
                     endpoints: record.endpoints.clone(),
                     source: record.source.clone(),
-                    reason: unconnectable_reason(record),
+                    reason,
                 });
             }
         }
@@ -521,17 +600,30 @@ mod tests {
     }
 
     #[test]
-    fn expands_bare_names_ports_and_preserves_explicit_schemes() {
+    fn expands_bare_names_ports_trims_trailing_slash_and_preserves_explicit_schemes() {
         assert_eq!(
-            expand_endpoint("studio.tail.ts.net"),
+            expand_endpoint("studio.invalid"),
             vec![
-                "https://studio.tail.ts.net",
-                "https://studio.tail.ts.net:7297",
-                "http://studio.tail.ts.net:7297",
+                "https://studio.invalid",
+                "https://studio.invalid:7297",
+                "http://studio.invalid:7297",
             ]
         );
         assert_eq!(
-            expand_endpoint("box:8443"),
+            expand_endpoint("studio.invalid/"),
+            vec![
+                "https://studio.invalid",
+                "https://studio.invalid:7297",
+                "http://studio.invalid:7297",
+            ],
+            "trailing slash on bare host must not produce host/:7297"
+        );
+        assert!(
+            expand_endpoint("studio.invalid/sub/path").is_empty(),
+            "bare host with internal path is rejected"
+        );
+        assert_eq!(
+            expand_endpoint("box:8443/"),
             vec!["https://box:8443", "http://box:8443"]
         );
         assert_eq!(
@@ -543,40 +635,41 @@ mod tests {
             vec!["https://[::1]", "https://[::1]:7297", "http://[::1]:7297"]
         );
         for explicit in [
-            "https://studio.tail.ts.net",
+            "https://studio.invalid",
             "http://10.0.0.5:7297",
-            "ssh://me@studio",
+            "ssh://me@studio.invalid",
             "unix:///tmp/rex.sock",
             "ftp://unsupported",
         ] {
             assert_eq!(expand_endpoint(explicit), vec![explicit]);
         }
         assert!(expand_endpoint("   ").is_empty());
+        assert!(expand_endpoint("///").is_empty());
     }
 
     #[test]
     fn canonicalization_normalizes_case_default_ports_and_trailing_slashes() {
         assert_eq!(
-            canonical_endpoint("HTTPS://Studio.TS.net:443/"),
-            "https://studio.ts.net"
+            canonical_endpoint("HTTPS://Studio.Invalid:443/"),
+            "https://studio.invalid"
         );
         assert_eq!(
-            canonical_endpoint("https://studio.ts.net"),
-            "https://studio.ts.net"
+            canonical_endpoint("https://studio.invalid"),
+            "https://studio.invalid"
         );
         assert_eq!(canonical_endpoint("HTTP://Box:80/"), "http://box");
         assert_eq!(canonical_endpoint("http://Box:7297/"), "http://box:7297");
         assert_eq!(
-            canonical_endpoint("SSH://Alice@Studio.TS.net/Run/Rex.sock/"),
-            "ssh://Alice@studio.ts.net/Run/Rex.sock"
+            canonical_endpoint("SSH://Alice@Studio.Invalid/Run/Rex.sock/"),
+            "ssh://Alice@studio.invalid/Run/Rex.sock"
         );
         assert_eq!(
             canonical_endpoint("UNIX:///Run/User/1000/rex.sock/"),
             "unix:///Run/User/1000/rex.sock"
         );
         assert!(same_endpoint(
-            "https://STUDIO.ts.net:443/",
-            "https://studio.ts.net"
+            "https://STUDIO.invalid:443/",
+            "https://studio.invalid"
         ));
     }
 
@@ -588,7 +681,7 @@ mod tests {
                 {
                     "id": "host:0199abcd-1234-7abc-8def-0123456789ab",
                     "label": "Studio",
-                    "endpoints": ["studio.ts.net", "ssh://me@studio"],
+                    "endpoints": ["studio.invalid", "ssh://me@studio.invalid"],
                     "host_id": "11111111-2222-3333-4444-555555555555",
                     "source": "init.lua:2",
                     "icon": "desktop",
@@ -610,7 +703,10 @@ mod tests {
         let h = &list.hosts[0];
         assert_eq!(h.id, "host:0199abcd-1234-7abc-8def-0123456789ab");
         assert_eq!(h.label, "Studio");
-        assert_eq!(h.endpoints, vec!["studio.ts.net", "ssh://me@studio"]);
+        assert_eq!(
+            h.endpoints,
+            vec!["studio.invalid", "ssh://me@studio.invalid"]
+        );
         assert_eq!(
             h.host_id.as_deref(),
             Some("11111111-2222-3333-4444-555555555555")
@@ -635,18 +731,18 @@ mod tests {
     fn rule_1_suppresses_self_by_host_id() {
         let local = vec![local_host("This Mac", SOURCE)];
         let list = list_of(vec![
-            shared_record("host:self", "Me", &["me.ts.net"], Some("LOCAL-UUID-1")),
+            shared_record("host:self", "Me", &["me.invalid"], Some("LOCAL-UUID-1")),
             shared_record(
                 "host:other",
                 "Studio",
-                &["studio.ts.net"],
+                &["studio.invalid"],
                 Some("OTHER-UUID-2"),
             ),
         ]);
         let plan = reconcile(&local, SOURCE, &list, Some("local-uuid-1"));
         assert_eq!(plan.additions.len(), 1);
         assert_eq!(plan.additions[0].label, "Studio");
-        assert_eq!(plan.additions[0].endpoint, "https://studio.ts.net");
+        assert_eq!(plan.additions[0].endpoint, "https://studio.invalid");
         assert!(plan.unconnectable.is_empty());
     }
 
@@ -654,17 +750,17 @@ mod tests {
     fn rule_2_tracks_label_and_flags_endpoint_change_only_when_dropped() {
         let local = vec![
             local_host("Local", SOURCE),
-            linked_host("OldName", "https://studio.ts.net:7297", "host:1"),
-            linked_host("Moved", "https://old.ts.net", "host:2"),
+            linked_host("OldName", "https://studio.invalid:7297", "host:1"),
+            linked_host("Moved", "https://old.invalid", "host:2"),
         ];
         let list = list_of(vec![
-            // studio.ts.net expands to include https://studio.ts.net:7297, so endpoint stays!
-            shared_record("host:1", "Studio", &["studio.ts.net"], None),
-            // old.ts.net is gone -> switches to first valid endpoint with endpoint_changed = true!
+            // studio.invalid expands to include https://studio.invalid:7297, so endpoint stays!
+            shared_record("host:1", "Studio", &["studio.invalid"], None),
+            // old.invalid is gone -> switches to first valid endpoint with endpoint_changed = true!
             shared_record(
                 "host:2",
                 "MovedRenamed",
-                &["ftp://bad", "new.ts.net:8443"],
+                &["ftp://bad", "new.invalid:8443"],
                 None,
             ),
         ]);
@@ -675,7 +771,7 @@ mod tests {
             HostUpdate {
                 index: 1,
                 label: "Studio".into(),
-                endpoint: "https://studio.ts.net:7297".into(),
+                endpoint: "https://studio.invalid:7297".into(),
                 endpoint_changed: false,
             }
         );
@@ -684,7 +780,7 @@ mod tests {
             HostUpdate {
                 index: 2,
                 label: "MovedRenamed".into(),
-                endpoint: "https://new.ts.net:8443".into(),
+                endpoint: "https://new.invalid:8443".into(),
                 endpoint_changed: true,
             }
         );
@@ -694,8 +790,36 @@ mod tests {
     }
 
     #[test]
+    fn rule_2_refuses_to_switch_linked_host_onto_endpoint_owned_by_another_row() {
+        let local = vec![
+            local_host("Local", SOURCE),
+            linked_host("Alpha", "https://alpha-old.invalid", "host:alpha"),
+            linked_host("Beta", "https://beta.invalid:7297", "host:beta"),
+        ];
+        let list = list_of(vec![
+            // Alpha's only endpoint now collides with Beta's existing endpoint!
+            shared_record("host:alpha", "Alpha", &["beta.invalid"], None),
+            shared_record("host:beta", "Beta", &["beta.invalid"], None),
+        ]);
+        let plan = reconcile(&local, SOURCE, &list, None);
+        assert!(
+            plan.updates.is_empty(),
+            "Alpha must not switch onto Beta's endpoint: {:?}",
+            plan.updates
+        );
+        assert!(plan.additions.is_empty());
+        assert_eq!(plan.unconnectable.len(), 1);
+        assert_eq!(plan.unconnectable[0].label, "Alpha");
+        assert!(
+            plan.unconnectable[0]
+                .reason
+                .contains("already in workspace")
+        );
+    }
+
+    #[test]
     fn rule_3_links_existing_unlinked_host_by_canonical_expanded_endpoint() {
-        let mut existing = local_host("My Custom Name", "HTTPS://Studio.TS.net:443/");
+        let mut existing = local_host("My Custom Name", "HTTPS://Studio.Invalid:443/");
         existing.shell = Some("/bin/zsh".into());
         existing.collapsed = true;
         existing.remote_control = true;
@@ -703,7 +827,7 @@ mod tests {
         let list = list_of(vec![shared_record(
             "host:studio",
             "Studio",
-            &["studio.ts.net"],
+            &["studio.invalid"],
             None,
         )]);
         let plan = reconcile(&local, SOURCE, &list, None);
@@ -725,30 +849,63 @@ mod tests {
     fn rule_4_appends_connectable_and_reports_unconnectable_without_spawning() {
         let local = vec![local_host("Local", SOURCE)];
         let list = list_of(vec![
-            shared_record("host:ok", "Lab", &["ftp://nope", "ssh://me@lab"], None),
+            shared_record(
+                "host:ok",
+                "Lab",
+                &["ftp://nope", "ssh://me@lab.invalid"],
+                None,
+            ),
             shared_record("host:bad1", "Empty", &[], None),
             shared_record("host:bad2", "BadScheme", &["ftp://only-ftp"], None),
         ]);
         let plan = reconcile(&local, SOURCE, &list, None);
         assert_eq!(plan.additions.len(), 1);
         assert_eq!(plan.additions[0].label, "Lab");
-        assert_eq!(plan.additions[0].endpoint, "ssh://me@lab");
+        assert_eq!(plan.additions[0].endpoint, "ssh://me@lab.invalid");
         assert_eq!(plan.unconnectable.len(), 2);
         assert_eq!(plan.unconnectable[0].label, "Empty");
         assert_eq!(plan.unconnectable[1].label, "BadScheme");
     }
 
     #[test]
+    fn rule_4_never_duplicates_endpoint_across_two_shared_records() {
+        let local = vec![local_host("Local", SOURCE)];
+        let list = list_of(vec![
+            shared_record("host:one", "One", &["shared.invalid"], None),
+            shared_record("host:two", "Two", &["shared.invalid"], None),
+            shared_record(
+                "host:three",
+                "Three",
+                &["shared.invalid", "ssh://me@fallback.invalid"],
+                None,
+            ),
+        ]);
+        let plan = reconcile(&local, SOURCE, &list, None);
+        assert_eq!(plan.additions.len(), 2);
+        assert_eq!(plan.additions[0].label, "One");
+        assert_eq!(plan.additions[0].endpoint, "https://shared.invalid");
+        assert_eq!(plan.additions[1].label, "Three");
+        assert_eq!(plan.additions[1].endpoint, "ssh://me@fallback.invalid");
+        assert_eq!(plan.unconnectable.len(), 1);
+        assert_eq!(plan.unconnectable[0].label, "Two");
+        assert!(
+            plan.unconnectable[0]
+                .reason
+                .contains("already in workspace")
+        );
+    }
+
+    #[test]
     fn rule_5_unlinks_departed_host_without_deleting_and_is_idempotent() {
         let mut hosts = vec![
             local_host("Local", SOURCE),
-            linked_host("Gone", "https://gone.ts.net", "host:gone"),
-            linked_host("Kept", "https://kept.ts.net", "host:kept"),
+            linked_host("Gone", "https://gone.invalid", "host:gone"),
+            linked_host("Kept", "https://kept.invalid", "host:kept"),
         ];
         let list = list_of(vec![shared_record(
             "host:kept",
             "Kept",
-            &["kept.ts.net"],
+            &["kept.invalid"],
             None,
         )]);
         let plan = reconcile(&hosts, SOURCE, &list, None);
@@ -766,24 +923,52 @@ mod tests {
     }
 
     #[test]
-    fn never_links_the_source_server_row_itself() {
+    fn never_links_or_duplicates_the_source_server_row_even_without_host_id() {
         let local = vec![local_host("Local", SOURCE)];
-        let list = list_of(vec![shared_record("host:loop", "Loop", &[SOURCE], None)]);
+        // init.lua declaration omits host_id and lists the local source endpoint.
+        let list = list_of(vec![shared_record(
+            "host:loop",
+            "Loop",
+            &[&format!("{SOURCE}/")],
+            None,
+        )]);
         let plan = reconcile(&local, SOURCE, &list, None);
         assert!(plan.links.is_empty(), "must not link the source host row");
-        // Without host_id suppression, rule 4 would still treat it as unmatched; with host_id
-        // rule 1 suppresses it completely.
+        assert!(
+            plan.additions.is_empty(),
+            "must not append a duplicate row for source_endpoint"
+        );
+        assert!(
+            plan.unconnectable.is_empty(),
+            "a self-only source_endpoint record is suppressed quietly as self"
+        );
+
+        // If a record lists source_endpoint first AND a remote endpoint second, filter
+        // source_endpoint out and use the remote endpoint instead.
+        let mixed = list_of(vec![shared_record(
+            "host:mixed",
+            "Mixed",
+            &[SOURCE, "remote.invalid"],
+            None,
+        )]);
+        let mixed_plan = reconcile(&local, SOURCE, &mixed, None);
+        assert!(mixed_plan.links.is_empty());
+        assert_eq!(mixed_plan.additions.len(), 1);
+        assert_eq!(mixed_plan.additions[0].endpoint, "https://remote.invalid");
+
+        // With host_id matching local_host_id, Rule 1 suppresses even remote endpoints.
         let suppressed = reconcile(
             &local,
             SOURCE,
             &list_of(vec![shared_record(
                 "host:loop",
                 "Loop",
-                &[SOURCE],
+                &[SOURCE, "remote.invalid"],
                 Some("self-id"),
             )]),
             Some("self-id"),
         );
         assert!(!suppressed.has_host_changes());
+        assert!(suppressed.unconnectable.is_empty());
     }
 }
