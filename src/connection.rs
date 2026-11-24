@@ -1158,6 +1158,11 @@ async fn list(
         let prev_sessions: HashSet<String> =
             m.sessions.iter().map(|s| s.session_id.clone()).collect();
         m.sessions = reply.value.sessions;
+        for session in &m.sessions {
+            if let Some(view) = m.views.get_mut(&session.session_id) {
+                view.label = Some(session.label.clone());
+            }
+        }
         let current: HashSet<String> = m.sessions.iter().map(|s| s.session_id.clone()).collect();
         let mut gone: HashSet<String> = m
             .views
@@ -1567,15 +1572,6 @@ async fn handle_event(
                 }
                 "session_created" | "session_moved" | "session_label_changed" => {
                     list(control, shared, state, sweep).await?;
-                    if event_type == "session_label_changed" {
-                        shared.update(|m| {
-                            for session in &m.sessions {
-                                if let Some(view) = m.views.get_mut(&session.session_id) {
-                                    view.label = Some(session.label.clone());
-                                }
-                            }
-                        });
-                    }
                 }
                 _ if let Some(id) = session_id => {
                     let dropped_block = event.payload["block_id"].as_str().map(str::to_owned);

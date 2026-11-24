@@ -258,6 +258,11 @@ pub(crate) fn probe_io<S: Read + Write + ?Sized>(stream: &mut S) -> AgentHealth 
 }
 
 fn io_health(error: std::io::Error) -> AgentHealth {
+    // macOS/BSD XNU can return EPROTOTYPE when writing to a Unix socket whose peer just closed.
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::EPROTOTYPE) {
+        return AgentHealth::NotAnswering("Agent is not listening".into());
+    }
     match error.kind() {
         ErrorKind::TimedOut | ErrorKind::WouldBlock => {
             AgentHealth::NotAnswering("Timed out".into())
@@ -266,9 +271,11 @@ fn io_health(error: std::io::Error) -> AgentHealth {
             AgentHealth::NotAnswering("Agent closed connection without replying".into())
         }
         ErrorKind::PermissionDenied => AgentHealth::NotAnswering("Permission denied".into()),
-        ErrorKind::ConnectionRefused | ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => {
-            AgentHealth::NotAnswering("Agent is not listening".into())
-        }
+        ErrorKind::ConnectionRefused
+        | ErrorKind::BrokenPipe
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::NotConnected => AgentHealth::NotAnswering("Agent is not listening".into()),
         _ => AgentHealth::NotAnswering(error.to_string()),
     }
 }
@@ -557,6 +564,46 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn io_health_maps_closed_and_stale_socket_errors_to_not_listening() {
+        use std::io::Error;
+
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::NotConnected,
+        ] {
+            assert_eq!(
+                io_health(Error::from(kind)),
+                AgentHealth::NotAnswering("Agent is not listening".into()),
+                "expected {kind:?} to map to Agent is not listening"
+            );
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            io_health(Error::from_raw_os_error(libc::EPROTOTYPE)),
+            AgentHealth::NotAnswering("Agent is not listening".into())
+        );
+        assert_eq!(
+            io_health(Error::from(ErrorKind::TimedOut)),
+            AgentHealth::NotAnswering("Timed out".into())
+        );
+        assert_eq!(
+            io_health(Error::from(ErrorKind::WouldBlock)),
+            AgentHealth::NotAnswering("Timed out".into())
+        );
+        assert_eq!(
+            io_health(Error::from(ErrorKind::UnexpectedEof)),
+            AgentHealth::NotAnswering("Agent closed connection without replying".into())
+        );
+        assert_eq!(
+            io_health(Error::from(ErrorKind::PermissionDenied)),
+            AgentHealth::NotAnswering("Permission denied".into())
+        );
+    }
+
     #[cfg(unix)]
     mod unix {
         use super::*;
@@ -660,10 +707,11 @@ mod tests {
             {
                 let _listener = UnixListener::bind(&closed_sock).unwrap();
             }
-            assert!(matches!(
-                probe_socket(&closed_sock),
-                AgentHealth::NotAnswering(msg) if msg.contains("not listening")
-            ));
+            let closed = probe_socket(&closed_sock);
+            assert!(
+                matches!(closed, AgentHealth::NotAnswering(ref msg) if msg.contains("not listening")),
+                "expected stale socket to report not listening, got {closed:?}"
+            );
 
             // Non-existent path -> NotFound
             assert_eq!(

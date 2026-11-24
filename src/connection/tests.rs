@@ -3948,3 +3948,142 @@ async fn event_dropped_cancels_superseded_in_flight_status_sweep_read() {
     drop(host);
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn list_syncs_cached_view_label_when_buffered_label_drop_is_suppressed_by_list_seq() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(boot()).unwrap(),
+        )
+        .await;
+
+        // Trigger `list()` via `session_created` at seq 13.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "session_created",
+                    "payload": {"session_id": OTHER}
+                }
+            }),
+        )
+        .await;
+        let list_req = recv(&mut ws).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+
+        // Buffer an unnamed `event_dropped("session_label_changed")` at seq 14 before the
+        // `session.attach_all` reply at seq 15 arrives. `ControlState::includes` suppresses
+        // seq 14 against `list_seq = 15`, so `list()` itself must reconcile `m.views[SESSION].label`.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 14,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_label_changed",
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        reply(
+            &mut ws,
+            &list_req,
+            15,
+            json!({"sessions": [
+                {"session_id": SESSION, "label": "renamed-during-list"},
+                {"session_id": OTHER, "label": "other"}
+            ]}),
+        )
+        .await;
+
+        // Fence event at seq 16 on OTHER so the client has drained and suppressed the
+        // buffered seq 14 drop before we inspect `m.views[SESSION].label`.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 16,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": OTHER,
+                        "event": {
+                            "type": "session_label_changed",
+                            "payload": {"label": "fenced"}
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        done_tx.send(()).unwrap();
+        let mut saw_extra_attach_all = false;
+        let mut bg = |req: &Value| -> Option<(u64, Value)> {
+            if req["method"] == "session.attach_all" {
+                saw_extra_attach_all = true;
+                return Some((
+                    16,
+                    json!({"sessions": [
+                        {"session_id": SESSION, "label": "renamed-during-list"},
+                        {"session_id": OTHER, "label": "fenced"}
+                    ]}),
+                ));
+            }
+            if req["method"] == "session.view" && req["payload"]["session_id"] == OTHER {
+                return Some((
+                    16,
+                    json!({"session_id": OTHER, "label": "fenced", "revision": 1, "windows": []}),
+                ));
+            }
+            None
+        };
+        expect_close_answering_sweep(&mut ws, &mut bg).await;
+        assert!(
+            !saw_extra_attach_all,
+            "buffered seq 14 session_label_changed drop must be suppressed by list_seq = 15"
+        );
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        m.sessions
+            .iter()
+            .any(|s| s.session_id == OTHER && s.label == "fenced")
+    })
+    .await;
+    {
+        let m = host.model.lock().unwrap();
+        assert!(
+            m.sessions
+                .iter()
+                .any(|s| s.session_id == SESSION && s.label == "renamed-during-list")
+        );
+        assert_eq!(
+            m.views.get(SESSION).and_then(|v| v.label.as_deref()),
+            Some("renamed-during-list")
+        );
+    }
+    drop(host);
+    server.await.unwrap();
+}
