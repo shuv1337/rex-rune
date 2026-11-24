@@ -307,6 +307,25 @@ fn snapshot_cutoffs_are_scoped_to_the_state_they_replace() {
     assert!(state.includes(&event(16, "session_destroyed", Some(SESSION))));
     assert!(!state.includes(&event(19, "session_label_changed", Some(SESSION))));
     assert!(state.includes(&event(21, "session_label_changed", Some(SESSION))));
+    // List-level `event_dropped` carrying `payload.session_id` gates against `list_seq`,
+    // not `view_seq`.
+    let dropped = |seq, event_type: &str, session: Option<&str>| rexrs::Event {
+        seq,
+        name: "event_dropped".into(),
+        session_id: None,
+        payload: match session {
+            Some(id) => json!({"event_type": event_type, "session_id": id, "size": 100000}),
+            None => json!({"event_type": event_type, "size": 100000}),
+        },
+    };
+    assert!(!state.includes(&dropped(15, "session_created", Some(SESSION))));
+    assert!(state.includes(&dropped(16, "session_created", Some(SESSION))));
+    assert!(!state.includes(&dropped(15, "session_moved", Some(SESSION))));
+    assert!(state.includes(&dropped(16, "session_moved", Some(SESSION))));
+    assert!(!state.includes(&dropped(15, "session_destroyed", Some(SESSION))));
+    assert!(state.includes(&dropped(16, "session_destroyed", Some(SESSION))));
+    assert!(!state.includes(&dropped(20, "block_event", Some(SESSION))));
+    assert!(state.includes(&dropped(21, "block_event", Some(SESSION))));
 }
 
 #[tokio::test]
@@ -2960,6 +2979,44 @@ async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet()
     server.await.unwrap();
 }
 
+/// Receive the next control request, transparently answering any interleaved background
+/// `status_sweep` reads (`session.view` or `com.superlogical.terminal.program_status`) that
+/// `handle_bg` recognizes so mock tests never race with paced sweep traffic.
+async fn recv_answering_sweep(
+    ws: &mut WebSocketStream<TcpStream>,
+    handle_bg: &mut impl FnMut(&Value) -> Option<(u64, Value)>,
+) -> Value {
+    loop {
+        let req = recv(ws).await;
+        if let Some((seq, payload)) = handle_bg(&req) {
+            reply(ws, &req, seq, payload).await;
+            continue;
+        }
+        return req;
+    }
+}
+
+/// Drain frames until the client closes the WebSocket, answering any trailing background
+/// sweep requests that were already queued when the test dropped the host.
+async fn expect_close_answering_sweep(
+    ws: &mut WebSocketStream<TcpStream>,
+    handle_bg: &mut impl FnMut(&Value) -> Option<(u64, Value)>,
+) {
+    loop {
+        match ws.next().await {
+            Some(Ok(Message::Close(_))) => return,
+            Some(Ok(Message::Text(text))) => {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                if let Some((seq, payload)) = handle_bg(&req) {
+                    reply(ws, &req, seq, payload).await;
+                }
+            }
+            Some(Ok(_)) => {}
+            other => panic!("expected WebSocket Close frame, got {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn event_dropped_recovers_session_list_keymap_and_hosts() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3021,12 +3078,42 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
         assert_eq!(hosts_req["method"], "hosts.list");
         reply(&mut ws, &hosts_req, 11, json!({"hash": "hh1", "hosts": []})).await;
 
-        // 1. Session-scoped event_dropped -> refreshes view and re-reads b1 metadata.
+        // Deliver a live status_changed record on b1 so it is marked `live: true`. A dropped
+        // StatusRemoved afterwards must be cleared when program_status is re-read as empty.
         send(
             &mut ws,
             json!({
                 "type": "event",
                 "seq": 12,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {
+                            "type": "block_event",
+                            "payload": {
+                                "block_id": "b1",
+                                "creator_name": "com.superlogical.terminal",
+                                "name": "program_status_changed",
+                                "payload": {
+                                    "id": "",
+                                    "record": {"state": "working", "app": "build"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        // 1. Session-scoped event_dropped -> refreshes view, downgrades live status records,
+        //    and re-reads b1 metadata.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
                 "payload": {
                     "type": "event_dropped",
                     "payload": {
@@ -3045,7 +3132,7 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
         reply(
             &mut ws,
             &view_req,
-            13,
+            14,
             json!({
                 "session_id": SESSION,
                 "label": "snapshot",
@@ -3074,7 +3161,7 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
                 "com.superlogical.terminal.title" => json!({"title": "after-drop"}),
                 _ => json!({}),
             };
-            reply(&mut ws, &req, 13, payload).await;
+            reply(&mut ws, &req, 14, payload).await;
         }
 
         // 2. Server-wide session_* event_dropped -> re-lists sessions.
@@ -3082,7 +3169,7 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
             &mut ws,
             json!({
                 "type": "event",
-                "seq": 14,
+                "seq": 15,
                 "payload": {
                     "type": "event_dropped",
                     "payload": {"event_type": "session_created", "size": 100000}
@@ -3095,7 +3182,7 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
         reply(
             &mut ws,
             &list_req,
-            15,
+            16,
             json!({"sessions": [
                 {"session_id": SESSION, "label": "snapshot"},
                 {"session_id": OTHER, "label": "other"}
@@ -3103,12 +3190,28 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
         )
         .await;
 
+        let mut bg_other = |req: &Value| -> Option<(u64, Value)> {
+            let method = req["method"].as_str()?;
+            if method == "session.view" && req["payload"]["session_id"] == OTHER {
+                return Some((
+                    16,
+                    json!({"session_id": OTHER, "revision": 1, "windows": []}),
+                ));
+            }
+            if method == "com.superlogical.terminal.program_status"
+                && req["payload"]["session_id"] == OTHER
+            {
+                return Some((16, json!({})));
+            }
+            None
+        };
+
         // 3. Server-wide keymap_changed event_dropped -> refreshes keymap.
         send(
             &mut ws,
             json!({
                 "type": "event",
-                "seq": 16,
+                "seq": 17,
                 "payload": {
                     "type": "event_dropped",
                     "payload": {"event_type": "keymap_changed", "size": 100000}
@@ -3116,29 +3219,16 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
             }),
         )
         .await;
-        let km_req2 = loop {
-            let req = recv(&mut ws).await;
-            if req["method"] == "session.view" && req["payload"]["session_id"] == OTHER {
-                reply(
-                    &mut ws,
-                    &req,
-                    15,
-                    json!({"session_id": OTHER, "revision": 1, "windows": []}),
-                )
-                .await;
-                continue;
-            }
-            break req;
-        };
+        let km_req2 = recv_answering_sweep(&mut ws, &mut bg_other).await;
         assert_eq!(km_req2["method"], "client.keymap");
-        reply(&mut ws, &km_req2, 17, km_reply("h2", 2)).await;
+        reply(&mut ws, &km_req2, 18, km_reply("h2", 2)).await;
 
         // 4. Server-wide hosts_changed event_dropped -> re-reads hosts.list.
         send(
             &mut ws,
             json!({
                 "type": "event",
-                "seq": 18,
+                "seq": 19,
                 "payload": {
                     "type": "event_dropped",
                     "payload": {"event_type": "hosts_changed", "size": 100000}
@@ -3146,31 +3236,18 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
             }),
         )
         .await;
-        let hosts_req2 = loop {
-            let req = recv(&mut ws).await;
-            if req["method"] == "session.view" && req["payload"]["session_id"] == OTHER {
-                reply(
-                    &mut ws,
-                    &req,
-                    18,
-                    json!({"session_id": OTHER, "revision": 1, "windows": []}),
-                )
-                .await;
-                continue;
-            }
-            break req;
-        };
+        let hosts_req2 = recv_answering_sweep(&mut ws, &mut bg_other).await;
         assert_eq!(hosts_req2["method"], "hosts.list");
         reply(
             &mut ws,
             &hosts_req2,
-            19,
+            20,
             json!({"hash": "hh2", "hosts": []}),
         )
         .await;
 
         done_tx.send(()).unwrap();
-        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+        expect_close_answering_sweep(&mut ws, &mut bg_other).await;
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
@@ -3198,6 +3275,7 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
         .unwrap();
     until(&host, |m| {
         m.title("b1") == Some("after-drop")
+            && !m.activity.contains_key("b1")
             && m.sessions.len() == 2
             && m.keymap
                 .as_ref()
@@ -3210,10 +3288,170 @@ async fn event_dropped_recovers_session_list_keymap_and_hosts() {
 }
 
 #[tokio::test]
+async fn event_dropped_with_session_id_routes_list_level_session_events() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (step1_tx, step1_rx) = tokio::sync::oneshot::channel();
+    let (step1_go_tx, step1_go_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(boot()).unwrap(),
+        )
+        .await;
+
+        // 1. `event_dropped` for `session_created` WITH `payload.session_id` populated must
+        //    call `session.attach_all` (not `session.view`) so `m.sessions` learns about OTHER.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 11,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_created",
+                        "session_id": OTHER,
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        let list_req = recv(&mut ws).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req,
+            12,
+            json!({"sessions": [
+                {"session_id": SESSION, "label": "snapshot"},
+                {"session_id": OTHER, "label": "other"}
+            ]}),
+        )
+        .await;
+        // Let the initial background sweep probe OTHER and fail so OTHER stays unplaced
+        // (in `m.sessions`, absent from `m.views`, marked in `state.viewed`). Under the old
+        // bug, `event_dropped(session_destroyed, session_id=OTHER)` cleared `state.viewed`
+        // without removing OTHER from `m.sessions`, triggering a second `session.view` poll.
+        let initial_other_view = recv(&mut ws).await;
+        assert_eq!(initial_other_view["method"], "session.view");
+        assert_eq!(initial_other_view["payload"]["session_id"], OTHER);
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": initial_other_view["id"],
+                "seq": 12,
+                "error": {"code": "internal", "message": "transient", "status": 500}
+            }),
+        )
+        .await;
+        step1_tx.send(()).unwrap();
+        step1_go_rx.await.unwrap();
+
+        // 2. `event_dropped` for `session_destroyed` WITH `payload.session_id` on unplaced
+        //    session OTHER must remove OTHER without polling `session.view` for it again.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_destroyed",
+                        "session_id": OTHER,
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        // Also verify `session_label_changed` with `session_id` re-lists and updates view label.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 14,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_label_changed",
+                        "session_id": SESSION,
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        let mut saw_other_view_after_destroy = false;
+        let mut bg = |req: &Value| -> Option<(u64, Value)> {
+            if req["method"] == "session.view" && req["payload"]["session_id"] == OTHER {
+                saw_other_view_after_destroy = true;
+                return Some((
+                    13,
+                    json!({"session_id": OTHER, "revision": 1, "windows": []}),
+                ));
+            }
+            None
+        };
+        let list_req2 = recv_answering_sweep(&mut ws, &mut bg).await;
+        assert_eq!(list_req2["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req2,
+            15,
+            json!({"sessions": [{"session_id": SESSION, "label": "renamed-via-drop"}]}),
+        )
+        .await;
+        done_tx.send(()).unwrap();
+        expect_close_answering_sweep(&mut ws, &mut bg).await;
+        assert!(
+            !saw_other_view_after_destroy,
+            "destroyed unplaced session must not be queried with session.view"
+        );
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(5), step1_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        m.sessions.iter().any(|s| s.session_id == OTHER) && !m.views.contains_key(OTHER)
+    })
+    .await;
+    step1_go_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        !m.sessions.iter().any(|s| s.session_id == OTHER)
+            && m.sessions
+                .iter()
+                .any(|s| s.session_id == SESSION && s.label == "renamed-via-drop")
+            && m.views.get(SESSION).and_then(|v| v.label.as_deref()) == Some("renamed-via-drop")
+    })
+    .await;
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn recreated_block_and_session_ids_reread_layout_and_activity() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (phase1_tx, phase1_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
     let (phase2_tx, phase2_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
@@ -3321,6 +3559,8 @@ async fn recreated_block_and_session_ids_reread_layout_and_activity() {
             reply(&mut ws, &req, 14, payload).await;
         }
         phase1_tx.send(()).unwrap();
+        // Wait for the client test task to observe "reopened-block" before destroying SESSION.
+        proceed_rx.await.unwrap();
 
         // 2. `session_destroyed` clears SESSION + b1; when SESSION is recreated with the same ID,
         //    selecting it re-reads its view and b1's metadata.
@@ -3357,16 +3597,18 @@ async fn recreated_block_and_session_ids_reread_layout_and_activity() {
             json!({"sessions": [{"session_id": SESSION, "label": "snapshot"}]}),
         )
         .await;
-        let attach_req = loop {
-            let req = recv(&mut ws).await;
-            if req["method"] == "session.attach" {
-                break req;
-            }
-            if req["method"] == "session.view" {
-                // Background sweep may also inspect the recreated session; reply cleanly.
-                reply(&mut ws, &req, 17, view_with_b1(4)).await;
+
+        // Background sweep may read `session.view` and `program_status` for the recreated
+        // session before or during `session.attach`; answer both transparently.
+        let mut bg_session = |req: &Value| -> Option<(u64, Value)> {
+            match req["method"].as_str()? {
+                "session.view" => Some((17, view_with_b1(4))),
+                "com.superlogical.terminal.program_status" => Some((17, json!({}))),
+                _ => None,
             }
         };
+        let attach_req = recv_answering_sweep(&mut ws, &mut bg_session).await;
+        assert_eq!(attach_req["method"], "session.attach");
         assert_eq!(attach_req["payload"]["session_id"], SESSION);
         reply(
             &mut ws,
@@ -3375,24 +3617,25 @@ async fn recreated_block_and_session_ids_reread_layout_and_activity() {
             json!({"client_id": "client:test", "view": view_with_b1(4)}),
         )
         .await;
+
         let mut saw_title = false;
-        while !saw_title {
-            let req = recv(&mut ws).await;
-            let payload = match req["method"].as_str().unwrap_or("") {
+        let mut saw_process = false;
+        while !(saw_title && saw_process) {
+            let req = recv_answering_sweep(&mut ws, &mut bg_session).await;
+            match req["method"].as_str().unwrap_or("") {
                 "com.superlogical.terminal.title" => {
                     saw_title = true;
-                    json!({"title": "reopened-session"})
+                    reply(&mut ws, &req, 18, json!({"title": "reopened-session"})).await;
                 }
-                _ => json!({}),
-            };
-            reply(&mut ws, &req, 18, payload).await;
+                "com.superlogical.terminal.process" => {
+                    saw_process = true;
+                    reply(&mut ws, &req, 18, json!({})).await;
+                }
+                other => panic!("unexpected request after attach: {other}"),
+            }
         }
-        // Answer the trailing process query after title.
-        let proc_req = recv(&mut ws).await;
-        assert_eq!(proc_req["method"], "com.superlogical.terminal.process");
-        reply(&mut ws, &proc_req, 18, json!({})).await;
         phase2_tx.send(()).unwrap();
-        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+        expect_close_answering_sweep(&mut ws, &mut bg_session).await;
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
@@ -3402,6 +3645,7 @@ async fn recreated_block_and_session_ids_reread_layout_and_activity() {
         .unwrap()
         .unwrap();
     until(&host, |m| m.title("b1") == Some("reopened-block")).await;
+    proceed_tx.send(()).unwrap();
     until(&host, |m| {
         m.selected.is_none() && m.sessions.iter().any(|s| s.session_id == SESSION)
     })

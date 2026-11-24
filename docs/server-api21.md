@@ -115,31 +115,45 @@ Summary of schema and protocol changes from revision 14 through revision 21:
      or timeouts) are debug-logged, never retried, and never disconnect the host.
    - Ignores `client_prompt_ended` quietly.
 4. **`event_dropped` recovery (`src/connection.rs`):**
-   - Session-scoped drops refresh the session view (when opened or selected; or
-     clear `viewed` / mark in-flight fetches stale when unplaced) and clear
-     once-read block metadata marks (`queried`, `status_queried`,
-     `status_failed`, `status_reading`, `status_read`) so titles, process info,
-     and program status re-read cleanly.
-   - Server-wide drops trigger `session.attach_all` for `session_*` types,
-     `client.keymap` refresh for `keymap_changed`, `hosts.list` re-read for
-     `hosts_changed`, and `server.status` re-read for
+   - List-level session drops (`session_created`, `session_moved`,
+     `session_label_changed`) re-list sessions via `session.attach_all` (even
+     when `payload.session_id` is populated), and `session_destroyed` removes
+     the named session (or re-lists when unnamed).
+   - Other session-scoped drops refresh the session view (when opened or
+     selected; or clear `viewed` / mark in-flight fetches stale when unplaced),
+     clear once-read block metadata marks (`queried`, `status_queried`,
+     `status_failed`, `status_reading`, `status_read`), and downgrade existing
+     activity records' `live` flag so a dropped `StatusRemoved` event is cleared
+     by the subsequent `program_status` read.
+   - Server-wide drops trigger `client.keymap` refresh for `keymap_changed`,
+     `hosts.list` re-read for `hosts_changed`, and `server.status` re-read for
      `tailscale_status_changed`.
+   - Known limitation: if `client_prompt_requested` or
+     `client_perform_requested` is replaced by `event_dropped`, the server's
+     drop notice carries no `call_id`, so the client cannot send a `client.reply`
+     and the caller waits until its own timeout.
 5. **Session and block ID reuse cleanup (`src/connection.rs`):**
    - Clears per-block and per-session once-read marks (`queried`,
      `status_queried`, `status_failed`, `status_reading`, `themed`, `tickets`,
      `viewed`, `urgent_views`, `view_seq`, `fetch_stale`, `background_views`,
      `status_read`) on `block_closed`, `session_destroyed`, and sessions removed
-     by `session.attach_all` so an undone close (rev 20) re-reads layout,
-     titles, and activity cleanly without reconnecting.
+     by `session.attach_all` (including removed sessions that never had a cached
+     view) so an undone close (rev 20) re-reads layout, titles, and activity
+     cleanly without reconnecting.
 6. **API 21 dual zoom (`src/layout.rs`, `src/connection.rs`, `src/app/`):**
-   - Added pure helpers `layout::full_window_zoom`, `layout::tiled_zoom`,
-     `layout::is_zoomed`, `layout::any_zoomed`, and `layout::block_visible`.
+   - Added pure helpers `layout::full_window_zoom`, `layout::tiled_zoom`
+     (validating that the block exists in a non-minimized tiled layer and
+     falling back cleanly to the tiled layout if stale), `layout::is_zoomed`,
+     `layout::any_zoomed`, and `layout::block_visible`.
    - Under API 21 tiled zoom (`tiled_zoomed_block_id` set, no differing
      `zoomed_block_id`), the zoomed tiled pane fills `[0, 0, 1, 1]` on the tiled
      layer behind all non-minimized floating layers while floating cards,
-     floating split dividers, resize grips, and header drag remain active,
-     hidden tiled siblings do not stream, and focusing a floating pane keeps the
-     zoomed tiled pane's geometry and PTY size stable.
+     floating split dividers, resize grips, and header drag remain active, and
+     focusing a floating pane keeps the zoomed tiled pane's geometry and PTY
+     size stable. Hidden tiled siblings (and blocks in minimized floating
+     layers) are marked not visible by `block_visible`: no new worker is spawned
+     for them while hidden, and any already-running worker keeps its data stream
+     with `DataCommand::Visible(false)` so it parses output without repainting.
    - Under legacy API 10-20 zoom (`tiled_zoomed_block_id` absent) or API 21
      floating zoom (`zoomed_block_id != tiled_zoomed_block_id`), the zoomed pane
      covers the entire window in front of every layer.
@@ -170,7 +184,7 @@ Summary of schema and protocol changes from revision 14 through revision 21:
 | `cargo +1.96.1 clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo +1.96.1 test --manifest-path vendor/rexrs/Cargo.toml --all-features` | **167 passed**, 0 failed, 10 ignored (live tests) |
-| `cargo +1.96.1 test --locked --all-features` | **1,418 passed**, 0 failed, 6 ignored (477 lib, 933 headless UI, 8 integration) |
+| `cargo +1.96.1 test --locked --all-features` | **1,420 passed**, 0 failed, 6 ignored (479 lib, 933 headless UI, 8 integration) |
 | `cargo +1.96.1 build --locked --release --bin rex-rune` | Pass |
 | `cargo +1.96.1 build --locked --no-default-features --bin rex-probe --bin rex-workspace-probe` | Pass |
 

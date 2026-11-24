@@ -242,13 +242,18 @@ fn zoomed(window: &Window, block: &str) -> bool {
 /// The quiet word beside the name of a pane that fills its tab while the others wait.
 pub fn zoomed_chip(window: &Window, block: &str) -> Option<El> {
     zoomed(window, block).then(|| {
+        let help = if layout::tiled_zoom(window) == Some(block) {
+            "The other tiled panes of this tab are hidden behind this one until it is restored."
+        } else {
+            "The other panes of this tab are hidden until this one is restored."
+        };
         el().key(format!("pane-zoomed:{block}"))
             .h(18.)
             .px(7.)
             .center()
             .radius(9.)
             .fill(white(KEYCAP_FILL))
-            .help("The other panes of this tab are hidden until this one is restored.")
+            .help(help)
             .child(text("Zoomed").font(medium(10.5)).color(rgb(keycap_ink())))
     })
 }

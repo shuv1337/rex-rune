@@ -101,24 +101,60 @@ pub fn full_window_zoom(window: &Window) -> Option<&str> {
     }
 }
 
+fn node_contains(node: &ViewLayoutNode, block: &str) -> bool {
+    if node.block_id.as_deref() == Some(block) {
+        return true;
+    }
+    node.split.as_ref().is_some_and(|split| {
+        split
+            .before
+            .as_deref()
+            .is_some_and(|b| node_contains(b, block))
+            || split
+                .after
+                .as_deref()
+                .is_some_and(|a| node_contains(a, block))
+    })
+}
+
+fn layer_contains(layer: &Layer, block: &str) -> bool {
+    layer
+        .blocks
+        .iter()
+        .any(|b| b.block_id.as_deref() == Some(block))
+        || layer
+            .layout
+            .as_ref()
+            .is_some_and(|node| node_contains(node, block))
+}
+
 /// The block zoomed on the tiled layer behind all non-minimized floating layers (API 21).
-/// Returns `None` while a full-window zoom covers everything.
+/// Returns `None` while a full-window zoom covers everything, or if the named block does not
+/// exist in a non-minimized tiled layer.
 pub fn tiled_zoom(window: &Window) -> Option<&str> {
     if full_window_zoom(window).is_some() {
         return None;
     }
-    window.tiled_zoomed_block_id.as_deref()
+    let block = window.tiled_zoomed_block_id.as_deref()?;
+    window
+        .layers
+        .iter()
+        .any(|layer| {
+            layer.kind == "tiled"
+                && layer.state.as_deref() != Some("minimized")
+                && layer_contains(layer, block)
+        })
+        .then_some(block)
 }
 
 /// Whether `block` is zoomed (either full-window or on the tiled layer).
 pub fn is_zoomed(window: &Window, block: &str) -> bool {
-    window.zoomed_block_id.as_deref() == Some(block)
-        || window.tiled_zoomed_block_id.as_deref() == Some(block)
+    full_window_zoom(window) == Some(block) || tiled_zoom(window) == Some(block)
 }
 
 /// Whether any block in `window` is zoomed (full-window or tiled).
 pub fn any_zoomed(window: &Window) -> bool {
-    window.zoomed_block_id.is_some() || window.tiled_zoomed_block_id.is_some()
+    full_window_zoom(window).is_some() || tiled_zoom(window).is_some()
 }
 
 /// Whether `block` in `layer` is visible under `window`'s current zoom and layer state.
@@ -744,5 +780,48 @@ mod tests {
             assert!(!block_visible(&float_zoom, &float_zoom.layers[2], "f2"));
             assert_eq!(neighbour(&float_zoom, "f1", Side::Down), None);
         }
+    }
+
+    #[test]
+    fn stale_tiled_zoomed_block_id_falls_back_to_tiled_layout() {
+        let base: Window = serde_json::from_value(json!({"layers":[
+            {"kind":"tiled","bounds":[0,0,1,1],
+             "layout":{"split":{"direction":"horizontal","ratio":0.5,
+                "before":{"block_id":"t1"},"after":{"block_id":"t2"}}}},
+            {"kind":"floating","bounds":[0.2,0.15,0.6,0.6],
+             "layout":{"block_id":"f1"}}
+        ]}))
+        .unwrap();
+
+        // Works when `blocks` is omitted and the block exists in the tiled layout tree.
+        let mut valid_from_tree = base.clone();
+        valid_from_tree.tiled_zoomed_block_id = Some("t1".into());
+        assert_eq!(tiled_zoom(&valid_from_tree), Some("t1"));
+
+        // Stale block ID (missing from tiled layer) or ID belonging only to a floating layer
+        // must fall back cleanly to the normal tiled layout instead of hiding every tiled pane.
+        for (zoomed, stale) in [(None, "gone"), (Some("gone"), "gone"), (None, "f1")] {
+            let mut window = base.clone();
+            window.zoomed_block_id = zoomed.map(str::to_owned);
+            window.tiled_zoomed_block_id = Some(stale.into());
+            assert_eq!(tiled_zoom(&window), None);
+            assert!(!any_zoomed(&window));
+            assert!(!is_zoomed(&window, stale));
+            let (panes, dividers) = placements(&window, None);
+            assert_eq!(
+                panes.iter().map(|p| p.block.as_str()).collect::<Vec<_>>(),
+                ["t1", "t2", "f1"]
+            );
+            assert_eq!(dividers.len(), 1);
+            assert!(block_visible(&window, &window.layers[0], "t1"));
+            assert!(block_visible(&window, &window.layers[0], "t2"));
+            assert_eq!(neighbour(&window, "t1", Side::Right).as_deref(), Some("t2"));
+        }
+
+        // Minimized tiled layer does not satisfy tiled_zoom either.
+        let mut min_tiled = base.clone();
+        min_tiled.layers[0].state = Some("minimized".into());
+        min_tiled.tiled_zoomed_block_id = Some("t1".into());
+        assert_eq!(tiled_zoom(&min_tiled), None);
     }
 }

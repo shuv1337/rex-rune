@@ -742,20 +742,22 @@ impl ControlState {
         } else {
             event.name.as_str()
         };
-        if matches!(
+        let list_event = matches!(
             event_type,
-            "session_created" | "session_moved" | "session_destroyed" | "session_label_changed"
-        ) {
+            "session_created" | "session_moved" | "session_destroyed"
+        );
+        if list_event || event_type == "session_label_changed" {
             floor = floor.max(self.list_seq);
         }
-        // Views contain state, not transient clipboard events.
+        // Views contain state, not transient clipboard events or list-level session events.
         let session = event.session_id.as_deref().or_else(|| {
             (event.name == "event_dropped")
                 .then(|| event.payload["session_id"].as_str())
                 .flatten()
         });
-        if event_type != "session_destroyed"
-            && !(event.name == "block_event" && clipboard::is_copy(&event.payload))
+        let is_copy = event.name == "block_event" && clipboard::is_copy(&event.payload);
+        if !list_event
+            && !is_copy
             && let Some(id) = session
         {
             floor = floor.max(self.view_seq.get(id).copied().unwrap_or(0));
@@ -1144,27 +1146,34 @@ async fn list(control: &mut Client, shared: &Shared, state: &mut ControlState) -
     state.list_seq = reply.seq;
     let mut removed = Vec::<(String, Vec<String>)>::new();
     shared.update(|m| {
+        let prev_sessions: HashSet<String> =
+            m.sessions.iter().map(|s| s.session_id.clone()).collect();
         m.sessions = reply.value.sessions;
-        let gone: Vec<String> = m
+        let current: HashSet<String> = m.sessions.iter().map(|s| s.session_id.clone()).collect();
+        let mut gone: HashSet<String> = m
             .views
             .keys()
-            .filter(|id| !m.sessions.iter().any(|s| &s.session_id == *id))
+            .filter(|id| !current.contains(*id))
             .cloned()
             .collect();
-        for id in gone {
-            m.background_views.remove(&id);
-            if let Some(view) = m.views.remove(&id) {
-                let blocks: Vec<String> = view_blocks(&view).collect();
-                for block in &blocks {
-                    m.forget_block(block);
-                }
-                removed.push((id, blocks));
+        for id in prev_sessions {
+            if !current.contains(&id) {
+                gone.insert(id);
             }
         }
-        if m.selected
-            .as_ref()
-            .is_some_and(|id| !m.sessions.iter().any(|s| &s.session_id == id))
-        {
+        for id in gone {
+            m.background_views.remove(&id);
+            let blocks: Vec<String> = m
+                .views
+                .remove(&id)
+                .map(|view| view_blocks(&view).collect())
+                .unwrap_or_default();
+            for block in &blocks {
+                m.forget_block(block);
+            }
+            removed.push((id, blocks));
+        }
+        if m.selected.as_ref().is_some_and(|id| !current.contains(id)) {
             m.selected = None;
         }
     });
@@ -1531,73 +1540,111 @@ async fn handle_event(
     match event.name.as_str() {
         "event_dropped" => {
             let event_type = event.payload["event_type"].as_str().unwrap_or("");
-            if let Some(id) = event
+            let session_id = event
                 .session_id
                 .as_deref()
-                .or_else(|| event.payload["session_id"].as_str())
-            {
-                let dropped_block = event.payload["block_id"].as_str().map(str::to_owned);
-                let (should_refresh, mut forget) = {
-                    let m = shared.model.lock().expect("host model");
-                    let has_view = m.views.contains_key(id);
-                    let blocks: Vec<String> = m
-                        .views
-                        .get(id)
-                        .map(|v| view_blocks(v).collect())
-                        .unwrap_or_default();
-                    (has_view || m.selected.as_deref() == Some(id), blocks)
-                };
-                if let Some(block) = dropped_block {
-                    forget.push(block);
-                }
-                if should_refresh {
-                    match refresh(control, shared, state, id).await {
-                        Ok(()) => {
-                            let new_blocks: Vec<String> = shared
-                                .model
-                                .lock()
-                                .expect("host model")
-                                .views
-                                .get(id)
-                                .map(|v| view_blocks(v).collect())
-                                .unwrap_or_default();
-                            forget.extend(new_blocks);
-                        }
-                        Err(error)
-                            if matches!(
-                                error.downcast_ref::<rexrs::Error>(),
-                                Some(rexrs::Error::Api(rexrs::ApiError::SessionNotFound { .. }))
-                            ) =>
-                        {
-                            remove_session(shared, workers, state, id);
-                            return Ok(());
-                        }
-                        Err(error) => return Err(error),
-                    }
-                } else {
-                    state.viewed.remove(id);
-                    if state.view_reading.as_deref() == Some(id) {
-                        state.view_stale = true;
-                    }
-                    if state.fetch_reading.contains(id) {
-                        state.fetch_stale.insert(id.to_owned());
+                .or_else(|| event.payload["session_id"].as_str());
+            match event_type {
+                "session_destroyed" => {
+                    if let Some(id) = session_id {
+                        remove_session(shared, workers, state, id);
+                    } else {
+                        list(control, shared, state).await?;
                     }
                 }
-                shared.update(|m| {
+                "session_created" | "session_moved" | "session_label_changed" => {
+                    list(control, shared, state).await?;
+                    if event_type == "session_label_changed"
+                        && let Some(id) = session_id
+                    {
+                        shared.update(|m| {
+                            if let Some(label) = m
+                                .sessions
+                                .iter()
+                                .find(|s| s.session_id == id)
+                                .map(|s| s.label.clone())
+                                && let Some(view) = m.views.get_mut(id)
+                            {
+                                view.label = Some(label);
+                            }
+                        });
+                    }
+                }
+                _ if let Some(id) = session_id => {
+                    let dropped_block = event.payload["block_id"].as_str().map(str::to_owned);
+                    let (should_refresh, mut forget) = {
+                        let m = shared.model.lock().expect("host model");
+                        let has_view = m.views.contains_key(id);
+                        let blocks: Vec<String> = m
+                            .views
+                            .get(id)
+                            .map(|v| view_blocks(v).collect())
+                            .unwrap_or_default();
+                        (has_view || m.selected.as_deref() == Some(id), blocks)
+                    };
+                    if let Some(block) = dropped_block {
+                        forget.push(block);
+                    }
+                    if should_refresh {
+                        match refresh(control, shared, state, id).await {
+                            Ok(()) => {
+                                let new_blocks: Vec<String> = shared
+                                    .model
+                                    .lock()
+                                    .expect("host model")
+                                    .views
+                                    .get(id)
+                                    .map(|v| view_blocks(v).collect())
+                                    .unwrap_or_default();
+                                forget.extend(new_blocks);
+                            }
+                            Err(error)
+                                if matches!(
+                                    error.downcast_ref::<rexrs::Error>(),
+                                    Some(rexrs::Error::Api(
+                                        rexrs::ApiError::SessionNotFound { .. }
+                                    ))
+                                ) =>
+                            {
+                                remove_session(shared, workers, state, id);
+                                return Ok(());
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        state.viewed.remove(id);
+                        if state.view_reading.as_deref() == Some(id) {
+                            state.view_stale = true;
+                        }
+                        if state.fetch_reading.contains(id) {
+                            state.fetch_stale.insert(id.to_owned());
+                        }
+                    }
+                    shared.update(|m| {
+                        for block in &forget {
+                            m.status_read.remove(block);
+                            // Downgrade live records so a dropped StatusRemoved is not kept
+                            // stuck by status_sweep::merge's live-record preservation rule.
+                            if let Some(records) = m.activity.get_mut(block) {
+                                for record in records.values_mut() {
+                                    record.live = false;
+                                }
+                            }
+                        }
+                    });
                     for block in &forget {
-                        m.status_read.remove(block);
+                        state.queried.remove(block);
+                        state.status_queried.remove(block);
+                        state.status_failed.remove(block);
+                        state.status_reading.remove(block);
                     }
-                });
-                for block in &forget {
-                    state.queried.remove(block);
-                    state.status_queried.remove(block);
-                    state.status_failed.remove(block);
-                    state.status_reading.remove(block);
                 }
-            } else if event_type.starts_with("session_") {
-                list(control, shared, state).await?;
-            } else {
-                log::debug!("ignoring unhandled server-wide event_dropped: {event_type:?}");
+                _ if event_type.starts_with("session_") => {
+                    list(control, shared, state).await?;
+                }
+                _ => {
+                    log::debug!("ignoring unhandled server-wide event_dropped: {event_type:?}");
+                }
             }
         }
         "session_created" | "session_moved" => {
