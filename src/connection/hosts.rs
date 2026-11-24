@@ -393,8 +393,8 @@ pub(super) async fn execute_put(
                 );
                 return Ok(());
             };
-            let needs_refresh =
-                shared.model.lock().expect("host model").shared.hash() != Some(hash.as_str());
+            let needs_refresh = reader.in_flight()
+                || shared.model.lock().expect("host model").shared.hash() != Some(hash.as_str());
             record_write(
                 shared,
                 WriteResult {
@@ -516,8 +516,8 @@ pub(super) async fn execute_remove(
                 );
                 return Ok(());
             };
-            let needs_refresh =
-                shared.model.lock().expect("host model").shared.hash() != Some(hash.as_str());
+            let needs_refresh = reader.in_flight()
+                || shared.model.lock().expect("host model").shared.hash() != Some(hash.as_str());
             record_write(
                 shared,
                 WriteResult {

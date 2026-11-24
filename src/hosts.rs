@@ -91,13 +91,14 @@ pub fn build_put_update(
         let mut raw_list = Vec::with_capacity(record.endpoints.len() + 1);
         let mut replaced = false;
         for existing in &record.endpoints {
-            let matches_prev = !replaced
-                && expand_endpoint(existing)
-                    .iter()
-                    .any(|exp| canonical_endpoint(exp) == prev_canon);
+            let matches_prev = expand_endpoint(existing)
+                .iter()
+                .any(|exp| canonical_endpoint(exp) == prev_canon);
             if matches_prev {
-                raw_list.push(next_trimmed.to_owned());
-                replaced = true;
+                if !replaced {
+                    raw_list.push(next_trimmed.to_owned());
+                    replaced = true;
+                }
             } else {
                 raw_list.push(existing.clone());
             }
@@ -1167,6 +1168,30 @@ mod tests {
             "SSH://alice@STUDIO.invalid/",
         );
         assert_eq!(deduped["endpoints"], json!(["SSH://alice@STUDIO.invalid/"]));
+
+        // Duplicate canonical representations of the old endpoint (bare + explicit) are all
+        // replaced so neither form of the old endpoint is left behind.
+        let both_forms = SharedHost::from_value(&json!({
+            "id": "host:dup-old",
+            "label": "Studio",
+            "endpoints": [
+                "studio.invalid",
+                "https://studio.invalid",
+                "HTTPS://STUDIO.INVALID:443/",
+                "ssh://alice@studio.invalid"
+            ]
+        }))
+        .unwrap();
+        let replaced_all = build_put_update(
+            &both_forms,
+            "Studio",
+            "https://studio.invalid",
+            "https://studio-v2.invalid",
+        );
+        assert_eq!(
+            replaced_all["endpoints"],
+            json!(["https://studio-v2.invalid", "ssh://alice@studio.invalid"])
+        );
     }
 
     #[test]

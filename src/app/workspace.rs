@@ -2441,6 +2441,12 @@ impl Workspace {
                         Form::EditHost(i) => Some(i),
                         _ => None,
                     };
+                    let editing_shared_id = editing.and_then(|i| {
+                        self.settings
+                            .hosts
+                            .get(i)
+                            .and_then(|h| h.shared.as_ref().map(|l| l.id.as_str()))
+                    });
                     validate_host(&values[0], &values[1])
                         .err()
                         .map(|e| e.to_string())
@@ -2454,6 +2460,13 @@ impl Workspace {
                                         && rex_rune::hosts::same_endpoint(&h.endpoint, &values[1])
                                 })
                                 .then(|| "This endpoint is already in the workspace".to_owned())
+                        })
+                        .or_else(|| {
+                            self.has_pending_shared_write_endpoint(&values[1], editing_shared_id)
+                                .then(|| {
+                                    "A shared host change for this endpoint is already in progress."
+                                        .to_owned()
+                                })
                         })
                         .or_else(|| {
                             values

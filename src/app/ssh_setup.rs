@@ -145,12 +145,14 @@ impl Workspace {
                 self.inform(format!("{} cannot be updated: {reason}.", saved.label));
                 return;
             }
+            let editing_shared_id = saved.shared.as_ref().map(|l| l.id.as_str());
             if self
                 .settings
                 .hosts
                 .iter()
                 .enumerate()
                 .any(|(i, h)| i != host && rex_rune::hosts::same_endpoint(&h.endpoint, &proposed))
+                || self.has_pending_shared_write_endpoint(&proposed, editing_shared_id)
             {
                 self.inform(format!(
                     "Cannot save {}: that endpoint is already in the workspace.",

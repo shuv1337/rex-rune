@@ -1051,11 +1051,11 @@ fn editing_stored_shared_host_preserves_raw_waits_for_server_applies_safety_and_
     assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("/bin/zsh"));
     assert!(ws.settings.hosts[1].remote_control);
     assert_eq!(ws.hosts[1].id, old_host_id);
-    assert!(
-        ws.notices
-            .iter()
-            .any(|n| n.text.contains("Studio Pro") && n.text.contains("already used"))
-    );
+    assert!(ws.notices.iter().any(|n| {
+        n.text.contains("Studio Pro")
+            && n.text.contains("already used")
+            && n.text.contains("including default shell, were saved")
+    }));
 
     // 4. Retry edit and deliver server confirmation + refreshed list: applies safety policy once.
     ws.perform(Intent::EditHost(1), &mut tx);
@@ -1672,5 +1672,494 @@ fn settings_card_distinguishes_skipped_duplicate_chip_from_unconnectable_and_edi
             && dialog_r[0] + dialog_r[2] <= 640.5
             && dialog_r[1] + dialog_r[3] <= 480.5,
         "EditHost dialog overflows 640x480: {dialog_r:?}"
+    );
+}
+
+#[test]
+fn async_shared_removal_clears_non_settings_host_indexed_panels_and_keeps_settings() {
+    use crate::app::panel::SessionTarget;
+
+    let mut ws = workspace_hosts(3);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep);
+    let rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+    let _rx2 = stub_host(&mut ws, 2);
+    ws.hosts[0]
+        .connection
+        .model
+        .lock()
+        .unwrap()
+        .connection_epoch = 2;
+
+    ws.settings.hosts[1].label = "Alpha".into();
+    ws.settings.hosts[1].endpoint = "https://alpha.invalid".into();
+    ws.settings.hosts[2].label = "Beta".into();
+    ws.settings.hosts[2].endpoint = "https://beta.invalid".into();
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![
+                host_record("host:alpha", "Alpha", &["alpha.invalid"], None, None),
+                host_record("host:beta", "Beta", &["beta.invalid"], None, None),
+            ],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    rx0.drain();
+
+    // Start removing host 1 (Alpha), then open a non-Settings host-indexed panel on host 2 (Beta).
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::RemoveHost(1), &mut tx);
+    ws.submit(&mut tx);
+    let req_id = match rx0.try_recv().expect("RemoveSharedHost sent") {
+        HostCommand::RemoveSharedHost { id, .. } => id,
+        _ => panic!("expected RemoveSharedHost"),
+    };
+    ws.open_panel(PanelKind::Session, "Beta session", &[]);
+    ws.panel.as_mut().unwrap().session = Some(SessionTarget {
+        host: 2,
+        session: "session:beta".into(),
+        label: "work".into(),
+    });
+    assert!(ws.panel.is_some());
+
+    // Async confirmation removes host 1 (shifting Beta from 2 -> 1): non-Settings panel MUST clear
+    // so it cannot panic or target a shifted host index!
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: req_id,
+            epoch: 2,
+            kind: WriteKind::Remove,
+            outcome: WriteOutcome::Removed {
+                host_id: "host:alpha".into(),
+                removed: true,
+                hash: "h2".into(),
+            },
+        },
+    );
+    assert_eq!(ws.settings.hosts.len(), 2);
+    assert!(
+        ws.panel.is_none(),
+        "non-Settings host-indexed panel must be cleared on async host removal"
+    );
+
+    // By contrast, Settings stays open when Beta (now index 1) is removed asynchronously.
+    rx0.drain();
+    ws.perform(Intent::Settings, &mut tx);
+    ws.open_section(SettingsSection::Hosts);
+    ws.perform(Intent::RemoveHost(1), &mut tx);
+    ws.submit(&mut tx);
+    let req_id2 = match rx0.try_recv().expect("second RemoveSharedHost") {
+        HostCommand::RemoveSharedHost { id, .. } => id,
+        _ => panic!("expected RemoveSharedHost"),
+    };
+    assert!(matches!(
+        ws.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Settings)
+    ));
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: req_id2,
+            epoch: 2,
+            kind: WriteKind::Remove,
+            outcome: WriteOutcome::Removed {
+                host_id: "host:beta".into(),
+                removed: true,
+                hash: "h3".into(),
+            },
+        },
+    );
+    assert_eq!(ws.settings.hosts.len(), 1);
+    assert!(matches!(
+        ws.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Settings)
+    ));
+}
+
+#[test]
+fn shared_write_collision_guards_upfront_pending_and_reply_time_preserve_unique_endpoints() {
+    let mut ws = workspace_hosts(3);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+    let _rx2 = stub_host(&mut ws, 2);
+    ws.hosts[0]
+        .connection
+        .model
+        .lock()
+        .unwrap()
+        .connection_epoch = 5;
+
+    ws.settings.hosts[1].label = "Alpha".into();
+    ws.settings.hosts[1].endpoint = "https://alpha.invalid".into();
+    ws.settings.hosts[2].label = "Beta".into();
+    ws.settings.hosts[2].endpoint = "ssh://me@beta.invalid".into();
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![
+                host_record("host:alpha", "Alpha", &["alpha.invalid"], None, None),
+                host_record("host:beta", "Beta", &["ssh://me@beta.invalid"], None, None),
+            ],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    rx0.drain();
+    let mut tx = rune::Tx::default();
+
+    // (a) Upfront pending-write duplicate rejection: start shared Add for https://raced.invalid.
+    ws.perform(Intent::AddHostManually, &mut tx);
+    {
+        let p = ws.panel.as_mut().unwrap();
+        p.inputs[0].text = "Raced".into();
+        p.inputs[1].text = "https://raced.invalid".into();
+    }
+    ws.submit(&mut tx);
+    let add_req_id = match rx0.try_recv().expect("Add PutSharedHost") {
+        HostCommand::PutSharedHost { id, .. } => id,
+        _ => panic!("expected PutSharedHost"),
+    };
+
+    // Concurrent second Add targeting the same canonical endpoint is refused upfront!
+    ws.perform(Intent::AddHostManually, &mut tx);
+    {
+        let p = ws.panel.as_mut().unwrap();
+        p.inputs[0].text = "Raced2".into();
+        p.inputs[1].text = "HTTPS://RACED.INVALID:443/".into();
+    }
+    ws.submit(&mut tx);
+    assert!(rx0.is_empty(), "duplicate pending Add must not hit wire");
+    assert!(
+        ws.panel
+            .as_ref()
+            .and_then(|p| p.error.as_deref())
+            .is_some_and(|e| e.contains("already in progress"))
+    );
+    ws.close_panel(&mut tx);
+
+    // Concurrent Edit targeting the pending Add's canonical endpoint is also refused upfront!
+    ws.perform(Intent::EditHost(1), &mut tx);
+    ws.panel.as_mut().unwrap().inputs[1].text = "https://raced.invalid/".into();
+    ws.submit(&mut tx);
+    assert!(rx0.is_empty(), "duplicate pending Edit must not hit wire");
+    assert!(
+        ws.panel
+            .as_ref()
+            .and_then(|p| p.error.as_deref())
+            .is_some_and(|e| e.contains("already in progress"))
+    );
+    ws.close_panel(&mut tx);
+
+    // (b) Reply-time Add collision with an ALREADY-LINKED row must NOT hijack that row!
+    // Suppose while add_req_id was in flight, another shared record linked host[1] onto https://raced.invalid.
+    ws.settings.hosts[1].endpoint = "https://raced.invalid".into();
+    ws.notices.clear();
+    let created = SharedHost::from_value(&json!({
+        "id": "host:raced-new",
+        "label": "Server Canonical Label",
+        "endpoints": ["https://raced.invalid"]
+    }))
+    .unwrap();
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: add_req_id,
+            epoch: 5,
+            kind: WriteKind::Put,
+            outcome: WriteOutcome::Put {
+                host: created,
+                hash: "h2".into(),
+            },
+        },
+    );
+    assert_eq!(ws.settings.hosts.len(), 3, "must not create duplicate row");
+    assert_eq!(
+        ws.settings.hosts[1].shared.as_ref().map(|l| l.id.as_str()),
+        Some("host:alpha"),
+        "already-linked row must never be hijacked by another shared record"
+    );
+    assert_eq!(ws.settings.hosts[1].label, "Alpha");
+    assert!(
+        ws.notices
+            .iter()
+            .any(|n| n.text.contains("Added Server Canonical Label")),
+        "toast should use server-returned record.label"
+    );
+
+    // Restore host[1] endpoint for part (c).
+    ws.settings.hosts[1].endpoint = "https://alpha.invalid".into();
+
+    // (c) Reply-time Edit collision: start Edit moving Alpha to https://target.invalid, then
+    // add another row owning https://target.invalid before the server replies.
+    ws.perform(Intent::EditHost(1), &mut tx);
+    {
+        let p = ws.panel.as_mut().unwrap();
+        p.inputs[0].text = "Alpha Renamed".into();
+        p.inputs[1].text = "https://target.invalid".into();
+        p.inputs[2].text = "zsh".into();
+    }
+    ws.submit(&mut tx);
+    let edit_req_id = match rx0.try_recv().expect("Edit PutSharedHost") {
+        HostCommand::PutSharedHost { id, .. } => id,
+        _ => panic!("expected PutSharedHost"),
+    };
+
+    // Another row claims https://target.invalid while edit_req_id is in flight.
+    ws.add_host(
+        Host {
+            label: "Claimed".into(),
+            endpoint: "https://target.invalid".into(),
+            remote_control: false,
+            collapsed: false,
+            shell: None,
+            shared: None,
+        },
+        &mut tx,
+    );
+    let alpha_id_before = ws.hosts[1].id;
+    let updated = SharedHost::from_value(&json!({
+        "id": "host:alpha",
+        "label": "Alpha Renamed",
+        "endpoints": ["https://target.invalid"]
+    }))
+    .unwrap();
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: edit_req_id,
+            epoch: 5,
+            kind: WriteKind::Put,
+            outcome: WriteOutcome::Put {
+                host: updated.clone(),
+                hash: "h3".into(),
+            },
+        },
+    );
+    assert_eq!(
+        ws.settings.hosts[1].endpoint, "https://alpha.invalid",
+        "colliding Edit reply must not mutate onto another row's canonical endpoint"
+    );
+    assert_eq!(
+        ws.hosts[1].id, alpha_id_before,
+        "must not respawn duplicate worker"
+    );
+    assert_eq!(ws.settings.hosts[1].label, "Alpha Renamed");
+    assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("zsh"));
+
+    // Subsequent hosts.list reconcile surfaces the colliding record cleanly as Skipped (duplicate).
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h3".into(),
+            hosts: vec![
+                updated,
+                host_record("host:beta", "Beta", &["ssh://me@beta.invalid"], None, None),
+            ],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    assert!(
+        ws.shared_hosts
+            .unconnectable
+            .iter()
+            .any(|u| u.id == "host:alpha" && u.duplicate),
+        "reconcile must surface colliding edit as Skipped duplicate: {:?}",
+        ws.shared_hosts.unconnectable
+    );
+}
+
+#[test]
+fn self_removal_when_hosts_list_arrives_before_write_outcome_avoids_rule_5_and_leaks() {
+    let mut ws = workspace_hosts(2);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep);
+    let rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+    ws.hosts[0]
+        .connection
+        .model
+        .lock()
+        .unwrap()
+        .connection_epoch = 6;
+
+    ws.settings.hosts[1].label = "Studio".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![host_record(
+                "host:studio",
+                "Studio",
+                &["studio.invalid"],
+                None,
+                None,
+            )],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    rx0.drain();
+    ws.notices.clear();
+
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::RemoveHost(1), &mut tx);
+    ws.submit(&mut tx);
+    let req_id = match rx0.try_recv().expect("RemoveSharedHost sent") {
+        HostCommand::RemoveSharedHost { id, .. } => id,
+        _ => panic!("expected RemoveSharedHost"),
+    };
+
+    // 1. hosts.list WITHOUT host:studio arrives BEFORE WriteOutcome::Removed!
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h2".into(),
+            hosts: Vec::new(),
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    assert_eq!(ws.settings.hosts.len(), 1, "row must be removed cleanly");
+    assert!(
+        !ws.notices
+            .iter()
+            .any(|n| n.text.contains("kept as a local host")),
+        "must not fire Rule 5 unlink-and-keep notice: {:?}",
+        ws.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+    let notice_count_after_list = ws.notices.len();
+    assert!(ws.notices.iter().any(|n| {
+        n.text
+            .contains("Removed Studio from the shared Rex host list")
+    }));
+
+    // 2. WriteOutcome::Removed arrives afterward: no duplicate notice and no stale self_removed!
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: req_id,
+            epoch: 6,
+            kind: WriteKind::Remove,
+            outcome: WriteOutcome::Removed {
+                host_id: "host:studio".into(),
+                removed: true,
+                hash: "h2".into(),
+            },
+        },
+    );
+    assert_eq!(
+        ws.notices.len(),
+        notice_count_after_list,
+        "must not emit duplicate removal notice"
+    );
+    assert!(
+        ws.shared_hosts.self_removed.is_empty(),
+        "self_removed must not leak stale IDs"
+    );
+
+    // 3. removed: false when cached Loaded list no longer has the ID also leaks zero self_removed.
+    ws.shared_hosts.pending_writes.insert(
+        999,
+        crate::app::shared_hosts::PendingSharedWrite::Remove {
+            shared_id: "host:already-gone".into(),
+            source_endpoint: ws.settings.hosts[0].endpoint.clone(),
+            label: "Ghost".into(),
+            applied: false,
+        },
+    );
+    ws.notices.clear();
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: 999,
+            epoch: 6,
+            kind: WriteKind::Remove,
+            outcome: WriteOutcome::Removed {
+                host_id: "host:already-gone".into(),
+                removed: false,
+                hash: "h2".into(),
+            },
+        },
+    );
+    assert!(ws.shared_hosts.self_removed.is_empty());
+    assert!(
+        ws.notices.is_empty(),
+        "must not emit misleading Removed notice when host was already absent"
+    );
+}
+
+#[test]
+fn long_shared_host_form_errors_wrap_inside_640x480_dialog() {
+    let mut ws = workspace_hosts(1);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep);
+    let _rx0 = stub_host(&mut ws, 0);
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: Vec::new(),
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::AddHostManually, &mut tx);
+    assert!(ws.panel.as_ref().unwrap().save_shared);
+
+    // Source goes offline while AddHost dialog is open, triggering the long offline error message.
+    ws.hosts[0].connection.model.lock().unwrap().connected = false;
+    ws.hosts[0].model.connected = false;
+    {
+        let p = ws.panel.as_mut().unwrap();
+        p.inputs[0].text = "OfflineLab".into();
+        p.inputs[1].text = "https://offline-lab.invalid".into();
+    }
+    ws.submit(&mut tx);
+    assert!(
+        ws.panel
+            .as_ref()
+            .and_then(|p| p.error.as_deref())
+            .is_some_and(|e| e.len() > 100),
+        "expected long offline shared-add error"
+    );
+
+    let mut rt = runtime_at(ws, (640., 480.));
+    settle(&mut rt);
+    let dlg_r = rect(&rt, "dialog");
+    let err_r = rect(&rt, "form-error");
+    assert!(
+        dlg_r[0] >= 0.
+            && dlg_r[1] >= 0.
+            && dlg_r[0] + dlg_r[2] <= 640.5
+            && dlg_r[1] + dlg_r[3] <= 480.5,
+        "AddHost dialog with long error overflows 640x480: {dlg_r:?}"
+    );
+    assert!(
+        err_r[0] >= dlg_r[0] - 0.5 && err_r[0] + err_r[2] <= dlg_r[0] + dlg_r[2] + 0.5,
+        "form-error overflows dialog horizontally at 640x480: {err_r:?} not in {dlg_r:?}"
     );
 }

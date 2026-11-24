@@ -92,6 +92,7 @@ fn form(s: &Workspace, form: &Form) -> El {
             text(error.clone())
                 .font(ui(13.))
                 .color(rgb(danger()))
+                .wrap()
                 .key("form-error"),
         );
     }

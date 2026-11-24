@@ -1,7 +1,7 @@
 //! Synchronization of Rex's shared host list (`hosts.list`, `hosts_changed`, `hosts.put`,
 //! `hosts.remove`) into the workspace and the Settings → Remote Hosts **Shared host list** card.
 use super::{
-    panel::{Form, PanelKind},
+    panel::PanelKind,
     settings_kit::{
         ChipTone, card, footnote, row_frame, section as kit_section, setting, state_chip,
     },
@@ -34,6 +34,7 @@ pub enum PendingSharedWrite {
         source_endpoint: String,
         shell: Option<String>,
         apply_shell: bool,
+        shell_changed: bool,
         previous_endpoint: String,
         next_endpoint: String,
         ssh_review_endpoint: Option<String>,
@@ -42,6 +43,10 @@ pub enum PendingSharedWrite {
         shared_id: String,
         source_endpoint: String,
         label: String,
+        /// Set when an earlier `hosts.list` refresh already observed the host absent and removed
+        /// the local row so the subsequent `WriteOutcome::Removed` does not duplicate notices or
+        /// leave a stale `self_removed` entry.
+        applied: bool,
     },
 }
 
@@ -186,6 +191,27 @@ impl Workspace {
             .any(|p| p.targets_shared_id(shared_id))
     }
 
+    /// Whether an in-flight shared Add or Edit write already targets `endpoint` canonically
+    /// (excluding writes for `excluding_shared_id`, e.g. when editing that same host).
+    pub fn has_pending_shared_write_endpoint(
+        &self,
+        endpoint: &str,
+        excluding_shared_id: Option<&str>,
+    ) -> bool {
+        self.shared_hosts.pending_writes.values().any(|p| match p {
+            PendingSharedWrite::Add { endpoint: ep, .. } => hosts::same_endpoint(ep, endpoint),
+            PendingSharedWrite::Edit {
+                shared_id,
+                next_endpoint,
+                ..
+            } => {
+                excluding_shared_id != Some(shared_id.as_str())
+                    && hosts::same_endpoint(next_endpoint, endpoint)
+            }
+            PendingSharedWrite::Remove { .. } => false,
+        })
+    }
+
     /// Why saved host `index` cannot currently be edited (label/endpoint) or removed via the
     /// shared Rex host list. Returns `None` for local hosts and for stored (`source.is_none()`)
     /// shared hosts whose local Rex server is connected and `Loaded`.
@@ -300,6 +326,7 @@ impl Workspace {
         let source_endpoint = self.settings.hosts[source_idx].endpoint.clone();
         let epoch = self.hosts[source_idx].model.connection_epoch;
         let previous_endpoint = self.settings.hosts[index].endpoint.clone();
+        let shell_changed = apply_shell && self.settings.hosts[index].shell != shell;
         let payload = hosts::build_put_update(&record, &label, &previous_endpoint, &endpoint);
         let id = self.alloc_shared_write_id();
         self.shared_hosts.pending_writes.insert(
@@ -309,6 +336,7 @@ impl Workspace {
                 source_endpoint,
                 shell,
                 apply_shell,
+                shell_changed,
                 previous_endpoint,
                 next_endpoint: endpoint,
                 ssh_review_endpoint,
@@ -360,6 +388,7 @@ impl Workspace {
                 shared_id: link.id.clone(),
                 source_endpoint,
                 label,
+                applied: false,
             },
         );
         self.send(
@@ -384,9 +413,9 @@ impl Workspace {
             match (pending, result.outcome) {
                 (
                     PendingSharedWrite::Add {
-                        label,
                         endpoint,
                         source_endpoint,
+                        ..
                     },
                     WriteOutcome::Put { host: record, .. },
                 ) => {
@@ -405,6 +434,7 @@ impl Workspace {
                         id: record.id.clone(),
                         from: source_endpoint.clone(),
                     };
+                    let added_label = record.label.clone();
                     if let Some(existing) = self.settings.hosts.iter().position(|h| {
                         h.shared.as_ref().is_some_and(|l| {
                             l.id == link.id && hosts::same_endpoint(&l.from, &source_endpoint)
@@ -421,17 +451,22 @@ impl Workspace {
                         .iter()
                         .position(|h| hosts::same_endpoint(&h.endpoint, &chosen_endpoint))
                     {
-                        if !hosts::same_endpoint(
-                            &self.settings.hosts[existing].endpoint,
-                            &source_endpoint,
-                        ) {
+                        // Match Rule 3: only link an unlinked non-source row in place. If another
+                        // shared record already owns this canonical endpoint, leave it untouched
+                        // and let reconcile surface the duplicate as Skipped.
+                        if self.settings.hosts[existing].shared.is_none()
+                            && !hosts::same_endpoint(
+                                &self.settings.hosts[existing].endpoint,
+                                &source_endpoint,
+                            )
+                        {
                             self.settings.hosts[existing].label = record.label;
                             self.settings.hosts[existing].shared = Some(link);
+                            self.active = existing;
+                            self.update_visibility();
+                            self.save();
+                            self.update_title(tx);
                         }
-                        self.active = existing;
-                        self.update_visibility();
-                        self.save();
-                        self.update_title(tx);
                     } else {
                         self.add_host(
                             Host {
@@ -445,7 +480,7 @@ impl Workspace {
                             tx,
                         );
                     }
-                    self.inform(format!("Added {label} to the shared Rex host list."));
+                    self.inform(format!("Added {added_label} to the shared Rex host list."));
                 }
                 (PendingSharedWrite::Add { label, .. }, WriteOutcome::Failed { message, .. }) => {
                     self.notify(format!("Could not add shared host {label}: {message}"));
@@ -459,9 +494,11 @@ impl Workspace {
                         previous_endpoint,
                         next_endpoint,
                         ssh_review_endpoint,
+                        ..
                     },
                     WriteOutcome::Put { host: record, .. },
                 ) => {
+                    let mut endpoint_applied = false;
                     if let Some(row_idx) = self.settings.hosts.iter().position(|h| {
                         h.shared.as_ref().is_some_and(|l| {
                             l.id == shared_id && hosts::same_endpoint(&l.from, &source_endpoint)
@@ -485,7 +522,16 @@ impl Workspace {
                             &self.settings.hosts[row_idx].endpoint,
                             &target_endpoint,
                         );
-                        if endpoint_changed {
+                        // Preserve one-row-per-canonical-endpoint: never mutate onto an endpoint
+                        // already owned by another saved row or the source server; let reconcile
+                        // surface the collision as Skipped instead.
+                        let collides = endpoint_changed
+                            && (hosts::same_endpoint(&target_endpoint, &source_endpoint)
+                                || self.settings.hosts.iter().enumerate().any(|(i, h)| {
+                                    i != row_idx
+                                        && hosts::same_endpoint(&h.endpoint, &target_endpoint)
+                                }));
+                        if endpoint_changed && !collides {
                             self.stop_install_for_host(row_idx);
                             let host = &mut self.settings.hosts[row_idx];
                             host.label = record.label;
@@ -504,50 +550,94 @@ impl Workspace {
                                 self.layer_drag = None;
                             }
                             self.update_visibility();
+                            endpoint_applied = true;
                         } else {
                             self.settings.hosts[row_idx].label = record.label;
                             if apply_shell {
                                 self.settings.hosts[row_idx].shell = shell;
                             }
+                            endpoint_applied = !endpoint_changed;
                         }
                         self.save();
                         self.update_title(tx);
                     }
                     if let Some(ep) = ssh_review_endpoint {
-                        self.ssh_setup.attachment.remove(&ep);
-                        self.inform(
-                            "Saved the reported socket endpoint to the shared Rex host list. Connecting through SSH without starting a server.",
-                        );
+                        if endpoint_applied {
+                            self.ssh_setup.attachment.remove(&ep);
+                            self.inform(
+                                "Saved the reported socket endpoint to the shared Rex host list. Connecting through SSH without starting a server.",
+                            );
+                        } else {
+                            self.notify(
+                                "Updated the shared Rex host list, but kept this host's current endpoint because the new endpoint is already in the workspace.",
+                            );
+                        }
                     }
                 }
-                (PendingSharedWrite::Edit { .. }, WriteOutcome::Failed { message, .. }) => {
-                    self.notify(format!("Could not update shared host: {message}"));
+                (
+                    PendingSharedWrite::Edit { shell_changed, .. },
+                    WriteOutcome::Failed { message, .. },
+                ) => {
+                    if shell_changed {
+                        self.notify(format!(
+                            "Could not update shared host (no changes, including default shell, were saved): {message}"
+                        ));
+                    } else {
+                        self.notify(format!(
+                            "Could not update shared host (no changes were saved): {message}"
+                        ));
+                    }
                 }
                 (
                     PendingSharedWrite::Remove {
                         shared_id,
                         source_endpoint,
                         label,
+                        applied,
                     },
-                    WriteOutcome::Removed { .. },
+                    WriteOutcome::Removed { removed, .. },
                 ) => {
-                    self.shared_hosts.self_removed.insert(shared_id.clone());
-                    if let Some(row_idx) = self.settings.hosts.iter().position(|h| {
-                        h.shared.as_ref().is_some_and(|l| {
-                            l.id == shared_id && hosts::same_endpoint(&l.from, &source_endpoint)
-                        })
-                    }) {
-                        self.remove_confirmed_shared_host_row(row_idx, tx);
+                    if applied {
+                        continue;
                     }
-                    self.inform(format!(
-                        "Removed {label} from the shared Rex host list. Its sessions keep running there."
-                    ));
+                    let still_in_loaded_list = self
+                        .shared_source_index()
+                        .and_then(|src| self.hosts.get(src))
+                        .and_then(|h| h.model.shared.list())
+                        .is_some_and(|list| list.hosts.iter().any(|r| r.id == shared_id));
+                    if still_in_loaded_list {
+                        self.shared_hosts.self_removed.insert(shared_id.clone());
+                    }
+                    let removed_row = self
+                        .settings
+                        .hosts
+                        .iter()
+                        .position(|h| {
+                            h.shared.as_ref().is_some_and(|l| {
+                                l.id == shared_id && hosts::same_endpoint(&l.from, &source_endpoint)
+                            })
+                        })
+                        .inspect(|&row_idx| {
+                            self.remove_confirmed_shared_host_row(row_idx, tx);
+                        })
+                        .is_some();
+                    if removed {
+                        self.inform(format!(
+                            "Removed {label} from the shared Rex host list. Its sessions keep running there."
+                        ));
+                    } else if removed_row {
+                        self.inform(format!(
+                            "Removed {label} from this workspace; it was already absent from the shared Rex host list."
+                        ));
+                    }
                 }
                 (
-                    PendingSharedWrite::Remove { label, .. },
+                    PendingSharedWrite::Remove { label, applied, .. },
                     WriteOutcome::Failed { message, .. },
                 ) => {
-                    self.notify(format!("Could not remove shared host {label}: {message}"));
+                    if !applied {
+                        self.notify(format!("Could not remove shared host {label}: {message}"));
+                    }
                 }
                 (_, WriteOutcome::Put { .. } | WriteOutcome::Removed { .. }) => {}
             }
@@ -565,15 +655,13 @@ impl Workspace {
         let host = self.settings.hosts.remove(index);
         self.settings.sessions.remove(&host.endpoint);
         self.settings.recent_paths.remove(&host.endpoint);
-        // Clear only panels that store a host index that just shifted; keep Settings open.
-        if self.panel.as_ref().is_some_and(|p| {
-            matches!(
-                p.kind,
-                PanelKind::Host(_)
-                    | PanelKind::RemoveHost(_)
-                    | PanelKind::Form(Form::EditHost(_) | Form::HostShell(_))
-            )
-        }) {
+        // Removing a host shifts every higher `host: usize` index; clear every non-Settings panel
+        // (matching `remove_host`) so no dialog, menu, download, or form targets a shifted index.
+        if self
+            .panel
+            .as_ref()
+            .is_some_and(|p| !matches!(p.kind, PanelKind::Settings))
+        {
             self.panel = None;
         }
         self.drag = None;
@@ -716,8 +804,32 @@ impl Workspace {
 
                 let mut self_removed_indices = Vec::new();
                 for unlink in plan.unlinks {
+                    let pending_remove_label = self
+                        .shared_hosts
+                        .pending_writes
+                        .values_mut()
+                        .find_map(|pending| match pending {
+                            PendingSharedWrite::Remove {
+                                shared_id,
+                                source_endpoint,
+                                label,
+                                applied,
+                            } if !*applied
+                                && *shared_id == unlink.id
+                                && hosts::same_endpoint(source_endpoint, &source) =>
+                            {
+                                *applied = true;
+                                Some(label.clone())
+                            }
+                            _ => None,
+                        });
                     if self.shared_hosts.self_removed.remove(&unlink.id) {
                         self_removed_indices.push(unlink.index);
+                    } else if let Some(label) = pending_remove_label {
+                        self_removed_indices.push(unlink.index);
+                        self.inform(format!(
+                            "Removed {label} from the shared Rex host list. Its sessions keep running there."
+                        ));
                     } else {
                         self.settings.hosts[unlink.index].shared = None;
                         self.inform(format!(
