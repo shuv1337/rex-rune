@@ -654,6 +654,9 @@ struct ControlState {
     /// meanwhile: that change was ignored for want of a layout, so it is read once more.
     view_reading: Option<String>,
     view_stale: bool,
+    /// Sessions with an in-flight on-demand `FetchView` whose layout changed meanwhile.
+    fetch_reading: HashSet<String>,
+    fetch_stale: HashSet<String>,
     /// The theme last declared to each block on this connection.
     themed: HashMap<String, SetTheme>,
     // This pool is scoped to the terminal data ref and subprotocol; other sources
@@ -1453,9 +1456,14 @@ async fn handle_event(
                         .is_some_and(|new| new > revision)
                 }) {
                     refresh(control, shared, state, id).await?;
-                } else if revision.is_none() && state.view_reading.as_deref() == Some(id) {
+                } else if revision.is_none() {
                     // The reply on its way may predate this change.
-                    state.view_stale = true;
+                    if state.view_reading.as_deref() == Some(id) {
+                        state.view_stale = true;
+                    }
+                    if state.fetch_reading.contains(id) {
+                        state.fetch_stale.insert(id.to_owned());
+                    }
                 }
             }
         }
@@ -1837,6 +1845,10 @@ async fn run_host(
                     fetched = view_fetches.finished(), if view_fetches.in_flight() => {
                         match fetched {
                             view_fetch::Event::Reply { session, ids, result: Ok((seq, view)) } => {
+                                if !view_fetches.reading(&session) {
+                                    state.fetch_reading.remove(&session);
+                                }
+                                let stale = state.fetch_stale.remove(&session);
                                 let mut placed = false;
                                 shared.update(|m| {
                                     if !m.sessions.iter().any(|s| s.session_id == session) {
@@ -1859,15 +1871,26 @@ async fn run_host(
                                     );
                                 });
                                 if placed {
-                                    state.view_seq.insert(session, seq);
+                                    state.view_seq.insert(session.clone(), seq);
+                                    if stale {
+                                        let _ = refresh(&mut control, shared, &mut state, &session).await;
+                                    }
                                 }
                             }
-                            view_fetch::Event::Reply { ids, result: Err(outcome), .. } => {
+                            view_fetch::Event::Reply { session, ids, result: Err(outcome) } => {
+                                if !view_fetches.reading(&session) {
+                                    state.fetch_reading.remove(&session);
+                                    state.fetch_stale.remove(&session);
+                                }
                                 shared.update(|m| {
                                     record_view_fetches(m, ids.into_iter().map(|id| (id, outcome)));
                                 });
                             }
-                            view_fetch::Event::Expired(ids) => {
+                            view_fetch::Event::Expired { session, ids, finished } => {
+                                if finished && !view_fetches.reading(&session) {
+                                    state.fetch_reading.remove(&session);
+                                    state.fetch_stale.remove(&session);
+                                }
                                 shared.update(|m| {
                                     record_view_fetches(
                                         m,
@@ -2029,7 +2052,9 @@ async fn run_host(
                                 shared.update(|m| record_view_fetches(m, [(id, ViewFetchOutcome::Failed)]));
                                 continue;
                             }
-                            if !view_fetches.start(&mut control, id, deadline, session).await? {
+                            if view_fetches.start(&mut control, id, deadline, session.clone()).await? {
+                                state.fetch_reading.insert(session);
+                            } else {
                                 shared.update(|m| record_view_fetches(m, [(id, ViewFetchOutcome::Failed)]));
                             }
                             continue;

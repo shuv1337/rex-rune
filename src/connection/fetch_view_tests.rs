@@ -350,3 +350,128 @@ async fn fetch_view_while_disconnected_is_dropped_cleanly_without_notice_or_repl
     drop(host);
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn fetch_view_refreshes_when_session_view_changed_arrives_mid_fetch() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (event_seen_tx, event_seen_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 13).await;
+        bootstrap_unloaded(&mut ws, &["s1"]).await;
+
+        let req1 = recv(&mut ws).await;
+        assert_eq!(req1["method"], "session.view");
+        assert_eq!(req1["payload"]["session_id"], "s1");
+
+        // Deliver session_view_changed for s1 BEFORE answering req1, followed by a
+        // sentinel label change on the same ordered event stream so the test waits on
+        // the worker having processed session_view_changed with zero sleep.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 2,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": "s1",
+                        "event": {"type": "session_view_changed", "payload": {"revision": 2}}
+                    }
+                }
+            }),
+        )
+        .await;
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 3,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {"type": "session_label_changed", "payload": {"label": "event-synced"}}
+                    }
+                }
+            }),
+        )
+        .await;
+        event_seen_rx.await.unwrap();
+
+        // Answer req1 with stale revision 1.
+        reply(
+            &mut ws,
+            &req1,
+            2,
+            json!({
+                "revision": 1,
+                "session_id": "s1",
+                "active_window_id": "w-old",
+                "windows": [{"window_id": "w-old", "label": "old", "layers": []}]
+            }),
+        )
+        .await;
+
+        // The worker must immediately follow up with a fresh session.view for s1.
+        let req2 = recv(&mut ws).await;
+        assert_eq!(req2["method"], "session.view");
+        assert_eq!(req2["payload"]["session_id"], "s1");
+        reply(
+            &mut ws,
+            &req2,
+            4,
+            json!({
+                "revision": 2,
+                "session_id": "s1",
+                "active_window_id": "w-new",
+                "windows": [{"window_id": "w-new", "label": "new", "layers": []}]
+            }),
+        )
+        .await;
+
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    wait_wake(&host, |m| m.connected && !m.activity_reading).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+
+    host.commands
+        .send(HostCommand::FetchView {
+            id: 42,
+            epoch,
+            deadline: Instant::now() + Duration::from_secs(5),
+            session: "s1".into(),
+        })
+        .unwrap();
+
+    // Wait for the ordered sentinel event after session_view_changed, then release req1's reply.
+    wait_wake(&host, |m| {
+        m.sessions
+            .iter()
+            .any(|s| s.session_id == SESSION && s.label == "event-synced")
+    })
+    .await;
+    event_seen_tx.send(()).unwrap();
+
+    assert_eq!(
+        next_fetch_outcome(&host, 42).await,
+        ViewFetchOutcome::Loaded
+    );
+    wait_wake(&host, |m| {
+        m.views.get("s1").is_some_and(|v| v.revision == 2)
+    })
+    .await;
+    {
+        let m = host.model.lock().unwrap();
+        assert_eq!(m.views["s1"].revision, 2);
+        assert_eq!(m.views["s1"].active_window_id.as_deref(), Some("w-new"));
+        assert!(m.background_views.contains("s1"));
+        assert_eq!(m.selected.as_deref(), Some(SESSION));
+    }
+
+    drop(host);
+    server.await.unwrap();
+}

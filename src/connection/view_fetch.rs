@@ -57,7 +57,11 @@ pub(super) enum Event {
         ids: Vec<u64>,
         result: Result<(u64, session::ViewResponse), ViewFetchOutcome>,
     },
-    Expired(Vec<u64>),
+    Expired {
+        session: String,
+        ids: Vec<u64>,
+        finished: bool,
+    },
 }
 
 struct InFlight {
@@ -96,6 +100,10 @@ impl Reader {
 
     pub fn in_flight(&self) -> bool {
         !self.entries.is_empty()
+    }
+
+    pub fn reading(&self, session: &str) -> bool {
+        self.entries.iter().any(|e| e.session == session)
     }
 
     /// Start or coalesce a detached `session.view` fetch. Returns `Ok(true)` when queued,
@@ -160,9 +168,10 @@ impl Reader {
                     });
                 }
             }
-            let now = Instant::now();
-            for index in 0..self.entries.len() {
+            let mut index = 0;
+            while index < self.entries.len() {
                 if self.entries[index].timer.as_mut().poll(cx).is_ready() {
+                    let now = tokio::time::Instant::now().into_std();
                     let entry = &mut self.entries[index];
                     let mut expired = Vec::new();
                     entry.waiters.retain(|&(id, deadline)| {
@@ -174,14 +183,54 @@ impl Reader {
                         }
                     });
                     if entry.waiters.is_empty() {
-                        self.entries.remove(index);
-                    } else {
-                        entry.reset_timer();
+                        let entry = self.entries.remove(index);
+                        if !expired.is_empty() {
+                            return Poll::Ready(Event::Expired {
+                                session: entry.session,
+                                ids: expired,
+                                finished: true,
+                            });
+                        }
+                        continue;
                     }
+                    entry.reset_timer();
                     if !expired.is_empty() {
-                        return Poll::Ready(Event::Expired(expired));
+                        let session = entry.session.clone();
+                        return Poll::Ready(Event::Expired {
+                            session,
+                            ids: expired,
+                            finished: false,
+                        });
+                    }
+                    // Poll the reset timer with `cx` so its waker is always registered.
+                    if entry.timer.as_mut().poll(cx).is_ready() {
+                        let earliest = entry.earliest_deadline();
+                        entry.waiters.retain(|&(id, deadline)| {
+                            if deadline <= earliest {
+                                expired.push(id);
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        if entry.waiters.is_empty() {
+                            let entry = self.entries.remove(index);
+                            return Poll::Ready(Event::Expired {
+                                session: entry.session,
+                                ids: expired,
+                                finished: true,
+                            });
+                        }
+                        let session = entry.session.clone();
+                        entry.reset_timer();
+                        return Poll::Ready(Event::Expired {
+                            session,
+                            ids: expired,
+                            finished: false,
+                        });
                     }
                 }
+                index += 1;
             }
             Poll::Pending
         })
