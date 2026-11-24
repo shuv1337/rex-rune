@@ -2,7 +2,7 @@
 //! previews in Settings: what they show is what a terminal shows, selection colours, rounded
 //! corners and cursor shapes included. Like a terminal, a preview never animates.
 use super::{
-    Marks, Metrics, RowPass, RunStyle, TermColors, cursor_el, glyph_run, row_pass,
+    Marks, Metrics, RowBg, RowPass, RunStyle, TermColors, cursor_el, glyph_run, row_pass,
     selection_corners,
 };
 use crate::app::theme::rgb;
@@ -129,7 +129,10 @@ pub fn sample(key: &str, sample: &Sample<'_>, m: &Metrics, colors: &TermColors) 
             row_pass(
                 cells,
                 y as f32 * m.cell.1,
-                ground,
+                RowBg {
+                    frame: ground,
+                    body: ground,
+                },
                 &marks,
                 m,
                 RowPass::All,

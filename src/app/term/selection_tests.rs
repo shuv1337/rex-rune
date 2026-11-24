@@ -128,10 +128,14 @@ fn row_view(s: &RowState, _: &mut rune::Cx<RowState>) -> El {
         corners: s.corners,
         ..Marks::default()
     };
+    let bg = RowBg {
+        frame: GROUND,
+        body: s.colors.body(GROUND, false),
+    };
     el().w_full().h_full().child(row_pass(
         &s.cells,
         0.,
-        GROUND,
+        bg,
         &marks,
         &fixed_metrics(),
         RowPass::All,
@@ -197,10 +201,14 @@ fn wide_selected_cells_share_fill_and_leave_original_cells_unchanged() {
             rounded,
         });
         let view = |s: &(Vec<Cell>, TermColors), _: &mut rune::Cx<(Vec<Cell>, TermColors)>| {
+            let bg = RowBg {
+                frame: 0,
+                body: s.1.body(0, false),
+            };
             row_pass(
                 &s.0,
                 0.,
-                0,
+                bg,
                 &Marks {
                     selection: Some((0, 1)),
                     corners: [true; 4],

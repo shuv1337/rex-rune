@@ -1282,6 +1282,7 @@ impl Workspace {
             palette_of(self.settings.chrome_theme),
         )
         .with_selection(super::term::SelectionLook::of(&self.settings.terminal))
+        .with_program_background(self.settings.terminal.keep_program_background)
     }
 
     /// Declare the theme the user chose, `choice`, from now on, on every host, and remember

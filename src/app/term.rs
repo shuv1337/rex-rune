@@ -937,6 +937,13 @@ fn selected_colors(colors: &TermColors, text: u32, ground: u32) -> (u32, u32) {
     }
 }
 
+/// The server's default background for a row and the colour this client draws it as.
+#[derive(Clone, Copy)]
+struct RowBg {
+    frame: u32,
+    body: u32,
+}
+
 #[cfg(test)]
 fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m: &Metrics) -> El {
     let marks = Marks {
@@ -944,27 +951,27 @@ fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m:
         corners: [true; 4],
         ..Marks::default()
     };
-    row_pass(
-        cells,
-        y,
-        frame_bg,
-        &marks,
-        m,
-        RowPass::All,
-        &TermColors::default(),
-    )
+    let colors = TermColors::default();
+    let bg = RowBg {
+        frame: frame_bg,
+        body: colors.body(frame_bg, false),
+    };
+    row_pass(cells, y, bg, &marks, m, RowPass::All, &colors)
 }
 
 fn row_pass(
     cells: &[Cell],
     y: f32,
-    frame_bg: u32,
+    bg: RowBg,
     marks: &Marks<'_>,
     m: &Metrics,
     pass: RowPass,
     colors: &TermColors,
 ) -> El {
-    let body = colors.body(frame_bg);
+    let RowBg {
+        frame: frame_bg,
+        body,
+    } = bg;
     let (cw, ch) = m.cell;
     let sel = marks.selection;
     // Memoized rows are flattened on their own, so each says again that it never animates:
@@ -1267,6 +1274,9 @@ pub struct TermColors {
     pub search_match: u32,
     /// The selected match's text, over its highlight.
     pub search_text: u32,
+    /// Keep a background colour a program set for its pane (OSC 11) instead of substituting
+    /// `background`.
+    pub keep_program_background: bool,
 }
 impl Default for TermColors {
     fn default() -> Self {
@@ -1287,6 +1297,7 @@ impl TermColors {
             cursor_text: theme.cursor_text,
             search_match: palette.accent,
             search_text: palette.on_accent,
+            keep_program_background: false,
         }
     }
 
@@ -1296,13 +1307,22 @@ impl TermColors {
         self
     }
 
-    /// What the server's default background `frame_bg` draws as: `background` when both are
-    /// equally dark or light (Rex's built-in black, or another owner's theme), so a single
-    /// pane reads as one surface with the chrome; otherwise the server's own, so the default
-    /// text drawn for it stays readable. Only that exact colour is replaced, so explicit
-    /// backgrounds and inverse video's block keep theirs.
-    pub fn body(&self, frame_bg: u32) -> u32 {
-        if is_light(frame_bg) == is_light(self.background) {
+    /// Whether a program-set default background (OSC 11) keeps its own colour.
+    pub fn with_program_background(mut self, keep: bool) -> Self {
+        self.keep_program_background = keep;
+        self
+    }
+
+    /// What the server's default background `frame_bg` draws as: `frame_bg` when a program
+    /// chose it (`from_program`) and `keep_program_background` is on; otherwise `background`
+    /// when both are equally dark or light (Rex's built-in black, or another owner's theme),
+    /// so a single pane reads as one surface with the chrome; otherwise the server's own, so
+    /// the default text drawn for it stays readable. Only that exact colour is replaced, so
+    /// explicit backgrounds and inverse video's block keep theirs.
+    pub fn body(&self, frame_bg: u32, from_program: bool) -> u32 {
+        if self.keep_program_background && from_program {
+            frame_bg
+        } else if is_light(frame_bg) == is_light(self.background) {
             self.background
         } else {
             frame_bg
@@ -1315,7 +1335,7 @@ impl Term {
     pub fn body(&self, colors: &TermColors) -> u32 {
         self.frame
             .as_ref()
-            .map_or(colors.background, |f| colors.body(f.bg))
+            .map_or(colors.background, |f| colors.body(f.bg, f.bg_from_program))
     }
 }
 
@@ -1329,7 +1349,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
     let start = frame.display_row_start(visible);
     let cols = frame.cols as usize;
     let colors = &look.colors;
-    let body = colors.body(frame.bg);
+    let body = colors.body(frame.bg, frame.bg_from_program);
     let selection = term.selection.map(|(a, b)| (a.min(b), a.max(b)));
     let selected_on = |y: usize| {
         if y >= frame.cells.len() {
@@ -1368,6 +1388,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             (
                 &marks,
                 frame.bg,
+                body,
                 cw.to_bits(),
                 ch.to_bits(),
                 m.px.to_bits(),
@@ -1379,8 +1400,12 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                 .hash(&mut h);
             let top = (y - start) as f32 * ch;
             let id = format!("{key}/r{}:{pass:?}", y - start);
+            let bg = RowBg {
+                frame: frame.bg,
+                body,
+            };
             grid = grid.child(memo(id, h.finish(), || {
-                row_pass(cells, top, frame.bg, &marks, m, pass, colors)
+                row_pass(cells, top, bg, &marks, m, pass, colors)
             }));
         }
         grid
@@ -1435,7 +1460,10 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                 cell.filter(|c| !c.text.is_empty() && !c.text.starts_with('\u{10eeee}'))
         {
             let style = RunStyle {
-                fg: colors.cursor_text.unwrap_or(body),
+                fg: colors
+                    .cursor_text
+                    .filter(|_| body == colors.background)
+                    .unwrap_or(body),
                 ..RunStyle::of(cell, frame.bg, body)
             };
             grid = grid.child(glyph_run(cell.text.clone(), style, px, py, m));
@@ -2076,10 +2104,14 @@ mod tests {
     fn the_default_background_takes_the_chromes_only_on_its_own_side() {
         let follow = TermColors::default();
         let card = MIDNIGHT.card;
-        assert_eq!(follow.body(0x000000), card, "Rex's built-in black");
-        assert_eq!(follow.body(0x1e1e2e), card, "another owner's dark theme");
+        assert_eq!(follow.body(0x000000, false), card, "Rex's built-in black");
         assert_eq!(
-            follow.body(0xfdf6e3),
+            follow.body(0x1e1e2e, false),
+            card,
+            "another owner's dark theme"
+        );
+        assert_eq!(
+            follow.body(0xfdf6e3, false),
             0xfdf6e3,
             "another owner's light theme"
         );
@@ -2090,10 +2122,10 @@ mod tests {
             }),
             &MIDNIGHT,
         );
-        assert_eq!(light.body(0xfdf6e3), 0xfdf6e3);
-        assert_eq!(light.body(0xeeeeee), 0xfdf6e3);
+        assert_eq!(light.body(0xfdf6e3, false), 0xfdf6e3);
+        assert_eq!(light.body(0xeeeeee, false), 0xfdf6e3);
         assert_eq!(
-            light.body(0x000000),
+            light.body(0x000000, false),
             0x000000,
             "a server without set_theme keeps its black under its light default text"
         );
@@ -2105,14 +2137,19 @@ mod tests {
             "Rex's own colours draw like Follow server"
         );
         let rose = TermColors::of(None, &crate::app::theme::ROSE_PINE);
-        assert_eq!(rose.body(0x000000), 0x191724, "another chrome's card");
+        assert_eq!(
+            rose.body(0x000000, false),
+            0x191724,
+            "another chrome's card"
+        );
         assert_eq!(rose.selection_bg, 0x403d52, "and its selection");
         assert_ne!(rose, follow, "so rows memoized on the colours draw again");
 
         for (bg, fg, body) in [(0x1e1e2e, 0xcdd6f4, card), (0xfdf6e3, 0x586e75, 0xfdf6e3)] {
             let frame = themed_frame(bg, fg);
             assert_eq!(frame.bg, bg);
-            let body_drawn = follow.body(frame.bg);
+            assert!(!frame.bg_from_program);
+            let body_drawn = follow.body(frame.bg, frame.bg_from_program);
             assert_eq!(body_drawn, body);
             let [plain, red, inverse] = [0, 1, 2].map(|i| &frame.cells[0][i]);
             assert_eq!(plain.bg, frame.bg, "drawn as the pane's fill, {body:06x}");
@@ -2126,6 +2163,183 @@ mod tests {
                 "inverse text is cut out of the block in the pane's fill"
             );
         }
+    }
+
+    #[test]
+    fn keep_program_background_preserves_osc11_and_invalidates_memo_and_cursor_text() {
+        use rex_rune::connection::{Connection, TerminalSender};
+        let hash_of = |colors: TermColors| {
+            let mut h = DefaultHasher::new();
+            colors.hash(&mut h);
+            h.finish()
+        };
+
+        let follow = TermColors::default();
+        let follow_keep = follow.with_program_background(true);
+        assert_ne!(follow, follow_keep);
+        assert_ne!(hash_of(follow), hash_of(follow_keep));
+
+        // Issue #143: OSC 11 #1d2a2b over dark Midnight card (#001528) and dark declared theme
+        // (#1a2116), plus non-program server backgrounds and light/dark combinations.
+        let dark_declared = TermColors::of(
+            Some(&TerminalTheme {
+                background: Some(0x1a2116),
+                cursor_text: Some(0xff00ff),
+                ..TerminalTheme::default()
+            }),
+            &MIDNIGHT,
+        );
+        let dark_declared_keep = dark_declared.with_program_background(true);
+        let light_declared = TermColors::of(
+            Some(&TerminalTheme {
+                background: Some(0xfdf6e3),
+                ..TerminalTheme::default()
+            }),
+            &MIDNIGHT,
+        );
+        let light_declared_keep = light_declared.with_program_background(true);
+
+        // Off: same-side is substituted even when from_program is true; opposite-side is kept.
+        assert_eq!(follow.body(0x1d2a2b, false), MIDNIGHT.card);
+        assert_eq!(follow.body(0x1d2a2b, true), MIDNIGHT.card);
+        assert_eq!(follow.body(0xfdf6e3, false), 0xfdf6e3);
+        assert_eq!(follow.body(0xfdf6e3, true), 0xfdf6e3);
+        assert_eq!(dark_declared.body(0x1d2a2b, false), 0x1a2116);
+        assert_eq!(dark_declared.body(0x1d2a2b, true), 0x1a2116);
+        assert_eq!(light_declared.body(0xe8f0e8, false), 0xfdf6e3);
+        assert_eq!(light_declared.body(0xe8f0e8, true), 0xfdf6e3);
+        assert_eq!(light_declared.body(0x1d2a2b, false), 0x1d2a2b);
+        assert_eq!(light_declared.body(0x1d2a2b, true), 0x1d2a2b);
+
+        // On: only from_program overrides same-side substitution; non-program stays substituted.
+        assert_eq!(follow_keep.body(0x1d2a2b, false), MIDNIGHT.card);
+        assert_eq!(follow_keep.body(0x1d2a2b, true), 0x1d2a2b);
+        assert_eq!(follow_keep.body(0xfdf6e3, false), 0xfdf6e3);
+        assert_eq!(follow_keep.body(0xfdf6e3, true), 0xfdf6e3);
+        assert_eq!(dark_declared_keep.body(0x1d2a2b, false), 0x1a2116);
+        assert_eq!(dark_declared_keep.body(0x1d2a2b, true), 0x1d2a2b);
+        assert_eq!(light_declared_keep.body(0xe8f0e8, false), 0xfdf6e3);
+        assert_eq!(light_declared_keep.body(0xe8f0e8, true), 0xe8f0e8);
+        assert_eq!(light_declared_keep.body(0x1d2a2b, false), 0x1d2a2b);
+        assert_eq!(light_declared_keep.body(0x1d2a2b, true), 0x1d2a2b);
+
+        // Live grid rendering: inverse video and block cursor text respond immediately to both
+        // toggling the option and OSC 11 / OSC 111 without stale memoized rows.
+        let mut terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 8,
+            rows: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        terminal
+            .set_default_bg_color(Some(ghostty_vt::style::RgbColor {
+                r: 0x1a,
+                g: 0x21,
+                b: 0x16,
+            }))
+            .unwrap();
+        terminal
+            .set_default_fg_color(Some(ghostty_vt::style::RgbColor {
+                r: 0xe0,
+                g: 0xe0,
+                b: 0xe0,
+            }))
+            .unwrap();
+        // Cell 0: 'C' under the block cursor; cell 1: 'I' in inverse video (fg = default bg).
+        terminal.vt_write(b"\x1b]11;#1d2a2b\x1b\\C\x1b[7mI\x1b[0m\x1b[1;1H");
+        let mut renderer = rex_rune::terminal::Renderer::new().unwrap();
+        let osc11_frame = renderer.frame(&terminal).unwrap();
+        assert!(osc11_frame.bg_from_program);
+        assert_eq!(osc11_frame.bg, 0x1d2a2b);
+        assert_eq!(osc11_frame.cursor, Some((0, 0)));
+
+        let mut term = Term::new(Connection {
+            model: Default::default(),
+            commands: TerminalSender::new(flume::unbounded().0, "s".into(), "b".into()),
+            wake: flume::unbounded().1,
+        });
+        term.frame = Some(Arc::new(osc11_frame));
+        term.rect = [0., 0., 200., clipped_metrics().cell.1];
+
+        struct State {
+            term: Term,
+            colors: TermColors,
+        }
+        let view = |s: &State, _: &mut Cx<State>| {
+            let look = GridLook {
+                cursor: Some(CursorLook::Block),
+                cursor_force: None,
+                ime: false,
+                colors: s.colors,
+            };
+            el().w_full()
+                .h_full()
+                .motion(crate::app::theme::STILL)
+                .child(grid("g", &s.term, &clipped_metrics(), look))
+        };
+        let mut rt = Runtime::new(
+            State {
+                term,
+                colors: dark_declared,
+            },
+            view,
+            (200., 60.),
+            Env::default(),
+        );
+        let glyph_count = |rt: &Runtime<State>, color: u32| {
+            let c = rgb(color);
+            let want = [c.r, c.g, c.b, c.a];
+            rt.instances
+                .iter()
+                .filter(|q| q.params[1] == rune::render::KIND_GLYPH && q.fill == want)
+                .count()
+        };
+
+        // Switch off: body == 0x1a2116 == colors.background -> inverse uses 0x1a2116,
+        // cursor text uses theme cursor_text (0xff00ff).
+        rt.frame(1. / 60.);
+        assert_eq!(rt.state.term.body(&rt.state.colors), 0x1a2116);
+        assert!(glyph_count(&rt, 0x1a2116) >= 1, "inverse text in theme bg");
+        assert!(glyph_count(&rt, 0xff00ff) >= 1, "cursor text uses theme's");
+        assert_eq!(glyph_count(&rt, 0x1d2a2b), 0, "OSC 11 not used while off");
+
+        // Flip switch on: memoized row redraws immediately; inverse text and block cursor text
+        // both use OSC 11 (0x1d2a2b), never theme cursor_text (0xff00ff).
+        rt.update(|s, tx| {
+            s.colors = dark_declared_keep;
+            tx.instant();
+        });
+        rt.frame(1. / 60.);
+        assert_eq!(rt.state.term.body(&rt.state.colors), 0x1d2a2b);
+        assert!(
+            glyph_count(&rt, 0x1d2a2b) >= 2,
+            "both inverse text and block cursor text draw in 0x1d2a2b"
+        );
+        assert_eq!(
+            glyph_count(&rt, 0xff00ff),
+            0,
+            "declared cursor_text never clashes over a program background"
+        );
+        assert_eq!(glyph_count(&rt, 0x1a2116), 0, "no stale row from before");
+
+        // Program resets with OSC 111 while switch stays on: row redraws back to 0x1a2116
+        // and theme cursor_text (0xff00ff) returns.
+        terminal.vt_write(b"\x1b]111\x1b\\");
+        let reset_frame = renderer.frame(&terminal).unwrap();
+        assert!(!reset_frame.bg_from_program);
+        assert_eq!(reset_frame.bg, 0x1a2116);
+        rt.update(|s, tx| {
+            s.term.frame = Some(Arc::new(reset_frame));
+            tx.instant();
+        });
+        rt.frame(1. / 60.);
+        assert_eq!(rt.state.term.body(&rt.state.colors), 0x1a2116);
+        assert!(
+            glyph_count(&rt, 0x1a2116) >= 1,
+            "inverse text back to theme"
+        );
+        assert!(glyph_count(&rt, 0xff00ff) >= 1, "cursor text back to theme");
+        assert_eq!(glyph_count(&rt, 0x1d2a2b), 0, "no stale OSC 11 row");
     }
 
     fn ime_test_term(terminal: &ghostty_vt::Terminal, rect: [f32; 4]) -> Term {
