@@ -197,6 +197,9 @@ pub(crate) fn probe_socket_with_timeout(path: &Path, timeout: Duration) -> Agent
         Ok(health) => health,
         Err(UnixSocketError::NotFound) => AgentHealth::NotFound,
         Err(UnixSocketError::NotSocket) => AgentHealth::NotAnswering("Not a Unix socket".into()),
+        Err(UnixSocketError::WrongType) => {
+            AgentHealth::NotAnswering("Could not establish a stream connection".into())
+        }
         Err(UnixSocketError::Refused) => AgentHealth::NotAnswering("Agent is not listening".into()),
         Err(UnixSocketError::PermissionDenied) => {
             AgentHealth::NotAnswering("Permission denied".into())
@@ -261,7 +264,9 @@ fn io_health(error: std::io::Error) -> AgentHealth {
     // macOS/BSD XNU can return EPROTOTYPE when writing to a Unix socket whose peer just closed.
     #[cfg(unix)]
     if error.raw_os_error() == Some(libc::EPROTOTYPE) {
-        return AgentHealth::NotAnswering("Agent is not listening".into());
+        return AgentHealth::NotAnswering(
+            "Agent connection closed before the reply was complete".into(),
+        );
     }
     match error.kind() {
         ErrorKind::TimedOut | ErrorKind::WouldBlock => {
@@ -271,11 +276,13 @@ fn io_health(error: std::io::Error) -> AgentHealth {
             AgentHealth::NotAnswering("Agent closed connection without replying".into())
         }
         ErrorKind::PermissionDenied => AgentHealth::NotAnswering("Permission denied".into()),
-        ErrorKind::ConnectionRefused
-        | ErrorKind::BrokenPipe
+        ErrorKind::ConnectionRefused => AgentHealth::NotAnswering("Agent is not listening".into()),
+        ErrorKind::BrokenPipe
         | ErrorKind::ConnectionReset
         | ErrorKind::ConnectionAborted
-        | ErrorKind::NotConnected => AgentHealth::NotAnswering("Agent is not listening".into()),
+        | ErrorKind::NotConnected => AgentHealth::NotAnswering(
+            "Agent connection closed before the reply was complete".into(),
+        ),
         _ => AgentHealth::NotAnswering(error.to_string()),
     }
 }
@@ -565,11 +572,13 @@ mod tests {
     }
 
     #[test]
-    fn io_health_maps_closed_and_stale_socket_errors_to_not_listening() {
+    fn io_health_maps_closed_and_stale_socket_errors() {
         use std::io::Error;
 
+        let closed_mid_reply = AgentHealth::NotAnswering(
+            "Agent connection closed before the reply was complete".into(),
+        );
         for kind in [
-            ErrorKind::ConnectionRefused,
             ErrorKind::BrokenPipe,
             ErrorKind::ConnectionReset,
             ErrorKind::ConnectionAborted,
@@ -577,13 +586,17 @@ mod tests {
         ] {
             assert_eq!(
                 io_health(Error::from(kind)),
-                AgentHealth::NotAnswering("Agent is not listening".into()),
-                "expected {kind:?} to map to Agent is not listening"
+                closed_mid_reply,
+                "expected {kind:?} to report closed connection before complete reply"
             );
         }
         #[cfg(unix)]
         assert_eq!(
             io_health(Error::from_raw_os_error(libc::EPROTOTYPE)),
+            closed_mid_reply
+        );
+        assert_eq!(
+            io_health(Error::from(ErrorKind::ConnectionRefused)),
             AgentHealth::NotAnswering("Agent is not listening".into())
         );
         assert_eq!(
@@ -602,6 +615,47 @@ mod tests {
             io_health(Error::from(ErrorKind::PermissionDenied)),
             AgentHealth::NotAnswering("Permission denied".into())
         );
+    }
+
+    #[test]
+    fn probe_io_reports_post_connect_closure_on_partial_reply() {
+        struct PartialFailStream {
+            reply: std::io::Cursor<Vec<u8>>,
+            fail_kind: ErrorKind,
+        }
+        impl Read for PartialFailStream {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.reply.read(buf)?;
+                if n == 0 {
+                    return Err(std::io::Error::from(self.fail_kind));
+                }
+                Ok(n)
+            }
+        }
+        impl Write for PartialFailStream {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for fail_kind in [ErrorKind::ConnectionReset, ErrorKind::ConnectionAborted] {
+            // Valid length (5) + SSH_AGENT_IDENTITIES_ANSWER (12), then connection drops
+            // before the 4-byte key count arrives.
+            let mut stream = PartialFailStream {
+                reply: std::io::Cursor::new(vec![0, 0, 0, 5, SSH_AGENT_IDENTITIES_ANSWER]),
+                fail_kind,
+            };
+            assert_eq!(
+                probe_io(&mut stream),
+                AgentHealth::NotAnswering(
+                    "Agent connection closed before the reply was complete".into()
+                ),
+                "expected partial reply followed by {fail_kind:?} to report closed connection"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -726,6 +780,15 @@ mod tests {
                 probe_socket(&regular),
                 AgentHealth::NotAnswering(msg) if msg.contains("Not a Unix socket")
             ));
+
+            // Live datagram socket -> EPROTOTYPE must not claim the listener is absent
+            let dgram_sock = dir.path().join("dgram.sock");
+            let _dgram = std::os::unix::net::UnixDatagram::bind(&dgram_sock).unwrap();
+            let dgram_health = probe_socket(&dgram_sock);
+            assert_eq!(
+                dgram_health,
+                AgentHealth::NotAnswering("Could not establish a stream connection".into())
+            );
         }
 
         #[test]

@@ -4085,5 +4085,8 @@ async fn list_syncs_cached_view_label_when_buffered_label_drop_is_suppressed_by_
         );
     }
     drop(host);
-    server.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
 }

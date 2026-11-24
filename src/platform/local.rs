@@ -89,6 +89,7 @@ impl<T: std::io::Read + std::io::Write> ReadWrite for T {}
 pub enum UnixSocketError {
     NotFound,
     NotSocket,
+    WrongType,
     Refused,
     PermissionDenied,
     TimedOut,
@@ -99,14 +100,16 @@ pub enum UnixSocketError {
 #[cfg(unix)]
 fn classify_unix_connect_error(error: std::io::Error) -> UnixSocketError {
     use std::io::ErrorKind;
-    // macOS/BSD XNU can return EPROTOTYPE, ECONNRESET, ECONNABORTED, EPIPE, or ENOTCONN
-    // when connecting to a stale or just-closed Unix domain socket.
+    // EPROTOTYPE occurs both on live non-stream (SOCK_DGRAM) Unix sockets and on some
+    // macOS/BSD socket teardown races, so report it separately from a missing listener.
     if error.raw_os_error() == Some(libc::EPROTOTYPE) {
-        return UnixSocketError::Refused;
+        return UnixSocketError::WrongType;
     }
     if error.raw_os_error() == Some(libc::ENOTSOCK) {
         return UnixSocketError::NotSocket;
     }
+    // macOS/BSD XNU can return ECONNRESET, ECONNABORTED, EPIPE, or ENOTCONN when
+    // connecting to a stale or just-closed Unix domain socket.
     match error.kind() {
         ErrorKind::NotFound => UnixSocketError::NotFound,
         ErrorKind::ConnectionRefused
@@ -279,7 +282,7 @@ mod tests {
         }
         assert_eq!(
             classify_unix_connect_error(Error::from_raw_os_error(libc::EPROTOTYPE)),
-            UnixSocketError::Refused
+            UnixSocketError::WrongType
         );
         assert_eq!(
             classify_unix_connect_error(Error::from_raw_os_error(libc::ENOTSOCK)),
