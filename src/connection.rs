@@ -520,6 +520,16 @@ pub enum HostCommand {
         method: String,
         payload: Value,
     },
+    /// Move or resize a floating layer on this connection epoch only (API revision 13).
+    /// Checked against the live epoch and negotiated API revision right before sending; never
+    /// replayed across disconnect/reconnect.
+    ResizeLayer {
+        epoch: u64,
+        session: String,
+        layer: String,
+        bounds: [f64; 4],
+        raise_first: bool,
+    },
     /// Explicit tab/split creation, inheriting the named source block's shell directory.
     /// A failed or slow read leaves the server's default starting directory unchanged.
     NewTerminal {
@@ -1724,6 +1734,68 @@ async fn run_host(
                             }
                             continue;
                         }
+                        if let HostCommand::ResizeLayer {
+                            epoch,
+                            session,
+                            layer,
+                            bounds,
+                            raise_first,
+                        } = command
+                        {
+                            let live_epoch = shared.model.lock().expect("host model").connection_epoch;
+                            if epoch != live_epoch {
+                                shared.update(|m| {
+                                    m.notice = Some(crate::layers::Blocked::ChangedDuringDrag.sentence());
+                                });
+                                continue;
+                            }
+                            let rev = control.welcome().api_revision;
+                            if rev < crate::layers::MIN_API_REVISION {
+                                shared.update(|m| {
+                                    m.notice = Some(crate::layers::Blocked::OldServer(rev).sentence());
+                                });
+                                continue;
+                            }
+                            let Some(bounds) = crate::layers::sendable(bounds) else {
+                                continue;
+                            };
+                            let outcome: Result<()> = async {
+                                if raise_first {
+                                    request(
+                                        &mut control,
+                                        "session.raise_layer",
+                                        json!({"session_id": session, "layer_id": layer}),
+                                    )
+                                    .await?;
+                                }
+                                request(
+                                    &mut control,
+                                    "session.resize_layer",
+                                    json!({"session_id": session, "layer_id": layer, "bounds": bounds}),
+                                )
+                                .await?;
+                                after_request(
+                                    &mut control,
+                                    shared,
+                                    &mut workers,
+                                    &mut state,
+                                    Some(&session),
+                                )
+                                .await
+                            }
+                            .await;
+                            if let Err(error) = outcome {
+                                shared.update(|m| m.notice = Some(format!("{error:#}")));
+                                if !matches!(error.downcast_ref::<rexrs::Error>(), Some(rexrs::Error::Api(_))) {
+                                    return Err(error);
+                                }
+                            }
+                            state.prune(&shared.model.lock().expect("host model"));
+                            reconcile(&endpoint, shared, &sender, &mut workers);
+                            declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
+                            query_activity(&mut control, shared, &mut state).await;
+                            continue;
+                        }
                         if let HostCommand::Keymap(new) = command {
                             keymap::refresh(&mut control, shared, &new).await;
                             keymap = Some(new);
@@ -1825,6 +1897,9 @@ async fn run_host(
                         if let Some(worker) = workers.get_mut(&block) { worker.size = Some((a,b,c,d)); }
                     }
                     Ok(HostCommand::Terminal { block, command, .. }) if forward_search(&workers, &block, &command) => {}
+                    Ok(HostCommand::ResizeLayer { .. }) => shared.update(|m| {
+                        m.notice = Some(crate::layers::Blocked::NotConnected.sentence());
+                    }),
                     Ok(_) => shared.update(|m| m.notice = Some("Action not sent while disconnected. Try it again after reconnecting.".into())),
                 }
             }
@@ -1860,6 +1935,9 @@ async fn run_host(
                             .into(),
                     );
                     m.server_stop_result = m.notice.clone();
+                }),
+                HostCommand::ResizeLayer { .. } => shared.update(|m| {
+                    m.notice = Some(crate::layers::Blocked::NotConnected.sentence());
                 }),
                 _ => {}
             }
@@ -2287,6 +2365,7 @@ async fn handle_command(
         | HostCommand::Reconnect
         | HostCommand::Shutdown
         | HostCommand::StopServer { .. }
+        | HostCommand::ResizeLayer { .. }
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)
         | HostCommand::Identify

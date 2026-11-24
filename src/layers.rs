@@ -29,6 +29,66 @@ pub const RETURN_DIRECTION: &str = "horizontal";
 pub const RETURN_SIDE: &str = "after";
 pub const RETURN_RATIO: f64 = 0.5;
 
+/// The smallest floating layer size this client's pointer resize will shrink to, in pane-area
+/// points. A layer another client already made smaller is never forced to grow.
+pub const MIN_FLOATING_PT: (f32, f32) = (160.0, 96.0);
+
+/// Which part of a floating layer a pointer gesture grabbed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grip {
+    Move,
+    North,
+    South,
+    East,
+    West,
+    NorthEast,
+    NorthWest,
+    SouthEast,
+    SouthWest,
+}
+
+impl Grip {
+    /// Every grip, move first, then the eight edges and corners.
+    pub const ALL: [Self; 9] = [
+        Self::Move,
+        Self::North,
+        Self::South,
+        Self::East,
+        Self::West,
+        Self::NorthEast,
+        Self::NorthWest,
+        Self::SouthEast,
+        Self::SouthWest,
+    ];
+
+    /// The eight resize grips around a floating layer's outer card rectangle.
+    pub const RESIZE: [Self; 8] = [
+        Self::North,
+        Self::South,
+        Self::East,
+        Self::West,
+        Self::NorthEast,
+        Self::NorthWest,
+        Self::SouthEast,
+        Self::SouthWest,
+    ];
+
+    /// Short stable suffix for element keys.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Move => "move",
+            Self::North => "n",
+            Self::South => "s",
+            Self::East => "e",
+            Self::West => "w",
+            Self::NorthEast => "ne",
+            Self::NorthWest => "nw",
+            Self::SouthEast => "se",
+            Self::SouthWest => "sw",
+        }
+    }
+}
+
 /// A reason a floating-layer action did not run. The sentence is for a notice; the hint is the
 /// few words a row's hint column can hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +103,8 @@ pub enum Blocked {
     NoTab,
     /// The captured layer (or the pane it named) is no longer what the view shows.
     Stale,
+    /// The layer or its connection changed while a pointer move or resize was in flight.
+    ChangedDuringDrag,
     /// The pane is already in a floating layer.
     AlreadyFloating,
     /// Minimizing would leave the window without a visible pane.
@@ -68,6 +130,9 @@ impl Blocked {
             Self::NoTab => "Open a tab before adding a floating pane.".into(),
             Self::Stale => {
                 "That floating layer changed since it was listed. Nothing was changed.".into()
+            }
+            Self::ChangedDuringDrag => {
+                "That floating layer changed while you were moving it. Nothing was changed.".into()
             }
             Self::AlreadyFloating => {
                 "This pane is already in a floating layer. Nothing was changed.".into()
@@ -96,7 +161,7 @@ impl Blocked {
             }
             Self::NoPane => "No pane".into(),
             Self::NoTab => "No tab".into(),
-            Self::Stale => "Layer changed".into(),
+            Self::Stale | Self::ChangedDuringDrag => "Layer changed".into(),
             Self::AlreadyFloating => "Already floating".into(),
             Self::LastVisible => "Only visible panes".into(),
             Self::NoAnchor => "No tiled pane beside it".into(),
@@ -195,6 +260,159 @@ pub fn tiled_anchor(window: &Window, block: &str) -> Option<String> {
         .filter_map(|b| b.block_id.as_deref())
         .find(|id| *id != block)
         .map(str::to_owned)
+}
+
+/// The layer's bounds `[x, y, w, h]` as the server reported them: four finite fractions with
+/// positive size and a non-negative origin. None when missing or malformed.
+pub fn bounds(layer: &Layer) -> Option<[f64; 4]> {
+    let rect: [f64; 4] = layer.bounds.as_slice().try_into().ok()?;
+    let [x, y, w, h] = rect;
+    (x.is_finite()
+        && y.is_finite()
+        && w.is_finite()
+        && h.is_finite()
+        && x >= 0.0
+        && y >= 0.0
+        && w > 0.0
+        && h > 0.0)
+        .then_some(rect)
+}
+
+/// The minimum `[w, h]` fraction for a pane area of `area_pt` points, capped at `1.0`. Returns
+/// `None` for degenerate areas (`< 1.0` pt on either axis) or non-finite inputs.
+pub fn min_fraction(area_pt: (f32, f32), min_pt: (f32, f32)) -> Option<[f64; 2]> {
+    let (aw, ah) = area_pt;
+    let (mw, mh) = min_pt;
+    if !aw.is_finite()
+        || !ah.is_finite()
+        || !mw.is_finite()
+        || !mh.is_finite()
+        || aw < 1.0
+        || ah < 1.0
+        || mw < 0.0
+        || mh < 0.0
+    {
+        return None;
+    }
+    Some([
+        (f64::from(mw) / f64::from(aw)).clamp(0.0, 1.0),
+        (f64::from(mh) / f64::from(ah)).clamp(0.0, 1.0),
+    ])
+}
+
+/// Proposed `[x, y, w, h]` bounds after dragging `grip` from `start` by fractional `delta`,
+/// clamped inside `[0.0, 1.0]` with opposite edges held fixed and `min` respected without
+/// forcing a layer already smaller than `min` to grow.
+pub fn dragged(start: [f64; 4], grip: Grip, delta: [f64; 2], min: [f64; 2]) -> [f64; 4] {
+    let [sx, sy, sw, sh] = start;
+    let [dx, dy] = delta;
+    if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0) {
+        return start;
+    }
+    if grip == Grip::Move {
+        let mut x = (sx + dx).clamp(0.0, (1.0 - sw).max(0.0));
+        let mut y = (sy + dy).clamp(0.0, (1.0 - sh).max(0.0));
+        // Keep `sw` and `sh` bit-identical while ensuring `x + sw <= 1.0` and `y + sh <= 1.0`.
+        while x > 0.0 && x + sw > 1.0 {
+            x = x.next_down();
+        }
+        while y > 0.0 && y + sh > 1.0 {
+            y = y.next_down();
+        }
+        return [x, y, sw, sh];
+    }
+
+    let min_w = min[0].clamp(0.0, 1.0).min(sw);
+    let min_h = min[1].clamp(0.0, 1.0).min(sh);
+    let right = (sx + sw).min(1.0);
+    let bottom = (sy + sh).min(1.0);
+
+    let (x, mut w) = match grip {
+        Grip::West | Grip::NorthWest | Grip::SouthWest => {
+            if dx == 0.0 {
+                (sx, sw)
+            } else {
+                let max_x = (right - min_w).max(0.0);
+                let x = (sx + dx).clamp(0.0, max_x);
+                let w = if x == sx { sw } else { (right - x).max(min_w) };
+                (x, w)
+            }
+        }
+        Grip::East | Grip::NorthEast | Grip::SouthEast => {
+            if dx == 0.0 {
+                (sx, sw)
+            } else {
+                let max_w = (1.0 - sx).max(min_w);
+                let w = (sw + dx).clamp(min_w, max_w);
+                (sx, w)
+            }
+        }
+        Grip::North | Grip::South | Grip::Move => (sx, sw),
+    };
+
+    let (y, mut h) = match grip {
+        Grip::North | Grip::NorthWest | Grip::NorthEast => {
+            if dy == 0.0 {
+                (sy, sh)
+            } else {
+                let max_y = (bottom - min_h).max(0.0);
+                let y = (sy + dy).clamp(0.0, max_y);
+                let h = if y == sy { sh } else { (bottom - y).max(min_h) };
+                (y, h)
+            }
+        }
+        Grip::South | Grip::SouthWest | Grip::SouthEast => {
+            if dy == 0.0 {
+                (sy, sh)
+            } else {
+                let max_h = (1.0 - sy).max(min_h);
+                let h = (sh + dy).clamp(min_h, max_h);
+                (sy, h)
+            }
+        }
+        Grip::East | Grip::West | Grip::Move => (sy, sh),
+    };
+
+    while w > 0.0 && x + w > 1.0 {
+        w = w.next_down();
+    }
+    while h > 0.0 && y + h > 1.0 {
+        h = h.next_down();
+    }
+    [x, y, w, h]
+}
+
+/// Strictly validate and, if floating-point rounding put `x + w` or `y + h` above `1.0`,
+/// step `w` or `h` down with [`f64::next_down`] so the server's unit-square check never rejects
+/// the rectangle. Returns `None` if no valid positive rectangle inside `[0.0, 1.0]` remains.
+pub fn sendable(bounds: [f64; 4]) -> Option<[f64; 4]> {
+    let [x, y, mut w, mut h] = bounds;
+    if !x.is_finite()
+        || !y.is_finite()
+        || !w.is_finite()
+        || !h.is_finite()
+        || x < 0.0
+        || y < 0.0
+        || x >= 1.0
+        || y >= 1.0
+        || w <= 0.0
+        || h <= 0.0
+    {
+        return None;
+    }
+    if x + w > 1.0 {
+        w = w.min(1.0 - x);
+        while w > 0.0 && x + w > 1.0 {
+            w = w.next_down();
+        }
+    }
+    if y + h > 1.0 {
+        h = h.min(1.0 - y);
+        while h > 0.0 && y + h > 1.0 {
+            h = h.next_down();
+        }
+    }
+    (w > 0.0 && h > 0.0 && x + w <= 1.0 && y + h <= 1.0).then_some([x, y, w, h])
 }
 
 #[cfg(test)]
@@ -318,5 +536,299 @@ mod tests {
         alone.layers[0].blocks = alone.layers[0].blocks[..1].to_vec();
         assert_eq!(tiled_anchor(&alone, "f").as_deref(), Some("a"));
         assert_eq!(tiled_anchor(&alone, "a"), None);
+    }
+
+    #[test]
+    fn bounds_reads_valid_rectangles_and_rejects_malformed_ones() {
+        let mut layer = window().layers.remove(1);
+        assert_eq!(bounds(&layer), Some([0.15, 0.12, 0.7, 0.7]));
+        for bad in [
+            vec![],
+            vec![0.1, 0.1, 0.5],
+            vec![0.1, 0.1, 0.5, 0.5, 0.5],
+            vec![-0.01, 0.1, 0.5, 0.5],
+            vec![0.1, -0.01, 0.5, 0.5],
+            vec![0.1, 0.1, 0.0, 0.5],
+            vec![0.1, 0.1, 0.5, 0.0],
+            vec![0.1, 0.1, -0.2, 0.5],
+            vec![f64::NAN, 0.1, 0.5, 0.5],
+            vec![0.1, 0.1, f64::INFINITY, 0.5],
+        ] {
+            layer.bounds = bad.clone();
+            assert_eq!(bounds(&layer), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn min_fraction_caps_at_one_and_rejects_degenerate_areas() {
+        assert_eq!(
+            min_fraction((1000.0, 500.0), (160.0, 96.0)),
+            Some([0.16, 0.192])
+        );
+        assert_eq!(min_fraction((100.0, 50.0), (160.0, 96.0)), Some([1.0, 1.0]));
+        assert_eq!(min_fraction((0.5, 500.0), MIN_FLOATING_PT), None);
+        assert_eq!(min_fraction((500.0, 0.9), MIN_FLOATING_PT), None);
+        assert_eq!(min_fraction((0.0, 0.0), MIN_FLOATING_PT), None);
+        assert_eq!(min_fraction((-10.0, 500.0), MIN_FLOATING_PT), None);
+        assert_eq!(min_fraction((f32::NAN, 500.0), MIN_FLOATING_PT), None);
+        assert_eq!(min_fraction((f32::INFINITY, 500.0), MIN_FLOATING_PT), None);
+    }
+
+    #[test]
+    fn move_keeps_size_bit_identical_and_clamps_to_unit_square() {
+        let start = [0.2, 0.15, 0.37, 0.43];
+        let min = [0.16, 0.14];
+        for delta in [
+            [0.0, 0.0],
+            [0.1, -0.05],
+            [-5.0, -5.0],
+            [5.0, 5.0],
+            [0.9, -0.9],
+            [-0.9, 0.9],
+        ] {
+            let out = dragged(start, Grip::Move, delta, min);
+            assert_eq!(
+                out[2].to_bits(),
+                start[2].to_bits(),
+                "width changed for {delta:?}"
+            );
+            assert_eq!(
+                out[3].to_bits(),
+                start[3].to_bits(),
+                "height changed for {delta:?}"
+            );
+            assert!(out[0] >= 0.0 && out[1] >= 0.0);
+            assert!(out[0] + out[2] <= 1.0 && out[1] + out[3] <= 1.0, "{out:?}");
+            assert_eq!(sendable(out), Some(out));
+        }
+        assert_eq!(
+            dragged(start, Grip::Move, [-5.0, -5.0], min)[..2],
+            [0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn every_resize_grip_holds_its_opposite_edge_fixed_and_respects_bounds_and_min() {
+        let start = [0.2, 0.2, 0.5, 0.5];
+        let min = [0.2, 0.15];
+        let right = start[0] + start[2];
+        let bottom = start[1] + start[3];
+        let eps = 1e-12;
+
+        // Grow and shrink each of the 8 grips.
+        for &(grip, delta, expect_left, expect_right, expect_top, expect_bottom) in &[
+            (
+                Grip::West,
+                [-0.1, 0.2],
+                Some(0.1),
+                Some(right),
+                Some(0.2),
+                Some(bottom),
+            ),
+            (
+                Grip::East,
+                [0.15, -0.2],
+                Some(0.2),
+                Some(0.85),
+                Some(0.2),
+                Some(bottom),
+            ),
+            (
+                Grip::North,
+                [0.2, -0.1],
+                Some(0.2),
+                Some(right),
+                Some(0.1),
+                Some(bottom),
+            ),
+            (
+                Grip::South,
+                [-0.2, 0.2],
+                Some(0.2),
+                Some(right),
+                Some(0.2),
+                Some(0.9),
+            ),
+            (
+                Grip::NorthWest,
+                [-0.1, -0.05],
+                Some(0.1),
+                Some(right),
+                Some(0.15),
+                Some(bottom),
+            ),
+            (
+                Grip::NorthEast,
+                [0.1, -0.05],
+                Some(0.2),
+                Some(0.8),
+                Some(0.15),
+                Some(bottom),
+            ),
+            (
+                Grip::SouthWest,
+                [-0.1, 0.1],
+                Some(0.1),
+                Some(right),
+                Some(0.2),
+                Some(0.8),
+            ),
+            (
+                Grip::SouthEast,
+                [0.1, 0.1],
+                Some(0.2),
+                Some(0.8),
+                Some(0.2),
+                Some(0.8),
+            ),
+        ] {
+            let [x, y, w, h] = dragged(start, grip, delta, min);
+            if let Some(el) = expect_left {
+                assert!((x - el).abs() < eps, "{grip:?} left {x} != {el}");
+            }
+            if let Some(er) = expect_right {
+                assert!(
+                    ((x + w) - er).abs() < eps,
+                    "{grip:?} right {} != {er}",
+                    x + w
+                );
+            }
+            if let Some(et) = expect_top {
+                assert!((y - et).abs() < eps, "{grip:?} top {y} != {et}");
+            }
+            if let Some(eb) = expect_bottom {
+                assert!(
+                    ((y + h) - eb).abs() < eps,
+                    "{grip:?} bottom {} != {eb}",
+                    y + h
+                );
+            }
+        }
+
+        // Shrinking past `min` clamps to `min` without flipping the opposite edge.
+        let w_shrunk = dragged(start, Grip::West, [0.9, 0.0], min);
+        assert!((w_shrunk[2] - min[0]).abs() < eps);
+        assert!(((w_shrunk[0] + w_shrunk[2]) - right).abs() < eps);
+        let e_shrunk = dragged(start, Grip::East, [-0.9, 0.0], min);
+        assert_eq!(e_shrunk[0], start[0]);
+        assert!((e_shrunk[2] - min[0]).abs() < eps);
+        let n_shrunk = dragged(start, Grip::North, [0.0, 0.9], min);
+        assert!((n_shrunk[3] - min[1]).abs() < eps);
+        assert!(((n_shrunk[1] + n_shrunk[3]) - bottom).abs() < eps);
+        let s_shrunk = dragged(start, Grip::South, [0.0, -0.9], min);
+        assert_eq!(s_shrunk[1], start[1]);
+        assert!((s_shrunk[3] - min[1]).abs() < eps);
+
+        // Zero delta or non-finite delta returns `start` unchanged.
+        for grip in Grip::ALL {
+            assert_eq!(dragged(start, grip, [0.0, 0.0], min), start);
+            assert_eq!(dragged(start, grip, [f64::NAN, 0.1], min), start);
+            assert_eq!(dragged(start, grip, [0.1, f64::INFINITY], min), start);
+        }
+    }
+
+    #[test]
+    fn a_layer_already_smaller_than_min_is_never_forced_to_grow() {
+        let tiny = [0.4, 0.4, 0.05, 0.04];
+        let min = [0.25, 0.2];
+        // Shrinking further keeps its own smaller size; it never snaps up to `min`.
+        for (grip, delta) in [
+            (Grip::East, [-0.1, 0.0]),
+            (Grip::West, [0.1, 0.0]),
+            (Grip::South, [0.0, -0.1]),
+            (Grip::North, [0.0, 0.1]),
+            (Grip::SouthEast, [-0.1, -0.1]),
+            (Grip::NorthWest, [0.1, 0.1]),
+        ] {
+            let out = dragged(tiny, grip, delta, min);
+            assert!(out[2] <= tiny[2] + 1e-12, "{grip:?} grew width: {out:?}");
+            assert!(out[3] <= tiny[3] + 1e-12, "{grip:?} grew height: {out:?}");
+            assert!(
+                out[2] >= tiny[2] - 1e-12 && out[3] >= tiny[3] - 1e-12,
+                "{grip:?}: {out:?}"
+            );
+        }
+        // Moving keeps its tiny size bit-identical.
+        let moved = dragged(tiny, Grip::Move, [0.1, -0.1], min);
+        assert_eq!(moved[2].to_bits(), tiny[2].to_bits());
+        assert_eq!(moved[3].to_bits(), tiny[3].to_bits());
+        // Growing outward still works smoothly without jumping straight to `min`.
+        let grown = dragged(tiny, Grip::East, [0.02, 0.0], min);
+        assert!((grown[2] - 0.07).abs() < 1e-12, "{grown:?}");
+    }
+
+    #[test]
+    fn sendable_steps_rounding_overshoot_down_and_deterministic_sweep_always_passes() {
+        // 1 ulp above 1.0 in f64 (which the live API-13 server rejects) steps down strictly.
+        let over_x = [0.5, 0.1, f64::from_bits(0.5_f64.to_bits() + 2), 0.5];
+        assert!(over_x[0] + over_x[2] > 1.0);
+        let fixed = sendable(over_x).expect("stepped down");
+        assert!(fixed[0] + fixed[2] <= 1.0);
+        assert!(fixed[2] > 0.0);
+
+        let over_y = [0.1, 0.5, 0.5, f64::from_bits(0.5_f64.to_bits() + 2)];
+        assert!(over_y[1] + over_y[3] > 1.0);
+        let fixed_y = sendable(over_y).expect("stepped down");
+        assert!(fixed_y[1] + fixed_y[3] <= 1.0);
+        assert!(fixed_y[3] > 0.0);
+
+        // Exact 1.0 stays untouched.
+        assert_eq!(sendable([0.3, 0.2, 0.7, 0.8]), Some([0.3, 0.2, 0.7, 0.8]));
+        assert_eq!(sendable([0.0, 0.0, 1.0, 1.0]), Some([0.0, 0.0, 1.0, 1.0]));
+
+        // Invalid rectangles return None.
+        for bad in [
+            [-0.01, 0.0, 0.5, 0.5],
+            [0.0, -0.01, 0.5, 0.5],
+            [1.0, 0.0, 0.1, 0.5],
+            [0.0, 1.0, 0.5, 0.1],
+            [0.1, 0.1, 0.0, 0.5],
+            [0.1, 0.1, 0.5, 0.0],
+            [f64::NAN, 0.1, 0.5, 0.5],
+        ] {
+            assert_eq!(sendable(bad), None, "{bad:?}");
+        }
+
+        // Deterministic sweep across starts, areas, all 9 grips and extreme deltas.
+        let starts = [
+            [0.0, 0.0, 1.0, 1.0],
+            [0.15, 0.12, 0.7, 0.7],
+            [0.3, 0.2, 0.7, 0.8],
+            [0.01, 0.01, 0.05, 0.04],
+            [0.7, 0.7, 0.29999999999999993, 0.29999999999999993],
+            [
+                0.1234567890123456,
+                0.2345678901234567,
+                0.4567890123456789,
+                0.543210987654321,
+            ],
+        ];
+        let areas = [(616.0_f32, 404.0_f32), (1000.0, 624.0), (1920.0, 1080.0)];
+        let deltas = [-2.0, -0.7, -0.13, -1e-6, 0.0, 1e-6, 0.13, 0.7, 2.0];
+        for area in areas {
+            let min = min_fraction(area, MIN_FLOATING_PT).unwrap();
+            for start in starts {
+                for grip in Grip::ALL {
+                    for &dx in &deltas {
+                        for &dy in &deltas {
+                            let proposed = dragged(start, grip, [dx, dy], min);
+                            let [x, y, w, h] = sendable(proposed).unwrap_or_else(|| {
+                                panic!("not sendable: start={start:?} grip={grip:?} d=({dx},{dy}) -> {proposed:?}")
+                            });
+                            assert!(
+                                x >= 0.0
+                                    && y >= 0.0
+                                    && w > 0.0
+                                    && h > 0.0
+                                    && x + w <= 1.0
+                                    && y + h <= 1.0,
+                                "out of unit square: {:?}",
+                                [x, y, w, h]
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

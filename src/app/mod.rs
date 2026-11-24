@@ -14,6 +14,7 @@ mod downloads;
 mod downloads_view;
 mod find;
 mod floating;
+mod floating_drag;
 mod font_page;
 mod font_picker;
 mod font_size;
@@ -176,7 +177,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .key("window")
         .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward])
         .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
-            if s.panel.is_some() || s.drag.is_some() {
+            if s.panel.is_some() || s.drag.is_some() || s.layer_drag.is_some() {
                 return;
             }
             let action = match tx.button() {

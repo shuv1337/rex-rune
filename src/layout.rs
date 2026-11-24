@@ -73,6 +73,7 @@ fn shell_layout_sets_the_shell_and_theme_only_when_given() {
 pub struct Placement {
     pub block: String,
     pub rect: [f64; 4],
+    pub layer_index: usize,
 }
 #[derive(Clone, Debug)]
 pub struct Divider {
@@ -81,6 +82,7 @@ pub struct Divider {
     pub horizontal: bool,
     pub rect: [f64; 4],
     pub ratio: f64,
+    pub layer_index: usize,
 }
 impl Divider {
     pub fn key(&self) -> String {
@@ -89,17 +91,27 @@ impl Divider {
 }
 pub fn placements(window: &Window, drag: Option<(&str, f64)>) -> (Vec<Placement>, Vec<Divider>) {
     if let Some(block) = &window.zoomed_block_id {
+        let layer_index = window
+            .layers
+            .iter()
+            .position(|l| {
+                l.blocks
+                    .iter()
+                    .any(|b| b.block_id.as_deref() == Some(block.as_str()))
+            })
+            .unwrap_or(0);
         return (
             vec![Placement {
                 block: block.clone(),
                 rect: [0., 0., 1., 1.],
+                layer_index,
             }],
             vec![],
         );
     }
     let mut panes = Vec::new();
     let mut dividers = Vec::new();
-    for layer in &window.layers {
+    for (layer_index, layer) in window.layers.iter().enumerate() {
         // Its blocks keep running, but a minimized layer isn't drawn. Unknown states draw.
         if layer.state.as_deref() == Some("minimized") {
             continue;
@@ -110,7 +122,7 @@ pub fn placements(window: &Window, drag: Option<(&str, f64)>) -> (Vec<Placement>
                 .as_slice()
                 .try_into()
                 .unwrap_or([0., 0., 1., 1.]);
-            walk(node, rect, drag, &mut panes, &mut dividers);
+            walk(node, rect, layer_index, drag, &mut panes, &mut dividers);
         }
     }
     (panes, dividers)
@@ -123,6 +135,7 @@ fn first(node: &ViewLayoutNode) -> Option<&str> {
 fn walk(
     node: &ViewLayoutNode,
     rect: [f64; 4],
+    layer_index: usize,
     drag: Option<(&str, f64)>,
     panes: &mut Vec<Placement>,
     dividers: &mut Vec<Divider>,
@@ -131,6 +144,7 @@ fn walk(
         panes.push(Placement {
             block: block.clone(),
             rect,
+            layer_index,
         });
         return;
     }
@@ -156,6 +170,7 @@ fn walk(
             horizontal,
             rect,
             ratio,
+            layer_index,
         });
     }
     let [x, y, w, h] = rect;
@@ -170,8 +185,8 @@ fn walk(
             [x, y + h * ratio, w, h * (1. - ratio)],
         )
     };
-    walk(before, a, drag, panes, dividers);
-    walk(after, b, drag, panes, dividers);
+    walk(before, a, layer_index, drag, panes, dividers);
+    walk(after, b, layer_index, drag, panes, dividers);
 }
 
 /// Proposed resize requests that give each branch in a same-direction chain equal space.
@@ -260,24 +275,29 @@ fn beside(window: &Window, block: &str) -> Option<(Vec<Placement>, Vec<Divider>)
     if window.zoomed_block_id.is_some() {
         return None;
     }
-    window.layers.iter().find_map(|layer| {
-        if layer.state.as_deref() == Some("minimized") {
-            return None;
-        }
-        let (mut panes, mut dividers) = (Vec::new(), Vec::new());
-        // Only how panes lie against each other matters here, so the layer's own bounds do not.
-        walk(
-            layer.layout.as_ref()?,
-            [0., 0., 1., 1.],
-            None,
-            &mut panes,
-            &mut dividers,
-        );
-        panes
-            .iter()
-            .any(|pane| pane.block == block)
-            .then_some((panes, dividers))
-    })
+    window
+        .layers
+        .iter()
+        .enumerate()
+        .find_map(|(layer_index, layer)| {
+            if layer.state.as_deref() == Some("minimized") {
+                return None;
+            }
+            let (mut panes, mut dividers) = (Vec::new(), Vec::new());
+            // Only how panes lie against each other matters here, so the layer's own bounds do not.
+            walk(
+                layer.layout.as_ref()?,
+                [0., 0., 1., 1.],
+                layer_index,
+                None,
+                &mut panes,
+                &mut dividers,
+            );
+            panes
+                .iter()
+                .any(|pane| pane.block == block)
+                .then_some((panes, dividers))
+        })
 }
 
 /// The pane that lies against `side` of `block` in the server's layout: of several, the one
@@ -515,5 +535,29 @@ mod tests {
         // Stepping there and back leaves no rounding noise in the ratio.
         assert_eq!(resized(&at(0.3), "a", Side::Right).unwrap().ratio, 0.35);
         assert_eq!(resized(&at(0.35), "a", Side::Left).unwrap().ratio, 0.3);
+    }
+
+    #[test]
+    fn placements_and_dividers_carry_their_layer_index() {
+        let window: Window = serde_json::from_value(json!({"layers":[
+            {"kind":"tiled","bounds":[0,0,1,1],
+             "layout":{"split":{"direction":"horizontal","ratio":0.5,
+                "before":{"block_id":"t1"},"after":{"block_id":"t2"}}}},
+            {"kind":"floating","state":"minimized","bounds":[0.1,0.1,0.4,0.4],
+             "layout":{"block_id":"hidden"}},
+            {"kind":"floating","bounds":[0.2,0.15,0.6,0.6],
+             "layout":{"split":{"direction":"vertical","ratio":0.5,
+                "before":{"block_id":"f1"},"after":{"block_id":"f2"}}}}
+        ]}))
+        .unwrap();
+        let (panes, dividers) = placements(&window, None);
+        let pane_layers: Vec<(&str, usize)> = panes
+            .iter()
+            .map(|p| (p.block.as_str(), p.layer_index))
+            .collect();
+        assert_eq!(pane_layers, [("t1", 0), ("t2", 0), ("f1", 2), ("f2", 2)]);
+        let divider_layers: Vec<(String, usize)> =
+            dividers.iter().map(|d| (d.key(), d.layer_index)).collect();
+        assert_eq!(divider_layers, [("t1:t2".into(), 0), ("f1:f2".into(), 2)]);
     }
 }

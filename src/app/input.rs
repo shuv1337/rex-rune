@@ -294,6 +294,10 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if s.recording().is_some() {
         return super::recorder::key(s, ev, tx);
     }
+    if ev.key == Key::Escape && s.layer_drag.is_some() {
+        s.cancel_layer_drag();
+        return true;
+    }
     use super::platform::keys::{WindowMenuKey, window_menu_key};
     let window_key = window_menu_key(&ev.key, ev.mods);
     if let Some(panel) = &s.panel {

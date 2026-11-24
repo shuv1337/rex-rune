@@ -207,6 +207,7 @@ pub fn placement(s: &Workspace, window: &Window, block: &str) -> Placement {
     } else if rows(s, window) {
         Placement::Row
     } else if s.header_reveal.pinned
+        || s.grabbed_header() == Some(block)
         || s.settings.pane_header == PaneHeader::OnHover
             && s.header_reveal.hover.as_deref() == Some(block)
     {

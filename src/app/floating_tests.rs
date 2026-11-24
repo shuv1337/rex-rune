@@ -10,6 +10,8 @@ use crate::app::{
 use rex_rune::layers;
 use serde_json::{Value, json};
 
+#[path = "floating_tests/drag.rs"]
+mod drag;
 #[path = "floating_tests/history.rs"]
 mod history;
 

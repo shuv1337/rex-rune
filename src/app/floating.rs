@@ -61,7 +61,7 @@ impl Workspace {
         targets
     }
 
-    fn layer_target_in(
+    pub(super) fn layer_target_in(
         &self,
         host: usize,
         session: &str,
@@ -115,7 +115,7 @@ impl Workspace {
         }
     }
 
-    fn layer_host(&self, target: &LayerTarget) -> Option<usize> {
+    pub(super) fn layer_host(&self, target: &LayerTarget) -> Option<usize> {
         self.hosts
             .get(target.host)
             .filter(|host| host.id == target.host_id)
@@ -123,7 +123,7 @@ impl Workspace {
             .or_else(|| self.host_index(target.host_id))
     }
 
-    fn captured_layer_gate(&self, target: &LayerTarget) -> Option<layers::Blocked> {
+    pub(super) fn captured_layer_gate(&self, target: &LayerTarget) -> Option<layers::Blocked> {
         let Some(index) = self.layer_host(target) else {
             return Some(layers::Blocked::Stale);
         };
@@ -131,7 +131,7 @@ impl Workspace {
         layers::unsupported(model.connected, model.protocol.api_revision)
     }
 
-    fn layer_window(&self, target: &LayerTarget) -> Option<&Window> {
+    pub(super) fn layer_window(&self, target: &LayerTarget) -> Option<&Window> {
         let model = &self.hosts[self.layer_host(target)?].model;
         if model.connection_epoch != target.epoch
             || !model

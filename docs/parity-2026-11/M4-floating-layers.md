@@ -270,17 +270,19 @@ menu still scrolls there.
   lands on the row the keyboard already had. Pointer and keyboard histories cover reorder,
   same-index hover and removal; the keyboard-only identity tests are unchanged.
 
-## Limits, and what slice 2 still owns
+## Limits, and slice 2 follow-up
 
-- **No pointer drag or edge resize.** `resize_layer` is in the verified contract but no handle,
-  move or resize pointer operation is offered or claimed here.
+- **Pointer drag and edge resize (shipped in slice 2):** slice 1 intentionally shipped verbs
+  only; header drag-move, 8-way edge/corner resize via `session.resize_layer`, per-layer
+  tiled-divider z-order, and quantitative two-client geometry convergence are now shipped in
+  [M4-floating-drag-resize.md](M4-floating-drag-resize.md), completing #136.
 - **No multi-pane creation or group editing.** New floating layers have one pane; a multi-pane
   layer made by another client (here: a split beside a floating pane) is listed, focused, raised
   and closed with all its panes named, natively for one such layer and in the headless suite for
   membership changes mid-confirmation.
-- **The two-client check is terminal text, not geometry.** The second client's capture is read
-  by OCR to show it renders the same floating pane; the two clients' rectangles are not compared
-  quantitatively. Convergence of geometry is slice 2's to prove.
+- **Slice 1's two-client check was terminal text; slice 2 proves geometry convergence.**
+  Quantitative two-client rectangle convergence is verified in
+  `scripts/floating-drag-private.py` ([M4-floating-drag-resize.md](M4-floating-drag-resize.md)).
 - Revisions 10–12 are unproven and therefore disabled; proving them needs older server binaries.
   The server's own refusals (last-visible minimize, tiled-layer close, out-of-window bounds) are
   documented rules; the client refuses the ones it can decide first and reports the rest as
