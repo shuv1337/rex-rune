@@ -753,8 +753,7 @@ impl crate::api::Method for TailscaleRename {
 /// The result of [`Version`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub struct VersionResponse {
-    /// The version of Rex the server runs, as rex version prints it, such as
-    /// 0.0.1780750825-g9a754d.
+    /// The version of Rex the server runs, as rex version prints it, such as 1.2.0-snapshot.214.
     pub rex_version: String,
     /// The operating system and CPU the server was built for, such as darwin_arm64 or linux_amd64.
     pub platform: String,

@@ -271,8 +271,8 @@ pub struct ServerStatus {
     pub listeners: Vec<Listener>,
 }
 
-/// The session the server chose and attached. Null if you sent attach_session_ids or there are no
-/// sessions.
+/// The session the server chose and attached. Null if you sent attach_session_ids, or if no session
+/// could be attached.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub struct SelectedSession {
     /// The session's entry from attach_all.
@@ -320,12 +320,12 @@ pub struct BootstrapResponse {
     /// What session.attach_all returns: every session on the server when this connection started
     /// receiving events.
     pub attach_all: AttachAllResponse,
-    /// The session the server chose and attached. Null if you sent attach_session_ids or there are
-    /// no sessions.
+    /// The session the server chose and attached. Null if you sent attach_session_ids, or if no
+    /// session could be attached.
     #[serde(default)]
     pub selected_session: Option<SelectedSession>,
     /// The sessions attached from attach_session_ids, in the order requested. Sessions that don't
-    /// exist are left out.
+    /// exist are left out, and so may be sessions that are being destroyed.
     #[serde(
         default,
         deserialize_with = "crate::api::nullable",
@@ -410,8 +410,8 @@ pub struct Bootstrap {
     /// session_created, session_destroyed, session_moved, and tailscale_status_changed. 'all' also
     /// sends block_event and the client events, such as client_joined.
     pub event_scope: String,
-    /// The session to attach to, if it exists. Otherwise the server attaches the first session.
-    /// Ignored when attach_session_ids is set.
+    /// The session to attach to, if it exists. Otherwise the server attaches the first session it
+    /// can. Ignored when attach_session_ids is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_session_id: Option<String>,
     /// The sessions to attach to, in order. Unknown and repeated IDs are skipped, and an empty list
@@ -439,8 +439,8 @@ impl Bootstrap {
         }
     }
 
-    /// The session to attach to, if it exists. Otherwise the server attaches the first session.
-    /// Ignored when attach_session_ids is set.
+    /// The session to attach to, if it exists. Otherwise the server attaches the first session it
+    /// can. Ignored when attach_session_ids is set.
     pub fn preferred_session_id(mut self, value: impl Into<String>) -> Self {
         self.preferred_session_id = Some(value.into());
         self
@@ -537,6 +537,10 @@ pub struct CloseWindowResponse {
 ///
 /// - The server closes every block in the window, which ends the programs running in them. The
 ///   call returns once the blocks have closed.
+/// - If `undoable` is true and the caller is a client attached to the session, the server instead
+///   keeps the window's blocks running, out of every window, for about a minute, so that
+///   `client.undo_close` can put the window back. `block_closed` arrives for each block only once
+///   it is freed.
 /// - If the window was active, the window after it becomes active, or the one before it if it was
 ///   last.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If `window_id` names
@@ -562,6 +566,11 @@ pub struct CloseWindow {
     /// The window to close. Leave it out to close the active window. Every block in it closes too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+    /// If true, hold the window's blocks for about a minute so that the calling client can bring
+    /// the window back with client.undo_close. Send it when a person closed the window. It only has
+    /// an effect for a client attached to the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undoable: Option<bool>,
 }
 
 impl CloseWindow {
@@ -570,12 +579,21 @@ impl CloseWindow {
         Self {
             session_id: session_id.into(),
             window_id: Default::default(),
+            undoable: Default::default(),
         }
     }
 
     /// The window to close. Leave it out to close the active window. Every block in it closes too.
     pub fn window_id(mut self, value: impl Into<String>) -> Self {
         self.window_id = Some(value.into());
+        self
+    }
+
+    /// If true, hold the window's blocks for about a minute so that the calling client can bring
+    /// the window back with client.undo_close. Send it when a person closed the window. It only has
+    /// an effect for a client attached to the session.
+    pub fn undoable(mut self, value: bool) -> Self {
+        self.undoable = Some(value);
         self
     }
 }
@@ -658,7 +676,9 @@ impl CreateInitialWindow {
 /// - The server sends `session_created` only once every window in `initial_windows` is ready, so
 ///   no client sees a half-built session. If any window fails, the server closes the session and
 ///   its blocks, and the call fails.
-/// - The calling client becomes the owner of every block in the initial windows.
+/// - The blocks in the initial windows start with no owner, because the calling client can't be
+///   attached to a session that doesn't exist yet. To own them, call `session.attach` and then
+///   `session.own_block`.
 /// - The call doesn't attach the connection to the new session. Call `session.attach` to receive
 ///   its events.
 /// - If a layout is malformed, the call fails with `bad_request` before any block is created. A
@@ -878,6 +898,12 @@ impl crate::api::Method for DescribeBlock {
 ///   program running in it, as closing a terminal window does.
 /// - The call returns once the session has closed. `session_destroyed` is the last event about
 ///   the session, though a `client_script_events_dropped` event for it can still follow.
+/// - If `undoable` is true, the caller is attached to the session with `session.attach` or
+///   `session.bootstrap`, and the session has a window, the server instead keeps the session for
+///   about a minute, hidden, with its blocks running, so that `client.undo_close` can bring it
+///   back. To every client it is destroyed all the same: every client is detached,
+///   `session_destroyed` goes out, and requests that name it fail with `session_not_found`. No
+///   `block_closed` events go out, then or when the server closes the session for good.
 /// - The connection must be attached to the session, with `session.attach`, `session.bootstrap`,
 ///   or `session.attach_all`, or the call fails with `conflict`.
 /// - If `session_id` names no session, the call fails with `session_not_found`.
@@ -896,6 +922,11 @@ impl crate::api::Method for DescribeBlock {
 pub struct Destroy {
     /// The session to destroy. Every block in it closes.
     pub session_id: String,
+    /// If true, hold the session for about a minute, hidden, so that the calling client can bring
+    /// it back with client.undo_close. Send it when a person destroyed the session. It only has an
+    /// effect for a client attached to the session, and for a session that has a window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undoable: Option<bool>,
 }
 
 impl Destroy {
@@ -903,7 +934,16 @@ impl Destroy {
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
+            undoable: Default::default(),
         }
+    }
+
+    /// If true, hold the session for about a minute, hidden, so that the calling client can bring
+    /// it back with client.undo_close. Send it when a person destroyed the session. It only has an
+    /// effect for a client attached to the session, and for a session that has a window.
+    pub fn undoable(mut self, value: bool) -> Self {
+        self.undoable = Some(value);
+        self
     }
 }
 
@@ -1122,7 +1162,8 @@ impl Bounds {
 /// - `bounds` is measured from the window's top-left corner. Its width and height must be greater
 ///   than 0.
 /// - The new layer is in the block's own window, in front of every other floating layer there.
-/// - Focus and the active window don't change. If the window was zoomed, the zoom ends.
+/// - Focus and the active window don't change. If the block was the zoomed block of the window's
+///   layout, that zoom ends, because the block has left the layout. Any other zoom stays.
 /// - Floating the last block of a window's layout leaves the layout empty. The window stays open,
 ///   and its layer of kind `tiled` in `session.view` keeps the same `layer_id`.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If `block_id` names a
@@ -1180,8 +1221,10 @@ pub struct FocusBlockResponse {
 
 /// Focus a block, and make its window the active window if it isn't.
 ///
-/// - The block can be in the window's layout or in a floating layer. If it isn't already its
-///   window's focused block, any zoom in that window ends.
+/// - The block can be in the window's layout or in a floating layer.
+/// - A zoomed block of a floating layer loses its zoom when focus moves to any other block. A
+///   zoomed block of the window's layout loses it only when focus moves to a different block of
+///   that layout, and stays zoomed behind a floating layer that takes focus.
 /// - If the block already has focus in the active window, the call changes nothing.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If `block_id` names a
 ///   block that isn't in any window, including a detached block, it fails with `not_found`.
@@ -1252,7 +1295,7 @@ pub enum Direction {
 ///   window, floating layers included, by where each appears on screen. When two blocks are
 ///   equally close, the one in front wins.
 /// - If no block lies in `direction`, focus doesn't change and the call still succeeds. Moving
-///   focus ends any zoom in the window.
+///   focus ends a zoom as `session.focus_block` describes.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If the session has no
 ///   windows, it fails with `conflict`.
 ///
@@ -1316,7 +1359,7 @@ pub struct FocusNextPaneResponse {
 /// - Blocks are in layout order: the window's layout first, reading each split's `before` side
 ///   ahead of its `after` side, then each floating layer from back to front.
 /// - If there's no next block, focus doesn't change and the call still succeeds. Moving focus
-///   ends any zoom in the window.
+///   ends a zoom as `session.focus_block` describes.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If the session has no
 ///   windows, it fails with `conflict`.
 ///
@@ -1431,7 +1474,7 @@ pub struct FocusPreviousPaneResponse {
 /// - Blocks are in layout order: the window's layout first, reading each split's `before` side
 ///   ahead of its `after` side, then each floating layer from back to front.
 /// - If there's no previous block, focus doesn't change and the call still succeeds. Moving focus
-///   ends any zoom in the window.
+///   ends a zoom as `session.focus_block` describes.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If the session has no
 ///   windows, it fails with `conflict`.
 ///
@@ -1765,10 +1808,12 @@ pub struct Info {
     /// client didn't say. Treat a platform you don't know as other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-    /// The program's name, such as Rex.app or rex.
+    /// The program's name, such as Rex.app or rex. If it is longer than 256 bytes, the server keeps
+    /// only the first 256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The program's version, as the program prints it, such as 1.6.0.
+    /// The program's version, as the program prints it, such as 1.6.0. If it is longer than 256
+    /// bytes, the server keeps only the first 256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// The client's label, such as studio. Two clients can share a label.
@@ -1984,7 +2029,9 @@ pub struct MoveBlockResponse {
 /// - The block and the anchor can be in different windows or layers.
 /// - If the block had focus in its window, focus moves with it and its new window becomes active.
 ///   A detached block doesn't take focus.
-/// - Zoom ends in every window the move changes.
+/// - A zoom follows its block. Moving another block doesn't end it. Moving the zoomed block of
+///   the window's layout to a floating layer or another window ends its zoom. A zoomed block that
+///   keeps focus in a floating layer stays zoomed.
 /// - If the move empties a floating layer, the server removes it. If it empties a whole window,
 ///   the server closes the window. A window's layout that empties while the window still has
 ///   floating layers stays, with the same `layer_id`.
@@ -2156,7 +2203,8 @@ pub struct NewBlockResponse {
 /// - The server passes `options` to the flavor's creator unchanged.
 /// - The block starts detached: it runs, sends events, and answers method calls, but no window
 ///   shows it. `session.move_block` can place it beside a block that is in a window.
-/// - The calling client becomes the block's owner.
+/// - If the calling client is attached to the session, it becomes the block's owner. Otherwise
+///   the block has no owner until an attached client claims it with `session.own_block`.
 /// - A malformed `flavor` or `label` fails with `bad_request`. A flavor that no creator provides
 ///   fails with `not_found`.
 /// - If the server already has as many blocks as it allows, the call fails with `conflict`.
@@ -2246,6 +2294,9 @@ pub struct NewLayerResponse {
 /// - `layout` always starts new blocks. To move a block that is already in a window's layout into
 ///   a floating layer, use `session.float_block`.
 /// - The new layer starts in front of every other floating layer in the window.
+/// - A zoomed block of the window's layout stays zoomed behind the new layer, whether or not
+///   `focus` is set. A zoomed block of another floating layer loses its zoom only if `focus`
+///   takes focus from it.
 /// - Either the whole layout is created or none of it is. If a block fails to start, the server
 ///   closes the blocks it already started, and the call fails.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If `window_id` names
@@ -2352,7 +2403,9 @@ pub struct NewSplitResponse {
 /// - In a `split` node, `direction` is `horizontal` to put `before` on the left of `after`, or
 ///   `vertical` to put it on top. `ratio` is the fraction of the space that `before` gets,
 ///   greater than 0 and less than 1. It defaults to 0.5.
-/// - Any zoom in the window ends, whether or not `focus` is set.
+/// - A new split doesn't end a zoom by itself. If `focus` is set, focus moves to the new block,
+///   and that ends a zoom as `session.focus_block` describes. Without `focus`, a zoomed block
+///   stays zoomed and the new blocks are hidden behind it.
 /// - If `anchor_id` is a split ID, the new split takes that split's place. The old split, with
 ///   everything under it, goes on one side and `layout` on the other. Anchoring a layer's top
 ///   split makes the new blocks span the whole layer. A layer with one block has no split, so
@@ -3044,8 +3097,9 @@ pub struct SetLayerStateResponse {
 ///   running, and it keeps its bounds and its place in the stack. `state` is left out for a
 ///   normal layer.
 /// - Minimizing the layer that has focus moves focus to the layer used before it, or to the
-///   nearest visible pane, and clears zoom. Returning a layer to normal leaves focus where it is.
-///   Setting the state the layer already has changes nothing.
+///   nearest visible pane. That ends a zoom in the layer. A zoomed block of the window's layout
+///   stays zoomed unless focus lands on a different block of that layout. Returning a layer to
+///   normal leaves focus where it is. Setting the state the layer already has changes nothing.
 /// - A window must keep a visible pane, so minimizing the layer that holds its last visible panes
 ///   fails with `bad_request`.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If `layer_id` names
@@ -3189,6 +3243,9 @@ pub struct SwapBlocksResponse {
 ///   stay the same.
 /// - If one of the blocks has focus in the active window, focus follows it to its new place, and
 ///   that place's window becomes active.
+/// - A zoom follows its block, so the other block doesn't take it over. A zoomed block stays
+///   zoomed if it is still where its zoom allows: in the window's layout for that zoom, or
+///   focused in a floating layer. Otherwise the zoom ends.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If `block_id` and
 ///   `other_block_id` are the same, it fails with `bad_request`. If either block isn't in any
 ///   window, including a detached block, it fails with `not_found`.
@@ -3332,10 +3389,16 @@ pub struct Window {
     /// the window has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_block_id: Option<String>,
-    /// The block zoomed to fill the window, if any. Layouts keep their normal sizes, so draw this
-    /// block over the whole window.
+    /// The focused block, if it is zoomed to fill the window. If it equals tiled_zoomed_block_id,
+    /// draw it as that field says. Otherwise it is in a floating layer, so draw it over the whole
+    /// window, in front of every layer. Layouts keep their normal sizes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zoomed_block_id: Option<String>,
+    /// The block of the tiled layer zoomed to fill the window, if any. Focus can be on it or in a
+    /// floating layer. Draw it over the whole window, behind the floating layers. Layouts keep
+    /// their normal sizes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiled_zoomed_block_id: Option<String>,
     /// The window's layers, from back to front. The first is the tiled layer, which holds the
     /// window's layout and fills the window.
     #[serde(default, deserialize_with = "crate::api::nullable")]
@@ -3345,8 +3408,9 @@ pub struct Window {
 /// The result of [`View`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub struct ViewResponse {
-    /// The view's revision. It goes up by one with every change, so a larger revision is a newer
-    /// view of the session.
+    /// The view's revision. A larger revision is a newer view of the session, even across a server
+    /// restart. It goes up by one with each change, and jumps ahead when a restarted server
+    /// restores the session.
     pub revision: u64,
     /// The session's ID.
     #[serde(default)]
@@ -3428,8 +3492,16 @@ pub struct ZoomBlockResponse {
 ///
 /// - With `block_id`, the server first focuses the block and makes its window active, as
 ///   `session.focus_block` does. With `window_id`, focus and the active window don't change.
-/// - Zoom changes only what is shown. The layout stays the same, and the zoom ends when focus
-///   moves to another block in the window.
+/// - A window has two zooms, one for its layout and one for its floating layers, and both can be
+///   on at once. The call changes the one for the layer the block is in. `session.view` reports
+///   them as `tiled_zoomed_block_id` and `zoomed_block_id`.
+/// - A zoomed block of the window's layout is shown behind the floating layers. It stays zoomed
+///   while a floating layer has focus, and the zoom ends when focus moves to a different block of
+///   the layout. A zoomed block of a floating layer is shown in front of everything, and its zoom
+///   ends when focus moves to any other block.
+/// - Zoom changes only what is shown. The layout stays the same. A change to a layout, such as a
+///   new split, doesn't end a zoom unless it moves focus as above or takes the zoomed block out
+///   of the window's layout.
 /// - If the session doesn't exist, the call fails with `session_not_found`. If `block_id` names a
 ///   block that isn't in any window, or `window_id` names a window that isn't in the session, it
 ///   fails with `not_found`. Sending both fails with `bad_request`.

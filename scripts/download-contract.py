@@ -174,7 +174,7 @@ class WS:
 class Control:
     """One control connection (rex.control.v1), with a transcript of every request."""
 
-    def __init__(self, rev=13, minimum=10, name="download-contract", log_requests=True):
+    def __init__(self, rev=21, minimum=10, name="download-contract", log_requests=True):
         self.ws = WS("/api/control", "rex.control.v1")
         self.log_requests = log_requests
         self.n = 0
@@ -1717,7 +1717,7 @@ def revisions(ctx):
         try:
             ver = subprocess.run([ctx.rex12, "version"], capture_output=True, text=True).stdout
             result["api12_binary_version"] = ver
-            ctl = Control(rev=13, minimum=0, name="to-api12")
+            ctl = Control(rev=21, minimum=0, name="to-api12")
             result["api12_negotiated"] = ctl.revision
             session, block = ctl.new_session("rev12")
             reply = ctl.probe(str(path))
@@ -1803,7 +1803,7 @@ class Ctx:
 def main():
     global OUT, FX, SOCK, SERVER_PID, TRANSCRIPT
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--rex", default=shutil.which("rex"), help="rex binary for the private server (API 13)")
+    parser.add_argument("--rex", default=shutil.which("rex"), help="rex binary for the private server (API 13+)")
     parser.add_argument("--rex12", default=None, help="an API 12 rex binary, to see what it answers")
     parser.add_argument("--out", default=str(Path.home() / ".cache/agent-ws/rex-downloads/d0"))
     parser.add_argument("--quick", action="store_true", help="skip scenarios that wait for minutes")
@@ -1835,7 +1835,7 @@ def main():
         ctx.ctl = Control()
         status = ctx.ctl.call("server.status")["payload"]
         print("server API revision", status.get("api_revision"), flush=True)
-        check("the private server speaks API revision 13", status.get("api_revision") == 13, status)
+        check("the private server speaks API revision 13 or newer", (status.get("api_revision") or 0) >= 13, status)
         failed = []
         for name, fn, slow in SCENARIOS:
             if (only and name not in only) or (slow and args.quick and not only):

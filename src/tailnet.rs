@@ -292,7 +292,7 @@ pub async fn probe_endpoint(endpoint: &str) -> Result<Probe> {
     .await
     .context("Rex discovery timed out")??;
     let (listeners, reason) =
-        match crate::transport::control_from_socket(socket, None, "Rex Rune (discovery)").await {
+        match crate::transport::discovery_from_socket(socket, "Rex Rune (discovery)").await {
             Ok(mut control) => {
                 let listeners = listeners(&mut control).await;
                 let _ =
@@ -511,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::result_large_err)] // tungstenite's handshake callback type
-    async fn discovery_reads_only_status_on_revisions_10_through_13() {
+    async fn discovery_reads_only_status_on_revisions_10_through_21() {
         use futures_util::{SinkExt, StreamExt};
         use serde_json::{Value, json};
         use tokio_tungstenite::tungstenite::Message;
@@ -526,6 +526,11 @@ mod tests {
             ),
             (
                 13,
+                json!({"listeners":[{"endpoint":"127.0.0.1:0","addresses":["127.0.0.1:4567"],"transport":"tcp","admission":"anonymous"}]}),
+                1,
+            ),
+            (
+                21,
                 json!({"listeners":[{"endpoint":"127.0.0.1:0","addresses":["127.0.0.1:4567"],"transport":"tcp","admission":"anonymous"}]}),
                 1,
             ),
@@ -550,6 +555,7 @@ mod tests {
                         .unwrap();
                 assert_eq!(hello["type"], "hello");
                 assert_eq!(hello["client"]["name"], "Rex Rune (discovery)");
+                assert_eq!(hello["client"]["kind"], "other");
                 ws.send(Message::Text(json!({"type":"welcome","protocol":"rex.control.v1","api_revision":revision,
                     "limits":{"max_message_bytes":65536},"client":{"id":"client:probe","reconnect_token":"probe"}}).to_string().into())).await.unwrap();
                 if revision == 9 {

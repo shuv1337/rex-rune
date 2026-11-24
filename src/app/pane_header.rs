@@ -140,7 +140,7 @@ pub enum Placement {
 
 /// One pane and nothing zoomed.
 fn single(window: &Window) -> bool {
-    window.zoomed_block_id.is_none() && layout::placements(window, None).0.len() == 1
+    !layout::any_zoomed(window) && layout::placements(window, None).0.len() == 1
 }
 
 /// Whether Zoom has anything to do in this tab: it zooms one pane of several, or restores
@@ -236,7 +236,7 @@ impl Workspace {
 }
 
 fn zoomed(window: &Window, block: &str) -> bool {
-    window.zoomed_block_id.as_deref() == Some(block)
+    layout::is_zoomed(window, block)
 }
 
 /// The quiet word beside the name of a pane that fills its tab while the others wait.

@@ -996,6 +996,96 @@ fn minimum_640x480_extremes_stay_sendable_and_lone_full_bleed_has_no_grips() {
     assert_eq!((GRIP_OUTSIDE, GRIP_INSIDE), (4.0, 3.0));
 }
 
+#[test]
+fn floating_cards_grips_and_drag_work_over_tiled_zoom_with_stable_tiled_geometry() {
+    let (mut ws, intended) = floating_workspace(
+        21,
+        vec![
+            tiled(&["block:a", "block:b"]),
+            layer_at("floating", [0.25, 0.2, 0.5, 0.5], &["block:f"]),
+        ],
+        "block:a",
+    );
+    {
+        let window = &mut ws.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window.zoomed_block_id = Some("block:a".into());
+        window.tiled_zoomed_block_id = Some("block:a".into());
+    }
+    let mut rt = runtime_at(ws, (1280.0, 800.0));
+    draw(&mut rt);
+    let _ = intended.try_iter().count();
+
+    // Zoomed tiled pane fills the pane area, hidden tiled sibling is absent, and the floating
+    // pane with its resize grips draws on top.
+    assert!(has_el(&rt, "pane:block:a"));
+    assert!(!has_el(&rt, "pane:block:b"));
+    assert!(has_el(&rt, "pane:block:f"));
+    assert!(has_el(&rt, "pane-zoomed:block:a"));
+    assert!(!has_el(&rt, "pane-zoomed:block:f"));
+    assert!(
+        grip_count(&rt) > 0,
+        "floating grips must stay active over tiled zoom"
+    );
+    let tiled_rect_when_tiled_focused = rect_of(&rt, "pane:block:a");
+
+    // Moving focus to the floating pane clears `zoomed_block_id` while keeping
+    // `tiled_zoomed_block_id` set (API 21 server state): zoomed tiled pane keeps exact rect.
+    sync_wake(&mut rt, |s| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window.focused_block_id = Some("block:f".into());
+        window.zoomed_block_id = None;
+        window.tiled_zoomed_block_id = Some("block:a".into());
+    });
+    assert_eq!(
+        rect_of(&rt, "pane:block:a"),
+        tiled_rect_when_tiled_focused,
+        "moving focus to floating pane must not resize the zoomed tiled pane"
+    );
+    assert!(has_el(&rt, "pane-zoomed:block:a"));
+    assert!(!has_el(&rt, "pane-zoomed:block:f"));
+    assert!(grip_count(&rt) > 0);
+
+    // Pane menu / Commands labels reflect each pane's own zoom state accurately.
+    rt.state.pane_menu("block:a".into(), None);
+    assert!(
+        rt.state.entries().iter().any(|e| e.label == "Restore pane"),
+        "tiled-zoomed pane must offer Restore pane even while floating pane is focused"
+    );
+    rt.state.panel = None;
+    rt.state.pane_menu("block:f".into(), None);
+    assert!(
+        rt.state.entries().iter().any(|e| e.label == "Zoom pane"),
+        "unzoomed floating pane over tiled zoom must offer Zoom pane"
+    );
+    rt.state.panel = None;
+    draw(&mut rt);
+
+    // Dragging the floating pane's header commits a ResizeLayer while tiled zoom stays active.
+    let hdr = rect_of(&rt, "pane-header:block:f");
+    let (sx, sy) = (hdr[0] + 40.0, hdr[1] + hdr[3] / 2.0);
+    rt.pointer_move(sx, sy);
+    rt.pointer_down(sx, sy);
+    rt.pointer_move(sx + 40.0, sy + 24.0);
+    draw(&mut rt);
+    assert!(has_el(&rt, "layer-drag-ghost:floating"));
+    rt.pointer_up(sx + 40.0, sy + 24.0);
+    draw(&mut rt);
+    let sent = resizes(&intended);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].layer, "floating");
+
+    // Floating zoom (`zoomed_block_id != tiled_zoomed_block_id`) covers the full window and
+    // removes floating resize grips.
+    sync_wake(&mut rt, |s| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window.zoomed_block_id = Some("block:f".into());
+        window.tiled_zoomed_block_id = Some("block:a".into());
+    });
+    assert!(has_el(&rt, "pane:block:f"));
+    assert!(!has_el(&rt, "pane:block:a"));
+    assert_eq!(grip_count(&rt), 0);
+}
+
 /// Real fonts are process-global: run each capture on its own with `REX_TEST_SNAP_DIR`.
 #[test]
 fn floating_drag_ghost_draw() {

@@ -60,7 +60,7 @@ impl Workspace {
         let Some(window) = self.model().window() else {
             return false;
         };
-        window.zoomed_block_id.is_none() && !full_bleed(self, window)
+        rex_rune::layout::full_window_zoom(window).is_none() && !full_bleed(self, window)
     }
 
     /// The block whose floating header is currently held by a pointer move gesture.
@@ -282,7 +282,7 @@ impl Workspace {
         else {
             return Err(Some(Blocked::ChangedDuringDrag));
         };
-        if window.zoomed_block_id.is_some() || full_bleed(self, window) {
+        if rex_rune::layout::full_window_zoom(window).is_some() || full_bleed(self, window) {
             return Err(Some(Blocked::ChangedDuringDrag));
         }
         let Some(layer) = self.current_layer(&drag.target) else {

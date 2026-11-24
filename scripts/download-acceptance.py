@@ -1027,7 +1027,7 @@ def final_checks():
 def main():
     print("Private download-acceptance artifacts:", work, flush=True)
     rex13 = Server("api13", REX)
-    assert rex13.revision == 13, f"rex on PATH is API {rex13.revision}, not 13"
+    assert rex13.revision >= 13, f"rex on PATH is API {rex13.revision}, expected >= 13"
     make_fixtures(rex13.home)
     rex12 = None
     if Path(REX12).exists():

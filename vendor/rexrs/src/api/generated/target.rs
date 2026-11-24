@@ -55,17 +55,19 @@ pub struct CompleteResponse {
     pub completions: Vec<Completion>,
 }
 
-/// Where the caller is. Only session_id is used: without scope.session, windows and blocks come
-/// from that session.
+/// Where the caller is. Only the caller's session is used, found from block_id or session_id as in
+/// target.resolve. Without scope.session, windows and blocks come from that session.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 #[non_exhaustive]
 pub struct Context {
-    /// The caller's session. Without scope.session, windows and blocks are searched only in this
-    /// session, and an empty session query selects it.
+    /// The caller's session. It's used only when block_id is left out or no longer names an open
+    /// block. Without scope.session, windows and blocks are searched only in the caller's session,
+    /// and an empty session query selects it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// The caller's block, such as the terminal a script runs in. In target.resolve, empty block
-    /// and window queries default to it and its window.
+    /// The caller's block, such as the terminal a script runs in. The session that holds it is the
+    /// caller's session, even if session_id names another. In target.resolve, empty block and
+    /// window queries default to it and its window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_id: Option<String>,
     /// The caller's own client. In target.resolve, an empty client query selects it if it's among
@@ -84,15 +86,17 @@ impl Context {
         }
     }
 
-    /// The caller's session. Without scope.session, windows and blocks are searched only in this
-    /// session, and an empty session query selects it.
+    /// The caller's session. It's used only when block_id is left out or no longer names an open
+    /// block. Without scope.session, windows and blocks are searched only in the caller's session,
+    /// and an empty session query selects it.
     pub fn session_id(mut self, value: impl Into<String>) -> Self {
         self.session_id = Some(value.into());
         self
     }
 
-    /// The caller's block, such as the terminal a script runs in. In target.resolve, empty block
-    /// and window queries default to it and its window.
+    /// The caller's block, such as the terminal a script runs in. The session that holds it is the
+    /// caller's session, even if session_id names another. In target.resolve, empty block and
+    /// window queries default to it and its window.
     pub fn block_id(mut self, value: impl Into<String>) -> Self {
         self.block_id = Some(value.into());
         self
@@ -110,8 +114,9 @@ impl Context {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 #[non_exhaustive]
 pub struct Scope {
-    /// The session to search in, named by ID, label, or the end of its ID. A client search then
-    /// covers only clients attached to it.
+    /// The session to search in, named by ID, label, or the end of its ID. The full ID of a block,
+    /// such as $REX_BLOCK, names the session that holds it. A client search then covers only
+    /// clients attached to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
     /// The window to search in, named by ID, label, position, or the end of its ID. Allowed only
@@ -129,8 +134,9 @@ impl Scope {
         }
     }
 
-    /// The session to search in, named by ID, label, or the end of its ID. A client search then
-    /// covers only clients attached to it.
+    /// The session to search in, named by ID, label, or the end of its ID. The full ID of a block,
+    /// such as $REX_BLOCK, names the session that holds it. A client search then covers only
+    /// clients attached to it.
     pub fn session(mut self, value: impl Into<String>) -> Self {
         self.session = Some(value.into());
         self
@@ -147,8 +153,9 @@ impl Scope {
 /// List the labels, window positions, and short IDs that start with a prefix. Use it to complete a
 /// name as someone types it.
 ///
-/// - `kinds`, `scope`, and `context.session_id` choose what to search the same way as in
-///   `target.resolve`, and the call fails with `bad_request` in the same cases.
+/// - `kinds`, `scope`, and `context` choose what to search the same way as in `target.resolve`,
+///   and the call fails with `bad_request` in the same cases. Only the caller's session is taken
+///   from `context`.
 /// - `prefix` matches the start of labels, ignoring case, and label completions keep the label's
 ///   own case. White space around `prefix` is ignored. A control character inside it, such as a
 ///   tab, fails the call with `bad_request`.
@@ -175,7 +182,7 @@ impl Scope {
 /// {
 ///   "kinds": ["block", "window"],
 ///   "prefix": "s",
-///   "context": { "session_id": "session:<uuid>" }
+///   "context": { "block_id": "block:<uuid>" }
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
@@ -188,8 +195,8 @@ pub struct Complete {
     /// The text typed so far. It matches the start of labels (ignoring case), window positions, and
     /// short IDs. An empty prefix matches everything.
     pub prefix: String,
-    /// Where the caller is. Only session_id is used: without scope.session, windows and blocks come
-    /// from that session.
+    /// Where the caller is. Only the caller's session is used, found from block_id or session_id as
+    /// in target.resolve. Without scope.session, windows and blocks come from that session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Context>,
     /// Limits completion to one session, or block completion to one window, as in target.resolve.
@@ -211,8 +218,8 @@ impl Complete {
         }
     }
 
-    /// Where the caller is. Only session_id is used: without scope.session, windows and blocks come
-    /// from that session.
+    /// Where the caller is. Only the caller's session is used, found from block_id or session_id as
+    /// in target.resolve. Without scope.session, windows and blocks come from that session.
     pub fn context(mut self, value: Context) -> Self {
         self.context = Some(value);
         self
@@ -307,27 +314,36 @@ pub struct ResolveResponse {
 /// - A query that starts like a full ID, such as `block:`, is only tried as a full ID. Its result
 ///   is `not_found` if the ID is malformed, if `kinds` doesn't include that kind, or if nothing
 ///   has that ID.
+/// - There's one exception. When `kinds` includes `session` but not `block`, the full ID of a
+///   block, such as `$REX_BLOCK`, names the session that holds the block. Every session is
+///   searched, even if the context names a different one. `scope.session` accepts a block ID the
+///   same way. If no open block has the ID, the result is `not_found`. A block that is closing
+///   doesn't count. Only a full block ID works this way. A block's label or the end of its ID
+///   never names a session.
 /// - Only windows have positions. `1` is the first window in its session, in the order Rex.app
 ///   shows them as tabs. When several sessions are searched, a position can match a window in
 ///   each one.
 /// - When `kinds` lists more than one kind, one query can match different kinds of things, such
 ///   as a session and a window with the same label. The result is then `ambiguous`, and each
 ///   candidate's `kind` says what it is.
-/// - Without `scope.session`, windows and blocks are searched only in the session named by
-///   `context.session_id`. If that's left out or the session no longer exists, every session is
-///   searched. This applies to full IDs too, so the full ID of a block in another session is
-///   `not_found`.
+/// - Without `scope.session`, windows and blocks are searched only in the caller's session.
+///   That's the session that holds `context.block_id`, if the block is open, or else the session
+///   named by `context.session_id`. The block comes first because it stays with its window when
+///   the window moves to another session, while a saved session ID keeps naming the old one. If
+///   neither applies, every session is searched. This applies to full IDs too, so a window or
+///   block query for the full ID of a block in another session is `not_found`.
 /// - If a scope matches nothing or several things, every result gets that `not_found` or
 ///   `ambiguous` status, and its `reason` says which scope failed. For an ambiguous scope,
 ///   `candidates` lists what the scope could mean.
 /// - An empty query, or one of only spaces, asks for a default, such as the block a script runs
 ///   in. When `kinds` lists several kinds, an empty query gets the default for the most specific
 ///   one: block, then window, then session.
-/// - An empty session query selects `context.session_id`, or the only session if there's just
+/// - An empty session query selects the caller's session, or the only session if there's just
 ///   one. With no sessions it's `not_found`, and with several it's `ambiguous`.
-/// - An empty window query selects the window that holds `context.block_id`, or else the active
-///   window of the session being searched. If several sessions are searched, it's `ambiguous`
-///   even with `context.block_id` set, and `candidates` lists the sessions to choose from.
+/// - An empty window query selects the window that holds `context.block_id`. If that block isn't
+///   set or is detached, it selects the active window of the session being searched. If several
+///   sessions are searched, because neither `scope.session` nor the context names one, it's
+///   `ambiguous`, and `candidates` lists the sessions to choose from.
 /// - An empty block query selects `context.block_id` if that block is among those searched.
 ///   Otherwise it selects the focused block of the window an empty window query would choose.
 ///   With `scope.window`, it ignores `context.block_id` and selects that window's focused block.
@@ -366,7 +382,8 @@ pub struct Resolve {
     #[serde(default, deserialize_with = "crate::api::nullable")]
     pub kinds: Vec<String>,
     /// The names to look up. Each is a full ID, a label, a window position, the end of an ID, or an
-    /// empty string for the default.
+    /// empty string for the default. When kinds includes session but not block, the full ID of a
+    /// block names the session that holds it.
     #[serde(default, deserialize_with = "crate::api::nullable")]
     pub queries: Vec<String>,
     /// Where the caller is, such as the terminal a script runs in. IDs in it that no longer exist

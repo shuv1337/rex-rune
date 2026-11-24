@@ -436,6 +436,22 @@ fn client_set_script_response() {
 }
 
 #[test]
+fn client_undo_close_request() {
+    let value: rexrs::api::client::UndoClose = serde_json::from_str(r##"{}"##).unwrap();
+    let json = serde_json::to_value(&value).unwrap();
+    let again: rexrs::api::client::UndoClose = serde_json::from_value(json).unwrap();
+    assert_eq!(value, again);
+}
+
+#[test]
+fn client_undo_close_response() {
+    let value: rexrs::api::client::UndoCloseResponse = serde_json::from_str(r##"{}"##).unwrap();
+    let json = serde_json::to_value(&value).unwrap();
+    let again: rexrs::api::client::UndoCloseResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(value, again);
+}
+
+#[test]
 fn data_connect_request() {
     let value: rexrs::api::data::Connect = serde_json::from_str(
         r##"{
@@ -789,7 +805,7 @@ fn server_tailscale_rename_response() {
 fn server_version_response() {
     let value: rexrs::api::server::VersionResponse = serde_json::from_str(
         r##"{
-  "rex_version": "0.0.1780750825-g9a754d",
+  "rex_version": "1.2.0-snapshot.214",
   "platform": "darwin_arm64",
   "commit": "9a754d1234567890",
   "built_at": "2026-06-06T13:00:25Z",
@@ -2144,7 +2160,7 @@ fn target_complete_request() {
         r##"{
   "kinds": ["block", "window"],
   "prefix": "s",
-  "context": { "session_id": "session:<uuid>" }
+  "context": { "block_id": "block:<uuid>" }
 }"##,
     )
     .unwrap();

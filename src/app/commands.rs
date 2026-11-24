@@ -547,7 +547,7 @@ impl Workspace {
         let model = self.model();
         let zoomed = model
             .window()
-            .is_some_and(|w| w.zoomed_block_id.as_ref() == Some(&target.block));
+            .is_some_and(|w| rex_rune::layout::is_zoomed(w, &target.block));
         // A row of the pane menu: it acts on `target`, and is available as it is there.
         let pane = |id, label: &'static str, action| {
             Command::new(id, G, label, Intent::Pane(target.clone(), action))

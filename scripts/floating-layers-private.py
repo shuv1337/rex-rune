@@ -247,7 +247,7 @@ try:
         server = subprocess.Popen(
             results["identity"]["server_command"], stdout=log, stderr=subprocess.STDOUT)
     wait(lambda: (work / "rex.sock").exists(), "private Rex did not start")
-    wait(lambda: accept.api("server.version").get("api_revision") == 13, "private Rex is not API 13")
+    wait(lambda: (accept.api("server.version").get("api_revision") or 0) >= 13, "private Rex is older than API 13")
     results["server"] = accept.api("server.version")
     results["server"]["binary"] = results["identity"]["rex_binary"]
     results["server"]["binary_sha256"] = results["identity"]["rex_binary_sha256"]

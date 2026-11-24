@@ -364,7 +364,7 @@ jobs:
 
           Built natively on Ubuntu 24.04; requires glibc 2.39 or newer, graphics drivers, fontconfig, xkbcommon, and Wayland/X11 libraries. These are dynamically linked builds, not self-contained AppImages. See the bundled README for dependencies and installation.
 
-          Requires an existing Rex server with API revision 10, 11, 12 or 13. Installing the client does not start, stop, or modify a Rex server.
+          Requires an existing Rex server with API revisions 10 through 21. Installing the client does not start, stop, or modify a Rex server.
           EOF
           gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Rex Rune ${GITHUB_REF_NAME#v}" --notes-file RELEASE-NOTES.md
           gh release upload "$GITHUB_REF_NAME" ./*.tar.gz ./*.deb ./*.pkg.tar.zst ./*.pkg.tar.zst.sig SHA256SUMS SHA256SUMS.minisig latest.json latest.json.minisig install.sh install.sh.minisig

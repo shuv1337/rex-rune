@@ -175,7 +175,7 @@ async fn send(ws: &mut WebSocketStream<TcpStream>, value: Value) {
 
 async fn welcome(ws: &mut WebSocketStream<TcpStream>, revision: u32) -> Value {
     let hello = recv(ws).await;
-    assert_eq!(hello["api_revision"], 13);
+    assert_eq!(hello["api_revision"], 21);
     assert_eq!(hello["api_min_revision"], 10);
     send(ws, json!({"type":"welcome", "protocol":"rex.control.v1", "api_revision":revision,
         "limits":{"max_message_bytes":65536}, "client":{"id":"client:test", "reconnect_token":"test-token"}})).await;
@@ -253,7 +253,7 @@ async fn bootstrap_is_first_and_newer_pre_response_events_survive() {
 
 #[tokio::test]
 async fn unsupported_negotiated_revision_is_rejected() {
-    for revision in [9, 14] {
+    for revision in [9, 22] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -263,7 +263,7 @@ async fn unsupported_negotiated_revision_is_rejected() {
         let error = transport::control(&endpoint, None).await.err().unwrap();
         assert_eq!(
             error.to_string(),
-            format!("Rex negotiated API revision {revision}; this client supports 10–13")
+            format!("Rex negotiated API revision {revision}; this client supports 10–21")
         );
         server.await.unwrap();
     }
@@ -271,7 +271,7 @@ async fn unsupported_negotiated_revision_is_rejected() {
 
 #[tokio::test]
 async fn supported_revisions_negotiate() {
-    for revision in [10, 11, 12, 13] {
+    for revision in 10..=21 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -2851,5 +2851,569 @@ async fn search_step_with_copy_mode_off_is_never_dropped_while_unsettled() {
         .await;
 
     ticket_task.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        assert_eq!(boot_req["method"], "session.bootstrap");
+        // Send a prompt BEFORE bootstrap finishes with seq below bootstrap's cutoff (seq 1 < 10).
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 1,
+                "payload": {
+                    "type": "client_prompt_requested",
+                    "payload": {
+                        "call_id": "prompt-early",
+                        "action": "git.branch",
+                        "prompt": {"kind": "input", "title": "Branch"}
+                    }
+                }
+            }),
+        )
+        .await;
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(boot()).unwrap(),
+        )
+        .await;
+
+        let first_reply = recv(&mut ws).await;
+        assert_eq!(first_reply["method"], "client.reply");
+        assert_eq!(first_reply["payload"]["call_id"], "prompt-early");
+        assert_eq!(first_reply["payload"]["error"]["code"], "not_supported");
+        assert!(
+            first_reply["payload"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("git.branch")
+        );
+        // Simulate another client having answered first -> `not_found` must not disconnect.
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": first_reply["id"],
+                "seq": 11,
+                "error": {"code": "not_found", "message": "already answered", "status": 404}
+            }),
+        )
+        .await;
+
+        // `client_prompt_ended` is ignored quietly; a second prompt still answers cleanly.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 12,
+                "payload": {
+                    "type": "client_prompt_ended",
+                    "payload": {"call_id": "prompt-early", "reason": "answered"}
+                }
+            }),
+        )
+        .await;
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "client_prompt_requested",
+                    "payload": {
+                        "call_id": "prompt-live",
+                        "prompt": {"kind": "pick", "title": "Choice", "items": []}
+                    }
+                }
+            }),
+        )
+        .await;
+        let second_reply = recv(&mut ws).await;
+        assert_eq!(second_reply["method"], "client.reply");
+        assert_eq!(second_reply["payload"]["call_id"], "prompt-live");
+        assert_eq!(second_reply["payload"]["error"]["code"], "not_supported");
+        reply(&mut ws, &second_reply, 14, json!({})).await;
+        done_tx.send(()).unwrap();
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(host.model.lock().unwrap().connected);
+    assert!(host.model.lock().unwrap().performs.is_empty());
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn event_dropped_recovers_session_list_keymap_and_hosts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        let mut initial = boot();
+        initial.selected_session.as_mut().unwrap().view.windows = vec![
+            serde_json::from_value(json!({
+                "window_id": "w1",
+                "focused_block_id": "b1",
+                "layers": [{
+                    "kind": "tiled",
+                    "bounds": [0, 0, 1, 1],
+                    "layout": {"block_id": "b1"},
+                    "blocks": [{"block_id": "b1", "creator_name": "com.superlogical.terminal"}]
+                }]
+            }))
+            .unwrap(),
+        ];
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(initial).unwrap(),
+        )
+        .await;
+
+        // Initial activity reads for b1.
+        for expected in [
+            "com.superlogical.terminal.program_status",
+            "com.superlogical.terminal.title",
+            "com.superlogical.terminal.process",
+        ] {
+            let req = recv(&mut ws).await;
+            assert_eq!(req["method"], expected);
+            let payload = match expected {
+                "com.superlogical.terminal.title" => json!({"title": "before"}),
+                _ => json!({}),
+            };
+            reply(&mut ws, &req, 10, payload).await;
+        }
+
+        // Keymap registration and WatchSharedHosts initial read.
+        let km_reply = |hash: &str, generation: u64| {
+            let mut resp = rexrs::api::client::KeymapResponse::default();
+            resp.config.hash = hash.into();
+            resp.config.generation = generation;
+            resp.config.instance_id = "inst".into();
+            serde_json::to_value(resp).unwrap()
+        };
+        let km_req = recv(&mut ws).await;
+        assert_eq!(km_req["method"], "client.keymap");
+        reply(&mut ws, &km_req, 11, km_reply("h1", 1)).await;
+        let hosts_req = recv(&mut ws).await;
+        assert_eq!(hosts_req["method"], "hosts.list");
+        reply(&mut ws, &hosts_req, 11, json!({"hash": "hh1", "hosts": []})).await;
+
+        // 1. Session-scoped event_dropped -> refreshes view and re-reads b1 metadata.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 12,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "block_event",
+                        "session_id": SESSION,
+                        "block_id": "b1",
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        let view_req = recv(&mut ws).await;
+        assert_eq!(view_req["method"], "session.view");
+        assert_eq!(view_req["payload"]["session_id"], SESSION);
+        reply(
+            &mut ws,
+            &view_req,
+            13,
+            json!({
+                "session_id": SESSION,
+                "label": "snapshot",
+                "revision": 2,
+                "windows": [{
+                    "window_id": "w1",
+                    "focused_block_id": "b1",
+                    "layers": [{
+                        "kind": "tiled",
+                        "bounds": [0, 0, 1, 1],
+                        "layout": {"block_id": "b1"},
+                        "blocks": [{"block_id": "b1", "creator_name": "com.superlogical.terminal"}]
+                    }]
+                }]
+            }),
+        )
+        .await;
+        for expected in [
+            "com.superlogical.terminal.program_status",
+            "com.superlogical.terminal.title",
+            "com.superlogical.terminal.process",
+        ] {
+            let req = recv(&mut ws).await;
+            assert_eq!(req["method"], expected);
+            let payload = match expected {
+                "com.superlogical.terminal.title" => json!({"title": "after-drop"}),
+                _ => json!({}),
+            };
+            reply(&mut ws, &req, 13, payload).await;
+        }
+
+        // 2. Server-wide session_* event_dropped -> re-lists sessions.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 14,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {"event_type": "session_created", "size": 100000}
+                }
+            }),
+        )
+        .await;
+        let list_req = recv(&mut ws).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req,
+            15,
+            json!({"sessions": [
+                {"session_id": SESSION, "label": "snapshot"},
+                {"session_id": OTHER, "label": "other"}
+            ]}),
+        )
+        .await;
+
+        // 3. Server-wide keymap_changed event_dropped -> refreshes keymap.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 16,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {"event_type": "keymap_changed", "size": 100000}
+                }
+            }),
+        )
+        .await;
+        let km_req2 = loop {
+            let req = recv(&mut ws).await;
+            if req["method"] == "session.view" && req["payload"]["session_id"] == OTHER {
+                reply(
+                    &mut ws,
+                    &req,
+                    15,
+                    json!({"session_id": OTHER, "revision": 1, "windows": []}),
+                )
+                .await;
+                continue;
+            }
+            break req;
+        };
+        assert_eq!(km_req2["method"], "client.keymap");
+        reply(&mut ws, &km_req2, 17, km_reply("h2", 2)).await;
+
+        // 4. Server-wide hosts_changed event_dropped -> re-reads hosts.list.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 18,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {"event_type": "hosts_changed", "size": 100000}
+                }
+            }),
+        )
+        .await;
+        let hosts_req2 = loop {
+            let req = recv(&mut ws).await;
+            if req["method"] == "session.view" && req["payload"]["session_id"] == OTHER {
+                reply(
+                    &mut ws,
+                    &req,
+                    18,
+                    json!({"session_id": OTHER, "revision": 1, "windows": []}),
+                )
+                .await;
+                continue;
+            }
+            break req;
+        };
+        assert_eq!(hosts_req2["method"], "hosts.list");
+        reply(
+            &mut ws,
+            &hosts_req2,
+            19,
+            json!({"hash": "hh2", "hosts": []}),
+        )
+        .await;
+
+        done_tx.send(()).unwrap();
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    until(&host, |m| m.title("b1") == Some("before")).await;
+    host.commands
+        .send(HostCommand::Keymap(Box::new(keymap::Declaration {
+            generation: 1,
+            request: rexrs::api::client::Keymap::new(),
+            overrides: crate::keymap::Overrides::default(),
+        })))
+        .unwrap();
+    until(&host, |m| {
+        m.keymap
+            .as_ref()
+            .is_some_and(|k| k.reply.config.hash == "h1")
+    })
+    .await;
+    host.commands.send(HostCommand::WatchSharedHosts).unwrap();
+    until(&host, |m| m.shared.hash() == Some("hh1")).await;
+
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        m.title("b1") == Some("after-drop")
+            && m.sessions.len() == 2
+            && m.keymap
+                .as_ref()
+                .is_some_and(|k| k.reply.config.hash == "h2")
+            && m.shared.hash() == Some("hh2")
+    })
+    .await;
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn recreated_block_and_session_ids_reread_layout_and_activity() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (phase1_tx, phase1_rx) = tokio::sync::oneshot::channel();
+    let (phase2_tx, phase2_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        let mut initial = boot();
+        let view_with_b1 = |rev: u64| {
+            json!({
+                "session_id": SESSION,
+                "label": "snapshot",
+                "revision": rev,
+                "windows": [{
+                    "window_id": "w1",
+                    "focused_block_id": "b1",
+                    "layers": [{
+                        "kind": "tiled",
+                        "bounds": [0, 0, 1, 1],
+                        "layout": {"block_id": "b1"},
+                        "blocks": [{"block_id": "b1", "creator_name": "com.superlogical.terminal"}]
+                    }]
+                }]
+            })
+        };
+        initial.selected_session.as_mut().unwrap().view =
+            serde_json::from_value(view_with_b1(1)).unwrap();
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(initial).unwrap(),
+        )
+        .await;
+
+        // Initial b1 queries.
+        for expected in [
+            "com.superlogical.terminal.program_status",
+            "com.superlogical.terminal.title",
+            "com.superlogical.terminal.process",
+        ] {
+            let req = recv(&mut ws).await;
+            assert_eq!(req["method"], expected);
+            let payload = match expected {
+                "com.superlogical.terminal.title" => json!({"title": "first"}),
+                _ => json!({}),
+            };
+            reply(&mut ws, &req, 10, payload).await;
+        }
+
+        // 1. `block_closed` clears b1's once-read marks; when b1 returns (undone close),
+        //    the client must re-query b1's status/title/process.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 11,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {"type": "block_closed", "payload": {"block_id": "b1"}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let view_req = recv(&mut ws).await;
+        assert_eq!(view_req["method"], "session.view");
+        reply(
+            &mut ws,
+            &view_req,
+            12,
+            json!({"session_id": SESSION, "label": "snapshot", "revision": 2, "windows": []}),
+        )
+        .await;
+        // Now b1 comes back with the same ID via session_view_changed.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {"type": "session_view_changed", "payload": {"revision": 3}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let view_req2 = recv(&mut ws).await;
+        assert_eq!(view_req2["method"], "session.view");
+        reply(&mut ws, &view_req2, 14, view_with_b1(3)).await;
+        for expected in [
+            "com.superlogical.terminal.program_status",
+            "com.superlogical.terminal.title",
+            "com.superlogical.terminal.process",
+        ] {
+            let req = recv(&mut ws).await;
+            assert_eq!(req["method"], expected);
+            let payload = match expected {
+                "com.superlogical.terminal.title" => json!({"title": "reopened-block"}),
+                _ => json!({}),
+            };
+            reply(&mut ws, &req, 14, payload).await;
+        }
+        phase1_tx.send(()).unwrap();
+
+        // 2. `session_destroyed` clears SESSION + b1; when SESSION is recreated with the same ID,
+        //    selecting it re-reads its view and b1's metadata.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 15,
+                "payload": {
+                    "type": "session_destroyed",
+                    "payload": {"session_id": SESSION}
+                }
+            }),
+        )
+        .await;
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 16,
+                "payload": {
+                    "type": "session_created",
+                    "payload": {"session_id": SESSION}
+                }
+            }),
+        )
+        .await;
+        let list_req = recv(&mut ws).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req,
+            17,
+            json!({"sessions": [{"session_id": SESSION, "label": "snapshot"}]}),
+        )
+        .await;
+        let attach_req = loop {
+            let req = recv(&mut ws).await;
+            if req["method"] == "session.attach" {
+                break req;
+            }
+            if req["method"] == "session.view" {
+                // Background sweep may also inspect the recreated session; reply cleanly.
+                reply(&mut ws, &req, 17, view_with_b1(4)).await;
+            }
+        };
+        assert_eq!(attach_req["payload"]["session_id"], SESSION);
+        reply(
+            &mut ws,
+            &attach_req,
+            18,
+            json!({"client_id": "client:test", "view": view_with_b1(4)}),
+        )
+        .await;
+        let mut saw_title = false;
+        while !saw_title {
+            let req = recv(&mut ws).await;
+            let payload = match req["method"].as_str().unwrap_or("") {
+                "com.superlogical.terminal.title" => {
+                    saw_title = true;
+                    json!({"title": "reopened-session"})
+                }
+                _ => json!({}),
+            };
+            reply(&mut ws, &req, 18, payload).await;
+        }
+        // Answer the trailing process query after title.
+        let proc_req = recv(&mut ws).await;
+        assert_eq!(proc_req["method"], "com.superlogical.terminal.process");
+        reply(&mut ws, &proc_req, 18, json!({})).await;
+        phase2_tx.send(()).unwrap();
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(5), phase1_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| m.title("b1") == Some("reopened-block")).await;
+    until(&host, |m| {
+        m.selected.is_none() && m.sessions.iter().any(|s| s.session_id == SESSION)
+    })
+    .await;
+    host.commands
+        .send(HostCommand::Select(SESSION.into()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), phase2_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| m.title("b1") == Some("reopened-session")).await;
+    drop(host);
     server.await.unwrap();
 }

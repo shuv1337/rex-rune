@@ -198,7 +198,7 @@ impl rexrs::AsyncTransport for Transport {
 
 pub type Client = AsyncRexClient<Transport>;
 pub const MIN_API_REVISION: u32 = 10;
-pub const API_REVISION: u32 = 13;
+pub const API_REVISION: u32 = 21;
 pub async fn control(endpoint: &str, reconnect: Option<&str>) -> Result<Client> {
     control_with_label(endpoint, reconnect, &crate::settings::hostname()).await
 }
@@ -211,15 +211,20 @@ pub async fn control_with_label(
     // This is an attachment-only client. Server lifetime and listener configuration
     // belong to the existing upstream Rex server, including its Tailscale identity.
     let socket = socket(endpoint, "/api/control", "rex.control.v1").await?;
-    connect(socket, reconnect, "Rex Rune", label).await
+    connect(socket, reconnect, "Rex Rune", label, rexrs::ClientKind::App).await
 }
 
-pub(crate) async fn control_from_socket(
-    socket: Socket,
-    reconnect: Option<&str>,
-    name: &str,
-) -> Result<Client> {
-    connect(socket, reconnect, name, &crate::settings::hostname()).await
+/// Connect a short-lived discovery probe as `ClientKind::Other` so rev 17+ servers never
+/// select it as a `rex.ui` prompt target.
+pub(crate) async fn discovery_from_socket(socket: Socket, name: &str) -> Result<Client> {
+    connect(
+        socket,
+        None,
+        name,
+        &crate::settings::hostname(),
+        rexrs::ClientKind::Other,
+    )
+    .await
 }
 
 async fn connect(
@@ -227,13 +232,14 @@ async fn connect(
     reconnect: Option<&str>,
     name: &str,
     label: &str,
+    kind: rexrs::ClientKind,
 ) -> Result<Client> {
     let mut builder = AsyncRexClient::builder()
         .label(label)
         .name(name)
         .version(env!("CARGO_PKG_VERSION"))
         .api_revisions(MIN_API_REVISION..=API_REVISION)
-        .kind(rexrs::ClientKind::App);
+        .kind(kind);
     if let Some(token) = reconnect {
         builder = builder.reconnect_token(token);
     }

@@ -1058,7 +1058,7 @@ impl Workspace {
         {
             let zoomed = model
                 .window()
-                .is_some_and(|w| w.zoomed_block_id.as_ref() == Some(&target.block));
+                .is_some_and(|w| rex_rune::layout::is_zoomed(w, &target.block));
             let mut rows = vec![
                 ("Copy", 0, PaneAction::Copy),
                 ("Paste", 0, PaneAction::Paste),

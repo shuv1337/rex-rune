@@ -653,21 +653,32 @@ impl crate::api::BlockMethod for Modes {
     type Response = ModesResponse;
 }
 
-/// How the terminal's program exited. Null while it is still running, and for a terminal that
-/// didn't start a program of its own.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
-pub struct LastExit {
-    /// The program's exit code, or -1 if it has none, as when a signal ended it.
-    pub exit_code: i64,
-    /// Why the program failed, such as 'exit status 1'. Left out when it exited successfully.
+pub struct Port {
+    /// The port number.
+    pub port: u64,
+    /// The address the socket is bound to, as an IP literal with no brackets, such as 127.0.0.1,
+    /// ::1, 0.0.0.0, or ::. An IPv4 address mapped into IPv6 is given as plain IPv4. An IPv6
+    /// link-local address keeps its zone, an interface index, as in fe80::1%1.
+    pub address: String,
+    /// The transport protocol, 'tcp' today. Skip an entry whose protocol you don't know.
+    pub protocol: String,
+    /// When the server first saw this address and port held by this process in this terminal, as an
+    /// RFC 3339 timestamp. The server looks in the background, every second while there is output
+    /// or input in any terminal and every 5 minutes at most while nothing happens, and also when
+    /// asked, so this can be minutes after the port opened. It changes if the port closes and opens
+    /// again or another process holds it.
+    pub first_seen_at: String,
+    /// The ID of the process that holds the socket, or the first started of several that share it.
+    /// The process is described by the entry in processes with the same pid. Left out when the
+    /// server can't tell which process holds the socket, such as a server started with sudo, and
+    /// the reply is then partial.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub pid: Option<i64>,
 }
 
-/// The process the terminal started, usually a shell. On macOS a login shell runs under login, and
-/// this describes login. Left out if there is no such process or it can't be read.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
-pub struct Child {
+pub struct PortsResponseProcess {
     /// The process ID.
     pub pid: i64,
     /// The user ID the process runs as on Unix, which shows when a command runs as another user,
@@ -703,8 +714,73 @@ pub struct Child {
     pub cwd: Option<String>,
 }
 
+/// The result of [`Ports`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
-pub struct Ancestor {
+pub struct PortsResponse {
+    /// How complete ports is: 'ok' if every process in the terminal was looked at, 'partial' if
+    /// some could not be, so ports may be missing some, or 'unsupported' if this server cannot list
+    /// ports for this terminal. Treat any other value as 'partial'.
+    pub status: String,
+    /// The ports that programs in the terminal listen on, sorted by port and then by address, with
+    /// one entry for each protocol, address and port. An empty array when nothing is listening.
+    #[serde(default, deserialize_with = "crate::api::nullable")]
+    pub ports: Vec<Port>,
+    /// The processes that hold the ports, sorted by pid, with one entry for each, described as the
+    /// process method describes them. A pid in ports with no entry here is a process the server
+    /// couldn't describe. Each is described when its first port is found, so fields such as cwd
+    /// show their value from then.
+    #[serde(default, deserialize_with = "crate::api::nullable")]
+    pub processes: Vec<PortsResponseProcess>,
+    /// True if entries were left out from the end of ports so that the reply fits in one message.
+    /// processes then describes only the processes that the remaining entries name. Left out when
+    /// false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Set only when truncated is true. Names a stored copy of the whole reply, from the same scan.
+    /// Read it with blob_read from offset 0 until eof, and decode the text as a ports reply. The
+    /// server keeps it for a few minutes. Left out if the server couldn't store the copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+}
+
+/// List the TCP ports that programs in the terminal are listening on, such as a development
+/// server's, with each port's address and the process that holds it. status is 'partial' when some
+/// processes couldn't be looked at, so a port missing from a partial reply may still be open. A
+/// truncated reply has an id, and blob_read with that id returns the whole list. It doesn't wake an
+/// idle terminal. To follow changes, call it once and then follow the ports_changed event.
+///
+/// Wire method: `com.superlogical.terminal.ports`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+#[non_exhaustive]
+pub struct Ports {}
+
+impl Ports {
+    /// Creates a `Ports` with every field left out.
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl crate::api::BlockMethod for Ports {
+    const NAME: &'static str = "com.superlogical.terminal.ports";
+    type Response = PortsResponse;
+}
+
+/// How the terminal's program exited. Null while it is still running, and for a terminal that
+/// didn't start a program of its own.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct LastExit {
+    /// The program's exit code, or -1 if it has none, as when a signal ended it.
+    pub exit_code: i64,
+    /// Why the program failed, such as 'exit status 1'. Left out when it exited successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The process the terminal started, usually a shell. On macOS a login shell runs under login, and
+/// this describes login. Left out if there is no such process or it can't be read.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct Child {
     /// The process ID.
     pub pid: i64,
     /// The user ID the process runs as on Unix, which shows when a command runs as another user,
@@ -764,7 +840,7 @@ pub struct ProcessResponse {
         deserialize_with = "crate::api::nullable",
         skip_serializing_if = "Vec::is_empty"
     )]
-    pub ancestors: Vec<Ancestor>,
+    pub ancestors: Vec<PortsResponseProcess>,
     /// The home directory that the terminal's program inherited, for showing and expanding ~ in
     /// paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]

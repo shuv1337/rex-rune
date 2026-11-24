@@ -20,6 +20,11 @@ pub struct CloseResponse {
 ///   with `bad_request`.
 /// - The server sends `block_closed` when the block closes. If it was the last block in its
 ///   window, the window closes too and the server sends `window_closed`.
+/// - If `undoable` is true and the caller is a client attached to the session, the server instead
+///   keeps the block running, out of every window, for about a minute, so that
+///   `client.undo_close` can put it back. The view changes at once, and `block_closed` arrives
+///   only once the block is freed. A block that is in no window, or is still starting, closes at
+///   once all the same.
 /// - If `keep_last` is true and the block is the only one left in its window, counting blocks in
 ///   floating layers, the call fails with `bad_request` and closes nothing.
 /// - If the block's creator is still placing it, the call returns at once and the block closes
@@ -57,6 +62,11 @@ pub struct Close {
     /// Ignored for detached blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_last: Option<bool>,
+    /// If true, hold the block for about a minute so that the calling client can bring it back with
+    /// client.undo_close. Send it when a person closed the block. It only has an effect for a
+    /// client attached to the session, and for a block that is in a window and has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undoable: Option<bool>,
 }
 
 impl Close {
@@ -67,6 +77,7 @@ impl Close {
             block_id: Default::default(),
             window_id: Default::default(),
             keep_last: Default::default(),
+            undoable: Default::default(),
         }
     }
 
@@ -87,6 +98,14 @@ impl Close {
     /// Ignored for detached blocks.
     pub fn keep_last(mut self, value: bool) -> Self {
         self.keep_last = Some(value);
+        self
+    }
+
+    /// If true, hold the block for about a minute so that the calling client can bring it back with
+    /// client.undo_close. Send it when a person closed the block. It only has an effect for a
+    /// client attached to the session, and for a block that is in a window and has started.
+    pub fn undoable(mut self, value: bool) -> Self {
+        self.undoable = Some(value);
         self
     }
 }

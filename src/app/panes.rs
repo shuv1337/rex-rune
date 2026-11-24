@@ -1029,7 +1029,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
         })
     };
 
-    if current.zoomed_block_id.is_some() {
+    if layout::full_window_zoom(current).is_some() {
         for placement in &panes {
             area = area.child(emit_card(placement));
         }

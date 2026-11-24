@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Remote UI acceptance on two disposable Rex servers and a private Xvfb.
 
-Requires rex (API 12 or 13), Xvfb, openbox, xdotool, ImageMagick and a built client
+Requires rex (API 12 or newer), Xvfb, openbox, xdotool, ImageMagick and a built client
 (REX_BIN). Uses ~/.cache/agent-ws, private HOME/XDG/config/socket paths and an
 explicit REX_SERVER with autostart disabled. Never uses installed Rex servers,
 packages or units. If sshd can run as this user, host B uses a real private SSH

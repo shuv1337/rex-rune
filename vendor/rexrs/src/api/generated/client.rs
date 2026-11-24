@@ -224,10 +224,12 @@ pub struct Info {
     /// client didn't say. Treat a platform you don't know as other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-    /// The program's name, such as Rex.app or rex.
+    /// The program's name, such as Rex.app or rex. If it is longer than 256 bytes, the server keeps
+    /// only the first 256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The program's version, as the program prints it, such as 1.6.0.
+    /// The program's version, as the program prints it, such as 1.6.0. If it is longer than 256
+    /// bytes, the server keeps only the first 256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// The client's label, such as studio. Two clients can share a label.
@@ -1541,9 +1543,10 @@ pub struct PerformResponse {
 ///   it on to the client.
 /// - Requests to one client wait in line, and the client answers them one at a time in the order
 ///   they arrived. `timeout_ms` counts from when a request reaches the front of the line.
-/// - A request without `client_id` or `action`, with a negative `timeout_ms`, or with `args` that
-///   aren't an object or don't match the action's schema fails with `bad_request`. If `client_id`
-///   names no connected client, the call fails with `not_found`.
+/// - A request without `client_id` or `action`, with an `action` longer than 256 bytes, with a
+///   negative `timeout_ms`, or with `args` that aren't an object or don't match the action's
+///   schema fails with `bad_request`. If `client_id` names no connected client, the call fails
+///   with `not_found`.
 /// - If the client has listed its actions and `action` isn't one of them, the call fails with
 ///   `not_supported`. A client that listed none is asked anyway, and it may answer
 ///   `not_supported` itself.
@@ -1574,7 +1577,8 @@ pub struct PerformResponse {
 pub struct Perform {
     /// The client to ask. To find one by its label, call target.resolve with kinds set to client.
     pub client_id: String,
-    /// The name of an action the client declared, such as pane.split. client.inspect lists them.
+    /// The name of an action the client declared, such as pane.split. client.inspect lists them. At
+    /// most 256 bytes.
     pub action: String,
     /// The action's arguments, as a JSON object. Leave it out if there are none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1651,13 +1655,15 @@ impl crate::api::Method for Perform {
     type Response = PerformResponse;
 }
 
-/// Why the call failed or the action wasn't performed. Set this or result, not both.
+/// Why the call failed, the action wasn't performed, or the prompt couldn't be shown. Set this or
+/// result, not both.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 #[non_exhaustive]
 pub struct ReplyError {
     /// The kind of failure, as an error code such as not_found, refused, or internal.
     pub code: String,
-    /// What went wrong, written for people.
+    /// What went wrong, written for people. In client.reply, a message longer than 4096 bytes is
+    /// shortened and ends with an ellipsis.
     pub message: String,
 }
 
@@ -1671,7 +1677,7 @@ impl ReplyError {
     }
 }
 
-/// Answer a client_call_requested or client_perform_requested event.
+/// Answer a client_call_requested, client_perform_requested, or client_prompt_requested event.
 ///
 /// - A `client_call_requested` event asks this client to make one call on another server, for a
 ///   `client.action` request that is still running. Reply to every one, even when the call fails.
@@ -1679,6 +1685,16 @@ impl ReplyError {
 /// - A `client_perform_requested` event asks this client to perform one of its own actions for
 ///   another client's `client.perform` request. Reply the same way. `result` is what the action
 ///   returned, or `null`.
+/// - A `client_prompt_requested` event asks this client to put a question to the person using it,
+///   for an action that called `rex.ui`. Reply once the person answers, with `result` set to
+///   `{"text": "..."}` for typed text, `{"ids": ["..."]}` for chosen items, or `{"cancelled":
+///   true}` if they closed the prompt. A result the prompt doesn't accept, such as an ID it
+///   didn't offer, fails with `bad_request` and leaves the prompt waiting. If you can't show the
+///   prompt, set `error.code` to `not_supported`.
+/// - The server sends a prompt to every connected app that can show it, so the same prompt may be
+///   open on several devices. The first answer ends it on all of them, and so does a cancel.
+///   Every other app then receives a `client_prompt_ended` event with its own `call_id`. Close
+///   the prompt whatever the event's `reason` is. A reply after that fails with `not_found`.
 /// - A reply that sets both `result` and `error`, or neither, fails with `bad_request`. For a
 ///   call with no result, send `"result": null`.
 /// - For a call that failed, use the code and message the other server returned, or explain why
@@ -1686,6 +1702,8 @@ impl ReplyError {
 /// - For an action you didn't perform, set `error.code` to `not_supported`, `refused`, or
 ///   `internal`. The client that sent `client.perform` gets that code unchanged. An empty code is
 ///   sent as `internal`.
+/// - If `error.message` is longer than 4096 bytes, the server shortens it and ends it with an
+///   ellipsis (…). The reply is still accepted.
 /// - A reply runs as soon as it arrives. It doesn't wait behind this connection's earlier
 ///   `client.key` and `client.action` requests, because a `client.action` request that is waiting
 ///   for the reply holds that line.
@@ -1707,11 +1725,13 @@ impl ReplyError {
 pub struct Reply {
     /// The call_id of the event you're answering.
     pub call_id: String,
-    /// The call's result, or what the action returned. Use null if there is none. Set this or
-    /// error, not both.
+    /// The call's result, what the action returned, or the prompt's answer. For a call or action
+    /// with no output, use null. For a prompt, send a prompt result: text, ids, or cancelled. Set
+    /// this or error, not both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
-    /// Why the call failed or the action wasn't performed. Set this or result, not both.
+    /// Why the call failed, the action wasn't performed, or the prompt couldn't be shown. Set this
+    /// or result, not both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ReplyError>,
 }
@@ -1726,14 +1746,16 @@ impl Reply {
         }
     }
 
-    /// The call's result, or what the action returned. Use null if there is none. Set this or
-    /// error, not both.
+    /// The call's result, what the action returned, or the prompt's answer. For a call or action
+    /// with no output, use null. For a prompt, send a prompt result: text, ids, or cancelled. Set
+    /// this or error, not both.
     pub fn result(mut self, value: serde_json::Value) -> Self {
         self.result = Some(value);
         self
     }
 
-    /// Why the call failed or the action wasn't performed. Set this or result, not both.
+    /// Why the call failed, the action wasn't performed, or the prompt couldn't be shown. Set this
+    /// or result, not both.
     pub fn error(mut self, value: ReplyError) -> Self {
         self.error = Some(value);
         self
@@ -1759,7 +1781,8 @@ impl crate::api::Method for Reply {
 ///   `session.attach_all` with `event_scope` set to `all`.
 /// - A client can also send a label when it connects, in the `client` field of its `hello`
 ///   message. The same rules apply, but the server fixes the label instead of failing: it cuts a
-///   label longer than 64 bytes down to size and drops one that is otherwise invalid.
+///   label longer than 64 bytes down to size and drops one that is otherwise invalid. It also
+///   shortens a `name` or `version` that is longer than 256 bytes.
 ///
 /// Wire method: `client.set_label`.
 ///
@@ -1893,4 +1916,78 @@ impl SetScript {
 impl crate::api::Method for SetScript {
     const NAME: &'static str = "client.set_script";
     type Response = SetScriptResponse;
+}
+
+/// The result of [`UndoClose`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct UndoCloseResponse {
+    /// The session that holds what came back, or the session that came back. It may not be the
+    /// session the client is showing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The window that holds the reopened block, or the reopened window. It is that session's
+    /// active window. For a session that came back, it is the session's active window, and is left
+    /// out if the session has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    /// The reopened block, or the focused block of the reopened window. For a session that came
+    /// back, it is the focused block of its active window. Left out if that window has no focused
+    /// block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+}
+
+/// Reopen what this client closed most recently, a pane, a window, or a session, if it can still be
+/// undone.
+///
+/// - The call reopens the caller's newest close that can still be undone, in whichever session it
+///   was. Each client has one history of closes for the whole server, and calling again reopens
+///   the one before. There is no redo.
+/// - A close can be undone only if it asked to be, with `undoable` set to true. `block.close`,
+///   `session.close_window`, and `session.destroy` take it. Send it when a person closed
+///   something. A close without it can't be undone.
+/// - When an attached client closes a block with `block.close`, or a window with
+///   `session.close_window`, and sends `undoable`, the server keeps the blocks running, out of
+///   every window, for about a minute, and sends `block_closed` only once it frees a block.
+///   Leaving the session frees the client's held blocks there at once.
+/// - When an attached client destroys a session with `session.destroy`, and sends `undoable`, the
+///   server keeps the whole session, hidden, for about a minute. Undoing that brings the session
+///   back at its place in the session list, with the same ID, as it was. A `session_created`
+///   event announces it, and a `session_moved` event follows unless it is last. No client is
+///   attached to it, the caller included, and its blocks have no owner: attach to it as to a new
+///   session. The closes the caller could have undone in the session before it destroyed it are
+///   still its to undo, by calling again. Another client's are freed.
+/// - The blocks come back where they were, with the same block, split, layer, and window IDs,
+///   owned by the caller. A closed window comes back at its place in the window order.
+/// - Focus moves to what came back, for every client attached to the session. A reopened block
+///   becomes its window's focused block, its window becomes the active window, and a zoom on
+///   another block there ends. A reopened window becomes the active window, with the focus and
+///   zoom it had. A session comes back with the active window and focus it was destroyed with.
+///   The answer names the session, window, and block, so the client can show them, and the place
+///   becomes the newest in the caller's focus history.
+/// - The close ended the blocks' data streams with `block_closed`. Open them again.
+/// - If there is nothing left to reopen, the call fails with `not_found`. A request that includes
+///   `client_id` fails with `bad_request`.
+///
+/// Wire method: `client.undo_close`.
+///
+/// # Example
+///
+/// ```json
+/// {}
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+#[non_exhaustive]
+pub struct UndoClose {}
+
+impl UndoClose {
+    /// Creates a `UndoClose` with every field left out.
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl crate::api::Method for UndoClose {
+    const NAME: &'static str = "client.undo_close";
+    type Response = UndoCloseResponse;
 }

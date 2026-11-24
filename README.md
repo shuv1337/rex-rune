@@ -210,7 +210,7 @@ details are in [Building and
 development](docs/building.md#vendored-dependencies).
 
 Thanks to [Superlogical Rex](https://www.superlogical.com/rex) for the server
-and protocol this client follows (API revision 13, with revisions 10–12 also
+and protocol this client follows (API revision 21, with revisions 10-20 also
 supported), and to [m4nik1/rex-linux-client](https://github.com/m4nik1/rex-linux-client)
 and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx) for protocol work
 that served as references.

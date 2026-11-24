@@ -313,7 +313,7 @@ try:
             results["identity"]["server_command"], stdout=log, stderr=subprocess.STDOUT
         )
     wait(lambda: (work / "rex.sock").exists(), "private Rex did not start")
-    wait(lambda: accept.api("server.version").get("api_revision") == 13, "private Rex is not API 13")
+    wait(lambda: (accept.api("server.version").get("api_revision") or 0) >= 13, "private Rex is older than API 13")
     results["server"] = accept.api("server.version")
     results["server"]["binary"] = rex_path
     results["server"]["binary_sha256"] = sha256(rex_path or "")
