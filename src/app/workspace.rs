@@ -74,6 +74,7 @@ pub struct Workspace {
     next_notice: u64,
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
+    pub layer_drag: Option<super::floating_drag::LayerDrag>,
     /// Keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<super::bindings::Identity>,
     pub bindings: super::bindings::State,
@@ -281,6 +282,7 @@ impl Workspace {
             next_notice: 0,
             zoom_notice: None,
             drag: None,
+            layer_drag: None,
             forwarded: HashSet::new(),
             bindings: Default::default(),
             local_keymap,
@@ -474,6 +476,7 @@ impl Workspace {
         // Menus and drags name hosts by position, which just shifted.
         self.panel = None;
         self.drag = None;
+        self.layer_drag = None;
         if self.active == index {
             self.active = 0;
         } else if self.active > index {
@@ -514,6 +517,7 @@ impl Workspace {
             self.forget_host(old);
             if self.active == index {
                 self.drag = None;
+                self.layer_drag = None;
             }
             self.update_visibility();
         }
@@ -681,6 +685,7 @@ impl Workspace {
         self.restore_row_selection();
         self.deliver_program_notices(index, notices);
         self.sync_layer_menu(tx);
+        self.sync_layer_drag();
         if self
             .panel
             .as_ref()
@@ -695,6 +700,7 @@ impl Workspace {
         self.process_directory(index);
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
+            self.layer_drag = None;
         }
         if changed_session && self.hosts[index].model.selected.is_some() {
             self.save();
@@ -749,6 +755,7 @@ impl Workspace {
             self.forwarded.clear();
         }
         if !focused {
+            self.cancel_layer_drag();
             for term in self.terminals.values_mut() {
                 term.end_selection();
             }
@@ -1174,6 +1181,7 @@ impl Workspace {
 
     /// Opens the focused terminal's search field, or gives it back the keyboard.
     pub fn open_search(&mut self) {
+        self.cancel_layer_drag();
         if let Some(term) = self.active_terminal_mut() {
             term.search.get_or_insert_with(|| TextEdit::new("")).focused = true;
         }
@@ -1378,6 +1386,7 @@ impl Workspace {
         self.settings.hosts[host].collapsed = false;
         self.active = host;
         self.drag = None;
+        self.layer_drag = None;
         self.update_visibility();
         self.observe_navigation();
         self.save();
@@ -1605,6 +1614,7 @@ impl Workspace {
             }
             Intent::Sidebar => self.toggle_sidebar(),
             Intent::Settings => {
+                self.cancel_layer_drag();
                 self.leave_install_dialog();
                 self.bindings.sequence.clear();
                 self.reload_shortcuts();
@@ -1664,6 +1674,7 @@ impl Workspace {
         self.settings.hosts[host].collapsed = false;
         self.active = host;
         self.drag = None;
+        self.layer_drag = None;
         self.update_visibility();
         self.save();
         self.update_title(tx);
@@ -1982,6 +1993,7 @@ impl Workspace {
     }
 
     pub(super) fn confirm(&mut self, title: &str, method: &str, payload: Value, description: &str) {
+        self.cancel_layer_drag();
         let target = self.panel.as_ref().and_then(|p| p.target.clone());
         let mut panel = Panel::new(
             PanelKind::Confirm {
@@ -2035,6 +2047,7 @@ impl Workspace {
     }
 
     pub fn open_panel(&mut self, kind: PanelKind, title: &str, fields: &[(&str, &str, &str)]) {
+        self.cancel_layer_drag();
         self.leave_install_dialog();
         self.bindings.sequence.clear();
         for term in self.terminals.values_mut() {

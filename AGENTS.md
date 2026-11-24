@@ -20,7 +20,7 @@ cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features
 
 Requirements are listed in the README (Rust 1.96+, Zig 0.17.x for `ghostty-vt`, Linux graphics and input libraries, macOS with the Xcode command-line tools, or Windows MSVC with Visual Studio C++ Build Tools). `Cargo.lock` is committed; keep `--locked` working. `.github/workflows/ci.yml` runs the Linux checks above, the `x86_64-linux` Nix flake check (`aarch64-linux` is not built in CI), a macOS build with tests, and Windows MSVC builds with the full unit and headless UI suite, no-UI VT/keymap integration tests, Clippy, `--version` and `--help` on every pull request. Native Windows UI and real server attachment have not been tested.
 
-Some probes connect to the configured Rex server and create sessions there. Of the Python scripts in `scripts/`, `x11-smoke.py`, `rune-acceptance-x11.py` and `wayland-seat-smoke.py` require `REX_SERVER` to name a disposable server and exit without it; the rest start their own. Every script that launches the client honours `REX_BIN`. Run them only against a disposable server or socket you control, and check each script's requirements in its docstring. `floating-layers-private.py` proves the floating-layer lifecycle on its own server, Xvfb and two clients with real input, and keeps redacted receipts outside its removed run root. `rex-download-probe <unix endpoint> <work dir>` creates a session on the server it is given and downloads real files from it; it refuses the default per-user socket path. Scripts that select text by pointer pin `pane_padding` and `pane_header` (hidden, so a single pane's default header row does not move the grid) in their private `workspace.json` and compute positions from them (`grid_origin` in `rune-acceptance-x11.py`), so a changed default does not break them. Anything that exercises the UI against real input (`x11-smoke.py`, `rune-acceptance-x11.py`, `wayland-seat-smoke.py`) needs a built binary and the tools it names.
+Some probes connect to the configured Rex server and create sessions there. Of the Python scripts in `scripts/`, `x11-smoke.py`, `rune-acceptance-x11.py` and `wayland-seat-smoke.py` require `REX_SERVER` to name a disposable server and exit without it; the rest start their own. Every script that launches the client honours `REX_BIN`. Run them only against a disposable server or socket you control, and check each script's requirements in its docstring. `floating-layers-private.py` proves the floating-layer lifecycle on its own server, Xvfb and two clients with real input, and keeps redacted receipts outside its removed run root; `floating-drag-private.py` proves pointer header drag-move, 8-way edge/corner resize, Escape cancellation without PTY leak, raise-on-grab, and quantitative two-client geometry convergence under the same isolated fixture contract. `rex-download-probe <unix endpoint> <work dir>` creates a session on the server it is given and downloads real files from it; it refuses the default per-user socket path. Scripts that select text by pointer pin `pane_padding` and `pane_header` (hidden, so a single pane's default header row does not move the grid) in their private `workspace.json` and compute positions from them (`grid_origin` in `rune-acceptance-x11.py`), so a changed default does not break them. Anything that exercises the UI against real input (`x11-smoke.py`, `rune-acceptance-x11.py`, `wayland-seat-smoke.py`) needs a built binary and the tools it names.
 
 ## Code layout
 
@@ -29,12 +29,18 @@ Some probes connect to the configured Rex server and create sessions there. Of t
   - `connection.rs` (and `connection/`): one control connection per host, block-keyed terminal streams, the `Options` CLI definition. `connection/server_info.rs`: the server's version and status on `HostModel::server_info`, read-only and once per connection.
   - `terminal.rs`: Ghostty decoding and render frames. `terminal/search.rs`: searching the screen and scrollback with Ghostty's search. `links.rs`: OSC 8 hyperlinks and text URLs in a frame.
   - `qr.rs`: dependency-free Model 2 QR byte-mode M encoder, versions 1–10 (213 bytes), matrix-only. `qr/tests.rs` compares 22 committed qrencode matrices under `tests/data/qr`; `scripts/qr-goldens.py` regenerates them, and `scripts/qr-verify.py` independently decodes `examples/qr_dump.rs` output and dialog captures with zbarimg.
-  - `layout.rs`: split placement. `layers.rs`: floating layers as the server's session view
-    describes them (membership, back-to-front order, minimized state, visible-pane count, the
-    tiled anchor for docking) and the API 13 gate — `MIN_API_REVISION = 13` here is the layer
-    methods' revision, not the client's minimum (10); revisions 10–12 stay attach-and-render
-    only, with the verbs disabled and nothing sent. Pure, no UI; `app/floating.rs` sends the
-    one request per verb. Scope and evidence: `docs/parity-2026-11/M4-floating-layers.md`.
+  - `layout.rs`: split placement (each `Placement` and `Divider` tagged with `layer_index` so
+    `panes::area` emits each layer's cards, dividers and floating resize grips back to front).
+    `layers.rs`: floating layers as the server's session view describes them (membership,
+    back-to-front order, minimized state, visible-pane count, the tiled anchor for docking),
+    pure drag/resize geometry (`Grip`, `bounds`, `min_fraction`, `dragged`, strict `sendable`),
+    and the API 13 gate — `MIN_API_REVISION = 13` here is the layer methods' revision, not the
+    client's minimum (10); revisions 10–12 stay attach-and-render only, with the verbs disabled
+    and nothing sent. Pure, no UI; `app/floating.rs` sends the one request per verb and
+    `app/floating_drag.rs` drives pointer header drag and 8-way edge/corner resize via
+    epoch-checked `HostCommand::ResizeLayer`. Scope and evidence:
+    `docs/parity-2026-11/M4-floating-layers.md` and
+    `docs/parity-2026-11/M4-floating-drag-resize.md`.
     `settings.rs`: local configuration. `settings/terminal.rs`: local cursor, selection, sequence-hint and Mac Option-key preferences, with backwards-compatible defaults. `settings/typography.rs`: compatible font style, line height, spacing and program bold/italic preferences under `terminal.font`; existing top-level font keys stay put.
   - `legacy.rs`: what is left of `rex-linux`, the client's name through 0.7.x: the name it still answers to and the one-time move of that name's settings and state.
   - `platform.rs` (and `platform/`): what differs between operating systems, for the library. `dirs` (settings, state and runtime folders), `process` (is a pid alive, when did it start), `local` (the default local endpoint, local connections and SSH availability), `fs` and `net` (system calls with no portable form). `downloads` selects the POSIX store on Unix and the explicit refusal interface in `no_downloads.rs` on Windows. `process` is Unix-only because Windows cannot create tunnels or partial downloads yet. `tools` locates command-line tools, including helpers inside Mac apps. `update/no_installer.rs` is the updater's interface where there are no releases to install.
@@ -69,7 +75,14 @@ Some probes connect to the configured Rex server and create sessions there. Of t
     the requests, refusals, both captured paths and the API 13 gate; real-font captures are
     `floating_*_draw` and run individually with `REX_TEST_SNAP_DIR` (`REX_M136_MINIMUM`,
     `REX_M136_COMPACT`, `REX_M136_NO_TOOLBAR`). Shared geometry, focus/selection and terminal
-    content never move locally. Pointer drag and edge resize are slice 2 and are not here. `font_size.rs`: terminal font size actions. `help.rs`: Rex help.
+    content never move locally. `floating_drag.rs`: pointer header drag-move (4 pt slop; clicks
+    stay click-to-focus; `OnHover` headers stay mounted while grabbed) and 8-way edge/corner
+    resize (#136 slice 2; L-shaped 12 pt corners clear of Close, 4 pt outside / 3 pt inside
+    bands, `Cursor::ResizeEdge`, inert accent ghost outline, commit-on-release via epoch- and
+    revision-checked `HostCommand::ResizeLayer`, raise-first when non-frontmost; `Phase::Down`
+    only starts a drag, cancellation never re-arms on later motion; API 10–12 emits zero grips).
+    `floating_tests/drag.rs` covers pointer drag/resize, z-order, cancellation and ghost
+    captures (`floating_drag_ghost_draw`, `floating_resize_ghost_draw`). `font_size.rs`: terminal font size actions. `help.rs`: Rex help.
   - `input.rs`, `keys.rs`: workspace shortcuts first, then every other key to the focused pane's PTY; Rune key events to Rex `client.key` payloads; IME.
   - `term.rs`: one pane's view state and cell grid. Rows are text segments placed at `column × cell width`; a character joins a segment only if it advances exactly one cell; ligatures and kerning are off; rows are memoized by content.
   - `term/preview.rs`: steady Settings previews using the terminal renderer. `select_copy.rs`: release-triggered selection copying and opt-in PRIMARY ownership/paste on a dedicated clipboard worker.

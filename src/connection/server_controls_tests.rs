@@ -146,3 +146,134 @@ async fn stale_stop_epoch_never_reaches_the_wire() {
     drop(host);
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn resize_layer_sends_raise_then_resize_and_blocks_stale_epoch_or_old_api() {
+    // 1. API 13: raise_first=false sends only session.resize_layer; raise_first=true sends
+    //    session.raise_layer then session.resize_layer; stale epoch never reaches the wire.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        ready(&mut ws).await;
+        let first = next(&mut ws).await;
+        assert_eq!(first["method"], "session.resize_layer");
+        assert_eq!(
+            first["payload"],
+            json!({"session_id": "s", "layer_id": "fl", "bounds": [0.2, 0.2, 0.5, 0.5]})
+        );
+        reply(&mut ws, &first, 2, json!({"revision": 2})).await;
+        let view1 = next(&mut ws).await;
+        assert_eq!(view1["method"], "session.view");
+        reply(
+            &mut ws,
+            &view1,
+            2,
+            json!({"revision": 2, "session_id": "s", "windows": []}),
+        )
+        .await;
+
+        let raise = next(&mut ws).await;
+        assert_eq!(raise["method"], "session.raise_layer");
+        assert_eq!(
+            raise["payload"],
+            json!({"session_id": "s", "layer_id": "back"})
+        );
+        reply(&mut ws, &raise, 3, json!({"revision": 3})).await;
+        let second = next(&mut ws).await;
+        assert_eq!(second["method"], "session.resize_layer");
+        assert_eq!(
+            second["payload"],
+            json!({"session_id": "s", "layer_id": "back", "bounds": [0.1, 0.1, 0.4, 0.4]})
+        );
+        reply(&mut ws, &second, 4, json!({"revision": 4})).await;
+        let view2 = next(&mut ws).await;
+        assert_eq!(view2["method"], "session.view");
+        reply(
+            &mut ws,
+            &view2,
+            4,
+            json!({"revision": 4, "session_id": "s", "windows": []}),
+        )
+        .await;
+
+        // Stale epoch must never reach the wire before close.
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+    host.commands
+        .send(HostCommand::ResizeLayer {
+            epoch,
+            session: "s".into(),
+            layer: "fl".into(),
+            bounds: [0.2, 0.2, 0.5, 0.5],
+            raise_first: false,
+        })
+        .unwrap();
+    host.commands
+        .send(HostCommand::ResizeLayer {
+            epoch,
+            session: "s".into(),
+            layer: "back".into(),
+            bounds: [0.1, 0.1, 0.4, 0.4],
+            raise_first: true,
+        })
+        .unwrap();
+    host.commands
+        .send(HostCommand::ResizeLayer {
+            epoch: epoch + 99,
+            session: "s".into(),
+            layer: "fl".into(),
+            bounds: [0.3, 0.3, 0.4, 0.4],
+            raise_first: false,
+        })
+        .unwrap();
+    until(&host, |m| {
+        m.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("changed while you were moving it"))
+    })
+    .await;
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // 2. API 12 host: ResizeLayer is rejected at the worker before reaching the wire.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 12).await;
+        let boot_req = next(&mut ws).await;
+        assert_eq!(boot_req["method"], "session.bootstrap");
+        reply(&mut ws, &boot_req, 1, serde_json::to_value(boot()).unwrap()).await;
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+    host.commands
+        .send(HostCommand::ResizeLayer {
+            epoch,
+            session: "s".into(),
+            layer: "fl".into(),
+            bounds: [0.2, 0.2, 0.5, 0.5],
+            raise_first: true,
+        })
+        .unwrap();
+    until(&host, |m| {
+        m.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("API revision 12") && n.contains("revision 13"))
+    })
+    .await;
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}

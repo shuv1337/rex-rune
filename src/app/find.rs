@@ -222,6 +222,10 @@ impl Workspace {
             Some(_) => term.send(Command::SearchStep(older)),
             None if term.find.last.is_empty() => self.open_search(),
             None => {
+                self.cancel_layer_drag();
+                let Some(term) = self.active_terminal_mut() else {
+                    return;
+                };
                 let needle = term.find.last.clone();
                 term.search = Some(TextEdit::new(needle.as_str()));
                 term.send(Command::Search(needle));

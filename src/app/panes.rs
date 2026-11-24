@@ -6,7 +6,7 @@
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
     activity::{PaneProgram, pane_activity, progress_bar, tab_progress, tab_word},
-    find,
+    find, floating_drag,
     pane_header::{self, Placement, full_bleed},
     panel::{Form, Intent, PanelKind},
     tab_icons,
@@ -17,7 +17,7 @@ use super::{
 };
 use rex_rune::{
     connection::Command,
-    layout,
+    layers, layout,
     settings::{PaneDensity, PaneHeader},
     terminal::selection::Phase as SelectionPhase,
 };
@@ -26,7 +26,7 @@ use rune::{Cursor, El, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, 
 use std::borrow::Cow;
 
 /// The area cards are laid out in, in the pane area's own points.
-fn inner(s: &Workspace) -> [f32; 4] {
+pub(super) fn inner(s: &Workspace) -> [f32; 4] {
     let [_, _, aw, ah] = s.area;
     if s.settings.pane_density == PaneDensity::Compact {
         return [0., 0., aw, ah];
@@ -111,8 +111,13 @@ fn header(
         .pr(pane_header::HEADER_TAIL)
         .gap(pane_header::HEADER_GAP)
         .center_y()
-        .preserve_focus_on_press(true)
-        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+        .preserve_focus_on_press(true);
+    let h = if let Some((host_id, layer_id)) = floating_drag::draggable_header(s, window, block) {
+        // Clicks under the drag slop still focus the pane on release; drags send only
+        // `ResizeLayer` and never fire an accidental focus press on a horizontal move.
+        floating_drag::attach_drag(h, host_id, layer_id, id, layers::Grip::Move)
+    } else {
+        h.on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
             if s.focused_block().as_deref() != Some(id.as_str())
                 && let Some(t) = s.terminals.get(&s.term_key(&id))
             {
@@ -120,9 +125,10 @@ fn header(
             }
             tx.blur();
         })
-        .on_secondary_press(move |s: &mut Workspace, p, _| {
-            s.pane_menu(menu_id.clone(), Some((p.x, p.y)))
-        });
+    }
+    .on_secondary_press(move |s: &mut Workspace, p, _| {
+        s.pane_menu(menu_id.clone(), Some((p.x, p.y)))
+    });
     // The pane's own program before its name, as the title row draws the lone pane's: the
     // tab glyph rule, lit with its pane, and faded with the name where headers fade. The
     // glyph is decided from the room the row will have: its pads and gaps, the buttons it
@@ -297,7 +303,7 @@ fn pane_card(
     // The search field has the terminal's top-right corner, so nothing floats over it.
     let searching = s.terminals.get(&key).is_some_and(|t| t.search.is_some());
     let placement = match pane_header::placement(s, window, block) {
-        Placement::Floating if searching => Placement::None,
+        Placement::Floating if searching && s.grabbed_header() != Some(block) => Placement::None,
         placement => placement,
     };
     let headed = placement == Placement::Row;
@@ -880,7 +886,9 @@ pub fn area(s: &Workspace, px: f32) -> El {
     let (panes, dividers) =
         layout::placements(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
     let bleed = full_bleed(s, current);
-    for placement in panes {
+    let [ix, iy, iw, ih] = inner(s);
+
+    let emit_card = |placement: &layout::Placement| {
         let rect = if bleed {
             [0., 0., s.area[2], s.area[3]]
         } else {
@@ -896,7 +904,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
         } else {
             CardState::Plain
         };
-        area = area.child(pane_card(
+        pane_card(
             s,
             current,
             &placement.block,
@@ -905,10 +913,10 @@ pub fn area(s: &Workspace, px: f32) -> El {
             state,
             is_focus && s.panel.is_none(),
             bleed || s.settings.pane_density == PaneDensity::Compact,
-        ));
-    }
-    let [ix, iy, iw, ih] = inner(s);
-    for divider in dividers {
+        )
+    };
+
+    let emit_divider = |divider: &layout::Divider| {
         let [x, y, w, h] = divider.rect;
         let horizontal = divider.horizontal;
         let dragging = s
@@ -931,47 +939,75 @@ pub fn area(s: &Workspace, px: f32) -> El {
             .w(w as f32 * iw)
         };
         let d = divider.clone();
-        area = area.child(
-            divider_handle(
-                handle.key(format!("divider:{}", divider.key())),
-                horizontal,
-                dragging,
-                s.settings.pane_density == PaneDensity::Compact,
-            )
-            .on_drag(move |s: &mut Workspace, g, tx| {
-                let Some(session) = s.model().selected.clone() else {
-                    return;
+        divider_handle(
+            handle.key(format!("divider:{}", divider.key())),
+            horizontal,
+            dragging,
+            s.settings.pane_density == PaneDensity::Compact,
+        )
+        .on_drag(move |s: &mut Workspace, g, tx| {
+            let Some(session) = s.model().selected.clone() else {
+                return;
+            };
+            if g.phase == Phase::Down || s.drag.is_none() {
+                s.layer_drag = None;
+                s.drag = Some(DividerDrag {
+                    host: s.active,
+                    session,
+                    divider: d.clone(),
+                    start: d.ratio,
+                    ratio: d.ratio,
+                });
+            }
+            let [_, _, iw, ih] = inner(s);
+            let scale = s.ui_scale() as f64;
+            if let Some(drag) = &mut s.drag {
+                let [_, _, w, h] = drag.divider.rect;
+                let moved = if drag.divider.horizontal {
+                    g.dx as f64 / (iw as f64 * w * scale)
+                } else {
+                    g.dy as f64 / (ih as f64 * h * scale)
                 };
-                if g.phase == Phase::Down || s.drag.is_none() {
-                    s.drag = Some(DividerDrag {
-                        host: s.active,
-                        session,
-                        divider: d.clone(),
-                        start: d.ratio,
-                        ratio: d.ratio,
-                    });
+                drag.ratio = (drag.start + moved).clamp(0.1, 0.9);
+            }
+            tx.instant();
+            if g.phase == Phase::Up {
+                if g.cancelled() {
+                    s.drag = None;
+                } else {
+                    s.finish_drag();
                 }
-                let [_, _, iw, ih] = inner(s);
-                let scale = s.ui_scale() as f64;
-                if let Some(drag) = &mut s.drag {
-                    let [_, _, w, h] = drag.divider.rect;
-                    let moved = if drag.divider.horizontal {
-                        g.dx as f64 / (iw as f64 * w * scale)
-                    } else {
-                        g.dy as f64 / (ih as f64 * h * scale)
-                    };
-                    drag.ratio = (drag.start + moved).clamp(0.1, 0.9);
+            }
+        })
+    };
+
+    if current.zoomed_block_id.is_some() {
+        for placement in &panes {
+            area = area.child(emit_card(placement));
+        }
+    } else {
+        // Emit layer by layer back to front: that layer's cards, then its own split dividers,
+        // then (for floating layers on API >= 13 drawn at their bounds) its outer resize grips.
+        // A tiled divider behind a floating card never steals pointer input through the card.
+        for (layer_index, layer) in current.layers.iter().enumerate() {
+            if layers::minimized(layer) {
+                continue;
+            }
+            for placement in panes.iter().filter(|p| p.layer_index == layer_index) {
+                area = area.child(emit_card(placement));
+            }
+            for divider in dividers.iter().filter(|d| d.layer_index == layer_index) {
+                area = area.child(emit_divider(divider));
+            }
+            if !bleed && layers::floating(layer) {
+                for grip in floating_drag::grips(s, layer) {
+                    area = area.child(grip);
                 }
-                tx.instant();
-                if g.phase == Phase::Up {
-                    if g.cancelled() {
-                        s.drag = None;
-                    } else {
-                        s.finish_drag();
-                    }
-                }
-            }),
-        );
+            }
+        }
+    }
+    if let Some(ghost) = floating_drag::ghost(s) {
+        area = area.child(ghost);
     }
     area
 }

@@ -18,6 +18,7 @@ Implementation follow-up records, each with scope and verification. They do not 
 - M3.3: [first, read-only Server settings slice](M3.3-server-settings.md); [running duration and confirmed Stop server (partial)](M3.3-server-controls.md); [Pair device (partial)](M3.3-pair-device.md).
 - M3.4: [notification quality and health (partial)](M3.4-notification-quality.md); [optional activity sounds (partial)](M3.4-sounds.md).
 - M3.7: [prompt navigation verified and implemented](prompt-navigation.md).
+- M4: [floating panes, slice 1 (server actions and lifecycle)](M4-floating-layers.md); [floating panes, slice 2 (pointer drag and 8-way edge resize)](M4-floating-drag-resize.md).
 - M4.4: [recovery: shortcut recorder](M4.4.md).
 - M7: [terminal fonts without fontconfig, and bundled Nerd Font symbols](M7-fonts.md).
 - M11: [macOS notifications through the notification centre](M11-macos-notifications.md).
