@@ -2781,16 +2781,17 @@ async fn run_data(
                         // Ghostty scrolls the selected match into view.
                         Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &mut stream.terminal {
                             prompt_anchor = false;
-                            if search.has_needle() && !search.is_settled() {
-                                if let Some(epoch) = copy_mode.active_epoch() {
-                                    pending_copy_search
-                                        .get_or_insert(PendingCopySearch {
-                                            epoch,
-                                            steps: Vec::new(),
-                                        })
-                                        .steps
-                                        .push(older);
-                                }
+                            if search.has_needle()
+                                && !search.is_settled()
+                                && let Some(epoch) = copy_mode.active_epoch()
+                            {
+                                pending_copy_search
+                                    .get_or_insert(PendingCopySearch {
+                                        epoch,
+                                        steps: Vec::new(),
+                                    })
+                                    .steps
+                                    .push(older);
                             } else {
                                 if let Err(error) = search.step(terminal, older) {
                                     search = Default::default();

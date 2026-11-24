@@ -138,13 +138,14 @@ impl Harness {
                         .unwrap();
                 }
                 Command::SearchStep(older) => {
-                    if self.search.has_needle() && !self.search.is_settled() {
-                        if let Some(epoch) = self.copy.active_epoch() {
-                            pending_search
-                                .get_or_insert((epoch, Vec::new()))
-                                .1
-                                .push(older);
-                        }
+                    if self.search.has_needle()
+                        && !self.search.is_settled()
+                        && let Some(epoch) = self.copy.active_epoch()
+                    {
+                        pending_search
+                            .get_or_insert((epoch, Vec::new()))
+                            .1
+                            .push(older);
                     } else {
                         self.search.step(&self.terminal, older).unwrap();
                         if self.copy.is_active() {
