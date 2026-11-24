@@ -324,7 +324,7 @@ fn pane_card(
             s.pane_menu(id.clone(), Some((p.x, p.y)))
         })
         .on_drop_hover(move |s: &mut Workspace, inside, _| {
-            if inside {
+            if inside && !s.in_copy_mode() {
                 s.drop_hover = Some(hover_id.clone());
             } else if s.drop_hover.as_ref() == Some(&hover_id) {
                 s.drop_hover = None;
@@ -468,6 +468,7 @@ fn pane_card(
                                     let _ = t.connection.commands.focus();
                                 }
                                 t.mouse = None;
+                                t.mouse_cell = Some(t.cell_at(d.x, d.y, cell));
                                 t.pressed_link = None;
                                 t.primary_press = None;
                                 t.selecting = false;
@@ -599,6 +600,7 @@ fn pane_card(
                     if same {
                         tx.live_only();
                     }
+                    let at = t.cell_at(p.x, p.y, cell);
                     if in_copy
                         || tx.mods().shift
                         || !focused
@@ -606,9 +608,11 @@ fn pane_card(
                         || !t.tracking()
                         || !t.status().live
                     {
+                        if in_copy {
+                            t.mouse_cell = Some(at);
+                        }
                         return;
                     }
-                    let at = t.cell_at(p.x, p.y, cell);
                     if t.mouse_cell != Some(at) {
                         t.send_mouse("motion", None, at, tx.mods());
                     }
@@ -625,20 +629,26 @@ fn pane_card(
                     let cell = s.metrics().cell;
                     let mods = tx.mods();
                     let focused = s.focused_block().as_deref() == Some(k5.1.as_str());
-                    let in_copy = s.copy_mode_on(&k5);
-                    if !in_copy
-                        && let Some(t) = s.terminals.get_mut(&k5)
+                    if s.copy_mode_on(&k5) && mods.shift {
+                        return;
+                    }
+                    if let Some(t) = s.terminals.get_mut(&k5)
                         && t.tracking()
                         && mods.shift
                         && t.status().live
                     {
                         if !focused {
-                            let _ = t.connection.commands.focus();
+                            s.exit_copy_mode();
+                            if let Some(t) = s.terminals.get_mut(&k5) {
+                                let _ = t.connection.commands.focus();
+                            }
                         }
-                        let at = t.cell_at(p.x, p.y, cell);
-                        t.clear_selection();
-                        t.send_mouse("press", Some("right"), at, mods);
-                        t.send_mouse("release", Some("right"), at, mods);
+                        if let Some(t) = s.terminals.get_mut(&k5) {
+                            let at = t.cell_at(p.x, p.y, cell);
+                            t.clear_selection();
+                            t.send_mouse("press", Some("right"), at, mods);
+                            t.send_mouse("release", Some("right"), at, mods);
+                        }
                         return;
                     }
                     let w = p.window();

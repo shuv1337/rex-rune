@@ -411,11 +411,20 @@ impl Term {
     /// The same send and notice, with acceptance feedback for local path history.
     /// Defense-in-depth: exits copy mode before any PTY input command reaches the worker.
     pub fn try_send(&mut self, command: Command) -> bool {
-        if matches!(
-            command,
-            Command::Paste(_) | Command::SendKey(_) | Command::Reset | Command::Clear
-        ) && let Some(epoch) = self.copy_mode_active.take()
-        {
+        let is_pty_input = match &command {
+            Command::Key(payload) => {
+                payload.get("action").and_then(|v| v.as_str()) != Some("release")
+            }
+            Command::KeyWithPrefix { .. }
+            | Command::Paste(_)
+            | Command::SendKey(_)
+            | Command::Mouse(_)
+            | Command::Wheel(_)
+            | Command::Reset
+            | Command::Clear => true,
+            _ => false,
+        };
+        if is_pty_input && let Some(epoch) = self.copy_mode_active.take() {
             self.selection_revision = self.selection_revision.wrapping_add(1);
             let _ = self
                 .connection
@@ -479,6 +488,7 @@ impl Term {
         self.copy_wanted = None;
         self.last_selection_input = None;
         self.primary_press = None;
+        self.mouse = None;
         self.send_copy_mode(self.restore_generation, epoch, cell, CopyModeOp::Begin);
         (self.restore_generation, epoch)
     }
@@ -1608,7 +1618,17 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                 let mut chars = cell.text.chars();
                 let single = chars.next().filter(|_| chars.next().is_none());
                 if let Some(sprite) = single.and_then(Sprite::of) {
-                    grid = sprite.draw(grid, px, (width, ch), m.px, rgb(colors.search_text));
+                    let layer = el()
+                        .key(format!("{key}/copy-cursor-sprite"))
+                        .absolute(px, py)
+                        .size(width, ch);
+                    grid = grid.child(sprite.draw(
+                        layer,
+                        0.,
+                        (width, ch),
+                        m.px,
+                        rgb(colors.search_text),
+                    ));
                 } else {
                     let mut style = RunStyle {
                         fg: colors.search_text,

@@ -2677,6 +2677,7 @@ async fn run_data(
             let mut socket = socket.context("data socket")?;
             let stream = stream.as_mut().context("terminal stream")?;
             let selection = selection.as_mut().context("selection controller")?;
+            let mut pending_copy_search: Option<PendingCopySearch> = None;
             let mut dirty = true;
             let mut tick = tokio::time::interval(Duration::from_millis(16));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2703,6 +2704,7 @@ async fn run_data(
                             dirty = true;
                         },
                         Ok(DataCommand::CopyMode(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &mut stream.terminal {
+                            let is_to_match = matches!(input.op, crate::terminal::copy_mode::CopyModeOp::ToMatch);
                             match copy_mode.apply(terminal, Some(&search), input) {
                                 Ok(outcome) if outcome.accepted => {
                                     prompt_anchor = false;
@@ -2713,10 +2715,19 @@ async fn run_data(
                                     if let Some(yank) = outcome.yank {
                                         pending_yank = Some(yank);
                                     }
+                                    if is_to_match && search.has_needle() && !search.is_settled() {
+                                        pending_copy_search = Some(PendingCopySearch {
+                                            epoch: input.epoch,
+                                            steps: Vec::new(),
+                                        });
+                                    } else {
+                                        pending_copy_search = None;
+                                    }
                                     dirty = true;
                                 }
                                 Ok(_) => {}
                                 Err(error) => {
+                                    pending_copy_search = None;
                                     fail_copy_mode(&mut copy_mode, &shared, error);
                                     dirty = true;
                                 }
@@ -2725,6 +2736,7 @@ async fn run_data(
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } else if !value && let Some(terminal) = &stream.terminal { selection.stop(terminal)?; } visible = value; }
                         Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal {
                             prompt_anchor = false;
+                            pending_copy_search = None;
                             let before = terminal.scrollbar()?.offset as usize;
                             terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta));
                             selection.after_scroll(terminal)?;
@@ -2735,6 +2747,7 @@ async fn run_data(
                         },
                         Ok(DataCommand::CursorStyle(shape)) => { cursor_style = shape; stream.set_cursor_style(shape)?; dirty = true; },
                         Ok(DataCommand::PromptStep(older)) => if let Some(terminal) = &mut stream.terminal {
+                            pending_copy_search = None;
                             let before = terminal.scrollbar()?.offset;
                             terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::DeltaPrompt(if older { -1 } else { 1 }));
                             if terminal.scrollbar()?.offset != before {
@@ -2748,6 +2761,7 @@ async fn run_data(
                         },
                         Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal {
                             prompt_anchor = false;
+                            pending_copy_search = None;
                             terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom);
                             if let Err(error) = copy_mode.after_scroll_bottom(terminal) {
                                 fail_copy_mode(&mut copy_mode, &shared, error);
@@ -2755,16 +2769,40 @@ async fn run_data(
                             dirty = true;
                         },
                         // A search that fails is dropped with a notice; the terminal's stream is not its to end.
-                        Ok(DataCommand::Search(needle)) => { prompt_anchor = false; if let Err(error) = search.set_needle(stream.terminal.as_ref(), needle) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } dirty = true; },
+                        Ok(DataCommand::Search(needle)) => {
+                            prompt_anchor = false;
+                            pending_copy_search = None;
+                            if let Err(error) = search.set_needle(stream.terminal.as_ref(), needle) {
+                                search = Default::default();
+                                shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                            }
+                            dirty = true;
+                        }
                         // Ghostty scrolls the selected match into view.
                         Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &mut stream.terminal {
                             prompt_anchor = false;
-                            if let Err(error) = search.step(terminal, older) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); }
-                            selection.after_scroll(terminal)?;
-                            if copy_mode.is_active()
-                                && let Err(error) = copy_mode.move_to_match(terminal, &search)
-                            {
-                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            if search.has_needle() && !search.is_settled() {
+                                if let Some(epoch) = copy_mode.active_epoch() {
+                                    pending_copy_search
+                                        .get_or_insert(PendingCopySearch {
+                                            epoch,
+                                            steps: Vec::new(),
+                                        })
+                                        .steps
+                                        .push(older);
+                                }
+                            } else {
+                                if let Err(error) = search.step(terminal, older) {
+                                    search = Default::default();
+                                    pending_copy_search = None;
+                                    shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                }
+                                selection.after_scroll(terminal)?;
+                                if copy_mode.is_active()
+                                    && let Err(error) = copy_mode.move_to_match(terminal, &search)
+                                {
+                                    fail_copy_mode(&mut copy_mode, &shared, error);
+                                }
                             }
                             dirty = true;
                         },
@@ -2776,10 +2814,54 @@ async fn run_data(
                         if stream.render_held(Instant::now())? { continue; }
                         if let Some(terminal) = &mut stream.terminal {
                             selection.tick(terminal)?;
-                            let search_pending = match search.update(terminal) {
+                            let mut search_pending = match search.update(terminal) {
                                 Ok(pending) => pending,
-                                Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); false }
+                                Err(error) => {
+                                    search = Default::default();
+                                    pending_copy_search = None;
+                                    shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                    false
+                                }
                             };
+                            if search_pending && pending_copy_search.is_some() {
+                                for _ in 0..64 {
+                                    match search.update(terminal) {
+                                        Ok(false) => {
+                                            search_pending = false;
+                                            break;
+                                        }
+                                        Ok(true) => {}
+                                        Err(error) => {
+                                            search = Default::default();
+                                            pending_copy_search = None;
+                                            shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                            search_pending = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if !search_pending
+                                && let Some(pending) = pending_copy_search.take()
+                                && copy_mode.active_epoch() == Some(pending.epoch)
+                                && search.has_needle()
+                            {
+                                let mut failed = false;
+                                for older in pending.steps {
+                                    if let Err(error) = search.step(terminal, older) {
+                                        search = Default::default();
+                                        shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                                if !failed {
+                                    selection.after_scroll(terminal)?;
+                                    if let Err(error) = copy_mode.move_to_match(terminal, &search) {
+                                        fail_copy_mode(&mut copy_mode, &shared, error);
+                                    }
+                                }
+                            }
                             if let Err(error) = copy_mode.sync(terminal) {
                                 fail_copy_mode(&mut copy_mode, &shared, error);
                             }
@@ -2838,6 +2920,12 @@ async fn run_data(
             }
         }
     }
+}
+
+/// Queued copy-mode jump/steps waiting for an in-flight search scan to settle.
+struct PendingCopySearch {
+    epoch: u64,
+    steps: Vec<bool>,
 }
 
 async fn open_data(

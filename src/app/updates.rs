@@ -622,6 +622,7 @@ impl Workspace {
     }
 
     pub fn open_updates_settings(&mut self) {
+        self.exit_copy_mode();
         self.cancel_layer_drag();
         self.leave_install_dialog();
         self.settings_nav.opened();

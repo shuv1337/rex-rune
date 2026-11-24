@@ -30,7 +30,8 @@ import tkinter
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-rune"))
-BASE = Path(os.path.realpath(os.environ.get("REX_COPY_MODE_BASE", "/mnt/data/tmp")))
+DEFAULT_BASE = "/mnt/data/tmp" if Path("/mnt/data/tmp").is_dir() else tempfile.gettempdir()
+BASE = Path(os.path.realpath(os.environ.get("REX_COPY_MODE_BASE", DEFAULT_BASE)))
 SNAP_OUT = os.environ.get("REX_COPY_MODE_SNAP_DIR")
 
 for tool in ("rex", "Xvfb", "openbox", "xdotool", "import"):
@@ -211,6 +212,7 @@ try:
     # ------------------------------------------------------------------
     # Check 1: Zero PTY bytes leaked during copy mode (including paste,
     # unbound keys, Return, BackSpace, visual toggles, and exit via `q`).
+    # Ends deterministically when post-exit sentinel `Z` arrives over FIFO.
     # ------------------------------------------------------------------
     set_clipboard_sentinel("MUST-NOT-PASTE-IN-COPY-MODE")
     dumped = work / "pty-bytes.bin"
@@ -223,10 +225,15 @@ try:
         "tty.setraw(fd)\n"
         f"open({str(ready)!r}, 'w').close()\n"
         "data = b''\n"
-        "until = time.monotonic() + 2.5\n"
+        "until = time.monotonic() + 15.0\n"
         "while time.monotonic() < until:\n"
         "    if select.select([fd], [], [], 0.05)[0]:\n"
-        "        data += os.read(fd, 4096)\n"
+        "        chunk = os.read(fd, 4096)\n"
+        "        if not chunk:\n"
+        "            break\n"
+        "        data += chunk\n"
+        "        if b'Z' in data:\n"
+        "            break\n"
         "termios.tcsetattr(fd, termios.TCSANOW, old)\n"
         f"open({str(dumped)!r}, 'wb').write(data)\n"
     )
@@ -265,8 +272,13 @@ try:
     ):
         desk.key(k)
         time.sleep(0.03)
-    wait(dumped.exists, "raw PTY byte-dumper did not finish")
-    leaked = dumped.read_bytes()
+    # Deterministic FIFO fence: send `Z` after `q` exited copy mode; anything
+    # received before `Z` would be a leaked byte from copy mode.
+    desk.key("Z")
+    wait(dumped.exists, "raw PTY byte-dumper did not receive post-exit sentinel")
+    raw = dumped.read_bytes()
+    assert b"Z" in raw, f"post-exit sentinel Z was not received by PTY dumper: {raw!r}"
+    leaked = raw.split(b"Z", 1)[0]
     assert leaked == b"", f"copy mode leaked bytes to PTY: {leaked!r}"
     print("PASS zero-pty-leak — 0 bytes leaked across all copy-mode keys and exit", flush=True)
 

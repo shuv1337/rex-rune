@@ -360,29 +360,42 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if dispatch(s, ev, tx, false) {
         return true;
     }
-    if s.in_copy_mode() {
-        return s.copy_mode_key(ev, tx);
-    }
     // Unbound, these are the window's: Minimize, and Close if its shortcut was taken away.
     // Left untaken, the system's window menu acts on them instead of the program.
     if window_key.is_some() {
         return false;
     }
+    if s.in_copy_mode() {
+        return s.copy_mode_key(ev, tx);
+    }
     forward(s, ev, tx, Vec::new())
 }
 
 fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -> bool {
+    let code = tx.physical_key();
+    let repeat = tx.key_repeat();
+    let base = tx.key_base();
+    let identity = Input {
+        event: ev,
+        code,
+        base,
+        repeat: false,
+    }
+    .identity();
+    // A repeat reaches the PTY only when its press did: a key held across an automatic
+    // copy-mode exit (or popup/dialog close) must never leak repeats to the PTY.
+    if repeat && !s.forwarded.contains(&identity) {
+        return true;
+    }
     if tx.focused().is_some() {
         // Both unbound keys and explicit forward bindings return focus to the terminal.
         tx.blur();
     }
-    let code = tx.physical_key();
-    let action = if tx.key_repeat() {
+    let action = if repeat {
         Action::Repeat
     } else {
         Action::Press
     };
-    let base = tx.key_base();
     let composes = s.option_composes(tx.alt_keys());
     let Some(term) = s.active_terminal_mut() else {
         return true;
@@ -404,15 +417,7 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
             }
         });
         s.last_keypress = Some(std::time::Instant::now());
-        s.forwarded.insert(
-            Input {
-                event: ev,
-                code,
-                base,
-                repeat: false,
-            }
-            .identity(),
-        );
+        s.forwarded.insert(identity);
     }
     true
 }
@@ -430,12 +435,8 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     .identity();
     let consumed = s.bindings.consumed.remove(&identity).is_some();
-    if s.in_copy_mode() {
-        s.forwarded.remove(&identity);
-        return true;
-    }
     if !s.forwarded.remove(&identity) {
-        return consumed || s.panel.is_none();
+        return consumed || s.in_copy_mode() || s.panel.is_none();
     }
     let composes = s.option_composes(tx.alt_keys());
     if let Some(term) = s.active_terminal_mut()

@@ -673,6 +673,9 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
     let Some(spec) = find(name).filter(|spec| spec.accepts(args)) else {
         return false;
     };
+    if s.in_copy_mode() && spec.blocked_in_copy_mode() {
+        return true;
+    }
     match spec.handler {
         Handler::Compatibility => super::compatibility::run(s, name, args, tx),
         Handler::Palette => s.picker(false),

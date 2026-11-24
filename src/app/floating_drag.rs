@@ -199,10 +199,11 @@ impl Workspace {
         if !drag.active {
             if drag.focus_on_click && inside {
                 let id = &drag.target.block;
-                if self.focused_block().as_deref() != Some(id.as_str())
-                    && let Some(t) = self.terminals.get(&self.term_key(id))
-                {
-                    let _ = t.connection.commands.focus();
+                if self.focused_block().as_deref() != Some(id.as_str()) {
+                    self.exit_copy_mode();
+                    if let Some(t) = self.terminals.get(&self.term_key(id)) {
+                        let _ = t.connection.commands.focus();
+                    }
                 }
                 tx.blur();
             }

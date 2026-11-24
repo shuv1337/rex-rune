@@ -104,6 +104,7 @@ impl Harness {
     ) -> Vec<Command> {
         let mut other = Vec::new();
         let mut yank = None;
+        let mut pending_search: Option<(u64, Vec<bool>)> = None;
         for cmd in rx.try_iter() {
             let HostCommand::Terminal { block, command, .. } = cmd else {
                 continue;
@@ -113,6 +114,7 @@ impl Harness {
             }
             match command {
                 Command::CopyMode(input) => {
+                    let is_to_match = matches!(input.op, CopyModeOp::ToMatch);
                     let outcome = self
                         .copy
                         .apply(&mut self.terminal, Some(&self.search), input)
@@ -122,22 +124,38 @@ impl Harness {
                         if let Some(y) = outcome.yank {
                             yank = Some(y);
                         }
+                        if is_to_match && self.search.has_needle() && !self.search.is_settled() {
+                            pending_search = Some((input.epoch, Vec::new()));
+                        } else {
+                            pending_search = None;
+                        }
                     }
                 }
                 Command::Search(needle) => {
+                    pending_search = None;
                     self.search
                         .set_needle(Some(&self.terminal), needle)
                         .unwrap();
                 }
                 Command::SearchStep(older) => {
-                    self.search.step(&self.terminal, older).unwrap();
-                    if self.copy.is_active() {
-                        self.copy
-                            .move_to_match(&mut self.terminal, &self.search)
-                            .unwrap();
+                    if self.search.has_needle() && !self.search.is_settled() {
+                        if let Some(epoch) = self.copy.active_epoch() {
+                            pending_search
+                                .get_or_insert((epoch, Vec::new()))
+                                .1
+                                .push(older);
+                        }
+                    } else {
+                        self.search.step(&self.terminal, older).unwrap();
+                        if self.copy.is_active() {
+                            self.copy
+                                .move_to_match(&mut self.terminal, &self.search)
+                                .unwrap();
+                        }
                     }
                 }
                 Command::Scroll(delta) => {
+                    pending_search = None;
                     let before = self.terminal.scrollbar().unwrap().offset as usize;
                     self.terminal
                         .scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta));
@@ -148,6 +166,23 @@ impl Harness {
                 Command::Resize(..) | Command::CursorStyle(_) => {}
                 leaked => other.push(leaked),
             }
+        }
+        // Mirror `run_data`'s tick arm: settle search first, then finish any queued ToMatch/steps.
+        for _ in 0..1000 {
+            if !self.search.update(&self.terminal).unwrap() {
+                break;
+            }
+        }
+        if let Some((epoch, steps)) = pending_search.take()
+            && self.copy.active_epoch() == Some(epoch)
+            && self.search.has_needle()
+        {
+            for older in steps {
+                self.search.step(&self.terminal, older).unwrap();
+            }
+            self.copy
+                .move_to_match(&mut self.terminal, &self.search)
+                .unwrap();
         }
         let frame = Arc::new(self.build_frame());
         let ended = self.copy.ended_epoch();
@@ -561,27 +596,148 @@ fn zero_pty_leaks_across_all_copy_mode_states_and_input_paths() {
     rt.frame(1. / 60.);
     rt.wheel(cx, cy, 40.);
     rt.frame(1. / 60.);
+    // Shift+right-click while in copy mode stays in copy mode, does not open the pane menu,
+    // and never leaks a mouse-tracking press/release to the PTY.
+    rt.physical_input(PhysicalInput::Modifiers(Mods {
+        shift: true,
+        ..Mods::default()
+    }));
     rt.secondary_down(cx, cy);
     rt.secondary_up(cx, cy);
     rt.frame(1. / 60.);
+    rt.physical_input(PhysicalInput::Modifiers(Mods::default()));
+    rt.frame(1. / 60.);
+    assert!(
+        rt.state.in_copy_mode(),
+        "Shift+right-click in copy mode must keep copy mode active"
+    );
+    assert!(
+        rt.state.panel.is_none(),
+        "Shift+right-click in copy mode must not open pane menu"
+    );
     assert!(
         drain_pty(&sent).is_empty(),
-        "middle-click/wheel/motion/right-click must not leak to PTY"
+        "middle-click/wheel/motion/shift+right-click must not leak to PTY"
+    );
+
+    // File drops onto a pane while in copy mode must NOT highlight drop_hover or upload to PTY.
+    let drop_paths = vec![std::path::PathBuf::from("/tmp/should-not-upload.txt")];
+    rt.drag_files(drop_paths.clone(), Some((cx, cy)));
+    rt.frame(1. / 60.);
+    assert!(
+        rt.state.drop_hover.is_none(),
+        "copy mode must suppress drop hover highlight"
+    );
+    rt.drop_files(drop_paths, Some((cx, cy)));
+    rt.frame(1. / 60.);
+    assert!(
+        rt.state.in_copy_mode(),
+        "file drop must not alter copy mode"
+    );
+    assert!(
+        !_host_rx
+            .try_iter()
+            .any(|c| matches!(c, HostCommand::Upload { .. })),
+        "file drop in copy mode must never emit HostCommand::Upload"
     );
 
     // Left-click inside pane exits copy mode without leaking mouse-tracking press.
-    if !rt.state.in_copy_mode() {
-        tap_ctrl_shift(&mut rt, Code::KeyX, 'x');
-        let _ = harness.pump(&mut rt, &sent);
-    }
+    assert!(
+        rt.state.in_copy_mode(),
+        "must still be in copy mode immediately before left-click exit"
+    );
     rt.pointer_down(cx, cy);
     rt.pointer_up(cx, cy);
     rt.frame(1. / 60.);
     assert!(!rt.state.in_copy_mode());
+    let leaked = drain_pty(&sent);
     assert!(
-        drain_pty(&sent).is_empty(),
-        "left-click exit must not leak mouse-tracking press to PTY"
+        leaked.is_empty(),
+        "left-click exit must not leak mouse-tracking press to PTY: {leaked:?}"
     );
+
+    // Held motion keys (`j` and `Ctrl+D`) whose press stayed in copy mode MUST NOT leak
+    // key repeats to the PTY if copy mode ends automatically via a non-keyboard trigger.
+    for (code, ev) in [
+        (Code::KeyJ, key_ev(Key::Text("j".into()), Mods::default())),
+        (
+            Code::KeyD,
+            key_ev(
+                Key::Command('d'),
+                Mods {
+                    ctrl: true,
+                    cmd: true,
+                    ..Mods::default()
+                },
+            ),
+        ),
+    ] {
+        tap_ctrl_shift(&mut rt, Code::KeyX, 'x');
+        assert!(harness.pump(&mut rt, &sent).is_empty());
+        assert!(rt.state.in_copy_mode());
+        // Initial press is handled by copy mode (leaves consumed=false so it can repeat).
+        send_key(&mut rt, Some(code), ev.clone(), true, false);
+        assert!(harness.pump(&mut rt, &sent).is_empty());
+        // Automatic worker exit (e.g. program switches to alternate screen / eviction).
+        let epoch = rt.state.active_copy_mode().unwrap().epoch;
+        rt.update(|s, tx| {
+            let key = s.term_key("block:a");
+            s.terminals[&key]
+                .connection
+                .model
+                .lock()
+                .unwrap()
+                .copy_ended_epoch = epoch;
+            s.terminal_woke(&key, tx);
+        });
+        assert!(!rt.state.in_copy_mode());
+        // Subsequent repeats and release from the same held key must NEVER reach the PTY!
+        send_key(&mut rt, Some(code), ev.clone(), true, true);
+        send_key(&mut rt, Some(code), ev.clone(), true, true);
+        send_key(&mut rt, Some(code), ev, false, false);
+        assert!(
+            drain_pty(&sent).is_empty(),
+            "held {code:?} repeat after automatic copy-mode exit leaked to PTY"
+        );
+    }
+
+    // Releasing a modifier that was pressed BEFORE entering copy mode still forwards its
+    // release without terminating copy mode (prevents stuck modifiers on kitty clients).
+    let ctrl_down = key_ev(
+        Key::Modifier {
+            modifier: rune::Modifier::ControlLeft,
+            pressed: true,
+        },
+        Mods {
+            ctrl: true,
+            cmd: true,
+            ..Mods::default()
+        },
+    );
+    let ctrl_up = key_ev(
+        Key::Modifier {
+            modifier: rune::Modifier::ControlLeft,
+            pressed: false,
+        },
+        Mods::default(),
+    );
+    send_key(&mut rt, Some(Code::ControlLeft), ctrl_down, true, false);
+    let _ = drain_pty(&sent);
+    tap_ctrl_shift(&mut rt, Code::KeyX, 'x');
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    assert!(rt.state.in_copy_mode());
+    send_key(&mut rt, Some(Code::ControlLeft), ctrl_up, false, false);
+    assert!(
+        rt.state.in_copy_mode(),
+        "draining pre-entry modifier release must not exit copy mode"
+    );
+    assert!(
+        drain_copy_ops(&sent).is_empty(),
+        "pre-entry modifier release must not send CopyModeOp::End"
+    );
+    tap_text(&mut rt, "q");
+    assert!(!rt.state.in_copy_mode());
+    let _ = harness.pump(&mut rt, &sent);
 
     // Key repeat + key release after exiting with q, y, Escape must NEVER leak to PTY.
     for (exit_code, exit_ev) in [
@@ -705,6 +861,78 @@ fn layout_independent_symbols_and_modifier_preservation() {
                 count: 1
             },
         ]
+    );
+
+    // macOS Option+4 (`$`) and Windows/Linux AltGr+4 (`$`, `^`) dispatch symbol motions,
+    // while Option/AltGr letters (`Alt+j`, `Ctrl+Alt+j`) stay swallowed without moving.
+    send_key(
+        &mut rt,
+        Some(Code::Digit4),
+        key_ev(
+            Key::Text("$".into()),
+            Mods {
+                alt: true,
+                ..Mods::default()
+            },
+        ),
+        true,
+        false,
+    );
+    send_key(
+        &mut rt,
+        Some(Code::Digit4),
+        key_ev(
+            Key::Text("$".into()),
+            Mods {
+                ctrl: true,
+                alt: true,
+                ..Mods::default()
+            },
+        ),
+        true,
+        false,
+    );
+    send_key(
+        &mut rt,
+        Some(Code::KeyJ),
+        key_ev(
+            Key::Text("j".into()),
+            Mods {
+                alt: true,
+                ..Mods::default()
+            },
+        ),
+        true,
+        false,
+    );
+    send_key(
+        &mut rt,
+        Some(Code::KeyJ),
+        key_ev(
+            Key::Text("j".into()),
+            Mods {
+                ctrl: true,
+                alt: true,
+                ..Mods::default()
+            },
+        ),
+        true,
+        false,
+    );
+    let alt_ops: Vec<CopyModeOp> = drain_copy_ops(&sent).into_iter().map(|i| i.op).collect();
+    assert_eq!(
+        alt_ops,
+        [
+            CopyModeOp::Move {
+                motion: CopyMotion::LineEnd,
+                count: 1
+            },
+            CopyModeOp::Move {
+                motion: CopyMotion::LineEnd,
+                count: 1
+            },
+        ],
+        "Option and AltGr `$` must dispatch LineEnd while Alt/AltGr letters stay swallowed"
     );
 
     // Logical `/` and `?` with non-US physical codes open forward and backward search.
@@ -1049,6 +1277,62 @@ fn search_handoff_forward_backward_stepping_and_exit_cleanup() {
     assert!(rt.state.in_copy_mode());
     assert!(rt.state.terminals[&key].search.is_none());
     assert!(harness.pump(&mut rt, &sent).is_empty());
+
+    // Fast `/` + typing + `Enter` in the SAME pump (zero pre-tick) settles and jumps to match.
+    tap_text(&mut rt, "g");
+    tap_text(&mut rt, "g");
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    tap_text(&mut rt, "/");
+    for ch in ["n", "e", "e", "d", "l", "e"] {
+        tap_text(&mut rt, ch);
+    }
+    tap_key(&mut rt, Code::Enter, Key::Enter);
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    {
+        let frame = rt.state.terminals[&key].frame.as_ref().unwrap();
+        let search = frame.search.as_ref().unwrap();
+        assert_eq!(search.index, Some(0));
+        assert_eq!(frame.copy.unwrap().cursor, search.selected.unwrap().start);
+    }
+
+    // Exit copy mode (preserving `find.last = "needle"` and clearing `term.search`), re-enter,
+    // and press `2N` (default Forward direction -> N is older, count=2 -> index 1) without
+    // opening the find bar first.
+    tap_text(&mut rt, "q");
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    tap_ctrl_shift(&mut rt, Code::KeyX, 'x');
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    tap_text(&mut rt, "2");
+    tap_text(&mut rt, "N");
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    {
+        let frame = rt.state.terminals[&key].frame.as_ref().unwrap();
+        let search = frame.search.as_ref().unwrap();
+        assert_eq!(
+            search.index,
+            Some(1),
+            "2N re-opening find.last must land on 2nd older match"
+        );
+        assert_eq!(frame.copy.unwrap().cursor, search.selected.unwrap().start);
+    }
+
+    // Re-open with `n` (Forward direction -> !older, count=1 -> wraps from newest to oldest index 2).
+    tap_text(&mut rt, "q");
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    tap_ctrl_shift(&mut rt, Code::KeyX, 'x');
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    tap_text(&mut rt, "n");
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    {
+        let frame = rt.state.terminals[&key].frame.as_ref().unwrap();
+        let search = frame.search.as_ref().unwrap();
+        assert_eq!(
+            search.index,
+            Some(2),
+            "n in Forward direction re-opening find.last must land on oldest match (index 2)"
+        );
+        assert_eq!(frame.copy.unwrap().cursor, search.selected.unwrap().start);
+    }
 }
 
 #[test]
@@ -1154,7 +1438,7 @@ fn lifecycle_auto_exit_is_immediate_across_focus_tabs_sessions_hosts_layers_and_
 fn cursor_rendering_wide_cells_hollow_focus_narrow_bar_hidden_toolbar_and_title_row() {
     let (mut ws, _host_rx) = tabbed_workspace("single");
     let (sender, sent) = flume::unbounded();
-    let mut harness = Harness::new(40, 8, "block:a", b"ab\xe4\xb8\x96\xe7\x95\x8ccd");
+    let mut harness = Harness::new(40, 8, "block:a", "ab世界cd\r\nsecond\r\n│█box".as_bytes());
     harness.attach(&mut ws, &sender);
     let (mut rt, _clipboard) = copy_runtime(ws, (640., 480.));
 
@@ -1178,7 +1462,9 @@ fn cursor_rendering_wide_cells_hollow_focus_narrow_bar_hidden_toolbar_and_title_
     let narrow_cursor = rect_of(&rt, "gblock:a/copy-cursor").expect("copy cursor rendered");
     assert!((narrow_cursor[2] - cw).abs() < 0.5);
 
-    // Move cursor onto wide CJK character '世' (col 2) -> cursor is 2 cells wide.
+    // Move cursor onto wide CJK character '世' (row 0, col 2) -> cursor is 2 cells wide.
+    tap_text(&mut rt, "g");
+    tap_text(&mut rt, "g");
     tap_text(&mut rt, "0");
     tap_text(&mut rt, "l");
     tap_text(&mut rt, "l");
@@ -1189,6 +1475,25 @@ fn cursor_rendering_wide_cells_hollow_focus_narrow_bar_hidden_toolbar_and_title_
         "wide cursor width {} expected {}",
         wide_cursor[2],
         2. * cw
+    );
+
+    // Move cursor onto box-drawing sprite '│' on row 2 (y > 0): the ON_ACCENT sprite
+    // container MUST render at `py` (same y as copy-cursor), NEVER at row 0 (`y = 0`).
+    tap_text(&mut rt, "j");
+    tap_text(&mut rt, "j");
+    tap_text(&mut rt, "0");
+    assert!(harness.pump(&mut rt, &sent).is_empty());
+    let sprite_cursor = rect_of(&rt, "gblock:a/copy-cursor").expect("sprite copy cursor");
+    let sprite_layer =
+        rect_of(&rt, "gblock:a/copy-cursor-sprite").expect("copy cursor sprite container");
+    assert!(
+        sprite_cursor[1] > grid_before[1] + rt.state.metrics().cell.1,
+        "copy cursor must be on row 2 (> row 0): cursor={sprite_cursor:?} grid={grid_before:?}"
+    );
+    assert!(
+        (sprite_layer[0] - sprite_cursor[0]).abs() < 0.5
+            && (sprite_layer[1] - sprite_cursor[1]).abs() < 0.5,
+        "copy cursor sprite must align with cursor at py, not y=0: sprite={sprite_layer:?} cursor={sprite_cursor:?}"
     );
 
     // Window blur keeps copy cursor element rendered (hollow outline).

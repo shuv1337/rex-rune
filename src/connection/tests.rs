@@ -2465,3 +2465,228 @@ async fn copy_mode_and_pointer_selection_coordinate_without_clobber_or_orphans()
     ticket_task.await.unwrap();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn copy_mode_search_to_match_and_steps_settle_when_queued_without_pre_tick() {
+    use crate::terminal::copy_mode::{CopyModeInput, CopyModeOp, CopyMotion};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+
+    let mut source = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 30,
+        rows: 6,
+        max_scrollback: 1 << 16,
+    })
+    .unwrap();
+    source.vt_write(b"needle-01 top\r\nfiller\r\nneedle-02 mid\r\nfiller\r\nneedle-03 bot");
+    let snapshot = ghostty_vt::snapshot::encode(&source).unwrap().to_vec();
+    drop(source);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, wire::PROTOCOL).await;
+        let _hello = ws.next().await.unwrap().unwrap().into_data();
+        let mut welcome = vec![0u8; 32];
+        welcome[0] = 0x81;
+        welcome[24] = 1;
+        ws.send(Message::Binary(welcome.into())).await.unwrap();
+        ws.send(Message::Binary(snapshot.into())).await.unwrap();
+        while ws.next().await.is_some() {}
+    });
+
+    let (host_tx, host_rx) = flume::unbounded::<HostCommand>();
+    let ticket_task = tokio::spawn(async move {
+        if let Ok(HostCommand::Ticket { reply, .. }) = host_rx.recv_async().await {
+            let _ = reply.send(Ok(TerminalTicket {
+                token: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                bundled: false,
+            }));
+        }
+    });
+
+    let model = Arc::new(Mutex::new(Model::default()));
+    let (wake_tx, wake_rx) = flume::bounded(1);
+    let (host_wake_tx, _host_wake_rx) = flume::bounded(1);
+    let (cmd_tx, cmd_rx) = flume::unbounded::<DataCommand>();
+    let pane = PaneShared {
+        model: model.clone(),
+        wake: wake_tx,
+        host_wake: host_wake_tx,
+    };
+
+    async fn wait_for(
+        model: &Arc<Mutex<Model>>,
+        wake_rx: &flume::Receiver<()>,
+        pred: impl Fn(&Model) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pred(&model.lock().unwrap()) {
+                    return;
+                }
+                wake_rx.recv_async().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let worker = tokio::task::spawn_local(run_data(
+                endpoint,
+                SESSION.into(),
+                "block:search-race".into(),
+                host_tx,
+                cmd_rx,
+                pane,
+            ));
+
+            wait_for(&model, &wake_rx, |m| m.connected && m.frame.is_some()).await;
+            let generation = model.lock().unwrap().restore_generation;
+
+            // Enter copy mode and move cursor away from the bottom match to row 0.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 1,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 2,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 2)
+            })
+            .await;
+
+            // Case 1: Queue DataCommand::Search + CopyModeOp::ToMatch in the same burst
+            // with zero pre-tick (mirrors `/` + fast typing + Enter within 16ms).
+            cmd_tx
+                .send(DataCommand::Search("needle-03".into()))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 3,
+                    visible_rows: None,
+                    op: CopyModeOp::ToMatch,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.selection_revision == 3
+                        && f.search
+                            .as_ref()
+                            .is_some_and(|s| s.total == 1 && s.selected.is_some())
+                })
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                let sel = frame.search.as_ref().unwrap().selected.unwrap();
+                assert_eq!(
+                    frame.copy.unwrap().cursor,
+                    sel.start,
+                    "ToMatch queued immediately after Search must jump once search settles"
+                );
+            }
+
+            // Case 2: Queue DataCommand::Search + ToMatch + SearchStep(true) in one burst
+            // (mirrors `2n` re-opening `find.last` without an open find bar).
+            cmd_tx.send(DataCommand::Search("needle".into())).unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 4,
+                    visible_rows: None,
+                    op: CopyModeOp::ToMatch,
+                }))
+                .unwrap();
+            cmd_tx.send(DataCommand::SearchStep(true)).unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.selection_revision == 4
+                        && f.search
+                            .as_ref()
+                            .is_some_and(|s| s.total == 3 && s.index == Some(1))
+                })
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                let sel = frame.search.as_ref().unwrap().selected.unwrap();
+                assert_eq!(
+                    frame.copy.unwrap().cursor,
+                    sel.start,
+                    "queued SearchStep after Search+ToMatch must land on index 1"
+                );
+                assert_eq!(sel.start.1, 2, "needle-02 is on row 2");
+            }
+
+            // Case 3: A manual motion queued before the search settles cancels the pending jump.
+            cmd_tx
+                .send(DataCommand::Search("needle-03".into()))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 5,
+                    visible_rows: None,
+                    op: CopyModeOp::ToMatch,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 6,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.selection_revision == 6 && f.search.as_ref().is_some_and(|s| s.total == 1)
+                })
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(
+                    frame.copy.unwrap().cursor.1,
+                    0,
+                    "subsequent Move must cancel pending search jump"
+                );
+            }
+
+            cmd_tx.send(DataCommand::Stop).unwrap();
+            worker.await.unwrap();
+        })
+        .await;
+
+    ticket_task.await.unwrap();
+    server.await.unwrap();
+}

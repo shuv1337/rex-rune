@@ -219,11 +219,13 @@ impl Workspace {
             return;
         }
         // Entering on a fresh pane cleanly exits any earlier session and cancels drags/modes.
+        // Keep `forwarded` intact so key-up releases for keys pressed before entering copy
+        // mode (such as Ctrl/Shift from Ctrl+Shift+X on kitty key-release clients) still drain.
         self.exit_copy_mode();
         self.cancel_layer_drag();
+        self.drop_hover = None;
         self.bindings.clear_modes();
         self.bindings.sequence.clear();
-        self.forwarded.clear();
         tx.blur();
 
         let cell = self.metrics().cell;
@@ -289,8 +291,7 @@ impl Workspace {
                 && host.model.window().is_some_and(|w| {
                     w.window_id.as_deref() == Some(session.window.as_str())
                         && w.focused_block_id.as_deref() == Some(session.key.1.as_str())
-                        && layers::layer_of(w, &session.key.1)
-                            .is_some_and(|l| !layers::minimized(l))
+                        && !layers::layer_of(w, &session.key.1).is_some_and(layers::minimized)
                 })
         }) && self.terminals.contains_key(&session.key);
         if !valid {
@@ -401,6 +402,7 @@ impl Workspace {
             let mut edit = TextEdit::new("");
             edit.focused = true;
             term.search = Some(edit);
+            term.send(Command::Search(String::new()));
         }
     }
 
@@ -430,6 +432,9 @@ impl Workspace {
         let mods = modifiers_on(ev.mods, rex_rune::keymap::command_key());
         let plain_mods = !mods.ctrl && !mods.alt && !mods.logo;
         let ctrl_only = mods.ctrl && !mods.alt && !mods.logo && !mods.shift;
+        // On Nordic/European layouts, copy-mode symbols (`$`, `^`, `/`, `?`) can be produced
+        // via macOS Option (`alt`) or Windows/Linux AltGr (`ctrl+alt`).
+        let symbol_mods = !mods.logo && (plain_mods || mods.alt);
 
         // 1. Escape / Ctrl+C hierarchy: pending count/prefix -> visual selection -> exit.
         let is_escape = ev.key == Key::Escape && !mods.alt && !mods.logo && !mods.ctrl;
@@ -591,8 +596,16 @@ impl Workspace {
             }
         }
 
-        // 4. Layout-independent logical character dispatch (no Ctrl/Alt/Logo).
-        if plain_mods && let Some(ch) = logical_char(ev, mods.shift) {
+        // 4. Layout-independent logical character dispatch (plain/shifted for all bindings,
+        // plus Option / AltGr for copy-mode symbols `$`, `^`, `/`, `?`).
+        let ch = if plain_mods {
+            logical_char(ev, mods.shift)
+        } else if symbol_mods {
+            logical_char(ev, mods.shift).filter(|c| matches!(c, '$' | '^' | '/' | '?'))
+        } else {
+            None
+        };
+        if let Some(ch) = ch {
             let pending_prefix = self.copy_mode.as_ref().and_then(|s| s.prefix);
             if let Some(prefix) = pending_prefix {
                 self.bindings.consumed.insert(identity, true);
@@ -806,6 +819,21 @@ impl Workspace {
             term.send(Command::Search(last));
         }
         self.send_active_copy_op(CopyModeOp::ToMatch);
+        // `Command::Search` settles on the newest match (index 0): an `older` (`?`) search
+        // is already at match 1 so it needs `count - 1` extra steps, while a forward (`!older`)
+        // step wraps from newest to oldest on step 1 and advances forward across `count` steps.
+        let extra_steps = if older {
+            count.saturating_sub(1)
+        } else {
+            count
+        };
+        if extra_steps > 0
+            && let Some(term) = self.terminals.get_mut(&key)
+        {
+            for _ in 0..extra_steps {
+                term.send(Command::SearchStep(older));
+            }
+        }
     }
 
     fn send_active_copy_op(&mut self, op: CopyModeOp) {

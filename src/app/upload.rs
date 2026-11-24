@@ -56,7 +56,7 @@ impl Workspace {
     }
 
     pub fn drop_files(&mut self, block: &str, paths: &[PathBuf]) {
-        if self.panel.is_some() || paths.is_empty() {
+        if self.panel.is_some() || self.in_copy_mode() || paths.is_empty() {
             return;
         }
         if self.focused_block().as_deref() != Some(block)

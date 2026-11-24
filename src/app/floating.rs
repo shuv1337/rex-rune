@@ -306,12 +306,15 @@ impl Workspace {
         }
         match action {
             // The menu's own tab, session and folder, never the ones on screen now.
-            LayerAction::NewFloating => self.new_floating_layer(
-                self.layer_host(&target).expect("validated host"),
-                &target.session,
-                &target.window,
-                Some(&target.block),
-            ),
+            LayerAction::NewFloating => {
+                self.exit_copy_mode();
+                self.new_floating_layer(
+                    self.layer_host(&target).expect("validated host"),
+                    &target.session,
+                    &target.window,
+                    Some(&target.block),
+                )
+            }
             LayerAction::Float => self.layer_request(
                 &target,
                 "session.float_block",

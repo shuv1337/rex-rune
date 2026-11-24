@@ -21,32 +21,36 @@ rendering into the Rune front end. Attribution: requested and originally contrib
     drag, clears IME preedit/sequences/modes, allocates a monotonically increasing non-zero
     epoch (`>= 1` and strictly `> model.copy_ended_epoch`), and sends `CopyModeOp::Begin`.
 - **Layout-independent copy-mode dispatcher (`src/app/copy_mode.rs`, `src/app/input.rs`):**
-  - Dispatches logical characters (supporting shifted symbols such as `$`, `^`, `%`, `/`, `?`,
-    `0`, `G`, `H`, `M`, `L`, `W`, `B`, `E`, `V`, `Y`, `N` across non-US keyboard layouts),
-    special keys (`Arrows`, `Home`, `End`, `PageUp`, `PageDown`, `Backspace`, `Enter`,
+  - Dispatches logical characters (supporting shifted, Option, and AltGr symbols such as `$`,
+    `^`, `/`, `?`, `0`, `G`, `H`, `M`, `L`, `W`, `B`, `E`, `V`, `Y`, `N` across non-US keyboard
+    layouts), special keys (`Arrows`, `Home`, `End`, `PageUp`, `PageDown`, `Backspace`, `Enter`,
     `Escape`), and `Ctrl+C`/`U`/`D`/`B`/`F`/`V` chords.
   - Preserves pending repeat counts (`1..=9999`, clamped to `MAX_COUNT`) and `g`/`y` prefixes
     across modifier-only key presses (`Key::Modifier`), swallows dead keys (`Key::Dead`), and
-    suppresses post-exit key repeats and key releases so exiting via `q`, `Escape`, `Ctrl+C`,
-    `y`, `Y`, `yy`, or `Enter` never leaks a single byte to the PTY.
+    suppresses post-exit key repeats and releases (including repeats of held motion keys after
+    automatic non-keyboard exits) while still draining releases for keys originally pressed
+    before entering copy mode.
   - Escape / `Ctrl+C` hierarchy: pending count/prefix → clear visual selection → exit copy mode.
 - **Zero-PTY-leak guards (`src/app/input.rs`, `src/app/panes.rs`, `src/app/upload.rs`,
   `src/app/select_copy.rs`, `src/app/term.rs`):**
   - While copy mode is active, unbound keys, `client.key.forward`, server-owned keybindings,
     `pane.paste`, `pane.send_key`, `pane.clear`, `pane.reset`, `pane.insert_path`,
-    `pane.go_to_directory`, `pane.select_all`, IME `Preedit`/`Commit`, middle-click PRIMARY
-    paste, and mouse-tracking pointer/right-click/wheel reports are blocked or routed locally
-    (`CopyModeOp::Scroll`). Left-clicking exits copy mode without leaking mouse-tracking press
-    events.
-  - `Term::try_send` defense-in-depth ends copy mode before any mutating PTY command if
-    `copy_mode_active` is still set.
+    `pane.go_to_directory`, `pane.select_all`, file drops (`drop_files` and drop-hover
+    highlights), IME `Preedit`/`Commit`, middle-click PRIMARY paste, and mouse-tracking
+    pointer/Shift+right-click/wheel reports are blocked or routed locally (`CopyModeOp::Scroll`).
+    Left-clicking exits copy mode without leaking mouse-tracking press events.
+  - `Term::try_send` defense-in-depth ends copy mode before any mutating PTY command (excluding
+    previously-forwarded key releases) if `copy_mode_active` is still set.
 - **Search handoff and yank delivery (`src/app/copy_mode.rs`, `src/app/input.rs`,
-  `src/app/select_copy.rs`, `src/app/term.rs`):**
-  - `/` (forward) and `?` (backward) open the pane's find bar; `Escape` closes the find bar and
-    returns to copy mode; `Enter` blurs the find bar, keeps search highlights visible, and jumps
-    the copy cursor straight to the match (`CopyModeOp::ToMatch`). `n` / `N` step matches in the
-    configured search direction (respecting `Command::SearchStep(older)` sign semantics). Exiting
-    copy mode clears any search opened from copy mode.
+  `src/connection.rs`, `src/app/select_copy.rs`, `src/app/term.rs`):**
+  - `/` (forward) and `?` (backward) open the pane's find bar and clear stale highlights;
+    `Escape` closes the find bar and returns to copy mode; `Enter` blurs the find bar, keeps
+    search highlights visible, and jumps the copy cursor straight to Ghostty's newest selected
+    match (`CopyModeOp::ToMatch`, waiting for an in-flight search scan to settle in `run_data`
+    if `Enter` arrives before the 16 ms tick). `n` / `N` step matches in the chosen search
+    direction (respecting `Command::SearchStep(older)` sign semantics, including re-opening
+    `find.last` with count and direction). Exiting copy mode clears any search opened from copy
+    mode.
   - `CopyYank` payloads are delivered once per `(epoch, revision)` on `terminal_woke` to the
     clipboard (and PRIMARY selection when `terminal.primary_selection` is enabled), never
     triggered by `copy_on_selection` during visual motions. `Ctrl+Shift+C` (`pane.copy`) yanks
@@ -77,8 +81,9 @@ rendering into the Rune front end. Attribution: requested and originally contrib
     `client.key.forward`, `pane.paste`, `pane.send_key`, dead keys, modifier-only keys, IME
     `Preedit`/`Commit`, middle-click PRIMARY paste, wheel/motion/right-click mouse tracking,
     left-click exit, and post-exit key repeats/releases.
-  - Layout-independent symbol dispatch (`$`, `^`, `%`, `?`, `/`, `G`, `H`, `M`, `L`) and
-    modifier-only preservation across pending counts/prefixes.
+  - Layout-independent symbol dispatch (`$`, `^`, `?`, `/`, `G`, `H`, `M`, `L`, including macOS
+    Option and Windows/Linux AltGr symbols) and modifier-only preservation across pending
+    counts/prefixes.
   - Full Vim workflow: `gg`, count clamping (`99999` → `9999`), Escape hierarchy, visual
     `v`/`V`/`Ctrl+V`/`o`/`y`/`Y`/`2yy`/`Enter`/`Ctrl+Shift+C`, `copy_on_selection` isolation,
     clipboard + PRIMARY delivery, and duplicate-wake deduplication.
@@ -105,5 +110,5 @@ rendering into the Rune front end. Attribution: requested and originally contrib
     scrollback text (`SCROLL_ROW_01 ... \nSCROLL_ROW_02 ...`) to the X11 clipboard (and visual
     capture `x11-copy-mode-scrollback-visual.png` inspected).
   - `clean-exit-resumes-pty`: typing immediately after yank exit reached the live PTY cleanly.
-  - `search-and-yy`: `?` search jumped to scrollback match `NEEDLE_ALPHA_77` and `yy` copied
+  - `search-and-yy`: `?` search jumped to scrollback match `SCROLL_ROW_15` and `yy` copied
     the exact line to the X11 clipboard.
