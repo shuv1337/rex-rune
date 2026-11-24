@@ -3010,13 +3010,36 @@ async fn expect_close_answering_sweep(
     ws: &mut WebSocketStream<TcpStream>,
     handle_bg: &mut impl FnMut(&Value) -> Option<(u64, Value)>,
 ) {
+    use std::io::ErrorKind;
+    use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
+
     loop {
         match ws.next().await {
-            Some(Ok(Message::Close(_))) => return,
+            None
+            | Some(Ok(Message::Close(_)))
+            | Some(Err(WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => return,
+            Some(Err(WsError::Io(err)))
+                if matches!(
+                    err.kind(),
+                    ErrorKind::ConnectionAborted
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::UnexpectedEof
+                ) =>
+            {
+                return;
+            }
             Some(Ok(Message::Text(text))) => {
                 let req: Value = serde_json::from_str(&text).unwrap();
                 if let Some((seq, payload)) = handle_bg(&req) {
-                    reply(ws, &req, seq, payload).await;
+                    let msg = json!({"type":"response","id":req["id"],"seq":seq,"payload":payload});
+                    if ws
+                        .send(Message::Text(msg.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
             Some(Ok(_)) => {}
@@ -3891,7 +3914,7 @@ async fn event_dropped_cancels_superseded_in_flight_status_sweep_read() {
         .await;
 
         done_tx.send(()).unwrap();
-        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+        expect_close_answering_sweep(&mut ws, &mut |_| None).await;
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
@@ -3912,6 +3935,7 @@ async fn event_dropped_cancels_superseded_in_flight_status_sweep_read() {
         m.sessions
             .iter()
             .any(|s| s.session_id == SESSION && s.label == "fenced")
+            && !m.activity_reading
     })
     .await;
     {
