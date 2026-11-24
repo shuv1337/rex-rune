@@ -1,6 +1,6 @@
 # Linux Nix packaging
 
-The flake exposes `packages.<system>.rex-rune` (also `default`), a development shell, a formatter and a package check for `x86_64-linux` and `aarch64-linux`. An output being exposed does not mean it has been built on that architecture.
+The flake exposes `packages.<system>.rex-rune` (also `default`), a development shell, a formatter and a package check for `x86_64-linux` and `aarch64-linux`. CI builds the `x86_64-linux` flake check on pull requests and pushes to `master`; `aarch64-linux` is not built in CI, so an output being exposed does not mean it has been built on that architecture.
 
 From a checkout:
 

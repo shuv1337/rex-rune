@@ -1,9 +1,10 @@
 name: CI
 
 # Every pull request and every push to master, on the three platforms the client builds
-# for. Linux is the released platform and runs everything. macOS builds the app and runs
-# the tests. Windows builds the probes and app and runs the full unit/headless suite.
-# Native Windows UI and server attachment are not tested (docs/plans/cross-platform.md).
+# for plus the x86_64-linux Nix flake check. Linux is the released platform and runs
+# everything. macOS builds the app and runs the tests. Windows builds the probes and app
+# and runs the full unit/headless suite. Native Windows UI and server attachment are not
+# tested (docs/plans/cross-platform.md), and aarch64-linux Nix outputs are not built in CI.
 on:
   pull_request:
   push:
@@ -73,6 +74,32 @@ jobs:
       - run: cargo build --locked --no-default-features --bin rex-install-probe
       - name: Run as the runner user on loopback
         run: python3 scripts/ssh-install-private.py
+
+  # The flake's package, with the toolchain in flake.lock rather than mise's. Its
+  # checkPhase runs fmt, Clippy with -D warnings and the tests inside the Nix sandbox.
+  nix:
+    name: Nix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+        with:
+          github_access_token: ${{ github.token }}
+          extra_nix_config: |
+            sandbox = true
+      - name: Verify Nix sandbox is active
+        run: test "$(nix config show sandbox)" = "true"
+      - name: Build and check the package
+        run: nix build --print-build-logs .#checks.x86_64-linux.rex-rune
+      - name: Check packaged binaries
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          test "$(./result/bin/rex-rune --version)" = "rex-rune $version"
+          test "$(./result/bin/rex-linux --version)" = "rex-linux $version"
+          ./result/bin/rex-rune --help > /dev/null
 
   macos:
     name: macOS
