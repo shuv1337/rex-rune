@@ -499,6 +499,7 @@ mod tests {
             remote_control: false,
             collapsed: false,
             shell: None,
+            shared: None,
         };
         let mut host = HostModel {
             connected: true,

@@ -7,6 +7,8 @@ mod directory_tests;
 #[cfg(unix)]
 #[path = "download_tests.rs"]
 mod download_tests;
+#[path = "hosts_tests.rs"]
+mod hosts_tests;
 #[path = "keymap_tests.rs"]
 mod keymap_tests;
 #[path = "navigation_tests.rs"]

@@ -19,6 +19,7 @@ pub mod activity;
 pub mod clipboard;
 pub mod directory;
 pub mod downloads;
+pub mod hosts;
 mod prefetch;
 pub mod server_info;
 mod status_sweep;
@@ -311,6 +312,10 @@ pub struct HostModel {
     pub theme_declared: bool,
     /// What the server says about itself; see [`server_info`].
     pub server_info: server_info::ServerInfo,
+    /// Read-only shared host list from this server (`hosts.list` / `hosts_changed`).
+    pub shared: hosts::SharedHostState,
+    /// Bumped whenever `shared` updates from a `hosts.list` reply.
+    pub shared_revision: u64,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -484,6 +489,9 @@ pub enum HostCommand {
     /// Read the server's version once on each connection from now on, and its status again
     /// when the server says it changed; see [`server_info`]. Read-only, and a refusal is quiet.
     Identify,
+    /// Read `hosts.list` once per connection and re-read on `hosts_changed`; see [`hosts`].
+    /// Read-only; never sends `hosts.put` or `hosts.remove`.
+    WatchSharedHosts,
     Action {
         generation: u64,
         request: Box<rexrs::api::client::Action>,
@@ -1349,6 +1357,9 @@ async fn handle_event(
         }
         return Ok(());
     }
+    if event.name == "hosts_changed" {
+        return Ok(());
+    }
     if !state.includes(&event) {
         return Ok(());
     }
@@ -1517,6 +1528,7 @@ async fn run_host(
     let mut prefetch = prefetch::Prefetch::default();
     let mut keymap: Option<Box<keymap::Declaration>> = None;
     let mut server_reads = server_info::Reader::default();
+    let mut hosts_reads = hosts::Reader::default();
     let mut directory_reads = directory::Reader::default();
     // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
     // fresh one, and its end is a disconnect like any other.
@@ -1654,6 +1666,8 @@ async fn run_host(
             if let Some(declaration) = &keymap { keymap::refresh(&mut control, shared, declaration).await; }
             server_reads.reset();
             server_reads.start(&mut control).await?;
+            hosts_reads.reset();
+            hosts_reads.start(&mut control).await?;
             // The last connection's listing can no longer be answered.
             directory_reads.abandon(shared, directory::Failure::Disconnected);
             retry = 0;
@@ -1671,6 +1685,11 @@ async fn run_host(
                     if let Some(event) = control.next_event().now_or_never() {
                         let event = event?;
                         if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
+                        if event.name == "hosts_changed"
+                            && hosts::changed(&shared.model.lock().expect("host model").shared, &event.payload)
+                        {
+                            hosts_reads.reread(&mut control).await?;
+                        }
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
@@ -1752,11 +1771,17 @@ async fn run_host(
                         status_sweep::record(shared, &mut state, &session, &block, reply, &removed);
                     }
                     reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
+                    reply = hosts_reads.finished(), if hosts_reads.in_flight() => hosts::record(shared, reply),
                     _ = directory_reads.finished(shared), if directory_reads.in_flight() => {}
                     event = control.next_event() => {
                         busy_since = Some(Instant::now());
                         let event = event?;
                         if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
+                        if event.name == "hosts_changed"
+                            && hosts::changed(&shared.model.lock().expect("host model").shared, &event.payload)
+                        {
+                            hosts_reads.reread(&mut control).await?;
+                        }
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
@@ -1875,6 +1900,11 @@ async fn run_host(
                             server_reads.start(&mut control).await?;
                             continue;
                         }
+                        if let HostCommand::WatchSharedHosts = command {
+                            hosts_reads.want();
+                            hosts_reads.start(&mut control).await?;
+                            continue;
+                        }
                         if let HostCommand::Upload { session, block, files } = command {
                             if let Err(error) = upload(&mut control, shared, &endpoint, &session, &block, files).await {
                                 shared.update(|m| m.notice = Some(format!("Upload failed: {error:#}")));
@@ -1966,6 +1996,7 @@ async fn run_host(
                     Ok(HostCommand::Theme(new)) => theme = new,
                     Ok(HostCommand::Keymap(new)) => keymap = Some(new),
                     Ok(HostCommand::Identify) => server_reads.want(),
+                    Ok(HostCommand::WatchSharedHosts) => hosts_reads.want(),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
                     Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
                     Ok(HostCommand::ListDir(request)) => directory::finish(shared, &request, Err(directory::Failure::Disconnected)),
@@ -1997,6 +2028,7 @@ async fn run_host(
                 HostCommand::SshAgent { socket, .. } => ssh_auth_sock = socket,
                 HostCommand::Keymap(new) => keymap = Some(new),
                 HostCommand::Identify => server_reads.want(),
+                HostCommand::WatchSharedHosts => hosts_reads.want(),
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
@@ -2452,6 +2484,7 @@ async fn handle_command(
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)
         | HostCommand::Identify
+        | HostCommand::WatchSharedHosts
         | HostCommand::Download(_)
         | HostCommand::DownloadConfirm(_)
         | HostCommand::DownloadCancel(_)

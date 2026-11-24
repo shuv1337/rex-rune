@@ -479,6 +479,7 @@ impl Workspace {
             remote_control: false,
             collapsed: false,
             shell: None,
+            shared: None,
         };
         let back = self.settings_back();
         self.close_panel(tx);

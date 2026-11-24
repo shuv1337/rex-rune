@@ -179,6 +179,7 @@ pub struct Workspace {
     #[cfg(test)]
     pub notification_outbox: super::notify::Outbox,
     pub integrations: super::integrations::Integrations,
+    pub shared_hosts: super::shared_hosts::SharedHostsState,
     pub ssh_agent: super::ssh_agent::SshAgentState,
     pub ssh_setup: super::ssh_setup::Setup,
     pub(super) ssh_install: Option<super::ssh_install::Install>,
@@ -234,6 +235,7 @@ impl Workspace {
                 remote_control: false,
                 collapsed: false,
                 shell: None,
+                shared: None,
             });
         }
         let wanted = if explicit {
@@ -347,6 +349,7 @@ impl Workspace {
             #[cfg(test)]
             notification_outbox: Default::default(),
             integrations: Default::default(),
+            shared_hosts: Default::default(),
             ssh_agent: Default::default(),
             ssh_setup: Default::default(),
             ssh_install: None,
@@ -402,8 +405,9 @@ impl Workspace {
     }
 
     /// A connection to saved host `index` under a fresh id, with its wake thread.
-    fn spawn_host(&mut self, index: usize, explicit: bool) -> HostState {
+    pub(super) fn spawn_host(&mut self, index: usize, explicit: bool) -> HostState {
         let host = &self.settings.hosts[index];
+        let watch_shared = self.settings.sync_shared_hosts && self.is_shared_source(index);
         let cli = explicit && index == self.active;
         let preferred = if cli {
             self.options.session.clone()
@@ -427,6 +431,9 @@ impl Workspace {
             .send(HostCommand::Keymap(Box::new(self.keymap_declaration())));
         // About and the copied reports name the server; reading it changes nothing there.
         let _ = connection.commands.send(HostCommand::Identify);
+        if watch_shared {
+            let _ = connection.commands.send(HostCommand::WatchSharedHosts);
+        }
         let id = HostId(self.next_host);
         self.next_host += 1;
         let receiver = connection.wake.clone();
@@ -450,7 +457,7 @@ impl Workspace {
     }
 
     /// Forget a host's terminals and claims; dropping its `HostState` shuts its worker down.
-    fn forget_host(&mut self, state: HostState) {
+    pub(super) fn forget_host(&mut self, state: HostState) {
         let id = state.id;
         self.terminals.retain(|(host, _), _| *host != id);
         self.claimed.retain(|(host, _)| *host != id);
@@ -458,12 +465,21 @@ impl Workspace {
         self.unseen_done.retain(|(host, _)| *host != id);
         self.unseen_bells.retain(|(host, _)| *host != id);
         self.activity_epochs.remove(&id);
+        self.shared_hosts.last_reconciled.remove(&id);
+        self.shared_hosts.last_host_id.remove(&id);
     }
 
     /// Stop connecting to saved host `index` and drop it from the workspace. Its server, its
     /// sessions and their programs are untouched. The last host can't be removed.
     pub fn remove_host(&mut self, index: usize, tx: &mut Tx) {
         if self.settings.hosts.len() <= 1 || index >= self.hosts.len() {
+            return;
+        }
+        if self.is_shared_managed(index) {
+            self.inform(format!(
+                "{} is managed by rex hosts (read-only). Turn off shared host sync in Settings → Remote Hosts to remove it locally.",
+                self.settings.hosts[index].label
+            ));
             return;
         }
         self.leave_install_dialog();
@@ -698,6 +714,7 @@ impl Workspace {
         self.sync_tabs(index, tx);
         self.process_downloads(index, tx);
         self.process_directory(index);
+        self.sync_shared_hosts(index, tx);
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
             self.layer_drag = None;
@@ -1640,6 +1657,13 @@ impl Workspace {
             Intent::CheckUpdates => self.check_updates_now(),
             Intent::Downloads => self.open_panel(PanelKind::Downloads, "Downloads", &[]),
             Intent::EditHost(host) => {
+                if self.is_shared_managed(host) {
+                    self.inform(format!(
+                        "{} is managed by rex hosts (read-only). Edit its default shell locally, or turn off shared host sync in Settings → Remote Hosts.",
+                        self.settings.hosts[host].label
+                    ));
+                    return;
+                }
                 let h = self.settings.hosts[host].clone();
                 self.open_panel(
                     PanelKind::Form(Form::EditHost(host)),
@@ -1652,6 +1676,13 @@ impl Workspace {
                 );
             }
             Intent::RemoveHost(host) => {
+                if self.is_shared_managed(host) {
+                    self.inform(format!(
+                        "{} is managed by rex hosts (read-only). Turn off shared host sync in Settings → Remote Hosts to remove it locally.",
+                        self.settings.hosts[host].label
+                    ));
+                    return;
+                }
                 let label = self.settings.hosts[host].label.clone();
                 self.open_panel(PanelKind::RemoveHost(host), &format!("Remove {label}?"), &[]);
             }
@@ -2399,6 +2430,7 @@ impl Workspace {
                             remote_control: false,
                             collapsed: false,
                             shell: None,
+                            shared: None,
                         },
                         tx,
                     ),
@@ -2412,6 +2444,7 @@ impl Workspace {
                                 remote_control: false,
                                 collapsed: false,
                                 shell: None,
+                                shared: None,
                             },
                             tx,
                         );

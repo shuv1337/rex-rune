@@ -66,6 +66,8 @@ mod session_word_tests;
 mod settings_nav_tests;
 #[path = "settings_tests.rs"]
 mod settings_tests;
+#[path = "shared_hosts_tests.rs"]
+mod shared_hosts_tests;
 #[path = "shortcuts_page_tests.rs"]
 mod shortcuts_page_tests;
 #[path = "sound_tests.rs"]
@@ -126,6 +128,7 @@ fn workspace_hosts(count: usize) -> Workspace {
                 remote_control: false,
                 collapsed: false,
                 shell: None,
+                shared: None,
             })
             .collect(),
         ..Settings::default()
@@ -1980,6 +1983,11 @@ fn settings_sections_and_their_forms_return_to_settings() {
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:hosts");
     assert!(has(&rt, "host-row:0") && has(&rt, "host-row:1"));
+    // Remote Hosts now includes Shared host list and SSH cards; bring the second host into view.
+    rt.update(|_, tx| tx.scroll_center("host-edit:1"));
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
     click(&mut rt, "host-edit:1");
     let panel = rt.state.panel.as_ref().expect("the edit form");
     assert!(matches!(panel.kind, PanelKind::Form(Form::EditHost(1))));

@@ -690,9 +690,20 @@ impl Workspace {
                 Entry::new("Retry connection", "", "", Intent::RetryHost(target.host))
                     .in_section(2),
             );
-            entries.push(
-                Entry::new("Edit host…", "", "", Intent::EditHost(target.host)).in_section(2),
-            );
+            let managed = self.is_shared_managed(target.host);
+            let mut edit = Entry::new(
+                "Edit host…",
+                if managed {
+                    super::shared_hosts::MANAGED_REASON
+                } else {
+                    ""
+                },
+                "",
+                Intent::EditHost(target.host),
+            )
+            .in_section(2);
+            edit.enabled = !managed;
+            entries.push(edit);
         }
         let mut close = Entry::new(
             "Close session…",
@@ -757,11 +768,33 @@ impl Workspace {
             )
             .in_section(2),
         );
-        entries.push(Entry::new("Edit host…", "", "", Intent::EditHost(host)).in_section(2));
-        let mut remove = Entry::new("Remove host…", "", "", Intent::RemoveHost(host))
-            .in_section(3)
-            .destructive();
-        remove.enabled = self.settings.hosts.len() > 1;
+        let managed = self.is_shared_managed(host);
+        let mut edit = Entry::new(
+            "Edit host…",
+            if managed {
+                super::shared_hosts::MANAGED_REASON
+            } else {
+                ""
+            },
+            "",
+            Intent::EditHost(host),
+        )
+        .in_section(2);
+        edit.enabled = !managed;
+        entries.push(edit);
+        let mut remove = Entry::new(
+            "Remove host…",
+            if managed {
+                super::shared_hosts::MANAGED_REASON
+            } else {
+                ""
+            },
+            "",
+            Intent::RemoveHost(host),
+        )
+        .in_section(3)
+        .destructive();
+        remove.enabled = self.settings.hosts.len() > 1 && !managed;
         entries.push(remove);
         entries
     }

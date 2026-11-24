@@ -101,6 +101,7 @@ fn every_menu_separates_its_groups_and_ends_with_its_destructive_row() {
         remote_control: false,
         collapsed: false,
         shell: None,
+        shared: None,
     });
     ws.hosts[0].model.sessions = vec![session("s"), session("next")];
     let mut rt = runtime(ws);

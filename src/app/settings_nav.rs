@@ -83,9 +83,11 @@ fn keywords(page: Page, ssh_available: bool) -> &'static str {
             SettingsSection::Integrations => "agents skill hooks claude codex opencode pi",
             SettingsSection::Notifications => "alerts sound bell desktop activity status",
             SettingsSection::Hosts if ssh_available => {
-                "servers ssh agent 1password bitwarden secretive gpg yubikey custom socket identityagent tailscale tailnet endpoint remote control"
+                "servers ssh agent 1password bitwarden secretive gpg yubikey custom socket identityagent tailscale tailnet endpoint remote control shared host rex hosts sync"
             }
-            SettingsSection::Hosts => "servers ssh tailscale tailnet endpoint remote control",
+            SettingsSection::Hosts => {
+                "servers ssh tailscale tailnet endpoint remote control shared host rex hosts sync"
+            }
             SettingsSection::Updates => "upgrade version release",
             SettingsSection::About => "version build license licence credits",
         },

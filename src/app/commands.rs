@@ -777,18 +777,24 @@ impl Workspace {
         use Group::Host as G;
         let host = self.active;
         let saved = &self.settings.hosts[host];
+        let managed = saved.shared.is_some();
         let name = &saved.label;
+        let mut edit = Command::new(
+            "host.edit",
+            G,
+            format!("Edit host {name}…"),
+            Intent::EditHost(host),
+        )
+        .enabled(!managed)
+        .keywords("endpoint name");
+        if managed {
+            edit = edit.detail(super::shared_hosts::MANAGED_REASON);
+        }
         let mut rows = vec![
             Command::action("host.switch", G, "Switch host…", "client.host.switch"),
             Command::new("host.add", G, "Add host…", Intent::AddHost)
                 .keywords("remote connect server"),
-            Command::new(
-                "host.edit",
-                G,
-                format!("Edit host {name}…"),
-                Intent::EditHost(host),
-            )
-            .keywords("endpoint name"),
+            edit,
             Command::new(
                 "host.shell",
                 G,
@@ -867,15 +873,21 @@ impl Workspace {
             )
             .enabled(self.can_stop_server())
             .destructive(),
-            Command::new(
-                "host.remove",
-                G,
-                format!("Remove host {name}…"),
-                Intent::RemoveHost(host),
-            )
-            .enabled(self.settings.hosts.len() > 1)
-            .keywords("forget delete")
-            .destructive(),
+            {
+                let mut remove = Command::new(
+                    "host.remove",
+                    G,
+                    format!("Remove host {name}…"),
+                    Intent::RemoveHost(host),
+                )
+                .enabled(self.settings.hosts.len() > 1 && !managed)
+                .keywords("forget delete")
+                .destructive();
+                if managed {
+                    remove = remove.detail(super::shared_hosts::MANAGED_REASON);
+                }
+                remove
+            },
         ]);
         rows
     }

@@ -46,6 +46,7 @@ mod settings_kit;
 mod settings_nav;
 mod settings_shell;
 mod settings_view;
+mod shared_hosts;
 mod shortcuts_page;
 mod sidebar;
 mod splits;
