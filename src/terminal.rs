@@ -272,7 +272,10 @@ pub struct Frame {
     pub cells: Vec<Vec<Cell>>,
     pub fg: u32,
     pub bg: u32,
+    /// The cursor's viewport cell when visible (DECTCEM on), for drawing and row cropping.
     pub cursor: Option<(u16, u16)>,
+    /// The cursor's viewport cell even when hidden (DECTCEM off); `None` when scrolled off-screen.
+    pub cursor_at: Option<(u16, u16)>,
     /// An explicit prompt jump anchors a cropped pane at the viewport top. Ordinary
     /// scrolling keeps its usual bottom/cursor crop. Set by the data worker, not decoding.
     pub prompt_anchor: bool,
@@ -421,6 +424,7 @@ impl Renderer {
         let colors = snapshot.colors()?;
         let fg = rgb(colors.foreground);
         let bg = rgb(colors.background);
+        let cursor_at = snapshot.cursor_viewport()?.map(|p| (p.x, p.y));
         let mut frame = Frame {
             cols: snapshot.cols()?,
             rows: snapshot.rows()?,
@@ -432,10 +436,11 @@ impl Renderer {
             fg,
             bg,
             cursor: if snapshot.cursor_visible()? {
-                snapshot.cursor_viewport()?.map(|p| (p.x, p.y))
+                cursor_at
             } else {
                 None
             },
+            cursor_at,
             prompt_anchor: false,
             cursor_color: snapshot.cursor_color()?.map(rgb).unwrap_or(fg),
             // Blinking is ignored: terminal content never animates.
@@ -586,7 +591,68 @@ mod tests {
         terminal.vt_write(b"\x1b[?25l");
         let hidden_cursor = renderer.frame(&terminal).unwrap();
         assert!(hidden_cursor.cursor.is_none());
+        assert_eq!(hidden_cursor.cursor_at, Some((0, 1)));
         assert_eq!(hidden_cursor.display_row_start(3), 2);
+    }
+
+    #[test]
+    fn cursor_at_tracks_hidden_alternate_screen_and_scrollback_cursor() {
+        use ghostty_vt::terminal::ScrollViewport;
+        let mut terminal = Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 1 << 16,
+        })
+        .unwrap();
+        let mut renderer = Renderer::new().unwrap();
+
+        // Hide the hardware cursor (DECTCEM off): cursor is None, cursor_at still tracks it.
+        terminal.vt_write(b"abc\x1b[?25l");
+        let hidden = renderer.frame(&terminal).unwrap();
+        assert_eq!(hidden.cursor, None);
+        assert_eq!(hidden.cursor_at, Some((3, 0)));
+
+        // Moving the cursor while hidden updates cursor_at without showing cursor.
+        terminal.vt_write(b"\x1b[3;5H");
+        let moved = renderer.frame(&terminal).unwrap();
+        assert_eq!(moved.cursor, None);
+        assert_eq!(moved.cursor_at, Some((4, 2)));
+
+        // Showing the cursor again makes cursor == cursor_at.
+        terminal.vt_write(b"\x1b[?25h");
+        let shown = renderer.frame(&terminal).unwrap();
+        assert_eq!(shown.cursor, Some((4, 2)));
+        assert_eq!(shown.cursor_at, shown.cursor);
+
+        // Alternate screen with hidden cursor tracks the alt cursor, and leaving restores primary.
+        terminal.vt_write(b"\x1b[?1049h\x1b[?25l\x1b[4;7H");
+        let alt = renderer.frame(&terminal).unwrap();
+        assert_eq!(alt.cursor, None);
+        assert_eq!(alt.cursor_at, Some((6, 3)));
+        terminal.vt_write(b"\x1b[?1049l");
+        let primary = renderer.frame(&terminal).unwrap();
+        assert_eq!(primary.cursor_at, Some((4, 2)));
+        assert_eq!(primary.cursor, None);
+
+        // Scrolling back off the active viewport clears cursor_at; scrolling to bottom restores it.
+        terminal.vt_write(b"\x1b[?25h\x1b[5;1H");
+        for i in 0..10 {
+            terminal.vt_write(format!("line {i}\r\n").as_bytes());
+        }
+        terminal.vt_write(b"\x1b[?25l");
+        let at_bottom = renderer.frame(&terminal).unwrap();
+        assert!(at_bottom.cursor.is_none());
+        assert!(at_bottom.cursor_at.is_some());
+
+        terminal.scroll_viewport(ScrollViewport::Delta(-6));
+        let scrolled = renderer.frame(&terminal).unwrap();
+        assert_eq!(scrolled.cursor, None);
+        assert_eq!(scrolled.cursor_at, None);
+
+        terminal.scroll_viewport(ScrollViewport::Bottom);
+        let restored = renderer.frame(&terminal).unwrap();
+        assert_eq!(restored.cursor, None);
+        assert_eq!(restored.cursor_at, at_bottom.cursor_at);
     }
 
     #[test]

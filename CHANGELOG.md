@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- **Terminal IME stays enabled when a program hides the hardware cursor ([#150](https://github.com/shuv1337/rex-rune/issues/150), reported by [@mag1c1an1](https://github.com/mag1c1an1)).** Full-screen TUIs that hide the hardware cursor (`CSI ?25l`) and draw their own cursor no longer disable native input methods or hide inline preedit text. The focused terminal now keeps a dedicated invisible IME anchor at the terminal's cursor cell (clamped into cropped viewports, or bottom-left when scrolled back) without drawing a hardware cursor when hidden, and clears any active preedit when the input method disables.
 - **SSH setup explains when a personal server stops (#147).** Closing the client leaves the server running. The preview and host docs explain Linux systemd logout and lingering, and point to `rex server install` for boot-time startup. The explanation scrolls in small windows while setup status and actions remain visible.
 
 ## 0.10.1 - 2026-11-14
