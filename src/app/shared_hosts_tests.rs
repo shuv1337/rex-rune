@@ -1923,6 +1923,7 @@ fn shared_write_collision_guards_upfront_pending_and_reply_time_preserve_unique_
             label: "Claimed".into(),
             endpoint: "https://target.invalid".into(),
             remote_control: false,
+            prompts: true,
             collapsed: false,
             shell: None,
             shared: None,

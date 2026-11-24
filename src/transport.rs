@@ -113,6 +113,7 @@ pub struct Transport {
     /// Requests sent past the client, whose responses go to their receiver instead.
     detached: HashMap<String, oneshot::Sender<String>>,
     next_detached: u64,
+    max_message_bytes: usize,
 }
 
 impl Transport {
@@ -130,6 +131,12 @@ impl Transport {
         let text = serde_json::to_string(&serde_json::json!({
             "type": "request", "id": id, "method": method, "payload": payload,
         }))?;
+        if text.len() > self.max_message_bytes {
+            return Err(rexrs::Error::RequestTooLarge {
+                size: text.len(),
+                limit: self.max_message_bytes,
+            });
+        }
         let (reply, receiver) = oneshot::channel();
         self.detached.retain(|_, reply| !reply.is_closed());
         self.detached.insert(id, reply);
@@ -152,6 +159,39 @@ impl Transport {
             .then(|| self.detached.remove(response.id.as_deref()?))
             .flatten()
     }
+}
+
+/// Decode a response intercepted by `detach` with the same defaults as an SDK call.
+pub(crate) fn detached_result<T: serde::de::DeserializeOwned>(text: &str) -> rexrs::Result<T> {
+    Ok(detached_result_with_seq(text)?.value)
+}
+
+pub(crate) fn detached_result_with_seq<T: serde::de::DeserializeOwned>(
+    text: &str,
+) -> rexrs::Result<rexrs::Reply<T>> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        #[serde(default)]
+        seq: u64,
+        payload: Option<serde_json::Value>,
+        error: Option<Error>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Error {
+        code: String,
+        #[serde(default)]
+        status: u16,
+        #[serde(default)]
+        message: String,
+    }
+    let reply: Response = serde_json::from_str(text)?;
+    if let Some(error) = reply.error {
+        return Err(rexrs::ApiError::from_wire(&error.code, error.status, error.message).into());
+    }
+    Ok(rexrs::Reply {
+        seq: reply.seq,
+        value: serde_json::from_value(reply.payload.unwrap_or_else(|| serde_json::json!({})))?,
+    })
 }
 
 impl rexrs::AsyncTransport for Transport {
@@ -243,12 +283,13 @@ async fn connect(
     if let Some(token) = reconnect {
         builder = builder.reconnect_token(token);
     }
-    let client = tokio::time::timeout(
+    let mut client = tokio::time::timeout(
         std::time::Duration::from_secs(8),
         builder.connect_with(Transport {
             socket,
             detached: HashMap::new(),
             next_detached: 0,
+            max_message_bytes: 0,
         }),
     )
     .await
@@ -258,6 +299,7 @@ async fn connect(
         "Rex negotiated API revision {}; this client supports {MIN_API_REVISION}–{API_REVISION}",
         client.welcome().api_revision
     );
+    client.transport().max_message_bytes = client.welcome().limits.max_message_bytes;
     Ok(client)
 }
 

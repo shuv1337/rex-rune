@@ -17,6 +17,8 @@ mod keymap_tests;
 mod navigation_tests;
 #[path = "perform_tests.rs"]
 mod perform_tests;
+#[path = "prompt_wire_tests.rs"]
+mod prompt_wire_tests;
 #[path = "server_controls_tests.rs"]
 mod server_controls_tests;
 #[path = "server_info_tests.rs"]
@@ -2886,6 +2888,7 @@ async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet()
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (disabled_tx, disabled_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
         welcome(&mut ws, 21).await;
@@ -2902,21 +2905,17 @@ async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet()
                     "payload": {
                         "call_id": "prompt-early",
                         "action": "git.branch",
-                        "prompt": {"kind": "input", "title": "Branch"}
+                        "prompt": {"kind": "input", "title": "Branch"},
+                        "timeout_ms": 5000
                     }
                 }
             }),
         )
         .await;
-        reply(
-            &mut ws,
-            &boot_req,
-            10,
-            serde_json::to_value(boot()).unwrap(),
-        )
-        .await;
-
-        let first_reply = recv(&mut ws).await;
+        // The server has not acknowledged bootstrap yet.
+        let first_reply = tokio::time::timeout(Duration::from_secs(5), recv(&mut ws))
+            .await
+            .unwrap();
         assert_eq!(first_reply["method"], "client.reply");
         assert_eq!(first_reply["payload"]["call_id"], "prompt-early");
         assert_eq!(first_reply["payload"]["error"]["code"], "not_supported");
@@ -2937,6 +2936,17 @@ async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet()
             }),
         )
         .await;
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(boot()).unwrap(),
+        )
+        .await;
+        disabled_rx.await.unwrap();
+        let barrier = recv(&mut ws).await;
+        assert_eq!(barrier["method"], "server.version");
+        reply(&mut ws, &barrier, 10, json!({})).await;
 
         // `client_prompt_ended` is ignored quietly; a second prompt still answers cleanly.
         send(
@@ -2960,7 +2970,8 @@ async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet()
                     "type": "client_prompt_requested",
                     "payload": {
                         "call_id": "prompt-live",
-                        "prompt": {"kind": "pick", "title": "Choice", "items": []}
+                        "prompt": {"kind": "pick", "title": "Choice", "items": []},
+                        "timeout_ms": 5000
                     }
                 }
             }),
@@ -2972,17 +2983,26 @@ async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet()
         assert_eq!(second_reply["payload"]["error"]["code"], "not_supported");
         reply(&mut ws, &second_reply, 14, json!({})).await;
         done_tx.send(()).unwrap();
-        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+        expect_close_answering_sweep(&mut ws, &mut |req| panic!("unexpected request: {req}")).await;
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
     connected(&host).await;
+    host.commands.send(HostCommand::Prompts(false)).unwrap();
+    host.commands
+        .send(HostCommand::Request {
+            method: "server.version".into(),
+            payload: json!({}),
+        })
+        .unwrap();
+    disabled_tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(5), done_rx)
         .await
         .unwrap()
         .unwrap();
     assert!(host.model.lock().unwrap().connected);
     assert!(host.model.lock().unwrap().performs.is_empty());
+    assert!(host.model.lock().unwrap().prompt_events.is_empty());
     drop(host);
     server.await.unwrap();
 }

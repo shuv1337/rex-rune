@@ -497,6 +497,7 @@ mod tests {
             label: "buildbox".into(),
             endpoint: endpoint.into(),
             remote_control: false,
+            prompts: true,
             collapsed: false,
             shell: None,
             shared: None,

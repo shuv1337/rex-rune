@@ -105,15 +105,28 @@ Summary of schema and protocol changes from revision 14 through revision 21:
    - Updated tailnet discovery probes (`transport::discovery_from_socket`) to
      identify as `ClientKind::Other` so short-lived probes are never selected as
      `rex.ui` prompt targets on rev 17+ servers.
-3. **Immediate `rex.ui` prompt refusal (`src/connection/prompt.rs`, `src/connection.rs`):**
-   - Handles `client_prompt_requested` in `handle_event` before
-     `ControlState::includes` (so prompts below the bootstrap sequence cutoff
-     still get answered) and replies once with `client.reply`, the original
-     `call_id`, `error.code = "not_supported"`, and a concise message noting
-     `#144` (with sanitized action name when present).
-   - Non-transport reply failures (`not_found` when another app answered first,
-     or timeouts) are debug-logged, never retried, and never disconnect the host.
-   - Ignores `client_prompt_ended` quietly.
+3. **`rex.ui` transport and prompt model (`src/connection/prompt.rs`, `src/connection.rs`):**
+   - Handles directed prompt events even during bootstrap and before
+     `ControlState::includes`. With no consumer enabled, sends a single detached
+     `not_supported` refusal. Hosts negotiated below API 17 send nothing.
+   - The opt-in `HostCommand::Prompts(true)` enables one live offer per
+     connection. Disabling it refuses the active offer. Invalid, unknown-kind
+     and second offers are refused without replacing the active prompt. The
+     app and existing probes do not opt in. The saved host's `prompts` preference
+     defaults to true and only an explicit false is written to disk.
+   - The bounded `HostModel.prompt_events` queue carries epoch-tagged offers,
+     ends, rejected answers, reply outcomes and dropped-offer notices. Local
+     expiry closes without sending anything. Disconnect clears the queue and
+     active state; a stale epoch or call ID is never sent.
+   - An accepted reply closes the offer. `bad_request` leaves it offered with a
+     cleaned reason for the next answer. `not_found`, other API failures and the
+     eight-second reply timeout close it without disconnecting. A transport
+     failure disconnects. Answers are never automatically retried or logged.
+   - `client.action` is detached. Before a prompt, the worker still defers
+     ordinary commands and events behind its 35-second wait. A prompt allows
+     ordinary work again and extends the action's wait to at least 35 seconds
+     past the prompt deadline. Queued `client_actions` still apply when the
+     response arrives. Disconnect discards any outstanding waits.
 4. **`event_dropped` recovery (`src/connection.rs`, `src/connection/status_sweep.rs`):**
    - List-level session drops (`session_created`, `session_moved`,
      `session_label_changed`) re-list sessions via `session.attach_all` (even
@@ -137,7 +150,8 @@ Summary of schema and protocol changes from revision 14 through revision 21:
    - Known limitation: if `client_prompt_requested` or
      `client_perform_requested` is replaced by `event_dropped`, the server's
      drop notice carries no `call_id`, so the client cannot send a `client.reply`
-     and the caller waits until its own timeout.
+     and the caller waits until its own timeout. A dropped prompt is surfaced
+     to the prompt consumer, without replacing any existing offer.
 5. **Session and block ID reuse cleanup (`src/connection.rs`):**
    - Clears per-block and per-session once-read marks (`queried`,
      `status_queried`, `status_failed`, `status_reading`, `themed`, `tickets`,
@@ -169,7 +183,7 @@ Summary of schema and protocol changes from revision 14 through revision 21:
 ## Deferred deliberately
 
 - **`rex.ui` interactive prompt rendering (#144):** deferred to its own UI slice;
-  refusing with `not_supported` prevents script stalls in the meantime.
+  the shipped client still refuses with `not_supported` in the meantime.
 - **Undo-close UI (`undoable: true` and `client.undo_close`):** Rex Rune keeps
   its existing explicit close confirmations and omits `undoable`; ID-reuse
   cleanup ensures external undone closes reconcile cleanly.
@@ -216,3 +230,30 @@ using the freshly built release `target/release/rex-rune` and debug probes.
 
 No Wayland, macOS, Windows, or Nix local builds are claimed here; Linux X11
 native acceptance and the full Rust unit/headless UI/SDK suites were verified.
+
+### `rex.ui` slice 1 contract (#144)
+
+Checked the `help.json` and `llms.txt` captures and exercised snapshot.2562
+on a fresh private socket with [`scripts/prompt-contract.py`](../scripts/prompt-contract.py).
+Set `REX_PROMPT_PROBE` to the binary built by
+`cargo build --locked --no-default-features --example prompt_probe`
+to include the real Rex Rune worker. The script allocates and removes its own
+HOME, XDG directories, server state, socket and synthetic session.
+
+| Case | Observed on snapshot.2562 |
+| --- | --- |
+| Lua `rex.ui.input({title, placeholder, value, confirm, timeout = 5})` | The event carries those four display fields, `kind: "input"`, and top-level `timeout_ms: 5000`. Lua's option is `timeout` in seconds, not `timeout_ms`; the latter was ignored, leaving the 300000 ms default. |
+| Lua `rex.ui.pick` | Takes the same fields and `items`, `multiple`, `allow_other`. Item fields are `id`, `title`, `subtitle`, `icon`, `detail`, `selected`. Item order is preserved. Unset Boolean flags and empty items were omitted on the wire. The capture also permits `items: null`. A single pick can carry `selected` on the wire, but the client only counts it for multiple. |
+| `client.reply` | `{"text":""}`, `{"ids":["a"]}`, `{"ids":["z","a"]}`, and `{"cancelled":true}` each received `{}` on matching offers. `allow_other` accepts `{"text":"custom"}`; Lua receives `{text="custom"}` rather than an item ID. An invalid ID returns `bad_request`; the same call ID then accepts a valid answer. |
+| Same-client `client.action` | The action's response waits for the answer. An ordered `client.key` release and unordered `client.reply` both completed while the action was pending; after the answer the action returned its queued `client_actions`. |
+| Direct Lua `client.key` binding | The binding's `rex.ui.input` returned `(nil, "failed")` without a prompt. `client.key` returned `handled: true` from the binding and did not wait for a person. No key-path change was needed. |
+| Second app answers first | Each app gets a different `call_id`. The other app's answer produced `client_prompt_ended` with `reason: "answered"` on the first app; the first app's late reply got `not_found`. |
+
+Display text has control and formatting characters stripped and whitespace
+folded. Action, title, placeholder and confirm are capped at 60, 120, 80 and
+24 characters; a blank title becomes `Question`, and a blank or case-insensitive
+`Cancel` confirmation is omitted. Item titles/subtitles are capped at 200
+characters and details at 32. Unknown icon names use a generic icon. The
+client refuses prefills over 4096 characters and lists over 2000 items rather
+than cutting them down; item IDs are opaque, unique, nonempty and at most
+1024 bytes. The display deadline clamps `timeout_ms` to 1000 through 3660000.

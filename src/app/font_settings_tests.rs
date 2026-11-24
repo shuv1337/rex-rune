@@ -810,6 +810,7 @@ fn font_fallback_on_the_command_line_still_overrides_the_saved_list() {
             label: "test".into(),
             endpoint: endpoint.into(),
             remote_control: false,
+            prompts: true,
             collapsed: false,
             shell: None,
             shared: None,

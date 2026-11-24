@@ -28,22 +28,44 @@ pub struct Requester {
     #[serde(default)]
     pub principal: Value,
 }
-/// Strip control and bidirectional override characters and cap length for safe UI notices.
+/// Strip control and formatting characters, fold whitespace, and cap text for UI display.
 pub fn sanitize_text(text: &str, max_chars: usize) -> String {
-    text.chars()
-        .filter(|c| {
-            !c.is_control()
-                && !matches!(
-                    c,
-                    '\u{061c}'
-                        | '\u{200e}'
-                        | '\u{200f}'
-                        | '\u{202a}'..='\u{202e}'
-                        | '\u{2066}'..='\u{2069}'
-                )
-        })
-        .take(max_chars)
-        .collect()
+    let mut cleaned = String::new();
+    let mut len = 0;
+    let mut space = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            space = len > 0;
+            continue;
+        }
+        if c.is_control()
+            || matches!(
+                c,
+                '\u{061c}'
+                    | '\u{200b}'
+                    | '\u{200e}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{feff}'
+                    | '\u{fff9}'..='\u{fffb}'
+                    | '\u{e0000}'..='\u{e007f}'
+            )
+        {
+            continue;
+        }
+        if len + usize::from(space) >= max_chars {
+            break;
+        }
+        if space {
+            cleaned.push(' ');
+            len += 1;
+            space = false;
+        }
+        cleaned.push(c);
+        len += 1;
+    }
+    cleaned
 }
 
 impl std::fmt::Display for Requester {
@@ -174,7 +196,7 @@ mod tests {
             principal: serde_json::json!({"display": "uid 1000"}),
             ..Requester::default()
         };
-        assert_eq!(requester.to_string(), "rex (uid 1000)");
+        assert_eq!(requester.to_string(), "re x (uid 1000)");
         requester.info = serde_json::json!({"name": "界".repeat(50)});
         assert_eq!(
             requester.to_string(),
@@ -182,7 +204,7 @@ mod tests {
         );
         requester.info = Value::Null;
         requester.client_id = "c\nli\u{202e}".into();
-        assert_eq!(requester.to_string(), "cli (uid 1000)");
+        assert_eq!(requester.to_string(), "c li (uid 1000)");
     }
 
     #[test]
