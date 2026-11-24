@@ -379,6 +379,16 @@ impl Term {
         (self.rect[3] / cell.1).floor().max(1.) as usize
     }
 
+    pub fn visible_cols(&self, cell: (f32, f32)) -> usize {
+        if self.rect[2] <= 0. {
+            return self
+                .frame
+                .as_ref()
+                .map_or(1, |f| usize::from(f.cols).max(1));
+        }
+        (self.rect[2] / cell.0).floor().max(1.) as usize
+    }
+
     pub fn display_row(&self, cell: (f32, f32)) -> usize {
         self.frame
             .as_ref()
@@ -1418,10 +1428,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             CursorLook::Block => look.cursor_force.unwrap_or(frame.cursor_shape),
             CursorLook::Hollow => CursorShape::Hollow,
         };
-        let mut cursor = cursor_el(shape, (px, py), m.cell, color).key(format!("{key}/cursor"));
-        if look.ime {
-            cursor = cursor.ime_cursor();
-        }
+        let cursor = cursor_el(shape, (px, py), m.cell, color).key(format!("{key}/cursor"));
         grid = grid.child(cursor);
         if shape == CursorShape::Block
             && let Some(cell) =
@@ -1433,6 +1440,16 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             };
             grid = grid.child(glyph_run(cell.text.clone(), style, px, py, m));
         }
+    }
+    if look.ime {
+        let (col, pane_row) = ime_cell(frame, start, visible, term.visible_cols(m.cell));
+        let (px, py) = (col as f32 * cw, pane_row as f32 * ch);
+        grid = grid.child(
+            el().key(format!("{key}/ime"))
+                .absolute(px, py)
+                .size(cw, ch)
+                .ime_cursor(),
+        );
         if !term.preedit.is_empty() {
             let len = term.preedit.len();
             grid = grid.child(
@@ -1443,6 +1460,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                         ..Span::new(0, len)
                     }],
                 )
+                .key(format!("{key}/preedit"))
                 .no_wrap()
                 .font(m.style)
                 .color(rgb(frame.fg))
@@ -1452,6 +1470,30 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
         }
     }
     grid
+}
+
+/// The cell `(col, pane_row)` inside the visible grid where the IME anchor and inline preedit
+/// sit: the terminal's cursor cell clamped to the visible viewport, or the bottom-left visible
+/// cell when scrolled away from the cursor.
+fn ime_cell(
+    frame: &Frame,
+    start: usize,
+    visible_rows: usize,
+    visible_cols: usize,
+) -> (usize, usize) {
+    let shown_rows = (frame.rows as usize)
+        .saturating_sub(start)
+        .min(visible_rows.max(1))
+        .max(1);
+    let max_row = start + shown_rows - 1;
+    let max_col = visible_cols.max(1).min((frame.cols as usize).max(1)) - 1;
+    match frame.cursor_at {
+        Some((x, y)) => (
+            (x as usize).min(max_col),
+            (y as usize).clamp(start, max_row) - start,
+        ),
+        None => (0, shown_rows - 1),
+    }
 }
 
 /// The cursor, `shape` on the cell at `at`.
@@ -2084,5 +2126,152 @@ mod tests {
                 "inverse text is cut out of the block in the pane's fill"
             );
         }
+    }
+
+    fn ime_test_term(terminal: &ghostty_vt::Terminal, rect: [f32; 4]) -> Term {
+        use rex_rune::connection::{Connection, TerminalSender};
+        let frame = rex_rune::terminal::Renderer::new()
+            .unwrap()
+            .frame(terminal)
+            .unwrap();
+        let mut term = Term::new(Connection {
+            model: Default::default(),
+            commands: TerminalSender::new(flume::unbounded().0, "s".into(), "b".into()),
+            wake: flume::unbounded().1,
+        });
+        term.frame = Some(Arc::new(frame));
+        term.rect = rect;
+        term
+    }
+
+    #[test]
+    fn ime_anchor_works_when_cursor_is_hidden_visible_cropped_or_scrolled() {
+        use ghostty_vt::terminal::ScrollViewport;
+        struct ImeState {
+            term: Term,
+            ime: bool,
+            cursor: Option<CursorLook>,
+        }
+        let view = |s: &ImeState, _: &mut Cx<ImeState>| {
+            let look = GridLook {
+                cursor: s.cursor,
+                cursor_force: None,
+                ime: s.ime,
+                colors: TermColors::default(),
+            };
+            el().w_full()
+                .h_full()
+                .child(grid("g", &s.term, &clipped_metrics(), look))
+        };
+        let (cw, ch) = clipped_metrics().cell;
+        let full_rect = [0., 0., 20. * cw, 5. * ch];
+
+        let mut terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 1 << 16,
+        })
+        .unwrap();
+        terminal.vt_write(b"abc\x1b[?25l\x1b[3;5H");
+
+        // Hidden cursor + look.ime == true: ime_area aligned with cursor cell, no /cursor drawn.
+        let mut rt = Runtime::new(
+            ImeState {
+                term: ime_test_term(&terminal, full_rect),
+                ime: true,
+                cursor: Some(CursorLook::Block),
+            },
+            view,
+            (20. * cw, 5. * ch),
+            Env::default(),
+        );
+        rt.frame(0.);
+        assert_eq!(rt.ime_area, Some([4. * cw, 2. * ch, cw, ch]));
+        assert!(
+            !rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("g/cursor")),
+            "hidden cursor draws no cursor element"
+        );
+        assert!(
+            rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("g/ime"))
+        );
+
+        // Preedit renders at the anchor even while cursor is hidden.
+        rt.update(|s, _| s.term.preedit = "你好".into());
+        rt.frame(0.);
+        let preedit = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("g/preedit"))
+            .expect("preedit rendered at hidden cursor anchor");
+        assert_eq!(preedit.text.as_deref(), Some("你好"));
+        assert_eq!((preedit.rect[0], preedit.rect[1]), (4. * cw, 2. * ch));
+        rt.update(|s, _| s.term.preedit.clear());
+
+        // look.ime == false disables ime_area whether hidden or visible.
+        rt.update(|s, _| s.ime = false);
+        rt.frame(0.);
+        assert_eq!(rt.ime_area, None);
+        terminal.vt_write(b"\x1b[?25h");
+        rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+        rt.frame(0.);
+        assert_eq!(rt.ime_area, None);
+
+        // Visible bar and underline cursors keep their own shapes while ime_area uses full cell.
+        rt.update(|s, _| s.ime = true);
+        for (seq, expected_size) in [(&b"\x1b[6 q"[..], (2., ch)), (&b"\x1b[4 q"[..], (cw, 2.))] {
+            terminal.vt_write(seq);
+            rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+            rt.frame(0.);
+            let cursor = rt
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some("g/cursor"))
+                .expect("visible cursor drawn");
+            assert_eq!((cursor.rect[2], cursor.rect[3]), expected_size);
+            assert_eq!(rt.ime_area, Some([4. * cw, 2. * ch, cw, ch]));
+        }
+
+        // Rapid hidden -> visible -> hidden transitions never drop ime_area.
+        for (seq, expect_cursor) in [
+            (&b"\x1b[?25l"[..], false),
+            (&b"\x1b[?25h"[..], true),
+            (&b"\x1b[?25l"[..], false),
+        ] {
+            terminal.vt_write(seq);
+            rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+            rt.frame(0.);
+            assert_eq!(rt.ime_area, Some([4. * cw, 2. * ch, cw, ch]));
+            assert_eq!(
+                rt.elements()
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some("g/cursor")),
+                expect_cursor
+            );
+        }
+
+        // Cropped pane: cursor hidden on row 1, col 15; pane shows 3 bottom rows and 10 cols.
+        terminal.vt_write(b"\x1b[2;16H\x1b[?25l");
+        let cropped_rect = [0., 0., 10. * cw, 3. * ch];
+        rt.update(|s, _| s.term = ime_test_term(&terminal, cropped_rect));
+        rt.frame(0.);
+        // display_row_start(3) == 2 (bottom-aligned because cursor is hidden), so row 1 clamps to
+        // pane row 0 and col 15 clamps to col 9.
+        assert_eq!(rt.ime_area, Some([9. * cw, 0., cw, ch]));
+
+        // Scrolled back (cursor_at == None): anchor falls back to bottom-left visible cell.
+        terminal.vt_write(b"\x1b[5;1H");
+        for i in 0..10 {
+            terminal.vt_write(format!("line {i}\r\n").as_bytes());
+        }
+        terminal.vt_write(b"\x1b[?25l");
+        terminal.scroll_viewport(ScrollViewport::Delta(-6));
+        rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+        rt.frame(0.);
+        assert_eq!(rt.state.term.frame.as_ref().unwrap().cursor_at, None);
+        assert_eq!(rt.ime_area, Some([0., 4. * ch, cw, ch]));
     }
 }

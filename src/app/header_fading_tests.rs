@@ -266,6 +266,13 @@ fn header_fading_native_focus_callback_keeps_existing_claim_policy() {
         settle(&mut rt);
         host.drain();
         let before = subtree(&rt, "grid:block:b");
+        let without_ime = |nodes: &[rune::ElementInfo]| -> Vec<rune::ElementInfo> {
+            nodes
+                .iter()
+                .filter(|e| e.key.as_deref() != Some("gblock:b/ime"))
+                .cloned()
+                .collect()
+        };
         rt.window_focus(false);
         settle(&mut rt);
         assert!(!rt.state.window_focused);
@@ -273,7 +280,9 @@ fn header_fading_native_focus_callback_keeps_existing_claim_policy() {
             element(&rt, "pane-name:block:b").text_color.unwrap().a,
             if on { pane_header::FADE } else { 1. }
         );
-        assert_same(&before, &subtree(&rt, "grid:block:b"));
+        // The invisible IME anchor intentionally follows window focus; every terminal cell and
+        // decoration stays identical.
+        assert_same(&without_ime(&before), &subtree(&rt, "grid:block:b"));
         assert!(sent.is_empty() && host.is_empty());
         rt.window_focus(true);
         settle(&mut rt);
