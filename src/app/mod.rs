@@ -311,6 +311,8 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
 #[cfg(test)]
 mod physical_input_tests;
 #[cfg(test)]
+mod present_mode_tests;
+#[cfg(test)]
 pub(crate) mod scratch;
 #[cfg(test)]
 mod tests;

@@ -358,6 +358,8 @@ pub use video::Player;
 pub use video::PlayerState;
 pub use video::Video;
 pub use window::WindowHandle;
+#[doc(hidden)]
+pub use window::present::{PresentChoice, choose_present};
 pub use window::spec as windows;
 pub use windows::AnyWindowSpec;
 pub use windows::ConfiguredWindowOptions;

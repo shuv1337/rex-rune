@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- **Prefer `Mailbox` present mode on Linux Wayland top-level windows (#146).** Native Wayland windows already pace redraws with frame callbacks, so preferring `Mailbox` when the surface advertises it avoids FIFO double-blocking (reported at ~19 fps on KDE Plasma/KWin + Mesa RADV by [@koihia](https://github.com/koihia); not reproduced locally on NVIDIA/Hyprland) and falls back to `AutoVsync` otherwise. X11, macOS, Windows, and Wayland layer-shell overlays keep `AutoVsync` by default, and `RUNE_PRESENT_MODE=fifo|fifo-relaxed|mailbox|immediate|auto` is available as an override validated against surface capabilities.
+
 - **Terminal IME stays enabled when a program hides the hardware cursor ([#150](https://github.com/shuv1337/rex-rune/issues/150), reported by [@mag1c1an1](https://github.com/mag1c1an1)).** Full-screen TUIs that hide the hardware cursor (`CSI ?25l`) and draw their own cursor no longer disable native input methods or hide inline preedit text. The focused terminal now keeps a dedicated invisible IME anchor at the terminal's cursor cell (clamped into cropped viewports, or bottom-left when scrolled back) without drawing a hardware cursor when hidden, and clears any active preedit when the input method disables.
 
 - **NixOS package build and sandbox checks (#151).** Fixed `clippy::byte_char_slices` in `src/platform/fs.rs` under newer nixpkgs Clippy, resolved `ps` via `PATH` in the SSH installer tests, added `pkgs.procps` to `nativeCheckInputs`, and added an `x86_64-linux` Nix flake check job to CI. (Based on fixes by [@nolith](https://github.com/nolith) / Alessio Caiazza.)
