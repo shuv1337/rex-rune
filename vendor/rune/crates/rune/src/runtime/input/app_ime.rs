@@ -28,7 +28,14 @@ impl<S: 'static> Runtime<S> {
     /// method turning on or off is only the app's to hear.
     pub(super) fn run_ime(&mut self, ev: Ime, one: &mut Tx) -> bool {
         let app = self.app_ime.composing() || matches!(ev, Ime::Enabled | Ime::Disabled) || self.focused_input().is_none();
-        let active = self.composing() || matches!(&ev, Ime::Preedit(s, _) | Ime::Commit(s) if !s.is_empty());
+        let composing = self.composing();
+        // Wayland can send an empty preedit in reply to a cursor-area update. Outside a
+        // composition it changes nothing, and with_focused would scroll back to the caret.
+        if !app && !composing && matches!(&ev, Ime::Preedit(s, _) if s.is_empty()) {
+            return false;
+        }
+        let active =
+            composing || matches!(&ev, Ime::Preedit(s, _) | Ime::Commit(s) if !s.is_empty());
         let ran = if app { self.app_ime_event(&ev, one) } else { self.with_focused(|e| e.ime(&ev), one) };
         // The key that confirmed or cancelled a composition comes back up unheard.
         if ran && active { self.key_releases.ime_took_key(); }

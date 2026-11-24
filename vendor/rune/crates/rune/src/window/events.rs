@@ -362,24 +362,13 @@ impl<S: 'static> Host<S> {
                 if !focused {
                     rt.cancel_composition();
                     l.window.set_ime_allowed(false);
-                    self.ime_allowed = false;
+                    self.ime.clear();
                     // A minimized or occluded window skips redraw.
                     l.apply_cursor(rt, false);
                 } else if rt.stale() {
                     rt.ime_reset = true;
                 } else {
-                    let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus();
-                    if std::mem::take(&mut rt.ime_reset) || ime_allowed != self.ime_allowed {
-                        l.window.set_ime_allowed(false);
-                        l.window.set_ime_allowed(ime_allowed);
-                        self.ime_allowed = ime_allowed;
-                    }
-                    if let Some(a) = rt.ime_area.map(|a| rt.to_window(a)) {
-                        l.window.set_ime_cursor_area(
-                            LogicalPosition::new(a[0] as f64, a[1] as f64),
-                            LogicalSize::new(a[2] as f64, a[3] as f64),
-                        );
-                    }
+                    platform_sync::sync_ime(&l.window, rt, &mut self.ime, true);
                     l.apply_cursor(rt, true);
                 }
                 if rt.stale() { l.request_redraw(); }
@@ -409,6 +398,9 @@ impl<S: 'static> Host<S> {
                 if redraw { l.request_redraw(); }
             }
             WindowEvent::Ime(ime) => {
+                if matches!(ime, WIme::Enabled | WIme::Disabled) {
+                    self.ime.invalidate_area();
+                }
                 match ime {
                     WIme::Preedit(s, cur) => rt.ime(Ime::Preedit(s, cur)),
                     WIme::Commit(s) => rt.ime(Ime::Commit(s)),

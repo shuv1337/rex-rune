@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::time::Instant;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime as WIme, MouseButton, StartCause, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
@@ -49,6 +49,8 @@ use redraw::{Steady, SteadyEvent};
 mod presented;
 pub(crate) use presented::Presented;
 use presented::composing;
+mod ime_sync;
+use ime_sync::ImeSync;
 mod platform_sync;
 use platform_sync::sync_platform;
 mod shell_requests;
@@ -467,7 +469,7 @@ struct Host<S: 'static> {
     files: FileDrop,
     clipboard: crate::clipboard::Client,
     secure_input: crate::input::secure_input::SecureInput,
-    ime_allowed: bool,
+    ime: ImeSync,
     comp: Option<Box<dyn Compositor<S>>>,
     wayland: bool,
     frame_move: Option<stepping::FrameMove>,
@@ -611,7 +613,7 @@ impl<S: 'static> Host<S> {
             files: FileDrop::default(),
             clipboard,
             secure_input: Default::default(),
-            ime_allowed: false,
+            ime: ImeSync::default(),
             comp,
             wayland,
             frame_move: None,

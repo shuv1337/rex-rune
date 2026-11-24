@@ -28,6 +28,16 @@ paths so the whole dependency graph sees a single `rune`. Nothing outside the ve
   `rex-rune` unit-test the policy across every CI target. Remove this patch once upstream Rune
   picks a non-blocking present mode on Wayland.
 
+- Backport [Rune #1454](https://github.com/anomalyco/rune/pull/1454)
+  ([`263b7998`](https://github.com/anomalyco/rune/commit/263b79984c13f2c70fa3e0dd9c8b48122b9d3c8c)):
+  top-level windows skip unchanged IME cursor rectangles to stop Wayland's idle redraw loop.
+  This snapshot's overlays do not synchronize IME.
+- Backport [Rune #1503](https://github.com/anomalyco/rune/pull/1503)
+  ([`1ab171df`](https://github.com/anomalyco/rune/commit/1ab171df98cca8b2a9949a15e54e3f387fab57e6)):
+  idle empty preedits no longer pull a scrolled text field back to its caret. Active composition
+  and `App::on_ime` routing are unchanged. Remove both backports once vendored Rune is bumped
+  past `1ab171df`.
+
 - Linux's optional GNOME reduced-motion read clears exit-on-close on GIO's shared
   session connection before constructing GSettings (dconf can initialize GVfs).
   One owned current reference outlives synchronous construction so dconf's deferred

@@ -87,3 +87,89 @@ fn without_on_ime_an_ime_cursor_hears_nothing() {
     press(&mut rt, Key::Enter);
     assert_eq!(rt.state.log, ["key Enter"], "nothing composing holds Return back");
 }
+
+#[test]
+fn the_app_still_hears_empty_preedit_without_composition() {
+    let mut rt = editor();
+    rt.ime(Ime::Preedit(String::new(), None));
+    rt.frame(0.0);
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.log, ["Preedit(\"\", None)", "key Enter"]);
+}
+
+#[test]
+fn empty_preedit_without_composition_does_not_snap_scroll_back_to_caret() {
+    struct Page {
+        field: TextEdit,
+    }
+    fn page_view(s: &Page, _: &mut Cx<Page>) -> El {
+        col()
+            .key("viewport")
+            .size(300.0, 120.0)
+            .scroll(crate::ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(
+                text_input(&s.field, TextStyle::new(14.0, 400.0).lh(20.0))
+                    .key("field")
+                    .label("Field")
+                    .w_full()
+                    .on_edit(|s: &mut Page| &mut s.field),
+            )
+    }
+    let scroll_y = |rt: &Runtime<Page>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("field"))
+            .unwrap()
+            .scrolled[1]
+    };
+
+    let mut field = TextEdit::new((1..=80).map(|i| format!("Line {i}\n")).collect::<String>());
+    field.focused = true;
+    field.set_caret(0);
+    let mut rt = Runtime::new(
+        Page { field },
+        page_view,
+        (300.0, 120.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+    assert_eq!(scroll_y(&rt), 0.0);
+
+    // Wheel-scroll far past the caret on line 1 before Wayland's empty preedit reply.
+    rt.wheel(150.0, 60.0, -400.0);
+    rt.frame(1.0 / 60.0);
+    let scrolled = scroll_y(&rt);
+    assert!(
+        scrolled > 200.0,
+        "wheel scrolled past the caret: {scrolled}"
+    );
+
+    let commits_before = rt.stats.commits;
+    rt.ime(Ime::Preedit(String::new(), None));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(
+        scroll_y(&rt),
+        scrolled,
+        "idle preedit must not follow the caret"
+    );
+    assert_eq!(
+        rt.stats.commits, commits_before,
+        "idle preedit must not commit"
+    );
+
+    // A real composition still follows the caret, and an empty preedit still cancels it.
+    rt.ime(Ime::Preedit("か".into(), Some((0, 3))));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.field.preedit(), Some(("か", Some((0, 3)))));
+    assert!(scroll_y(&rt) < 20.0, "active composition follows the caret");
+
+    rt.ime(Ime::Preedit(String::new(), None));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(
+        rt.state.field.preedit(),
+        None,
+        "empty preedit cancels composition"
+    );
+}

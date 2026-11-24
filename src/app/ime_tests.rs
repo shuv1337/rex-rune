@@ -104,6 +104,13 @@ fn hidden_cursor_keeps_ime_enabled_renders_preedit_commits_and_clears_on_disable
     );
     assert_rect_near(rect_of(&rt, "gblock:a/ime"), expected);
 
+    // An empty preedit outside composition leaves the hidden-cursor anchor enabled.
+    rt.ime(Ime::Preedit(String::new(), None));
+    rt.frame(1. / 60.);
+    assert_eq!(rt.ime_area, Some(stable_area));
+    assert!(rect_of(&rt, "gblock:a/preedit").is_none());
+    assert!(sent.try_iter().next().is_none());
+
     // Preedit renders inline at the anchor while the cursor stays hidden.
     rt.ime(Ime::Preedit("ni".into(), None));
     rt.frame(1. / 60.);
@@ -140,7 +147,16 @@ fn hidden_cursor_keeps_ime_enabled_renders_preedit_commits_and_clears_on_disable
     );
     assert!(rect_of(&rt, "gblock:a/preedit").is_none());
 
-    // Ime::Disabled clears any open preedit without sending a paste.
+    // Empty preedit and Ime::Disabled both clear open preedit without sending a paste.
+    rt.ime(Ime::Preedit("かん".into(), None));
+    rt.frame(1. / 60.);
+    assert!(rect_of(&rt, "gblock:a/preedit").is_some());
+    rt.ime(Ime::Preedit(String::new(), None));
+    rt.frame(1. / 60.);
+    assert!(rect_of(&rt, "gblock:a/preedit").is_none());
+    assert_eq!(rt.ime_area, Some(stable_area));
+    assert!(sent.try_iter().next().is_none());
+
     rt.ime(Ime::Preedit("かん".into(), None));
     rt.frame(1. / 60.);
     assert!(rect_of(&rt, "gblock:a/preedit").is_some());

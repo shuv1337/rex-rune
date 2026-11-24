@@ -77,6 +77,7 @@ impl<S: 'static> Host<S> {
             eprintln!("click-through unavailable for {}: {error}", self.native_handle.key());
         }
         window.set_ime_allowed(false);
+        self.ime.clear();
         self.rt.ime_reset = true;
         #[cfg(target_os = "macos")]
         if uses_drag_regions(chrome, self.options.borderless, false) {

@@ -14,6 +14,10 @@
 
 - **Read-only shared Rex host list sync (Part of [#145](https://github.com/shuv1337/rex-rune/issues/145), requested by [@oriori1703](https://github.com/oriori1703)).** Synchronizes hosts from this machine's Rex server (`hosts.list` and `hosts_changed` push events) read-only into the sidebar, host switcher, session switcher, and Settings → Remote Hosts. Pre-existing local hosts matching a shared host's canonical expanded endpoint link in place without duplicating rows or losing local preferences (`shell`, `collapsed`, `sessions`, `recent_paths`, `muted_tabs`, `remote_control`); endpoint changes reset `remote_control`, clear stale session/path history, and reconnect; departed shared hosts unlink and stay local with a notice rather than being deleted; config diagnostics and broken hosts-file `conflict` errors appear in Settings → Remote Hosts without clobbering last-known rows; and a default-on **Use shared Rex host list** toggle (`sync_shared_hosts`, omitted when true) lets users opt out locally with zero server commands. Linked hosts show their `rex hosts` / `init.lua` provenance and keep local shell editing working while guarding rename, endpoint edit, and remove as read-only until Slice 2 adds shared writes. [Scope, wire contract and checks](docs/parity-2026-11/shared-hosts-slice1.md).
 
+### Fixed
+
+- **Stop idle redraws on Wayland ([#167](https://github.com/shuv1337/rex-rune/issues/167)).** Unchanged IME cursor rectangles are not resent, and empty IME replies no longer snap scrolled text fields back to the caret outside composition.
+
 ## 0.11.0 - 2026-11-23
 
 Full floating pane support (server actions, pointer drag, and 8-way edge resize), SSH host-key review, consent-per-step remote installer and SSH agent picker, optional OSC 11 program backgrounds, and an active key mode chip. Includes Linux Wayland `Mailbox` present mode, hidden-cursor terminal IME support, and NixOS build and CI fixes.
