@@ -1956,3 +1956,258 @@ fn the_old_name_answers_version_as_the_old_updater_checks_it() {
     let options = Options::from_arguments(["rex-linux", "--session", "work"].map(Into::into), true);
     assert_eq!(options.session.as_deref(), Some("work"));
 }
+
+#[tokio::test]
+async fn copy_mode_worker_round_trip_yank_generation_guard_and_auto_exit() {
+    use crate::terminal::copy_mode::{CopyModeInput, CopyModeOp, CopyMotion, CopyUnit, CopyView};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (push_tx, push_rx) = flume::unbounded::<Vec<u8>>();
+
+    let mut source = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 20,
+        rows: 4,
+        max_scrollback: 1 << 16,
+    })
+    .unwrap();
+    source.vt_write(b"alpha beta\r\ngamma delta\r\n");
+    let snapshot = ghostty_vt::snapshot::encode(&source).unwrap().to_vec();
+    drop(source);
+
+    // Fake data server: handshake, send Ghostty snapshot, then forward pushed PTY bytes.
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, wire::PROTOCOL).await;
+        let hello = ws.next().await.unwrap().unwrap().into_data();
+        assert_eq!((hello.len(), hello[0]), (17, 1));
+        let mut welcome = vec![0u8; 32];
+        welcome[0] = 0x81;
+        welcome[24] = 1;
+        ws.send(Message::Binary(welcome.into())).await.unwrap();
+        ws.send(Message::Binary(snapshot.into())).await.unwrap();
+
+        while let Ok(bytes) = push_rx.recv_async().await {
+            ws.send(Message::Binary(bytes.into())).await.unwrap();
+        }
+    });
+
+    let (host_tx, host_rx) = flume::unbounded::<HostCommand>();
+    let ticket_task = tokio::spawn(async move {
+        if let Ok(HostCommand::Ticket { reply, .. }) = host_rx.recv_async().await {
+            let _ = reply.send(Ok(TerminalTicket {
+                token: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                bundled: false,
+            }));
+        }
+    });
+
+    let model = Arc::new(Mutex::new(Model::default()));
+    let (wake_tx, wake_rx) = flume::bounded(1);
+    let (host_wake_tx, _host_wake_rx) = flume::bounded(1);
+    let (cmd_tx, cmd_rx) = flume::unbounded::<DataCommand>();
+
+    let pane = PaneShared {
+        model: model.clone(),
+        wake: wake_tx,
+        host_wake: host_wake_tx,
+    };
+
+    async fn wait_for(
+        model: &Arc<Mutex<Model>>,
+        wake_rx: &flume::Receiver<()>,
+        pred: impl Fn(&Model) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pred(&model.lock().unwrap()) {
+                    return;
+                }
+                wake_rx.recv_async().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let worker = tokio::task::spawn_local(run_data(
+                endpoint,
+                SESSION.into(),
+                "block:copy".into(),
+                host_tx,
+                cmd_rx,
+                pane,
+            ));
+
+            wait_for(&model, &wake_rx, |m| m.connected && m.frame.is_some()).await;
+            let generation = model.lock().unwrap().restore_generation;
+            assert!(generation >= 1);
+
+            // 1. Stale generation is ignored without stamping selection_revision or entering copy mode.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation: generation + 99,
+                    epoch: 1,
+                    revision: 42,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+
+            // 2. Valid Begin + Top + Select(Char) + WordEnd -> check frame.copy & selection_revision.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 1,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 2,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 3,
+                    visible_rows: None,
+                    op: CopyModeOp::Select(CopyUnit::Char),
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 4,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::WordEnd,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 4)
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(
+                    frame.copy,
+                    Some(CopyView {
+                        epoch: 1,
+                        cursor: (4, 0),
+                        wide: false,
+                        unit: Some(CopyUnit::Char),
+                    })
+                );
+                assert_eq!(frame.selection_text.as_deref(), Some("alpha"));
+            }
+
+            // 3. Back-to-back Yank (rev 5) + End (rev 6) delivers CopyYank without racing!
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 5,
+                    visible_rows: None,
+                    op: CopyModeOp::Yank,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 6,
+                    visible_rows: None,
+                    op: CopyModeOp::End,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 6)
+            })
+            .await;
+            {
+                let mut m = model.lock().unwrap();
+                assert_eq!(m.frame.as_ref().unwrap().copy, None);
+                let yank = m.copy_yank.take().expect("yank preserved across End");
+                assert_eq!(
+                    (yank.epoch, yank.revision, yank.text.as_str()),
+                    (1, 5, "alpha")
+                );
+                assert_eq!(m.copy_ended_epoch, 0, "explicit End does not bump auto-end");
+            }
+
+            // 4. Re-enter copy mode (epoch 2), then stream alternate-screen switch over live PTY
+            //    to verify automatic exit and monotonic copy_ended_epoch reporting.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 2,
+                    revision: 7,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 7)
+            })
+            .await;
+            assert!(model.lock().unwrap().frame.as_ref().unwrap().copy.is_some());
+
+            push_tx.send(b"\x1b[?1049h".to_vec()).unwrap();
+            wait_for(&model, &wake_rx, |m| m.copy_ended_epoch == 2).await;
+            {
+                let m = model.lock().unwrap();
+                assert_eq!(m.frame.as_ref().unwrap().copy, None);
+                assert_eq!(m.copy_ended_epoch, 2);
+            }
+
+            // 5. Disconnected forwarding covers Command::CopyMode too.
+            let (fw_tx, fw_rx) = flume::unbounded();
+            let workers = HashMap::from([(
+                "b".to_owned(),
+                PaneWorker {
+                    session: "s".into(),
+                    commands: fw_tx,
+                    task: tokio::task::spawn_local(async {}),
+                    size: None,
+                },
+            )]);
+            let sample = CopyModeInput {
+                generation,
+                epoch: 3,
+                revision: 8,
+                visible_rows: None,
+                op: CopyModeOp::Begin,
+            };
+            assert!(forward_search(&workers, "b", &Command::CopyMode(sample)));
+            assert!(matches!(
+                fw_rx.try_recv(),
+                Ok(DataCommand::CopyMode(got)) if got == sample
+            ));
+
+            drop(push_tx);
+            cmd_tx.send(DataCommand::Stop).unwrap();
+            worker.await.unwrap();
+        })
+        .await;
+
+    ticket_task.await.unwrap();
+    server.await.unwrap();
+}

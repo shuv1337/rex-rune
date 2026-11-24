@@ -141,6 +141,7 @@ pub mod perform;
 
 pub enum Command {
     Selection(crate::terminal::selection::Input),
+    CopyMode(crate::terminal::copy_mode::CopyModeInput),
     Key(Value),
     KeyWithPrefix {
         key: Value,
@@ -186,6 +187,13 @@ pub struct Model {
     pub input_events: u64,
     /// Words for the user from the pane's worker (a failed search), taken once shown.
     pub notice: Option<String>,
+    /// Latest completed copy-mode yank (`Yank` / `YankLine`), taken once by the UI so a
+    /// fast `Yank` followed by `End` never races with selection clearing.
+    pub copy_yank: Option<crate::terminal::copy_mode::CopyYank>,
+    /// Highest copy-mode epoch ended automatically by the pane worker (screen switch,
+    /// lost tracked reference, or fresh snapshot/reconnect); monotonic so the UI
+    /// reconciles once.
+    pub copy_ended_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -818,6 +826,7 @@ impl PaneShared {
 enum DataCommand {
     CursorStyle(crate::terminal::CursorShape),
     Selection(crate::terminal::selection::Input),
+    CopyMode(crate::terminal::copy_mode::CopyModeInput),
     Visible(bool),
     Scroll(isize),
     Search(String),
@@ -2149,6 +2158,7 @@ fn forward_search(workers: &HashMap<String, PaneWorker>, block: &str, command: &
         Command::SearchStep(older) => DataCommand::SearchStep(*older),
         Command::PromptStep(older) => DataCommand::PromptStep(*older),
         Command::CursorStyle(shape) => DataCommand::CursorStyle(*shape),
+        Command::CopyMode(input) => DataCommand::CopyMode(*input),
         _ => return false,
     };
     if let Some(worker) = workers.get(block) {
@@ -2410,6 +2420,9 @@ async fn handle_command(
                 Command::Selection(input) => {
                     let _ = worker.commands.send(DataCommand::Selection(input));
                 }
+                Command::CopyMode(input) => {
+                    let _ = worker.commands.send(DataCommand::CopyMode(input));
+                }
                 Command::Resize(cols, rows, w, h) => {
                     worker.size = Some((cols, rows, w, h));
                     resize(control, &session, &block, cols, rows, w, h).await?;
@@ -2601,6 +2614,9 @@ async fn run_data(
     let mut welcome: Option<wire::Welcome> = None;
     let mut stream: Option<TerminalStream> = None;
     let mut selection = None;
+    let mut copy_mode = crate::terminal::copy_mode::Controller::default();
+    let mut pending_yank: Option<crate::terminal::copy_mode::CopyYank> = None;
+    let mut selection_revision: u64 = 0;
     let mut search = crate::terminal::search::Controller::default();
     let mut prompt_anchor = false;
     let mut visible = true;
@@ -2626,12 +2642,21 @@ async fn run_data(
             if socket.is_none() {
                 let (next, fresh) = open_data(&endpoint, &session, &block, &host).await?;
                 selection = Some(crate::terminal::selection::Controller::new()?);
+                let ended = copy_mode.reset();
+                pending_yank = None;
+                selection_revision = 0;
                 search.forget_terminal();
                 prompt_anchor = false;
                 let mut restored = TerminalStream::new(fresh.nonce);
                 restored.set_cursor_style(cursor_style)?;
                 stream = Some(restored); welcome = Some(fresh);
-                shared.update(|m|m.restore_generation+=1);
+                shared.update(|m| {
+                    m.restore_generation += 1;
+                    m.copy_yank = None;
+                    if let Some(epoch) = ended {
+                        m.copy_ended_epoch = m.copy_ended_epoch.max(epoch);
+                    }
+                });
                 renderer = Renderer::new()?; socket = Some(next);
                 shared.status("Restoring terminal…", false);
             }
@@ -2648,9 +2673,26 @@ async fn run_data(
                         dirty = true;
                     }
                     command = commands.recv_async() => match command {
-                        Ok(DataCommand::Selection(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &stream.terminal { selection.apply(terminal, input)?; dirty = true; },
+                        Ok(DataCommand::Selection(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &stream.terminal { selection.apply(terminal, input)?; selection_revision = selection.revision; copy_mode.clear_owned_selection(); dirty = true; },
+                        Ok(DataCommand::CopyMode(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &mut stream.terminal {
+                            match copy_mode.apply(terminal, Some(&search), input) {
+                                Ok(outcome) if outcome.accepted => {
+                                    prompt_anchor = false;
+                                    selection_revision = input.revision;
+                                    if let Some(yank) = outcome.yank {
+                                        pending_yank = Some(yank);
+                                    }
+                                    dirty = true;
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    shared.update(|m| m.notice = Some(format!("Copy mode failed: {error:#}")));
+                                    dirty = true;
+                                }
+                            }
+                        },
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } else if !value && let Some(terminal) = &stream.terminal { selection.stop(terminal)?; } visible = value; }
-                        Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); selection.after_scroll(terminal)?; dirty = true; },
+                        Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); selection.after_scroll(terminal)?; copy_mode.after_viewport_scroll(terminal)?; dirty = true; },
                         Ok(DataCommand::CursorStyle(shape)) => { cursor_style = shape; stream.set_cursor_style(shape)?; dirty = true; },
                         Ok(DataCommand::PromptStep(older)) => if let Some(terminal) = &mut stream.terminal {
                             let before = terminal.scrollbar()?.offset;
@@ -2659,13 +2701,14 @@ async fn run_data(
                                 prompt_anchor = !terminal.is_viewport_active()?;
                             }
                             selection.after_scroll(terminal)?;
+                            copy_mode.after_viewport_scroll(terminal)?;
                             dirty = true;
                         },
-                        Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); dirty = true; },
+                        Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); copy_mode.after_viewport_scroll(terminal)?; dirty = true; },
                         // A search that fails is dropped with a notice; the terminal's stream is not its to end.
                         Ok(DataCommand::Search(needle)) => { prompt_anchor = false; if let Err(error) = search.set_needle(stream.terminal.as_ref(), needle) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } dirty = true; },
                         // Ghostty scrolls the selected match into view.
-                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &stream.terminal { prompt_anchor = false; if let Err(error) = search.step(terminal, older) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } selection.after_scroll(terminal)?; dirty = true; },
+                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; if let Err(error) = search.step(terminal, older) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } selection.after_scroll(terminal)?; if copy_mode.is_active() { let _ = copy_mode.move_to_match(terminal, &search); } dirty = true; },
                         Ok(DataCommand::Reconnect) => { shared.status("Reconnecting terminal…", false); return Ok(false); }
                         Ok(DataCommand::Stop) | Err(_) => return Ok(true),
                     },
@@ -2678,18 +2721,36 @@ async fn run_data(
                                 Ok(pending) => pending,
                                 Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); false }
                             };
+                            if let Err(error) = copy_mode.sync(terminal) {
+                                let ended = copy_mode.reset();
+                                shared.update(|m| {
+                                    m.notice = Some(format!("Copy mode failed: {error:#}"));
+                                    if let Some(epoch) = ended {
+                                        m.copy_ended_epoch = m.copy_ended_epoch.max(epoch);
+                                    }
+                                });
+                            }
                             let mut frame = renderer.frame(terminal)?;
                             if terminal.is_viewport_active()? { prompt_anchor = false; }
                             frame.prompt_anchor = prompt_anchor;
-                            frame.selection_revision = selection.revision;
+                            frame.selection_revision = selection_revision;
+                            frame.copy = copy_mode.view(terminal)?;
                             frame.search = match search.results(terminal) {
                                 Ok(results) => results,
                                 Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); None }
                             };
                             let frame = Arc::new(frame);
+                            let yank = pending_yank.take();
+                            let ended = copy_mode.ended_epoch();
                             let mut transitioned = false;
                             shared.update(|m| {
                                 m.frame = Some(frame);
+                                if let Some(yank) = yank {
+                                    m.copy_yank = Some(yank);
+                                }
+                                if ended > m.copy_ended_epoch {
+                                    m.copy_ended_epoch = ended;
+                                }
                                 if !m.connected { m.connected = true; m.status = "Live · snapshot restored".into(); transitioned = true; }
                                 if let Some(code) = stream.exit_code { m.status = format!("Process exited · {code}"); }
                             });

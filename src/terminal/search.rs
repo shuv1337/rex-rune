@@ -5,7 +5,7 @@ use ghostty_vt::{
     Terminal,
     search::{Search, Status},
     selection::Selection,
-    terminal::PointSpace,
+    terminal::{PointCoordinate, PointSpace},
 };
 
 /// One match on screen, from `start` to `end` inclusive, as viewport (column, row) cells.
@@ -139,6 +139,18 @@ impl Controller {
     /// The search no longer applies to the terminal it ran on: a fresh snapshot replaced it.
     pub fn forget_terminal(&mut self) {
         self.search = None;
+    }
+
+    /// The selected match's starting cell in full-screen (scrollback + active) coordinates,
+    /// or `None` when no search match is selected.
+    pub fn selected_match_screen(&self, terminal: &Terminal) -> Result<Option<PointCoordinate>> {
+        let Some(search) = &self.search else {
+            return Ok(None);
+        };
+        let Some(found) = search.selected_match(terminal)? else {
+            return Ok(None);
+        };
+        Ok(terminal.point_from_grid_ref(&found.start(), PointSpace::Screen)?)
     }
 
     pub fn results(&self, terminal: &Terminal) -> Result<Option<Results>> {
