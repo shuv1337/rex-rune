@@ -83,6 +83,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
     let in_mode = !s.bindings.modes.is_empty();
     s.bindings.mode_map = in_mode.then(|| super::bindings::mode_map(map, &s.bindings.modes, modes));
     let map = s.bindings.mode_map.as_ref().unwrap_or(map);
+    let in_copy = s.in_copy_mode();
     let searching = s.panel.is_none() && s.active_terminal().is_some_and(|t| t.search.is_some());
     let step = s.bindings.sequence.advance(map, input, |i| {
         let binding = &map.bindings[i].binding;
@@ -107,7 +108,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
                     || searching && matches!(spec.name, "client.find.next" | "client.find.previous")
             }
             actions::Kind::Forward | actions::Kind::Server { .. } => {
-                !global_only && model.connected
+                !global_only && !in_copy && model.connected
             }
             actions::Kind::Skip => false,
         }
@@ -149,6 +150,10 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
             }
             match actions::classify(&binding, server_actions) {
                 actions::Kind::Local(spec) => {
+                    if s.in_copy_mode() && spec.blocked_in_copy_mode() {
+                        s.bindings.consumed.insert(identity, true);
+                        return true;
+                    }
                     s.bindings
                         .consumed
                         .insert(identity, sequence || once || !spec.repeats());
@@ -268,9 +273,33 @@ pub fn search_key(s: &mut Workspace, key: &(HostId, String), ev: &KeyEvent, tx: 
         return true;
     }
     match ev.key {
-        Key::Escape => s.close_search(key, tx),
+        Key::Escape => {
+            if s.copy_mode_on(key) {
+                let identity = Input {
+                    event: ev,
+                    code: tx.physical_key(),
+                    base: tx.key_base(),
+                    repeat: false,
+                }
+                .identity();
+                s.bindings.consumed.insert(identity, true);
+                s.cancel_copy_mode_search(key, tx);
+            } else {
+                s.close_search(key, tx);
+            }
+        }
         Key::Enter => {
-            if let Some(term) = s.terminals.get_mut(key) {
+            if s.copy_mode_on(key) {
+                let identity = Input {
+                    event: ev,
+                    code: tx.physical_key(),
+                    base: tx.key_base(),
+                    repeat: false,
+                }
+                .identity();
+                s.bindings.consumed.insert(identity, true);
+                s.confirm_copy_mode_search(key, tx);
+            } else if let Some(term) = s.terminals.get_mut(key) {
                 term.send(Command::SearchStep(!ev.mods.shift));
             }
         }
@@ -330,6 +359,9 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     s.last_keypress = Some(std::time::Instant::now());
     if dispatch(s, ev, tx, false) {
         return true;
+    }
+    if s.in_copy_mode() {
+        return s.copy_mode_key(ev, tx);
     }
     // Unbound, these are the window's: Minimize, and Close if its shortcut was taken away.
     // Left untaken, the system's window menu acts on them instead of the program.
@@ -398,6 +430,10 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     .identity();
     let consumed = s.bindings.consumed.remove(&identity).is_some();
+    if s.in_copy_mode() {
+        s.forwarded.remove(&identity);
+        return true;
+    }
     if !s.forwarded.remove(&identity) {
         return consumed || s.panel.is_none();
     }
@@ -419,6 +455,12 @@ pub fn on_ime(s: &mut Workspace, ime: &Ime, _: &mut Tx) -> bool {
     if super::recorder::ime(s, ime) || s.panel.is_some() {
         // Text inputs handle their own IME first. A modal's unhandled commit (including
         // composition cancelled by the recorder) must never become terminal paste.
+        return true;
+    }
+    if s.in_copy_mode() {
+        if let Some(term) = s.active_terminal_mut() {
+            term.preedit.clear();
+        }
         return true;
     }
     let Some(term) = s.active_terminal_mut() else {

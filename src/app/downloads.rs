@@ -293,7 +293,7 @@ impl Workspace {
         u8::from(super::downloads_view::chip_label(self).is_some())
             | u8::from(self.bindings.sequence.depth > 0) << 1
             | u8::from(self.activity_chip_shown().is_some()) << 2
-            | u8::from(self.key_mode().is_some()) << 3
+            | u8::from(self.has_mode_chip()) << 3
     }
 
     /// Every host's transfers, running ones first, newest first within each group.

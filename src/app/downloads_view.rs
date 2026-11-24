@@ -441,7 +441,7 @@ pub fn chip_label(s: &Workspace) -> Option<ChipText> {
     if !s.sidebar_tabs() && narrow && pending {
         return None;
     }
-    let compact = (!s.sidebar_tabs() || s.key_mode().is_some()) && (narrow || pending);
+    let compact = (!s.sidebar_tabs() || s.has_mode_chip()) && (narrow || pending);
     let rows = s.download_rows();
     let running: Vec<&Row> = rows
         .iter()

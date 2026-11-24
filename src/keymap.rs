@@ -422,6 +422,7 @@ pub fn defaults_on(command: bool) -> KeymapDefault {
         ("mod+shift+space", None, "pane.actions"),
         ("mod+shift+c", Some("cmd+c"), "pane.copy"),
         ("mod+shift+v", Some("cmd+v"), "pane.paste"),
+        ("mod+shift+x", None, "pane.copy_mode"),
         ("mod+shift+f", Some("cmd+f"), "client.search"),
         ("mod+shift+up", None, "client.prompt.previous"),
         ("mod+shift+down", None, "client.prompt.next"),
@@ -891,7 +892,7 @@ mod tests {
         let layer = defaults();
         assert_eq!(layer.name, "linux");
         assert!(layer.removals.is_empty());
-        assert_eq!(layer.bindings.len(), 38);
+        assert_eq!(layer.bindings.len(), 39);
         // The terminal font size actions have no default: Ctrl Alt + / - / 0 belong to the
         // program in the terminal until the user binds them.
         assert!(
@@ -908,6 +909,7 @@ mod tests {
             ("ctrl+tab", "client.tab.next_global"),
             ("ctrl+shift+tab", "client.tab.previous_global"),
             ("ctrl+shift+f", "client.search"),
+            ("ctrl+shift+x", "pane.copy_mode"),
             ("ctrl+shift+up", "client.prompt.previous"),
             ("ctrl+shift+down", "client.prompt.next"),
             ("ctrl++", "client.zoom.in"),
@@ -985,6 +987,7 @@ mod tests {
             ("cmd+c", "pane.copy"),
             ("cmd+v", "pane.paste"),
             ("cmd+f", "client.search"),
+            ("shift+cmd+x", "pane.copy_mode"),
             ("cmd+,", "client.settings"),
             ("shift+cmd+p", "client.palette.toggle"),
             ("shift+cmd+]", "client.tab.next"),

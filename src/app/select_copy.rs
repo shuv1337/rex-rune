@@ -22,7 +22,25 @@ impl Workspace {
     /// pointer just finished.
     pub fn terminal_woke(&mut self, key: &(HostId, String), tx: &mut Tx) {
         self.refresh_terminal(key);
+        self.deliver_copy_yank(key, tx);
         self.copy_selected(key, tx);
+    }
+
+    fn deliver_copy_yank(&mut self, key: &(HostId, String), tx: &mut Tx) {
+        let Some(yank) = self
+            .terminals
+            .get_mut(key)
+            .and_then(|term| term.take_copy_yank())
+        else {
+            return;
+        };
+        if key.0 != self.hosts[self.active].id || yank.text.is_empty() {
+            return;
+        }
+        if self.primary_selection() {
+            self.set_primary(yank.text.clone());
+        }
+        tx.copy(yank.text);
     }
 
     fn copy_selected(&mut self, key: &(HostId, String), tx: &mut Tx) {
@@ -48,7 +66,7 @@ impl Workspace {
     /// there, if the setting is on. The read answers later and reaches the pane only if it
     /// is still a pane of the session on screen and no dialog has opened since.
     pub fn paste_primary(&mut self, block: &str) {
-        if !self.primary_selection() {
+        if !self.primary_selection() || self.in_copy_mode() {
             return;
         }
         let asked = self.term_key(block);
@@ -71,6 +89,7 @@ impl Workspace {
             if !still
                 || !s.window_focused
                 || s.panel.is_some()
+                || s.in_copy_mode()
                 || !s.primary_selection()
                 || text.is_empty()
             {

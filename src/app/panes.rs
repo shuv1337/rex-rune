@@ -118,10 +118,11 @@ fn header(
         floating_drag::attach_drag(h, host_id, layer_id, id, layers::Grip::Move)
     } else {
         h.on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-            if s.focused_block().as_deref() != Some(id.as_str())
-                && let Some(t) = s.terminals.get(&s.term_key(&id))
-            {
-                let _ = t.connection.commands.focus();
+            if s.focused_block().as_deref() != Some(id.as_str()) {
+                s.exit_copy_mode();
+                if let Some(t) = s.terminals.get(&s.term_key(&id)) {
+                    let _ = t.connection.commands.focus();
+                }
             }
             tx.blur();
         })
@@ -386,7 +387,7 @@ fn pane_card(
                     .terminal
                     .cursor_force
                     .then(|| s.settings.terminal.cursor_style.shape()),
-                ime: keyboard,
+                ime: keyboard && !s.copy_mode_on(&key),
                 colors,
             };
             let (k1, k2, k3) = (key.clone(), key.clone(), key.clone());
@@ -446,13 +447,36 @@ fn pane_card(
                     let cell = s.metrics().cell;
                     let focused = s.focused_block().as_deref() == Some(k2.1.as_str());
                     let copies = s.settings.terminal.copy_on_selection || s.primary_selection();
-                    let Some(t) = s.terminals.get_mut(&k2) else {
-                        return;
-                    };
                     let button = match tx.button() {
                         PointerButton::Primary => "left",
                         PointerButton::Middle => "middle",
                         _ => return,
+                    };
+                    if s.in_copy_mode() {
+                        if button == "middle" {
+                            if let Some(t) = s.terminals.get_mut(&k2) {
+                                t.primary_press = None;
+                                t.mouse = None;
+                            }
+                            return;
+                        }
+                        if d.phase == Phase::Down {
+                            let same_pane = s.copy_mode_on(&k2);
+                            s.exit_copy_mode();
+                            if let Some(t) = s.terminals.get_mut(&k2) {
+                                if !same_pane && !focused {
+                                    let _ = t.connection.commands.focus();
+                                }
+                                t.mouse = None;
+                                t.pressed_link = None;
+                                t.primary_press = None;
+                                t.selecting = false;
+                            }
+                        }
+                        return;
+                    }
+                    let Some(t) = s.terminals.get_mut(&k2) else {
+                        return;
                     };
                     let mods = tx.mods();
                     let at = t.cell_at(d.x, d.y, cell);
@@ -555,6 +579,7 @@ fn pane_card(
                 .on_pointer_move_local(move |s: &mut Workspace, p: PointerEvent, tx: &mut Tx| {
                     let cell = s.metrics().cell;
                     let focused = s.focused_block().as_deref() == Some(k4.1.as_str());
+                    let in_copy = s.copy_mode_on(&k4);
                     let Some(t) = s.terminals.get_mut(&k4) else {
                         tx.live_only();
                         return;
@@ -574,7 +599,8 @@ fn pane_card(
                     if same {
                         tx.live_only();
                     }
-                    if tx.mods().shift
+                    if in_copy
+                        || tx.mods().shift
                         || !focused
                         || t.mouse.is_some()
                         || !t.tracking()
@@ -599,7 +625,9 @@ fn pane_card(
                     let cell = s.metrics().cell;
                     let mods = tx.mods();
                     let focused = s.focused_block().as_deref() == Some(k5.1.as_str());
-                    if let Some(t) = s.terminals.get_mut(&k5)
+                    let in_copy = s.copy_mode_on(&k5);
+                    if !in_copy
+                        && let Some(t) = s.terminals.get_mut(&k5)
                         && t.tracking()
                         && mods.shift
                         && t.status().live
@@ -619,19 +647,29 @@ fn pane_card(
                 .on_wheel(move |s: &mut Workspace, e: WheelEvent, _| {
                     let scale = if e.precise { s.ui_scale() } else { 1. };
                     let cell = s.metrics().cell;
-                    let Some(t) = s.terminals.get_mut(&k3) else {
-                        return false;
+                    let in_copy = s.copy_mode_on(&k3);
+                    let lines = {
+                        let Some(t) = s.terminals.get_mut(&k3) else {
+                            return false;
+                        };
+                        t.scroll -= e.dy / (cell.1 * scale);
+                        let lines = t.scroll.trunc();
+                        if lines != 0. {
+                            t.scroll -= lines;
+                        }
+                        lines
                     };
-                    t.scroll -= e.dy / (cell.1 * scale);
-                    let lines = t.scroll.trunc();
                     if lines != 0. {
-                        t.scroll -= lines;
-                        // Shift + wheel keeps scrolling the local scrollback.
-                        if t.tracking() && !e.mods.shift && t.status().live {
-                            let at = t.cell_at(e.x, e.y, cell);
-                            t.send_wheel(at, lines as i32);
-                        } else {
-                            t.send(Command::Scroll(lines as isize));
+                        if in_copy {
+                            s.copy_mode_scroll(lines as i32);
+                        } else if let Some(t) = s.terminals.get_mut(&k3) {
+                            // Shift + wheel keeps scrolling the local scrollback.
+                            if t.tracking() && !e.mods.shift && t.status().live {
+                                let at = t.cell_at(e.x, e.y, cell);
+                                t.send_wheel(at, lines as i32);
+                            } else {
+                                t.send(Command::Scroll(lines as isize));
+                            }
                         }
                     }
                     true

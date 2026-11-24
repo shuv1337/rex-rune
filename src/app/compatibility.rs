@@ -278,6 +278,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) {
         }
         "client.mode.exit_all" => s.bindings.clear_modes(),
         "client.prompt.previous" | "client.prompt.next" => {
+            s.exit_copy_mode();
             if let Some(term) = s.active_terminal_mut() {
                 term.send(Command::PromptStep(name == "client.prompt.previous"));
             }

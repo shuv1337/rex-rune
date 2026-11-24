@@ -318,17 +318,28 @@ impl Workspace {
                 json!({"block_id":target.block,"bounds":layers::REQUESTED_BOUNDS}),
             ),
             // The server keeps the block and its program; only the state changes.
-            LayerAction::Minimize => self.layer_request(
-                &target,
-                "session.set_layer_state",
-                json!({"layer_id":target.layer,"state":"minimized"}),
-            ),
+            LayerAction::Minimize => {
+                if self.copy_mode.as_ref().is_some_and(|session| {
+                    session.key.0 == target.host_id
+                        && target.panes.iter().any(|(id, _)| id == &session.key.1)
+                }) {
+                    self.exit_copy_mode();
+                }
+                self.layer_request(
+                    &target,
+                    "session.set_layer_state",
+                    json!({"layer_id":target.layer,"state":"minimized"}),
+                )
+            }
             // One call restores or focuses and raises, in one revision: no second request.
-            LayerAction::Focus => self.layer_request(
-                &target,
-                "session.set_layer_state",
-                json!({"layer_id":target.layer,"state":"normal","focus":true}),
-            ),
+            LayerAction::Focus => {
+                self.exit_copy_mode();
+                self.layer_request(
+                    &target,
+                    "session.set_layer_state",
+                    json!({"layer_id":target.layer,"state":"normal","focus":true}),
+                )
+            }
             // Bring to front never focuses, so it is named for raising alone.
             LayerAction::Raise => self.layer_request(
                 &target,

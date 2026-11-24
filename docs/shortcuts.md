@@ -31,6 +31,7 @@ exposes these navigation actions. Ctrl Tab is a client default; remove it (see
 | Ctrl Shift B | Collapse / restore the sidebar | `client.sidebar.toggle` |
 | Ctrl Alt Shift T | Reveal / put away the toolbar when it has no row | `client.toolbar.toggle` |
 | Ctrl Shift C / V | Copy selection / paste text (bracketed-paste aware), or upload copied files or an image | `pane.copy` / `pane.paste` |
+| Ctrl Shift X | Enter Vim copy mode on the focused pane (local scrollback navigation, visual selection, `/` and `?` search, and yank) | `pane.copy_mode` |
 | Ctrl Shift F | Search the focused terminal's screen and scrollback | `client.search` |
 | Ctrl Shift R | Resume the focused terminal's data stream | `pane.reconnect` |
 | Shift PageUp / PageDown, wheel | Scroll local history | `pane.scroll`, `{"lines":-20}` / `{"lines":20}` (wheel is pointer input) |

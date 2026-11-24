@@ -229,6 +229,7 @@ impl Workspace {
         timeout: Duration,
         tx: &mut Tx,
     ) {
+        self.exit_copy_mode();
         self.navigation.serial += 1;
         let now = Instant::now();
         self.navigation.pending = Some(Pending {

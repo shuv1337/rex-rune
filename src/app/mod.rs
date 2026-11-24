@@ -7,6 +7,7 @@ mod activity_list;
 mod bindings;
 mod commands;
 mod compatibility;
+mod copy_mode;
 mod dialogs;
 mod directory;
 mod discover;

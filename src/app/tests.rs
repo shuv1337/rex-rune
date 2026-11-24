@@ -14,6 +14,8 @@ mod bindings_integration_tests;
 mod command_tests;
 #[path = "compatibility_tests.rs"]
 mod compatibility_tests;
+#[path = "copy_mode_tests.rs"]
+mod copy_mode_tests;
 #[path = "directory_tests.rs"]
 mod directory_tests;
 // These fixtures exercise Unix process identity and the POSIX download store.

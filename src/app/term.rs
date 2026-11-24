@@ -16,7 +16,7 @@ use rex_rune::{
         typography::Typography,
     },
     terminal::{
-        Cell, CursorShape, Frame, SelectionUnit,
+        Cell, CopyModeOp, CopyYank, CursorShape, Frame, SelectionUnit,
         graphics::{Image as TermImage, ImagePixels},
     },
     terminal_theme::{TerminalTheme, is_light},
@@ -78,6 +78,16 @@ pub struct Term {
     pub search: Option<TextEdit>,
     /// The last text searched here and the corner the find bar is in.
     pub find: super::find::Memory,
+    /// Monotonically increasing copy-mode epoch allocated on this pane.
+    copy_epoch: u64,
+    /// Active copy-mode epoch on this pane, if any (for defense-in-depth guards).
+    copy_mode_active: Option<u64>,
+    /// Highest copy-mode epoch ended automatically by the pane worker.
+    copy_ended_epoch: u64,
+    /// Pending yank taken from `Model::copy_yank`, ready for one-shot clipboard delivery.
+    pending_copy_yank: Option<CopyYank>,
+    /// Last delivered `(epoch, revision)` so each yank is copied at most once.
+    last_copy_yank: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -229,9 +239,13 @@ pub struct Status {
 
 impl Term {
     pub fn new(connection: Connection) -> Self {
-        let (frame, restore_generation) = {
+        let (frame, restore_generation, copy_ended_epoch) = {
             let model = connection.model.lock().expect("terminal model");
-            (model.frame.clone(), model.restore_generation)
+            (
+                model.frame.clone(),
+                model.restore_generation,
+                model.copy_ended_epoch,
+            )
         };
         Self {
             connection,
@@ -259,35 +273,63 @@ impl Term {
             pressed_link: None,
             search: None,
             find: Default::default(),
+            copy_epoch: 0,
+            copy_mode_active: None,
+            copy_ended_epoch,
+            pending_copy_yank: None,
+            last_copy_yank: None,
         }
     }
 
     pub fn refresh(&mut self) {
-        let (frame, generation, notice) = {
+        let (frame, generation, notice, copy_yank, copy_ended_epoch) = {
             let mut model = self.connection.model.lock().expect("terminal model");
             (
                 model.frame.clone(),
                 model.restore_generation,
                 model.notice.take(),
+                model.copy_yank.take(),
+                model.copy_ended_epoch,
             )
         };
         if notice.is_some() {
             self.notice = notice;
         }
+        self.copy_ended_epoch = self.copy_ended_epoch.max(copy_ended_epoch);
         if generation != self.restore_generation {
             self.selection = None;
             self.selection_anchor = None;
             self.selecting = false;
             self.last_selection_input = None;
             self.copy_wanted = None;
+            self.copy_mode_active = None;
+            self.pending_copy_yank = None;
             self.restore_generation = generation;
+        }
+        if self
+            .copy_mode_active
+            .is_some_and(|epoch| self.copy_ended_epoch >= epoch)
+        {
+            self.copy_mode_active = None;
+        }
+        if let Some(yank) = copy_yank
+            && Some((yank.epoch, yank.revision)) != self.last_copy_yank
+        {
+            self.pending_copy_yank = Some(yank);
         }
         if let Some(frame) = &frame {
             if frame.selection_error != self.frame.as_ref().and_then(|f| f.selection_error.clone())
             {
                 self.notice = frame.selection_error.clone();
             }
-            if frame.selection_revision == self.selection_revision {
+            if frame.copy.is_some() {
+                // Copy mode owns Ghostty's selection; never fall back to pointer (0, 0)
+                // selection or let visual cursor motions trigger copy_on_selection.
+                self.selection = None;
+                self.selection_anchor = None;
+                self.selecting = false;
+                self.copy_wanted = None;
+            } else if frame.selection_revision == self.selection_revision {
                 if frame.selection_text.is_some() && self.selection.is_none() {
                     self.selection = Some((0, 0));
                 } else if !self.selecting && frame.selection_text.is_none() {
@@ -367,12 +409,109 @@ impl Term {
     }
 
     /// The same send and notice, with acceptance feedback for local path history.
+    /// Defense-in-depth: exits copy mode before any PTY input command reaches the worker.
     pub fn try_send(&mut self, command: Command) -> bool {
+        if matches!(
+            command,
+            Command::Paste(_) | Command::SendKey(_) | Command::Reset | Command::Clear
+        ) && let Some(epoch) = self.copy_mode_active.take()
+        {
+            self.selection_revision = self.selection_revision.wrapping_add(1);
+            let _ = self
+                .connection
+                .commands
+                .try_send(Command::CopyMode(super::copy_mode::input(
+                    self.restore_generation,
+                    epoch,
+                    self.selection_revision,
+                    None,
+                    CopyModeOp::End,
+                )));
+        }
         if let Err(error) = self.connection.commands.try_send(command) {
             self.notice = Some(format!("Input not sent: {error}"));
             return false;
         }
         true
+    }
+
+    pub fn restore_generation(&self) -> u64 {
+        self.restore_generation
+    }
+
+    pub fn copy_ended_epoch(&self) -> u64 {
+        self.copy_ended_epoch
+    }
+
+    pub fn copy_mode_is_active(&self, epoch: u64) -> bool {
+        self.copy_mode_active == Some(epoch)
+    }
+
+    pub fn clear_copy_mode_active(&mut self) {
+        self.copy_mode_active = None;
+    }
+
+    pub fn copy_visible_rows(&self, cell: (f32, f32)) -> Option<u16> {
+        if self.rect[3] <= 0. {
+            return None;
+        }
+        Some(self.visible_rows(cell).min(usize::from(u16::MAX)) as u16)
+    }
+
+    /// Allocate a monotonically increasing non-zero copy-mode epoch strictly greater than
+    /// `model.copy_ended_epoch`, clear local pointer selection, and send `CopyModeOp::Begin`.
+    pub fn begin_copy_mode(&mut self, cell: (f32, f32)) -> (u64, u64) {
+        {
+            let model = self.connection.model.lock().expect("terminal model");
+            self.restore_generation = model.restore_generation;
+            self.copy_ended_epoch = self.copy_ended_epoch.max(model.copy_ended_epoch);
+        }
+        let epoch = self
+            .copy_epoch
+            .max(self.copy_ended_epoch)
+            .saturating_add(1)
+            .max(1);
+        self.copy_epoch = epoch;
+        self.copy_mode_active = Some(epoch);
+        self.selection = None;
+        self.selection_anchor = None;
+        self.selecting = false;
+        self.copy_wanted = None;
+        self.last_selection_input = None;
+        self.primary_press = None;
+        self.send_copy_mode(self.restore_generation, epoch, cell, CopyModeOp::Begin);
+        (self.restore_generation, epoch)
+    }
+
+    /// Send one stamped copy-mode operation to the pane worker.
+    pub fn send_copy_mode(
+        &mut self,
+        generation: u64,
+        epoch: u64,
+        cell: (f32, f32),
+        op: CopyModeOp,
+    ) {
+        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.copy_wanted = None;
+        let visible_rows = self.copy_visible_rows(cell);
+        self.send(Command::CopyMode(super::copy_mode::input(
+            generation,
+            epoch,
+            self.selection_revision,
+            visible_rows,
+            op,
+        )));
+    }
+
+    /// Take the latest pending copy-mode yank once, deduplicated by `(epoch, revision)`.
+    pub fn take_copy_yank(&mut self) -> Option<CopyYank> {
+        let yank = self.pending_copy_yank.take()?;
+        if yank.epoch != self.copy_epoch || Some((yank.epoch, yank.revision)) == self.last_copy_yank
+        {
+            return None;
+        }
+        self.last_copy_yank = Some((yank.epoch, yank.revision));
+        Some(yank)
     }
 
     pub fn visible_rows(&self, cell: (f32, f32)) -> usize {
@@ -1351,10 +1490,13 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
     let colors = &look.colors;
     let body = colors.body(frame.bg, frame.bg_from_program);
     let selection = term.selection.map(|(a, b)| (a.min(b), a.max(b)));
+    let in_copy = frame.copy.is_some();
     let selected_on = |y: usize| {
         if y >= frame.cells.len() {
             None
-        } else if term.selection.is_some() && frame.selection_revision == term.selection_revision {
+        } else if in_copy
+            || (term.selection.is_some() && frame.selection_revision == term.selection_revision)
+        {
             frame.selection_rows.get(y).copied().flatten()
         } else {
             selection.and_then(|(a, b)| {
@@ -1440,7 +1582,45 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             grid = grid.child(mark);
         }
     }
-    if let Some((x, y)) = frame.cursor
+    if let Some(view) = frame.copy {
+        let (x, y) = view.cursor;
+        if let Some(cursor_look) = look.cursor
+            && (y as usize) >= start
+            && (y as usize) < start + visible
+        {
+            let (px, py) = (x as f32 * cw, (y as usize - start) as f32 * ch);
+            let width = if view.wide { 2. * cw } else { cw };
+            let color = rgb(colors.search_match);
+            let shape = match cursor_look {
+                CursorLook::Block => CursorShape::Block,
+                CursorLook::Hollow => CursorShape::Hollow,
+            };
+            let cursor =
+                cursor_el(shape, (px, py), (width, ch), color).key(format!("{key}/copy-cursor"));
+            grid = grid.child(cursor);
+            if shape == CursorShape::Block
+                && let Some(cell) = frame
+                    .cells
+                    .get(y as usize)
+                    .and_then(|r| r.get(x as usize))
+                    .filter(|c| !c.text.is_empty() && !c.text.starts_with('\u{10eeee}'))
+            {
+                let mut chars = cell.text.chars();
+                let single = chars.next().filter(|_| chars.next().is_none());
+                if let Some(sprite) = single.and_then(Sprite::of) {
+                    grid = sprite.draw(grid, px, (width, ch), m.px, rgb(colors.search_text));
+                } else {
+                    let mut style = RunStyle {
+                        fg: colors.search_text,
+                        ..RunStyle::of(cell, frame.bg, body)
+                    };
+                    style.bold &= m.bold;
+                    style.italic &= m.italic;
+                    grid = grid.child(glyph_run(cell.text.clone(), style, px, py, m));
+                }
+            }
+        }
+    } else if let Some((x, y)) = frame.cursor
         && let Some(cursor_look) = look.cursor
         && (y as usize) >= start
         && (y as usize) < start + visible

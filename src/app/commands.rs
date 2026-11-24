@@ -560,6 +560,10 @@ impl Workspace {
             pane("pane.paste", "Paste", PaneAction::Paste).keywords("clipboard"),
             pane("pane.select_all", "Select all", PaneAction::SelectAll)
                 .keywords("screen scrollback text"),
+            Command::action("pane.copy_mode", G, "Copy mode", super::copy_mode::ACTION)
+                .enabled(self.can_enter_copy_mode())
+                .keywords("vim scrollback select yank visual")
+                .section(1),
             Command::action("pane.search", G, "Search terminal…", actions::SEARCH)
                 .keywords("find")
                 .section(1),

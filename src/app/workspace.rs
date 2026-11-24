@@ -75,6 +75,7 @@ pub struct Workspace {
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
     pub layer_drag: Option<super::floating_drag::LayerDrag>,
+    pub copy_mode: Option<super::copy_mode::Session>,
     /// Keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<super::bindings::Identity>,
     pub bindings: super::bindings::State,
@@ -285,6 +286,7 @@ impl Workspace {
             zoom_notice: None,
             drag: None,
             layer_drag: None,
+            copy_mode: None,
             forwarded: HashSet::new(),
             bindings: Default::default(),
             local_keymap,
@@ -462,6 +464,9 @@ impl Workspace {
     /// Forget a host's terminals and claims; dropping its `HostState` shuts its worker down.
     pub(super) fn forget_host(&mut self, state: HostState) {
         let id = state.id;
+        if self.copy_mode.as_ref().is_some_and(|s| s.key.0 == id) {
+            self.copy_mode = None;
+        }
         self.terminals.retain(|(host, _), _| *host != id);
         self.claimed.retain(|(host, _)| *host != id);
         self.tab_states.retain(|(host, _), _| *host != id);
@@ -667,6 +672,7 @@ impl Workspace {
             // The session, keymap revision or connection above is what a mode belongs to.
             self.revalidate_key_modes();
         }
+        self.reconcile_copy_mode();
         self.announce_keymap_problems(index);
         self.poll_remote_navigation(std::time::Instant::now());
         for pending in performs {
@@ -957,6 +963,7 @@ impl Workspace {
             term.cache_images(self.images.as_ref());
             term.resize_if_owner(cell);
         }
+        self.reconcile_copy_mode_wake(key);
         self.place_find(key);
     }
 
@@ -1233,6 +1240,10 @@ impl Workspace {
     /// Opens the focused terminal's search field, or gives it back the keyboard.
     pub fn open_search(&mut self) {
         self.cancel_layer_drag();
+        if self.in_copy_mode() {
+            self.open_copy_mode_search(super::copy_mode::SearchDirection::Forward);
+            return;
+        }
         if let Some(term) = self.active_terminal_mut() {
             term.search.get_or_insert_with(|| TextEdit::new("")).focused = true;
         }
@@ -1279,6 +1290,7 @@ impl Workspace {
 
     pub fn request(&mut self, method: &str, mut payload: Value) {
         if method.starts_with("session.focus") {
+            self.exit_copy_mode();
             self.bindings.sequence.clear();
         }
         let Some(session) = self.model().selected.clone() else {
@@ -1431,6 +1443,7 @@ impl Workspace {
     }
 
     pub fn activate_host(&mut self, host: usize, tx: &mut Tx) {
+        self.exit_copy_mode();
         self.bindings.sequence.clear();
         self.observe_navigation();
         self.navigation.cancel();
@@ -1637,6 +1650,7 @@ impl Workspace {
                 }
             }
             Intent::NewWindow => {
+                self.exit_copy_mode();
                 if let Some(session) = self.model().selected.clone() {
                     let from = self.focused_block();
                     let layout = self.new_terminal(self.active);
@@ -1645,6 +1659,7 @@ impl Workspace {
                 }
             }
             Intent::Split(direction) => {
+                self.exit_copy_mode();
                 if let (Some(session), Some(block)) = (self.model().selected.clone(), self.focused_block()) {
                     let layout = self.new_terminal(self.active);
                     let payload = self.split_payload(self.active, &block, direction, layout);
@@ -1678,6 +1693,7 @@ impl Workspace {
             }
             Intent::Sidebar => self.toggle_sidebar(),
             Intent::Settings => {
+                self.exit_copy_mode();
                 self.cancel_layer_drag();
                 self.leave_install_dialog();
                 self.bindings.sequence.clear();
@@ -1785,6 +1801,7 @@ impl Workspace {
         if !self.hosts[host].model.connected {
             return;
         }
+        self.exit_copy_mode();
         self.navigation.cancel();
         if self.panel.is_some() {
             self.close_panel(tx);
@@ -2111,6 +2128,7 @@ impl Workspace {
     }
 
     pub(super) fn confirm(&mut self, title: &str, method: &str, payload: Value, description: &str) {
+        self.exit_copy_mode();
         self.cancel_layer_drag();
         let target = self.panel.as_ref().and_then(|p| p.target.clone());
         let mut panel = Panel::new(
@@ -2165,6 +2183,7 @@ impl Workspace {
     }
 
     pub fn open_panel(&mut self, kind: PanelKind, title: &str, fields: &[(&str, &str, &str)]) {
+        self.exit_copy_mode();
         self.cancel_layer_drag();
         self.leave_install_dialog();
         self.bindings.sequence.clear();
