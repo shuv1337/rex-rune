@@ -1,7 +1,9 @@
-//! Per-host consent and the deliberately small view-only remote surface.
+//! Per-host consent and the deliberately small remote surface: view-only actions plus
+//! explicitly targeted, idempotent tab muting.
 use super::{
     actions::{self, Remote},
     navigation::Visit,
+    tabs::TabTarget,
     workspace::{HostId, Workspace},
 };
 use rex_rune::connection::{
@@ -18,12 +20,155 @@ pub struct Navigation {
     deadline: Instant,
 }
 
+pub struct PendingMute {
+    host: HostId,
+    pending: Pending,
+    fetch_id: u64,
+    session: String,
+    deadline: Instant,
+}
+
+enum MuteTarget {
+    Ready(TabTarget),
+    FetchSession(String),
+}
+
 const TYPING: Duration = Duration::from_millis(1500);
+
+fn sanitize_label(label: &str) -> String {
+    let cleaned: String = label
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .take(60)
+        .collect();
+    if cleaned.trim().is_empty() {
+        "tab".into()
+    } else {
+        cleaned
+    }
+}
 
 impl Workspace {
     pub fn toggle_remote_control(&mut self, host: usize) {
         self.settings.hosts[host].remote_control = !self.settings.hosts[host].remote_control;
         self.save();
+    }
+
+    fn note_remote_off(&mut self, host: usize, pending: &Pending) {
+        if self.remote_off_notices.insert(self.hosts[host].id) {
+            self.inform(format!(
+                "{} on {} asked for {}. Remote control is off (Settings → Remote Hosts).",
+                pending.request.requester, self.settings.hosts[host].label, pending.request.action
+            ));
+        }
+    }
+
+    fn resolve_remote_mute(&self, host: usize, pending: &Pending) -> Result<MuteTarget, Outcome> {
+        let request = &pending.request;
+        let Some(window_id) = request.args["window_id"].as_str() else {
+            return Err(Outcome::error(
+                "bad_request",
+                "Remote client.tab.mute requires window_id and muted; nothing was done.",
+            ));
+        };
+        if !request.args["muted"].is_boolean() {
+            return Err(Outcome::error(
+                "bad_request",
+                "Remote client.tab.mute requires window_id and muted; nothing was done.",
+            ));
+        }
+        let model = &self.hosts[host].model;
+        if !model.connected || pending.received.elapsed() >= MAX_WAIT {
+            return Err(Outcome::error(
+                "internal",
+                "Rex Rune did not act in time or the host disconnected; nothing was done.",
+            ));
+        }
+        let arg_session = request.args["session_id"].as_str();
+        let env_session = request.session_id.as_deref();
+        let env_block = request.block_id.as_deref();
+        if let Some(session_id) = arg_session {
+            if !model.sessions.iter().any(|s| s.session_id == session_id) {
+                return Err(Outcome::error(
+                    "not_found",
+                    "That session does not exist on this host.",
+                ));
+            }
+            if env_session.is_some_and(|id| id != session_id) {
+                return Err(Outcome::error(
+                    "refused",
+                    "The requested tab does not belong to the request's session; nothing was done.",
+                ));
+            }
+            if !model.views.contains_key(session_id) {
+                return Ok(MuteTarget::FetchSession(session_id.to_owned()));
+            }
+            let Some(target) = self.tab_target(host, session_id, window_id) else {
+                return Err(Outcome::error(
+                    "not_found",
+                    "That tab does not exist in the requested session.",
+                ));
+            };
+            if env_block.is_some_and(|block| !self.tab_has_block(&target, block)) {
+                return Err(Outcome::error(
+                    "refused",
+                    "The requested pane does not belong to that tab; nothing was done.",
+                ));
+            }
+            return Ok(MuteTarget::Ready(target));
+        }
+        if let Some(target) = self.find_tab(host, window_id, None) {
+            if env_session.is_some_and(|id| id != target.session) {
+                return Err(Outcome::error(
+                    "refused",
+                    "The requested tab does not belong to the request's session; nothing was done.",
+                ));
+            }
+            if env_block.is_some_and(|block| !self.tab_has_block(&target, block)) {
+                return Err(Outcome::error(
+                    "refused",
+                    "The requested pane does not belong to that tab; nothing was done.",
+                ));
+            }
+            return Ok(MuteTarget::Ready(target));
+        }
+        if let Some(session_id) = env_session
+            && model.sessions.iter().any(|s| s.session_id == session_id)
+            && !model.views.contains_key(session_id)
+        {
+            return Ok(MuteTarget::FetchSession(session_id.to_owned()));
+        }
+        Err(Outcome::error(
+            "not_found",
+            "That tab does not exist on this host.",
+        ))
+    }
+
+    fn apply_remote_mute(&mut self, host: usize, pending: Pending, target: TabTarget) {
+        let muted = pending.request.args["muted"]
+            .as_bool()
+            .expect("validated muted bool");
+        let changed = self.set_tab_muted(&target, muted);
+        let notice = changed.then(|| {
+            let verb = if muted { "muted" } else { "unmuted" };
+            format!(
+                "{}: {} {verb} \"{}\"",
+                self.settings.hosts[host].label,
+                pending.request.requester,
+                sanitize_label(&target.name)
+            )
+        });
+        self.remote_reply_with_notice(host, pending, Outcome::Performed, notice);
     }
 
     fn remote_policy(
@@ -41,7 +186,7 @@ impl Workspace {
         };
         let Remote::View { navigation } = spec.remote() else {
             let Remote::Never(message) = spec.remote() else {
-                unreachable!()
+                unreachable!("Remote::TabState is handled before remote_policy")
             };
             return Err(Outcome::error(
                 "not_supported",
@@ -145,6 +290,57 @@ impl Workspace {
         if pending.epoch != self.hosts[host].model.connection_epoch {
             return;
         }
+        if let Some(spec) =
+            actions::find(&pending.request.action).filter(|s| s.remote() == Remote::TabState)
+        {
+            if !self.settings.hosts[host].remote_control {
+                self.note_remote_off(host, &pending);
+                self.remote_reply(
+                    host,
+                    pending,
+                    Outcome::error(
+                        "refused",
+                        "Remote control is off for this host in Rex Rune. The person at that computer can turn it on in Settings → Remote Hosts. Nothing was done.",
+                    ),
+                );
+                return;
+            }
+            if !spec.accepts(&pending.request.args) {
+                let message = format!(
+                    "Invalid arguments for {}; nothing was done.",
+                    pending.request.action
+                );
+                self.remote_reply(host, pending, Outcome::error("bad_request", message));
+                return;
+            }
+            match self.resolve_remote_mute(host, &pending) {
+                Ok(MuteTarget::Ready(target)) => self.apply_remote_mute(host, pending, target),
+                Ok(MuteTarget::FetchSession(session)) => {
+                    self.next_fetch_id += 1;
+                    let fetch_id = self.next_fetch_id;
+                    let deadline = pending.received + MAX_WAIT;
+                    let epoch = pending.epoch;
+                    self.send(
+                        host,
+                        HostCommand::FetchView {
+                            id: fetch_id,
+                            epoch,
+                            deadline,
+                            session: session.clone(),
+                        },
+                    );
+                    self.remote_mutes.push(PendingMute {
+                        host: self.hosts[host].id,
+                        pending,
+                        fetch_id,
+                        session,
+                        deadline,
+                    });
+                }
+                Err(outcome) => self.remote_reply(host, pending, outcome),
+            }
+            return;
+        }
         // Rune supplies Tx focus for input handlers, but not AppHandle::update.
         // Remote requests arrive through the latter, so inspect mounted search editors too.
         let field_focused = tx.focused().is_some()
@@ -166,14 +362,8 @@ impl Workspace {
                         actions::find(&pending.request.action).map(|s| s.remote()),
                         Some(Remote::View { .. })
                     )
-                    && self.remote_off_notices.insert(self.hosts[host].id)
                 {
-                    self.inform(format!(
-                        "{} on {} asked for {}. Remote control is off (Settings → Remote Hosts).",
-                        pending.request.requester,
-                        self.settings.hosts[host].label,
-                        pending.request.action
-                    ));
+                    self.note_remote_off(host, &pending);
                 }
                 outcome
             }
@@ -206,6 +396,101 @@ impl Workspace {
             }
         };
         self.remote_reply(host, pending, outcome);
+    }
+
+    pub(super) fn poll_remote_mutes(&mut self, now: Instant) -> bool {
+        if self.remote_mutes.is_empty() {
+            return false;
+        }
+        let mutes = std::mem::take(&mut self.remote_mutes);
+        let mut changed = false;
+        for mute in mutes {
+            let Some(host) = self.host_index(mute.host) else {
+                changed = true;
+                continue;
+            };
+            let model = &self.hosts[host].model;
+            if !model.connected || model.connection_epoch != mute.pending.epoch {
+                changed = true;
+                continue;
+            }
+            let view_loaded = model.views.contains_key(&mute.session);
+            let fetch_done = model
+                .view_fetch_result
+                .filter(|(id, _)| *id == mute.fetch_id);
+            if view_loaded || fetch_done.is_some() {
+                changed = true;
+                if !self.settings.hosts[host].remote_control {
+                    self.remote_reply(
+                        host,
+                        mute.pending,
+                        Outcome::error(
+                            "refused",
+                            "Remote control is off for this host in Rex Rune. The person at that computer can turn it on in Settings → Remote Hosts. Nothing was done.",
+                        ),
+                    );
+                    continue;
+                }
+                if view_loaded {
+                    match self.resolve_remote_mute(host, &mute.pending) {
+                        Ok(MuteTarget::Ready(target)) => {
+                            self.apply_remote_mute(host, mute.pending, target);
+                        }
+                        Ok(MuteTarget::FetchSession(_)) => {
+                            self.remote_reply(
+                                host,
+                                mute.pending,
+                                Outcome::error(
+                                    "internal",
+                                    "Could not load the session view; nothing was done.",
+                                ),
+                            );
+                        }
+                        Err(outcome) => self.remote_reply(host, mute.pending, outcome),
+                    }
+                } else if !self.hosts[host]
+                    .model
+                    .sessions
+                    .iter()
+                    .any(|s| s.session_id == mute.session)
+                {
+                    self.remote_reply(
+                        host,
+                        mute.pending,
+                        Outcome::error("not_found", "That session does not exist on this host."),
+                    );
+                } else {
+                    self.remote_reply(
+                        host,
+                        mute.pending,
+                        Outcome::error(
+                            "internal",
+                            "Could not load the session view; nothing was done.",
+                        ),
+                    );
+                }
+            } else if now >= mute.deadline {
+                changed = true;
+                self.remote_reply(
+                    host,
+                    mute.pending,
+                    Outcome::error(
+                        "internal",
+                        "Rex Rune did not load the session view in time; nothing was done.",
+                    ),
+                );
+            } else {
+                self.remote_mutes.push(mute);
+            }
+        }
+        changed
+    }
+
+    pub(super) fn next_remote_mute_deadline(&self, now: Instant) -> Option<Duration> {
+        self.remote_mutes
+            .iter()
+            .map(|m| m.deadline.saturating_duration_since(now))
+            .min()
     }
 
     pub(super) fn session_visit(
@@ -300,6 +585,22 @@ impl Workspace {
     }
 
     pub(super) fn remote_reply(&mut self, host: usize, pending: Pending, outcome: Outcome) {
+        let notice = (outcome == Outcome::Performed).then(|| {
+            format!(
+                "{}: {} performed {}",
+                self.settings.hosts[host].label, pending.request.requester, pending.request.action
+            )
+        });
+        self.remote_reply_with_notice(host, pending, outcome, notice);
+    }
+
+    fn remote_reply_with_notice(
+        &mut self,
+        host: usize,
+        pending: Pending,
+        outcome: Outcome,
+        notice: Option<String>,
+    ) {
         log::info!(
             "Remote control on {}: {} requested {}: {:?}",
             self.settings.hosts[host].label,
@@ -307,11 +608,8 @@ impl Workspace {
             pending.request.action,
             outcome
         );
-        if outcome == Outcome::Performed {
-            self.inform(format!(
-                "{}: {} performed {}",
-                self.settings.hosts[host].label, pending.request.requester, pending.request.action
-            ));
+        if let Some(text) = notice {
+            self.inform(text);
         }
         self.send(
             host,

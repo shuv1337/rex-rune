@@ -625,7 +625,7 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
     }
     rows.push(setting(
         "Remote control",
-        "Let rex do and other clients on this host change the view in this window.",
+        "Let rex do and other clients on this host change the view and mute tabs in this window.",
         Switch::new(host.remote_control)
             .label(format!("Remote control for {}", host.label))
             .hide_label()

@@ -51,7 +51,7 @@ The following actions have no default key binding:
 | `client.tab.goto` | `{"index": integer >= 1}` | Focus the 1-based tab in the current session |
 | `client.tab.close` | None | Confirm closing the current tab |
 | `client.tab.rename` | None | Open the current tab's rename dialog |
-| `client.tab.mute` | None | Mute the current tab on this client, or unmute it |
+| `client.tab.mute` | Optional `{"window_id": string, "session_id": string, "muted": boolean}` | Mute or unmute a tab on this client. Local calls default to toggling the current tab; `session_id` requires `window_id`. Remote calls require explicit `window_id` and `muted` |
 | `client.tab.close_others` | None | Confirm closing every other tab of the current session |
 | `session.rename` | None | Open the current session's rename dialog |
 | `session.next` / `session.previous` | None | Show the next / previous session, in sidebar order across connected hosts (wraps) |
@@ -247,27 +247,43 @@ remains a gap in [#44](https://github.com/shuv1337/rex-rune/issues/44).
 Settings → Remote Hosts has a **Remote control** switch for each saved host, **off
 by default, including local hosts**. Changing an endpoint turns it off again.
 Commands can turn it on or off for the host on screen. With it on, `rex do` and
-`client.perform` can run exactly eight actions: `session.select`, `client.tab.goto`,
-`client.tab.next`, `client.tab.previous`, `pane.focus`, `pane.zoom`,
-`pane.scroll`, and `client.sidebar.toggle` on that host. These requests cannot
-create or close terminals, type, access the clipboard, open dialogs (so none can
-start a download), change interface zoom, or affect any host other than the
-requesting host. Refusals name the server command to use instead where one exists
+`client.perform` can run eight view-only actions (`session.select`,
+`client.tab.goto`, `client.tab.next`, `client.tab.previous`, `pane.focus`,
+`pane.zoom`, `pane.scroll`, and `client.sidebar.toggle`) plus one targeted tab
+state action (`client.tab.mute`) on that host. These requests cannot create or
+close terminals, type, access the clipboard, open dialogs (so none can start a
+download), change interface zoom, or affect any host other than the requesting
+host. Refusals name the server command to use instead where one exists
 (`rex window new`, `rex send-key`, `rex capture`, etc.). Actions remain listed even
 with the switch off.
 
 `session.select` shows a session on the requesting host, switching to that host if
 needed; an optional `window_id` selects a tab. It replies only after navigation is
 acknowledged, or fails after five seconds. Unknown sessions/tabs return
-`not_found`. All other requests must match the host, session and pane on screen.
-Navigation runs only after a pause in typing, and never while a text field has
-focus. The pause must last at least 1.5 seconds. All remote actions are refused
-while a text field has focus, a panel is open or a key sequence is pending.
+`not_found`. All other view-only requests must match the host, session and pane on
+screen. Navigation runs only after a pause in typing, and never while a text field
+has focus. The pause must last at least 1.5 seconds. All view-only remote actions
+are refused while a text field has focus, a panel is open or a key sequence is
+pending.
+
+`client.tab.mute` requires both `window_id` and `muted` (`true` or `false`) on
+remote calls, with an optional `session_id`, so scripts stay explicit and
+idempotent. It touches no focus, keyboard, or view, so it runs unattended even when
+a panel is open, a field has focus, a key sequence is pending, the user is typing,
+or the requesting host is off screen. Target lookup is strictly confined to the
+requesting host across both opened and background session views (fetching a listed
+unloaded session's read-only view on demand without selecting or attaching it); an
+unknown session or tab returns `not_found`, and a mismatched envelope `session_id`
+or `block_id` returns `refused`. Muting a tab closes any active desktop
+notification for it. Repeating the same muted state succeeds without rewriting
+`workspace.json` or emitting a duplicate notice; a state change shows a six-second
+in-app notice naming host, requester and tab.
+
 Requests not acted on within five seconds are discarded, including time buffered
 during a busy connection step (counted conservatively from that step's start).
-Replies never cross a reconnect. Every performed request gets a six-second in-app
-notice naming host, requester and action; nothing raises the window or sends a
-desktop notification. The first request refused because control is off shows one
+Replies never cross a reconnect. Every performed view request gets a six-second
+in-app notice naming host, requester and action; nothing raises the window or sends
+a desktop notification. The first request refused because control is off shows one
 explanatory notice per host per launch. Requester identity is displayed, not used
 as a second permission filter.
 
@@ -283,6 +299,8 @@ rex -C LABEL do session.select session_id="$REX_SESSION"
 rex -C LABEL do session.select session_id=SESSION window_id=WINDOW
 rex -C LABEL do client.tab.goto index=2
 rex -C LABEL do client.tab.goto index=-1  # last tab
+rex -C LABEL do client.tab.mute window_id="$WINDOW" muted=true
+rex -C LABEL do client.tab.mute session_id="$REX_SESSION" window_id="$WINDOW" muted=false
 ```
 
 `session.select` can also be bound with fixed arguments in `shortcuts.json` or

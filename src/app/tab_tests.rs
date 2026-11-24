@@ -267,11 +267,7 @@ fn ctrl_shift_page_keys_move_the_tab_on_screen() {
     ] {
         assert!(!spec.accepts(&bad), "{bad}");
     }
-    for name in [
-        "client.tab.move",
-        "client.tab.mute",
-        "client.tab.close_others",
-    ] {
+    for name in ["client.tab.move", "client.tab.close_others"] {
         assert!(
             matches!(
                 actions::find(name).unwrap().remote(),
@@ -280,6 +276,10 @@ fn ctrl_shift_page_keys_move_the_tab_on_screen() {
             "{name} is never remote"
         );
     }
+    assert_eq!(
+        actions::find("client.tab.mute").unwrap().remote(),
+        actions::Remote::TabState
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -832,4 +832,253 @@ fn the_sidebar_footer_counts_one_session_in_the_singular() {
     }
     assert_eq!(count(&rt), "0 sessions");
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn mute_tab_schema_local_targeting_and_shortcuts_titles() {
+    let spec = actions::find("client.tab.mute").expect("client.tab.mute");
+    let max_id = "w".repeat(128);
+    let over_id = "w".repeat(129);
+    for good in [
+        Value::Null,
+        json!({}),
+        json!({"muted": true}),
+        json!({"muted": false}),
+        json!({"window_id": "a"}),
+        json!({"window_id": "a", "muted": true}),
+        json!({"window_id": "a", "session_id": "s"}),
+        json!({"window_id": "a", "session_id": "s", "muted": false}),
+        json!({"window_id": max_id, "session_id": max_id, "muted": true}),
+    ] {
+        assert!(spec.accepts(&good), "expected valid: {good}");
+    }
+    for bad in [
+        json!(true),
+        json!("a"),
+        json!([]),
+        json!({"extra": true}),
+        json!({"window_id": "a", "extra": 1}),
+        json!({"session_id": "s"}),
+        json!({"session_id": "s", "muted": true}),
+        json!({"window_id": ""}),
+        json!({"window_id": "   "}),
+        json!({"window_id": over_id}),
+        json!({"window_id": 123}),
+        json!({"window_id": "a", "session_id": ""}),
+        json!({"window_id": "a", "session_id": "  \t "}),
+        json!({"window_id": "a", "session_id": over_id}),
+        json!({"window_id": "a", "session_id": 42}),
+        json!({"muted": "true"}),
+        json!({"muted": null}),
+    ] {
+        assert!(!spec.accepts(&bad), "expected invalid: {bad}");
+    }
+
+    let (mut ws, _rx) = three_tabs("a");
+    let mut tx = rune::Tx::default();
+    // Explicit set on active tab.
+    assert!(actions::run(
+        &mut ws,
+        "client.tab.mute",
+        &json!({"muted": true}),
+        &mut tx
+    ));
+    assert!(ws.tab_muted(0, "a"));
+    // Repeating muted: true is a no-op (no toggle).
+    assert!(actions::run(
+        &mut ws,
+        "client.tab.mute",
+        &json!({"muted": true}),
+        &mut tx
+    ));
+    assert!(ws.tab_muted(0, "a"));
+    assert!(actions::run(
+        &mut ws,
+        "client.tab.mute",
+        &json!({"muted": false}),
+        &mut tx
+    ));
+    assert!(!ws.tab_muted(0, "a"));
+
+    // Targeted toggle by window_id without muted leaves active tab untouched.
+    assert!(actions::run(
+        &mut ws,
+        "client.tab.mute",
+        &json!({"window_id": "c"}),
+        &mut tx
+    ));
+    assert!(ws.tab_muted(0, "c") && !ws.tab_muted(0, "a"));
+    assert!(actions::run(
+        &mut ws,
+        "client.tab.mute",
+        &json!({"window_id": "c"}),
+        &mut tx
+    ));
+    assert!(!ws.tab_muted(0, "c"));
+
+    // Targeted explicit set with session_id.
+    assert!(actions::run(
+        &mut ws,
+        "client.tab.mute",
+        &json!({"window_id": "b", "session_id": "s", "muted": true}),
+        &mut tx
+    ));
+    assert!(ws.tab_muted(0, "b"));
+
+    // Settings -> Shortcuts keeps a single default row when unbound, and uses "Mute tab" /
+    // "Unmute tab" titles for explicit boolean bindings.
+    let default_rows: Vec<_> = ws
+        .shortcut_rows()
+        .into_iter()
+        .filter(|r| r.action == "client.tab.mute")
+        .collect();
+    assert_eq!(default_rows.len(), 1);
+    assert_eq!(default_rows[0].title, "Mute or unmute tab");
+    assert!(default_rows[0].recordable);
+
+    ws.settings.shortcut_file.overrides = rex_rune::keymap::Overrides::parse(&json!([
+        {"keys": "ctrl+alt+m", "action": "client.tab.mute", "args": {"muted": true}},
+        {"keys": "ctrl+alt+u", "action": "client.tab.mute", "args": {"muted": false}}
+    ]));
+    ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
+    ws.keymap_generation += 1;
+    let bound_titles: Vec<String> = ws
+        .shortcut_rows()
+        .into_iter()
+        .filter(|r| r.action == "client.tab.mute")
+        .map(|r| r.title)
+        .collect();
+    assert!(bound_titles.contains(&"Mute or unmute tab".to_owned()));
+    assert!(bound_titles.contains(&"Mute tab".to_owned()));
+    assert!(bound_titles.contains(&"Unmute tab".to_owned()));
+}
+
+#[test]
+fn muted_limit_is_enforced_per_host_endpoint_without_cross_host_eviction() {
+    let mut ws = workspace_hosts(2);
+    for i in 0..2 {
+        ws.hosts[i].model.connected = true;
+        ws.hosts[i].model.sessions = vec![session("s")];
+        ws.hosts[i].model.selected = Some("s".into());
+    }
+    let host0_tabs: Vec<Value> = (0..5)
+        .map(|i| tab(&format!("h0-{i}"), &format!("h0-{i}")))
+        .collect();
+    let host1_tabs: Vec<Value> = (0..260)
+        .map(|i| tab(&format!("h1-{i}"), &format!("h1-{i}")))
+        .collect();
+    ws.hosts[0].model.views.insert(
+        "s".into(),
+        serde_json::from_value(json!({"revision": 1, "session_id": "s", "windows": host0_tabs}))
+            .unwrap(),
+    );
+    ws.hosts[1].model.views.insert(
+        "s".into(),
+        serde_json::from_value(json!({"revision": 1, "session_id": "s", "windows": host1_tabs}))
+            .unwrap(),
+    );
+    for i in 0..5 {
+        let target = ws.tab_target(0, "s", &format!("h0-{i}")).unwrap();
+        assert!(ws.set_tab_muted(&target, true));
+    }
+    for i in 0..260 {
+        let target = ws.tab_target(1, "s", &format!("h1-{i}")).unwrap();
+        assert!(ws.set_tab_muted(&target, true));
+    }
+    // Host 0 keeps every single muted tab.
+    for i in 0..5 {
+        assert!(
+            ws.tab_muted(0, &format!("h0-{i}")),
+            "host 0 tab {i} evicted"
+        );
+    }
+    // Host 1 is capped at 256, evicting only its oldest 4 (h1-0..h1-3).
+    for i in 0..4 {
+        assert!(!ws.tab_muted(1, &format!("h1-{i}")));
+    }
+    for i in 4..260 {
+        assert!(ws.tab_muted(1, &format!("h1-{i}")));
+    }
+}
+
+#[test]
+fn muting_closes_active_tab_notification_without_starting_worker_when_unnotified() {
+    let (mut ws, _rx) = three_tabs("a");
+    ws.track_activity(0);
+
+    // Muting a tab that never notified sends no Seen command and leaves notifier unstarted.
+    let target_c = ws.current_tab("c").unwrap();
+    assert!(ws.set_tab_muted(&target_c, true));
+    assert!(ws.notifier.is_none());
+    assert!(ws.notification_outbox.commands.is_empty());
+    assert!(ws.notification_outbox.closed.is_empty());
+
+    // Tab b notifies while out of view; muting b closes that notification.
+    set_activity(&mut ws, "block:b", &[("", record(Blocked, true))]);
+    assert_eq!(ws.outbox.len(), 1);
+    assert_eq!(ws.notification_outbox.sent.len(), 1);
+    let sent_id = ws.notification_outbox.sent[0].2;
+    assert!(ws.notification_outbox.closed.is_empty());
+    let target_b = ws.current_tab("b").unwrap();
+    assert!(ws.set_tab_muted(&target_b, true));
+    assert_eq!(ws.notification_outbox.closed, [sent_id]);
+    assert!(ws.notification_outbox.commands.iter().any(|c| matches!(
+        c,
+        crate::app::notify::Command::Seen(t) if t.window.as_deref() == Some("b")
+    )));
+    assert!(ws.notifier.is_none());
+}
+
+#[test]
+fn muted_background_tab_survives_sync_and_relaunch_and_prunes_when_closed_or_ended() {
+    let (mut ws, _rx) = three_tabs("a");
+    ws.hosts[0].model.sessions.push(session("bg"));
+    ws.hosts[0].model.views.insert(
+        "bg".into(),
+        serde_json::from_value(json!({
+            "revision": 1,
+            "session_id": "bg",
+            "active_window_id": "bg-1",
+            "windows": [tab("bg-1", "bg-one"), tab("bg-2", "bg-two")]
+        }))
+        .unwrap(),
+    );
+    ws.hosts[0].model.background_views.insert("bg".into());
+    ws.settings.hosts[0].remote_control = true;
+
+    let mut tx = rune::Tx::default();
+    let target1 = ws.tab_target(0, "bg", "bg-1").unwrap();
+    let target2 = ws.tab_target(0, "bg", "bg-2").unwrap();
+    assert!(ws.set_tab_muted(&target1, true));
+    assert!(ws.set_tab_muted(&target2, true));
+
+    // Survives sync_tabs while open in background_views and survives disk relaunch.
+    ws.sync_tabs(0, &mut tx);
+    assert!(ws.tab_muted(0, "bg-1") && ws.tab_muted(0, "bg-2"));
+    let again = relaunch(&ws);
+    assert!(again.tab_muted(0, "bg-1") && again.tab_muted(0, "bg-2"));
+
+    // Closing bg-1 in the background view prunes only bg-1.
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("bg")
+        .unwrap()
+        .windows
+        .retain(|w| w.window_id.as_deref() != Some("bg-1"));
+    ws.sync_tabs(0, &mut tx);
+    assert!(!ws.tab_muted(0, "bg-1") && ws.tab_muted(0, "bg-2"));
+
+    // Ending session bg prunes bg-2 cleanly.
+    ws.hosts[0].model.sessions.retain(|s| s.session_id != "bg");
+    ws.hosts[0].model.views.remove("bg");
+    ws.hosts[0].model.background_views.remove("bg");
+    ws.sync_tabs(0, &mut tx);
+    assert!(!ws.tab_muted(0, "bg-2"));
+    assert!(
+        Settings::load(&ws.settings_path)
+            .unwrap()
+            .muted_tabs
+            .is_empty()
+    );
 }

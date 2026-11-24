@@ -24,7 +24,7 @@ EXPECTED_REVISION = os.environ.get("REX_EXPECT_REVISION")
 LABEL = "remote-accept"
 for tool in ("rex", "Xvfb", "openbox", "xdotool", "import"):
     assert shutil.which(tool), f"{tool} required"
-base = Path.home() / ".cache/agent-ws"
+base = Path(os.environ.get("REX_ACCEPT_BASE", Path.home() / ".cache/agent-ws"))
 base.mkdir(parents=True, exist_ok=True)
 work = Path(tempfile.mkdtemp(prefix="rex-remote-", dir=base))
 for name in ("home", "config", "state", "runtime", "cache", "captures", "bin"):
@@ -120,7 +120,7 @@ try:
     print("Private remote-control artifacts:", work, flush=True)
     version = subprocess.check_output([REX, "version", "--json"], text=True)
     revision = json.loads(version)["api_revision"]
-    assert revision in (12, 13), version
+    assert revision >= 12, version
     if EXPECTED_REVISION:
         assert revision == int(EXPECTED_REVISION), version
     (work / "version.txt").write_text(version)
@@ -147,14 +147,24 @@ try:
     app, window = desk.launch(sessions[0], workspace, log=(work / "client-off.log").open("w"))
     for i in range(2):
         wait(lambda: client_id(i), f"host {i} did not register actions")
-    declaration = next((a for a in api(1, "client.inspect", client_id=client_id(1))["actions"] if a["name"] == "session.select"), None)
+    actions = api(1, "client.inspect", client_id=client_id(1))["actions"]
+    declaration = next((a for a in actions if a["name"] == "session.select"), None)
     if declaration:
         assert declaration["args"]["required"] == ["session_id"]
         assert "window_id" in declaration["args"]["properties"]
+    mute_decl = next((a for a in actions if a["name"] == "client.tab.mute"), None)
+    assert mute_decl is not None, "client.tab.mute not advertised"
+    assert mute_decl["args"]["additionalProperties"] is False
+    for prop in ("window_id", "session_id", "muted"):
+        assert prop in mute_decl["args"]["properties"], mute_decl
+    assert "Not available remotely" not in (mute_decl.get("description") or "")
     title = desk.x("getwindowname", window)
     perform(1, "client.tab.next", error="Remote control is off")
+    off_window = api(1, "session.view", session_id=sessions[1])["windows"][0]["window_id"]
+    perform(1, "client.tab.mute", {"window_id": off_window, "muted": True}, error="Remote control is off", direct=True)
+    assert "muted_tabs" not in json.loads(workspace.read_text())
     assert desk.x("getwindowname", window) == title
-    print("PASS schema advertised, client-label targeting and default-off refusal without navigation", flush=True)
+    print("PASS schema advertised (including client.tab.mute), client-label targeting and default-off refusal without navigation", flush=True)
     stop(app)
     config = json.loads(workspace.read_text())
     # The old abruptly stopped client remains in the server reconnect grace period.
@@ -186,11 +196,14 @@ try:
     perform(active, "pane.zoom")
     perform(active, "pane.zoom")
     perform(active, "pane.scroll", {"lines": -10})
-    for action, args, index in [("client.tab.goto", {"index": 2}, 1),
+    tab_labels = ("first", "second", "last")
+    for action, args, index in [("client.tab.goto", {"index": 1}, 0),
+                                ("client.tab.goto", {"index": 2}, 1),
                                 ("client.tab.goto", {"index": -1 if declaration else 3}, 2),
                                 ("client.tab.previous", None, 1), ("client.tab.next", None, 2)]:
         perform(active, action, args)
-        wait(lambda: view()["active_window_id"] == windows[index], f"{action} did not focus expected tab")
+        wait(lambda: view()["active_window_id"] == windows[index] and tab_labels[index] in desk.x("getwindowname", window),
+             f"{action} did not focus expected tab")
     perform(active, "client.sidebar.toggle")
     perform(active, "client.sidebar.toggle")
     print("PASS all eight view-only actions, cross-host session/tab selection and goto -1" if declaration else
@@ -214,6 +227,30 @@ try:
     print("PASS malformed/unknown/cross-host targets and dangerous actions refused without terminal changes", flush=True)
     desk.key("ctrl+comma")
     perform(active, "client.sidebar.toggle", error="dialog or popup")
+    # Scriptable tab mute (#163): works unattended on an off-screen host even with Settings open.
+    other = 1 - active
+    created = api(other, "session.new_window", session_id=sessions[other], window_label="worker-tab", layout=shell)
+    worker_win = created["window_id"]
+    perform(other, "client.tab.mute", {}, error="window_id and muted", direct=True)
+    perform(other, "client.tab.mute", {"window_id": worker_win}, error="window_id and muted", direct=True)
+    perform(other, "client.tab.mute", {"window_id": "window:missing", "muted": True}, error="does not exist", direct=True)
+    title_before_mute = desk.x("getwindowname", window)
+    perform(other, "client.tab.mute", {"window_id": worker_win, "muted": "true"})
+    assert desk.x("getwindowname", window) == title_before_mute, "remote mute must not change view"
+    def muted_windows():
+        return [m["window"] for m in json.loads(workspace.read_text()).get("muted_tabs", [])]
+    wait(lambda: worker_win in muted_windows(), "muted worker tab not persisted to workspace.json")
+    # Idempotent repeat succeeds cleanly.
+    perform(other, "client.tab.mute", {"window_id": worker_win, "muted": True}, direct=True)
+    # Unmute via CLI `rex do` removes it from persisted muted_tabs.
+    perform(other, "client.tab.mute", {"window_id": worker_win, "muted": "false"})
+    wait(lambda: worker_win not in muted_windows(), "unmuted worker tab still in workspace.json")
+    # Mute again, then closing the window prunes it cleanly.
+    perform(other, "client.tab.mute", {"session_id": sessions[other], "window_id": worker_win, "muted": True}, direct=True)
+    wait(lambda: worker_win in muted_windows(), "re-muted worker tab not persisted")
+    api(other, "session.close_window", session_id=sessions[other], window_id=worker_win)
+    wait(lambda: worker_win not in muted_windows(), "closed worker tab was not pruned from workspace.json")
+    print("PASS remote client.tab.mute: unattended with Settings open, off-screen host, persisted, idempotent, unmuted and pruned on close", flush=True)
     # Settings is 816x680, centered under the 52 pt toolbar of the 1440x900 window (its corner
     # is at 312, 136); the seventh navigation row is Remote Hosts, 102 pt in and 300 pt down from
     # that corner. `the_acceptance_scripts_settings_click_lands_on_remote_hosts` in

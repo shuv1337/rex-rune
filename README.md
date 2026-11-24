@@ -85,10 +85,11 @@ client, launcher and icons, never the `rex` server.
   recording, with host-defined modes, the innermost active one named in a chip,
   and multi-key sequences. Commands lists actions; Rex action compatibility is
   a focused subset, not Mac parity.
-- **Remote control.** Off by default for every host; exactly eight navigation
-  actions can zoom panes and switch the display to the requesting host, but none
-  can type, use the clipboard, open dialogs, change interface zoom or act on
-  another host.
+- **Remote control.** Off by default for every host; eight view-only actions
+  can zoom panes and switch the display to the requesting host, and
+  `client.tab.mute` can mute or unmute a named tab on that host unattended,
+  while none can type, use the clipboard, open dialogs, change interface zoom or
+  act on another host.
 - **Settings and maintenance.** Server facts, duration, confirmed **Stop
   server…** and a local **Pair device…** QR dialog that sends no server request;
   Interface, Terminal, Shortcuts, Integrations, Notifications, Remote Hosts,

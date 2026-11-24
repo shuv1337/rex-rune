@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 pub const SEARCH: &str = "client.search";
 pub const SELECT_SESSION: &str = "session.select";
+pub const MUTE_TAB: &str = "client.tab.mute";
 pub const NEXT_GLOBAL: &str = "client.tab.next_global";
 pub const PREVIOUS_GLOBAL: &str = "client.tab.previous_global";
 pub const HISTORY_BACK: &str = "client.history.back";
@@ -163,7 +164,7 @@ specs! {
     super::find::NEXT => FindNext,
     super::find::PREVIOUS => FindPrevious,
     "client.tab.move" => MoveTab,
-    "client.tab.mute" => MuteTab,
+    MUTE_TAB => MuteTab,
     "client.tab.close_others" => CloseOtherTabs,
     super::splits::FOCUS_NEXT => FocusNextPane,
     super::splits::FOCUS_PREVIOUS => FocusPreviousPane,
@@ -230,7 +231,11 @@ pub fn find(name: &str) -> Option<&'static Spec> {
 /// Exhaustive by handler: new actions require an explicit remote decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Remote {
-    View { navigation: bool },
+    View {
+        navigation: bool,
+    },
+    /// Local per-tab presentation/notification state, explicitly targeted and idempotent.
+    TabState,
     Never(&'static str),
 }
 
@@ -267,9 +272,7 @@ impl Spec {
             CloseLayer => Remote::Never("Use rex api call session.close_layer instead."),
             CloseTab | CloseOtherTabs => Remote::Never("Use rex window close instead."),
             MoveTab => Remote::Never("Use rex window move instead."),
-            MuteTab => Remote::Never(
-                "Only the person at this computer can mute this client's notifications.",
-            ),
+            MuteTab => Remote::TabState,
             RenameTab => Remote::Never("Use rex window rename instead."),
             RenameSession => Remote::Never("Use rex session rename instead."),
             InsertPath | GoToDirectory => Remote::Never(
@@ -573,6 +576,17 @@ impl Spec {
                 json!({"type":"object","properties":{"session_id":{"type":"string","minLength":1},"window_id":{"type":"string","minLength":1}},"required":["session_id"],"additionalProperties":false}),
             );
         }
+        if matches!(self.handler, Handler::MuteTab) {
+            return Some(json!({
+                "type": "object",
+                "properties": {
+                    "window_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "muted": {"type": "boolean"}
+                },
+                "additionalProperties": false
+            }));
+        }
         let (key, schema) = match self.handler {
             Handler::Split => (
                 "direction",
@@ -656,6 +670,20 @@ impl Spec {
                         args["direction"].as_str(),
                         Some("left" | "right" | "backward" | "forward")
                     )
+            }
+            Handler::MuteTab => {
+                let valid_id = |v: &Value| {
+                    v.as_str()
+                        .is_some_and(|id| !id.trim().is_empty() && id.len() <= 128)
+                };
+                object
+                    .keys()
+                    .all(|k| matches!(k.as_str(), "window_id" | "session_id" | "muted"))
+                    && object.get("window_id").is_none_or(valid_id)
+                    && object
+                        .get("session_id")
+                        .is_none_or(|id| object.contains_key("window_id") && valid_id(id))
+                    && object.get("muted").is_none_or(Value::is_boolean)
             }
             Handler::SendKey => {
                 object.len() == 1
@@ -836,10 +864,22 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
                 s.perform(Intent::Pane(target, verb), tx);
             }
         }
-        Handler::MoveTab | Handler::MuteTab | Handler::CloseOtherTabs => {
+        Handler::MuteTab => {
+            let target = if let Some(window_id) = args["window_id"].as_str() {
+                s.find_tab(s.active, window_id, args["session_id"].as_str())
+            } else {
+                s.active_tab()
+            };
+            if let Some(target) = target {
+                let muted = args["muted"]
+                    .as_bool()
+                    .unwrap_or_else(|| !s.tab_muted(target.host, &target.window));
+                s.set_tab_muted(&target, muted);
+            }
+        }
+        Handler::MoveTab | Handler::CloseOtherTabs => {
             use super::tabs::TabAction;
             let action = match spec.handler {
-                Handler::MuteTab => TabAction::Mute,
                 Handler::CloseOtherTabs => TabAction::CloseOthers,
                 _ if matches!(args["direction"].as_str(), Some("left" | "backward")) => {
                     TabAction::MoveLeft
@@ -992,6 +1032,13 @@ pub fn binding_title(binding: &rexrs::api::client::Binding) -> String {
         "pane.split" => format!("Split {}", direction()),
         "pane.focus" => format!("Focus pane {}", direction()),
         "client.tab.move" => format!("Move tab {}", direction()),
+        "client.tab.mute" if args.as_object().is_some_and(|o| o.len() == 1) => {
+            match args["muted"].as_bool() {
+                Some(true) => "Mute tab".into(),
+                Some(false) => "Unmute tab".into(),
+                None => title.into(),
+            }
+        }
         "pane.scroll" => {
             let lines = args["lines"].as_i64().unwrap_or_default();
             let direction = if lines < 0 { "up" } else { "down" };
@@ -1014,13 +1061,22 @@ pub fn declarations() -> Vec<rexrs::api::client::InspectResponseAction> {
                 .keywords(s.title())
                 .repeats(s.repeats());
             action.args = s.schema();
-            if let Remote::Never(message) = s.remote() {
-                action.description = Some(format!(
-                    "{}Not available remotely. {message}",
-                    super::compatibility::unsupported(s.name)
-                        .map(|reason| format!("{reason} "))
-                        .unwrap_or_default()
-                ));
+            match s.remote() {
+                Remote::Never(message) => {
+                    action.description = Some(format!(
+                        "{}Not available remotely. {message}",
+                        super::compatibility::unsupported(s.name)
+                            .map(|reason| format!("{reason} "))
+                            .unwrap_or_default()
+                    ));
+                }
+                Remote::TabState => {
+                    action.description = Some(
+                        "Mute or unmute a tab on this client. Remote calls require Remote control for this host and explicit window_id and muted arguments (session_id is optional)."
+                            .into(),
+                    );
+                }
+                Remote::View { .. } => {}
             }
             action
         })

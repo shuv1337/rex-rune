@@ -242,7 +242,10 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     if let Some(delay) = next_server {
         tx.wake_after(delay);
     }
-    let remote_changed = s.poll_remote_navigation(now);
+    let remote_changed = s.poll_remote_navigation(now) | s.poll_remote_mutes(now);
+    if let Some(delay) = s.next_remote_mute_deadline(now) {
+        tx.wake_after(delay);
+    }
     let updates_changed = s.poll_updates(now, tx);
     let settings_changed = s.poll_settings(now, tx);
     let mut changed = s.poll_navigation(now, tx)

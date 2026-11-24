@@ -177,8 +177,9 @@ check if the saved host still needs one.
 ## Remote control
 
 Each saved host has a **Remote control** switch, off by default, including local
-hosts. The eight actions it permits, their five-second and typing-pause rules,
-and the refusal list are in [Remote control](shortcuts.md#remote-control).
+hosts. The view-only actions and targeted tab-mute action it permits, their
+five-second and typing-pause rules, and the refusal list are in
+[Remote control](shortcuts.md#remote-control).
 
 ## When a host disconnects
 

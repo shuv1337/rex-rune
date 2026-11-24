@@ -274,6 +274,8 @@ pub struct HostModel {
     pub selected: Option<String>,
     /// Completion of the latest client navigation request (id, success), not a notice.
     pub navigation_result: Option<(u64, bool)>,
+    /// Completion of an on-demand read-only session view fetch (id, success).
+    pub view_fetch_result: Option<(u64, bool)>,
     /// Most recent read-only directory reply; only its browser/request may consume it.
     pub directory: Option<Arc<directory::Reply>>,
     pub views: HashMap<String, session::ViewResponse>,
@@ -541,6 +543,14 @@ pub enum HostCommand {
     /// The sessions whose views to load in the background, for listing their tabs; empty
     /// stops loading.
     PrefetchViews(HashSet<String>),
+    /// Read-only `session.view` fetch for a listed unloaded session, without attaching or
+    /// selecting it.
+    FetchView {
+        id: u64,
+        epoch: u64,
+        deadline: Instant,
+        session: String,
+    },
     /// A new session: the server picks a unique label when `label` is none; `shell` starts
     /// its first terminal.
     CreateSession {
@@ -1931,6 +1941,55 @@ async fn run_host(
                             continue;
                         }
                         if let HostCommand::PrefetchViews(sessions) = command { prefetch.set_eligible(sessions); continue; }
+                        if let HostCommand::FetchView { id, epoch, deadline, session } = command {
+                            let (live_epoch, already_loaded, listed) = {
+                                let m = shared.model.lock().expect("host model");
+                                (
+                                    m.connection_epoch,
+                                    m.views.contains_key(&session),
+                                    m.sessions.iter().any(|s| s.session_id == session),
+                                )
+                            };
+                            if epoch != live_epoch {
+                                continue;
+                            }
+                            if already_loaded {
+                                shared.update(|m| m.view_fetch_result = Some((id, true)));
+                                continue;
+                            }
+                            if !listed || Instant::now() >= deadline {
+                                shared.update(|m| m.view_fetch_result = Some((id, false)));
+                                continue;
+                            }
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            let result = tokio::time::timeout(
+                                remaining.min(Duration::from_secs(8)),
+                                control.call_with_seq(session::View::new(&session)),
+                            )
+                            .await;
+                            match result {
+                                Ok(Ok(reply)) => {
+                                    state.view_seq.insert(session.clone(), reply.seq);
+                                    apply_view(shared, &session, reply.value);
+                                    shared.update(|m| {
+                                        if m.selected.as_deref() != Some(session.as_str()) {
+                                            m.background_views.insert(session.clone());
+                                        }
+                                        m.view_fetch_result = Some((id, true));
+                                    });
+                                }
+                                Ok(Err(error)) => {
+                                    shared.update(|m| m.view_fetch_result = Some((id, false)));
+                                    if !matches!(error, rexrs::Error::Api(_)) {
+                                        return Err(error.into());
+                                    }
+                                }
+                                Err(_) => {
+                                    shared.update(|m| m.view_fetch_result = Some((id, false)));
+                                }
+                            }
+                            continue;
+                        }
                         if let HostCommand::Identify = command {
                             server_reads.want();
                             server_reads.start(&mut control).await?;
@@ -2063,7 +2122,11 @@ async fn run_host(
                         "Shared host removal not sent while disconnected. Try again after reconnecting.",
                     ),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
-                    Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
+                    Ok(
+                        HostCommand::Claim { .. }
+                        | HostCommand::PerformReply { .. }
+                        | HostCommand::FetchView { .. },
+                    ) => {}
                     Ok(HostCommand::ListDir(request)) => directory::finish(shared, &request, Err(directory::Failure::Disconnected)),
                     Ok(HostCommand::Download(request)) => downloads::refuse(shared, *request, crate::download::Failure::Disconnected),
                     Ok(HostCommand::DownloadConfirm(_) | HostCommand::DownloadCancel(_)) => {}
@@ -2567,6 +2630,7 @@ async fn handle_command(
         | HostCommand::StopServer { .. }
         | HostCommand::ResizeLayer { .. }
         | HostCommand::PrefetchViews(_)
+        | HostCommand::FetchView { .. }
         | HostCommand::Keymap(_)
         | HostCommand::Identify
         | HostCommand::WatchSharedHosts
