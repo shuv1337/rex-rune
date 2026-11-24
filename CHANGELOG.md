@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-11-23
+
+Full floating pane support (server actions, pointer drag, and 8-way edge resize), SSH host-key review, consent-per-step remote installer and SSH agent picker, optional OSC 11 program backgrounds, and an active key mode chip. Includes Linux Wayland `Mailbox` present mode, hidden-cursor terminal IME support, and NixOS build and CI fixes.
+
 ### Added
 
 - **Pick the SSH agent for `ssh://` hosts ([#117](https://github.com/shuv1337/rex-rune/issues/117), requested by [@joegoldin](https://github.com/joegoldin)).** Settings → Remote Hosts adds an **SSH** section on Linux and macOS to choose **System default** (inheriting `SSH_AUTH_SOCK`), a detected running agent (1Password, Bitwarden, `gpg-agent`, `gcr-ssh-agent`, GNOME Keyring, OpenSSH/systemd user agent, `yubikey-agent`, and Secretive on macOS), or a **Custom socket…** path (`/` or `~/`). Probing runs off the UI thread only when opening Remote Hosts, picking an agent, or pressing **Refresh**, reads only the public key count over the Unix socket without reading or storing key blobs, and propagates `SSH_AUTH_SOCK` via environment variable only so `IdentityAgent` in `~/.ssh/config` keeps precedence. Picking or refreshing an answering agent with keys automatically retries disconnected `ssh://` hosts whose last error was authentication failure without dropping already-connected hosts. Saved under `ssh.agent` (omitted when System default) and preserved untouched on Windows where the section is omitted.
