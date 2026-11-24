@@ -178,6 +178,10 @@ pub struct TerminalConfig {
     pub selection_foreground: SelectionColor,
     pub selection_background: SelectionColor,
     pub selection_rounded: bool,
+    /// Keep a background colour a program sets for its pane (OSC 11) instead of substituting
+    /// the theme's background.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub keep_program_background: bool,
 }
 fn is_true(value: &bool) -> bool {
     *value
@@ -200,6 +204,7 @@ impl Default for TerminalConfig {
             selection_foreground: SelectionColor::default(),
             selection_background: SelectionColor::default(),
             selection_rounded: false,
+            keep_program_background: false,
         }
     }
 }
@@ -216,7 +221,7 @@ mod tests {
         let t = old.terminal;
         assert_eq!(t.cursor_style, CursorStyle::Block);
         assert!(!t.cursor_force && !t.copy_on_selection && !t.primary_selection);
-        assert!(t.key_sequence_hints && !t.selection_rounded);
+        assert!(t.key_sequence_hints && !t.selection_rounded && !t.keep_program_background);
         assert_eq!(
             (t.selection_foreground, t.selection_background),
             (SelectionColor::Theme, SelectionColor::Theme)
@@ -296,6 +301,7 @@ mod tests {
                     selection_foreground: color,
                     selection_background: color,
                     selection_rounded: false,
+                    keep_program_background: true,
                     font: Default::default(),
                 };
                 Settings {
@@ -392,5 +398,31 @@ mod tests {
         for key in [OptionKey::LeftAlt, OptionKey::RightAlt] {
             assert!(!key.acts_as_alt(true) && !key.acts_as_alt(false));
         }
+    }
+
+    #[test]
+    fn keep_program_background_defaults_off_omits_default_and_round_trips() {
+        let old: Settings = serde_json::from_str(r#"{"terminal": {}}"#).unwrap();
+        assert!(!old.terminal.keep_program_background);
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(
+            saved["terminal"].get("keep_program_background").is_none(),
+            "default false is omitted from serialized JSON"
+        );
+
+        let path =
+            std::env::temp_dir().join(format!("rex-keep-program-bg-{}.json", std::process::id()));
+        let mut enabled = Settings::default();
+        enabled.terminal.keep_program_background = true;
+        let saved = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(saved["terminal"]["keep_program_background"], true);
+        enabled.save(&path).unwrap();
+        assert!(
+            Settings::load(&path)
+                .unwrap()
+                .terminal
+                .keep_program_background
+        );
+        std::fs::remove_file(path).ok();
     }
 }

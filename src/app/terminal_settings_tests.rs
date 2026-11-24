@@ -1073,6 +1073,12 @@ fn terminal_controls_are_indexed_and_reachable_at_minimum_size() {
         let mut rt = runtime_at(ws, size);
         settle(&mut rt);
         for (query, label, key) in [
+            (
+                "program background",
+                "Keep program backgrounds",
+                "program-background",
+            ),
+            ("osc 11", "Keep program backgrounds", "program-background"),
             ("cursor style", "Cursor style", "cursor-style"),
             ("force style", "Force style", "cursor-force"),
             (
@@ -1301,4 +1307,97 @@ fn the_terminal_page_draws_its_cards_and_previews() {
         snap(&mut Camera::new(), &mut rt, name);
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
+}
+
+#[test]
+fn keep_program_backgrounds_saves_locally_and_fills_osc11_panes_without_changing_geometry() {
+    let (mut ws, host_rx) = tabbed_workspace("single");
+    let (sender, term_rx) = flume::unbounded();
+    framed_terminal(
+        &mut ws,
+        "block:a",
+        &sender,
+        b"\x1b]11;#1d2a2b\x1b\\hello\x1b[7mX\x1b[0m",
+    );
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    ws.open_section(SettingsSection::Terminal);
+    let mut rt = runtime_at(ws, (1440., 1000.));
+    settle(&mut rt);
+
+    assert!(!rt.state.settings.terminal.keep_program_background);
+    flip(&mut rt, "program-background");
+    assert!(rt.state.settings.terminal.keep_program_background);
+    assert!(
+        Settings::load(&rt.state.settings_path)
+            .unwrap()
+            .terminal
+            .keep_program_background
+    );
+    assert!(
+        other_commands(&host_rx).is_empty(),
+        "local-only: toggling sends no HostCommands"
+    );
+    assert!(
+        other_commands(&term_rx).is_empty(),
+        "local-only: toggling sends no terminal commands"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
+    // Pane rendering: off draws the chrome card; on fills both pane body and grid rows with
+    // OSC 11 (0x1d2a2b) while keeping padding/grid geometry unchanged and sending nothing.
+    let (mut ws, host_rx) = tabbed_workspace("single");
+    let (sender, term_rx) = flume::unbounded();
+    framed_terminal(
+        &mut ws,
+        "block:a",
+        &sender,
+        b"\x1b]11;#1d2a2b\x1b\\hello\x1b[7mX\x1b[0m",
+    );
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+
+    let key = rt.state.term_key("block:a");
+    let osc11 = crate::app::theme::rgb(0x1d2a2b);
+    let osc11_fill = [osc11.r, osc11.g, osc11.b, osc11.a];
+    let grid_before = rect(&rt, "grid:block:a");
+    assert_eq!(
+        rt.state.terminals[&key].body(&rt.state.term_colors()),
+        crate::app::theme::MIDNIGHT.card
+    );
+    assert!(
+        !rt.elements().iter().any(|e| !e.exiting && e.fill == osc11),
+        "OSC 11 fill is absent while off"
+    );
+    assert!(
+        !rt.instances
+            .iter()
+            .any(|q| q.params[1] == rune::render::KIND_GLYPH && q.fill == osc11_fill),
+        "inverse glyph does not use OSC 11 while off"
+    );
+
+    rt.update(|s, _| s.settings.terminal.keep_program_background = true);
+    settle(&mut rt);
+
+    assert_eq!(
+        rt.state.terminals[&key].body(&rt.state.term_colors()),
+        0x1d2a2b
+    );
+    assert!(
+        rt.elements().iter().any(|e| !e.exiting && e.fill == osc11),
+        "pane body fills with 0x1d2a2b when on"
+    );
+    assert!(
+        rt.instances
+            .iter()
+            .any(|q| q.params[1] == rune::render::KIND_GLYPH && q.fill == osc11_fill),
+        "grid row redraws with 0x1d2a2b when on"
+    );
+    assert_eq!(
+        rect(&rt, "grid:block:a"),
+        grid_before,
+        "padding and grid geometry are unchanged"
+    );
+    assert!(other_commands(&host_rx).is_empty());
+    assert!(other_commands(&term_rx).is_empty());
+    std::fs::remove_file(&rt.state.settings_path).ok();
 }
