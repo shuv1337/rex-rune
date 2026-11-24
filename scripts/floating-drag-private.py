@@ -32,9 +32,15 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("REX_BIN", str(ROOT / "target/debug/rex-rune"))
 SERVER_BIN = os.environ.get("REX_SERVER_BIN") or shutil.which("rex") or ""
-BASE = Path(os.environ.get("REX_FLOAT_BASE", str((Path.home() / ".cache/agent-ws").resolve())))
+BASE = Path(
+    os.path.realpath(
+        os.environ.get("REX_FLOAT_BASE", str((Path.home() / ".cache/agent-ws").resolve()))
+    )
+)
 RECEIPTS_ROOT = Path(
-    os.environ.get("REX_FLOAT_OUT", str(BASE / "issue136-slice2-receipts"))
+    os.path.realpath(
+        os.environ.get("REX_FLOAT_OUT", str(BASE / "issue136-slice2-receipts"))
+    )
 )
 
 WIN_W, WIN_H = 1024, 700
@@ -195,9 +201,13 @@ receipts = None
 results = {"endpoint_kind": "private unix socket under the run root", "checks": checks}
 try:
     RECEIPTS_ROOT.mkdir(parents=True, exist_ok=True)
-    receipts = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%S-"), dir=RECEIPTS_ROOT))
+    receipts = Path(
+        os.path.realpath(
+            tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%S-"), dir=RECEIPTS_ROOT)
+        )
+    )
     BASE.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="issue136-drag-", dir=BASE))
+    work = Path(os.path.realpath(tempfile.mkdtemp(prefix="issue136-drag-", dir=BASE)))
     for name in (
         "home",
         "home-b",

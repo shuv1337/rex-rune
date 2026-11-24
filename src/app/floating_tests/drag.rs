@@ -188,7 +188,9 @@ fn header_move_draws_ghost_without_moving_live_card_and_sends_exact_bounds() {
             raise_first: false,
         }]
     );
-    // Width and height stayed bit-identical on move.
+    // Width and height stayed bit-identical on move; position shifted independently of helper.
+    assert!((sent[0].bounds[0] - (0.15 + f64::from(dx) / f64::from(iw))).abs() < 1e-12);
+    assert!((sent[0].bounds[1] - (0.12 + f64::from(dy) / f64::from(ih))).abs() < 1e-12);
     assert_eq!(sent[0].bounds[2].to_bits(), 0.5_f64.to_bits());
     assert_eq!(sent[0].bounds[3].to_bits(), 0.5_f64.to_bits());
 }
@@ -300,10 +302,24 @@ fn header_buttons_retry_strip_right_click_and_ne_corner_stay_disjoint() {
         "Close {close_rect:?} overlaps NE vert arm {ne_v:?}"
     );
 
+    // Helper that presses down, verifies layer_drag stays None while held, then releases.
+    let press_button_without_arming_drag = |rt: &mut Runtime<Workspace>, key: &str| {
+        let r = rect_of(rt, key);
+        let (cx, cy) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        rt.pointer_move(cx, cy);
+        rt.pointer_down(cx, cy);
+        draw(rt);
+        assert!(
+            rt.state.layer_drag.is_none(),
+            "holding pointer_down on {key} must not arm layer_drag"
+        );
+        rt.pointer_up(cx, cy);
+        draw(rt);
+        assert!(rt.state.layer_drag.is_none());
+    };
+
     // Clicking Close opens the close confirmation instead of starting a drag.
-    click(&mut rt, "pane-close:block:f");
-    draw(&mut rt);
-    assert!(rt.state.layer_drag.is_none());
+    press_button_without_arming_drag(&mut rt, "pane-close:block:f");
     assert!(matches!(
         rt.state.panel.as_ref().map(|p| &p.kind),
         Some(PanelKind::Confirm { .. })
@@ -313,9 +329,7 @@ fn header_buttons_retry_strip_right_click_and_ne_corner_stay_disjoint() {
     draw(&mut rt);
 
     // Clicking Split right starts no layer drag and sends split.
-    click(&mut rt, "pane-split-right:block:f");
-    draw(&mut rt);
-    assert!(rt.state.layer_drag.is_none());
+    press_button_without_arming_drag(&mut rt, "pane-split-right:block:f");
     let sent = all_commands(&intended);
     assert!(
         sent.iter()
@@ -348,9 +362,7 @@ fn header_buttons_retry_strip_right_click_and_ne_corner_stay_disjoint() {
     draw(&mut rt);
     let _ = intended.try_iter().count();
     assert!(has_el(&rt, "strip-action:block:f"));
-    click(&mut rt, "strip-action:block:f");
-    draw(&mut rt);
-    assert!(rt.state.layer_drag.is_none());
+    press_button_without_arming_drag(&mut rt, "strip-action:block:f");
     let sent = all_commands(&intended);
     assert!(
         sent.iter()
@@ -492,6 +504,63 @@ fn all_eight_resize_grips_set_edge_cursors_and_send_expected_bounds() {
             }],
             "{key}"
         );
+
+        // Independent directional and opposite-edge assertions (without calling `layers::dragged`).
+        let [gx, gy, gw, gh] = sent[0].bounds;
+        let fdx = f64::from(dx) / f64::from(iw);
+        let fdy = f64::from(dy) / f64::from(ih);
+        let eps = 1e-12;
+        match grip {
+            Grip::North => {
+                assert_eq!(gx.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert_eq!(gw.to_bits(), 0.5_f64.to_bits(), "{key}");
+                assert!((gy - (0.2 + fdy)).abs() < eps && gy < 0.2, "{key}");
+                assert!(((gy + gh) - 0.7).abs() < eps, "{key} bottom moved");
+            }
+            Grip::South => {
+                assert_eq!(gx.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert_eq!(gw.to_bits(), 0.5_f64.to_bits(), "{key}");
+                assert_eq!(gy.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert!((gh - (0.5 + fdy)).abs() < eps && gh > 0.5, "{key}");
+            }
+            Grip::East => {
+                assert_eq!(gx.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert_eq!(gy.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert_eq!(gh.to_bits(), 0.5_f64.to_bits(), "{key}");
+                assert!((gw - (0.5 + fdx)).abs() < eps && gw > 0.5, "{key}");
+            }
+            Grip::West => {
+                assert_eq!(gy.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert_eq!(gh.to_bits(), 0.5_f64.to_bits(), "{key}");
+                assert!((gx - (0.2 + fdx)).abs() < eps && gx < 0.2, "{key}");
+                assert!(((gx + gw) - 0.7).abs() < eps, "{key} right moved");
+            }
+            Grip::NorthWest => {
+                assert!((gx - (0.2 + fdx)).abs() < eps && gx < 0.2, "{key}");
+                assert!((gy - (0.2 + fdy)).abs() < eps && gy < 0.2, "{key}");
+                assert!(((gx + gw) - 0.7).abs() < eps, "{key} right moved");
+                assert!(((gy + gh) - 0.7).abs() < eps, "{key} bottom moved");
+            }
+            Grip::NorthEast => {
+                assert_eq!(gx.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert!((gw - (0.5 + fdx)).abs() < eps && gw > 0.5, "{key}");
+                assert!((gy - (0.2 + fdy)).abs() < eps && gy < 0.2, "{key}");
+                assert!(((gy + gh) - 0.7).abs() < eps, "{key} bottom moved");
+            }
+            Grip::SouthWest => {
+                assert_eq!(gy.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert!((gh - (0.5 + fdy)).abs() < eps && gh > 0.5, "{key}");
+                assert!((gx - (0.2 + fdx)).abs() < eps && gx < 0.2, "{key}");
+                assert!(((gx + gw) - 0.7).abs() < eps, "{key} right moved");
+            }
+            Grip::SouthEast => {
+                assert_eq!(gx.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert_eq!(gy.to_bits(), 0.2_f64.to_bits(), "{key}");
+                assert!((gw - (0.5 + fdx)).abs() < eps && gw > 0.5, "{key}");
+                assert!((gh - (0.5 + fdy)).abs() < eps && gh > 0.5, "{key}");
+            }
+            Grip::Move => unreachable!(),
+        }
     }
 }
 
@@ -502,11 +571,16 @@ fn cancellation_matrix_sends_nothing_and_never_rearms_on_later_motion() {
         Pointer,
         WindowFocusLost,
         PanelOpen,
+        SettingsOpen,
+        ConfirmOpen,
+        UpdatesSettingsOpen,
         Disconnect,
         EpochChange,
         LayerGone,
         LayerMinimized,
         TabZoomed,
+        TabSwitched,
+        BecameFullBleed,
         RemoteBoundsChange,
     }
 
@@ -515,11 +589,16 @@ fn cancellation_matrix_sends_nothing_and_never_rearms_on_later_motion() {
         ("cancel_pointer", Cancel::Pointer, false),
         ("window_focus_false", Cancel::WindowFocusLost, false),
         ("panel_open", Cancel::PanelOpen, false),
+        ("settings_open", Cancel::SettingsOpen, false),
+        ("confirm_open", Cancel::ConfirmOpen, false),
+        ("updates_settings_open", Cancel::UpdatesSettingsOpen, false),
         ("disconnect", Cancel::Disconnect, true),
         ("epoch_change", Cancel::EpochChange, true),
         ("layer_gone", Cancel::LayerGone, true),
         ("layer_minimized", Cancel::LayerMinimized, true),
         ("tab_zoomed", Cancel::TabZoomed, true),
+        ("tab_switched", Cancel::TabSwitched, true),
+        ("became_full_bleed", Cancel::BecameFullBleed, true),
         ("remote_bounds_change", Cancel::RemoteBoundsChange, true),
     ] {
         let (mut rt, intended, decoy) = two_host_runtime(
@@ -565,6 +644,20 @@ fn cancellation_matrix_sends_nothing_and_never_rearms_on_later_motion() {
                 rt.update(|s, _| s.picker(false));
                 draw(&mut rt);
             }
+            Cancel::SettingsOpen => {
+                rt.update(|s, tx| s.perform(Intent::Settings, tx));
+                draw(&mut rt);
+            }
+            Cancel::ConfirmOpen => {
+                rt.update(|s, _| {
+                    s.confirm("Close?", "session.close_block", json!({}), "Ends pane.");
+                });
+                draw(&mut rt);
+            }
+            Cancel::UpdatesSettingsOpen => {
+                rt.update(|s, _| s.open_updates_settings());
+                draw(&mut rt);
+            }
             Cancel::Disconnect => {
                 sync_wake(&mut rt, |s| s.hosts[0].model.connected = false);
             }
@@ -588,6 +681,26 @@ fn cancellation_matrix_sends_nothing_and_never_rearms_on_later_motion() {
                 sync_wake(&mut rt, |s| {
                     s.hosts[0].model.views.get_mut("s").unwrap().windows[0].zoomed_block_id =
                         Some("block:f".into());
+                });
+            }
+            Cancel::TabSwitched => {
+                sync_wake(&mut rt, |s| {
+                    s.hosts[0]
+                        .model
+                        .views
+                        .get_mut("s")
+                        .unwrap()
+                        .active_window_id = Some("other".into());
+                });
+            }
+            Cancel::BecameFullBleed => {
+                // Last tiled pane closes while dragging the floating layer -> tab becomes lone
+                // full-bleed floating pane and must cancel cleanly instead of stranding the ghost.
+                sync_wake(&mut rt, |s| {
+                    let tiled_layer =
+                        &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0].layers[0];
+                    tiled_layer.layout = None;
+                    tiled_layer.blocks.clear();
                 });
             }
             Cancel::RemoteBoundsChange => {
@@ -806,6 +919,30 @@ fn on_hover_floating_header_stays_mounted_while_grabbed() {
         !has_el(&rt, "pane-header:block:f"),
         "OnHover header hides again once released outside the reveal band"
     );
+
+    // Opening Find/search mid-drag on an OnHover floating header cancels the drag cleanly
+    // instead of stranding the ghost outline when the floating header hides for search.
+    rt.update(|s, _| {
+        let host_tx = s.hosts[0].connection.commands.clone();
+        super::pane_verb_tests::framed_terminal(s, "block:f", &host_tx, b"ready\r\n");
+        s.header_reveal.hover = Some("block:f".into());
+    });
+    draw(&mut rt);
+    let _ = intended.try_iter().count();
+    let hdr = rect_of(&rt, "pane-header:block:f");
+    let (sx, sy) = (hdr[0] + 50.0, hdr[1] + hdr[3] / 2.0);
+    rt.pointer_move(sx, sy);
+    rt.pointer_down(sx, sy);
+    rt.pointer_move(sx + 40.0, sy + 60.0);
+    draw(&mut rt);
+    assert!(has_el(&rt, "layer-drag-ghost:floating"));
+    rt.update(|s, _| s.open_search());
+    draw(&mut rt);
+    assert!(rt.state.layer_drag.is_none());
+    assert!(!has_el(&rt, "layer-drag-ghost:floating"));
+    rt.pointer_up(sx + 40.0, sy + 60.0);
+    draw(&mut rt);
+    assert!(resizes(&intended).is_empty());
 }
 
 #[test]

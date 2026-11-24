@@ -303,7 +303,7 @@ fn pane_card(
     // The search field has the terminal's top-right corner, so nothing floats over it.
     let searching = s.terminals.get(&key).is_some_and(|t| t.search.is_some());
     let placement = match pane_header::placement(s, window, block) {
-        Placement::Floating if searching => Placement::None,
+        Placement::Floating if searching && s.grabbed_header() != Some(block) => Placement::None,
         placement => placement,
     };
     let headed = placement == Placement::Row;

@@ -1178,6 +1178,7 @@ impl Workspace {
 
     /// Opens the focused terminal's search field, or gives it back the keyboard.
     pub fn open_search(&mut self) {
+        self.cancel_layer_drag();
         if let Some(term) = self.active_terminal_mut() {
             term.search.get_or_insert_with(|| TextEdit::new("")).focused = true;
         }
@@ -1599,6 +1600,7 @@ impl Workspace {
             }
             Intent::Sidebar => self.toggle_sidebar(),
             Intent::Settings => {
+                self.cancel_layer_drag();
                 self.leave_install_dialog();
                 self.bindings.sequence.clear();
                 self.reload_shortcuts();
@@ -1974,6 +1976,7 @@ impl Workspace {
     }
 
     pub(super) fn confirm(&mut self, title: &str, method: &str, payload: Value, description: &str) {
+        self.cancel_layer_drag();
         let target = self.panel.as_ref().and_then(|p| p.target.clone());
         let mut panel = Panel::new(
             PanelKind::Confirm {

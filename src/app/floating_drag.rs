@@ -77,8 +77,9 @@ impl Workspace {
     }
 
     /// Re-validate an in-flight floating-layer drag after a host wake. If the connection, API
-    /// revision, layer identity, state, zoom or server bounds changed underneath the gesture,
-    /// cancel it and inform the user once (when active) without sending anything.
+    /// revision, active session/tab, full-bleed state, layer identity, state, zoom or server
+    /// bounds changed underneath the gesture, cancel it and inform the user once (when active
+    /// and the cause is remote/epoch invalidation) without sending anything.
     pub(super) fn sync_layer_drag(&mut self) {
         let Some(drag) = self.layer_drag.as_ref() else {
             return;
@@ -86,7 +87,7 @@ impl Workspace {
         if let Err(reason) = self.validate_layer_drag(drag) {
             let active = drag.active;
             self.layer_drag = None;
-            if active {
+            if active && let Some(reason) = reason {
                 self.inform(reason.sentence());
             }
         }
@@ -158,7 +159,7 @@ impl Workspace {
         if let Err(reason) = self.validate_layer_drag(drag) {
             let active = drag.active;
             self.layer_drag = None;
-            if active {
+            if active && let Some(reason) = reason {
                 self.inform(reason.sentence());
             }
             return;
@@ -209,10 +210,11 @@ impl Workspace {
         }
         let (host, raise_first) = match self.validate_layer_drag(&drag) {
             Ok(valid) => valid,
-            Err(reason) => {
+            Err(Some(reason)) => {
                 self.inform(reason.sentence());
                 return;
             }
+            Err(None) => return,
         };
         let [_, _, iw, ih] = panes::inner(self);
         let Some(min) = layers::min_fraction((iw, ih), MIN_FLOATING_PT) else {
@@ -248,36 +250,48 @@ impl Workspace {
         );
     }
 
-    /// Validate that `drag` still targets the exact same connected API-13 host, connection
-    /// epoch, session, unzoomed window, visible floating layer, member block and starting
-    /// bounds. Returns `(host_index, raise_first)` when valid.
-    fn validate_layer_drag(&self, drag: &LayerDrag) -> Result<(usize, bool), Blocked> {
+    /// Validate that `drag` still targets the exact same connected API-13 host, active session
+    /// and active tab, connection epoch, unzoomed non-full-bleed window, visible floating layer,
+    /// member block and starting bounds, with no open panel. Returns `(host_index, raise_first)`
+    /// when valid, `Err(None)` for silent local cancellation (panel open), or `Err(Some(reason))`
+    /// for remote/epoch invalidation.
+    fn validate_layer_drag(&self, drag: &LayerDrag) -> Result<(usize, bool), Option<Blocked>> {
+        if self.panel.is_some() {
+            return Err(None);
+        }
         if let Some(gate) = self.captured_layer_gate(&drag.target) {
-            return Err(match gate {
+            return Err(Some(match gate {
                 Blocked::Stale => Blocked::ChangedDuringDrag,
                 other => other,
-            });
+            }));
         }
         let Some(host) = self.layer_host(&drag.target) else {
-            return Err(Blocked::ChangedDuringDrag);
+            return Err(Some(Blocked::ChangedDuringDrag));
         };
         if host != self.active {
-            return Err(Blocked::ChangedDuringDrag);
+            return Err(Some(Blocked::ChangedDuringDrag));
         }
-        let Some(window) = self.layer_window(&drag.target) else {
-            return Err(Blocked::ChangedDuringDrag);
+        let model = &self.hosts[host].model;
+        if model.selected.as_deref() != Some(drag.target.session.as_str()) {
+            return Err(Some(Blocked::ChangedDuringDrag));
+        }
+        let Some(window) = model
+            .window()
+            .filter(|w| w.window_id.as_deref() == Some(drag.target.window.as_str()))
+        else {
+            return Err(Some(Blocked::ChangedDuringDrag));
         };
-        if window.zoomed_block_id.is_some() {
-            return Err(Blocked::ChangedDuringDrag);
+        if window.zoomed_block_id.is_some() || full_bleed(self, window) {
+            return Err(Some(Blocked::ChangedDuringDrag));
         }
         let Some(layer) = self.current_layer(&drag.target) else {
-            return Err(Blocked::ChangedDuringDrag);
+            return Err(Some(Blocked::ChangedDuringDrag));
         };
         if !layers::floating(layer) || layers::minimized(layer) {
-            return Err(Blocked::ChangedDuringDrag);
+            return Err(Some(Blocked::ChangedDuringDrag));
         }
         if layers::bounds(layer) != Some(drag.start_bounds) {
-            return Err(Blocked::ChangedDuringDrag);
+            return Err(Some(Blocked::ChangedDuringDrag));
         }
         let is_frontmost = layers::frontmost(window).and_then(|l| l.layer_id.as_deref())
             == Some(drag.target.layer.as_str());
