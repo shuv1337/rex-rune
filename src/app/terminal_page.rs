@@ -509,7 +509,7 @@ pub fn terminal(s: &Workspace) -> El {
                     ),
                 ]),
                 footnote(
-                    "Declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection.",
+                    "Theme is declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection. Keep program backgrounds is local to this client.",
                 ),
             ],
         ),

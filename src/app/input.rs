@@ -429,7 +429,8 @@ pub fn on_ime(s: &mut Workspace, ime: &Ime, _: &mut Tx) -> bool {
                 s.last_keypress = Some(std::time::Instant::now());
             }
         }
-        _ => {}
+        Ime::Disabled => term.preedit.clear(),
+        Ime::Enabled => {}
     }
     true
 }

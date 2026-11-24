@@ -275,7 +275,10 @@ pub struct Frame {
     /// The program set this pane's default background itself (OSC 11), overriding the server's
     /// default background.
     pub bg_from_program: bool,
+    /// The cursor's viewport cell when visible (DECTCEM on), for drawing and row cropping.
     pub cursor: Option<(u16, u16)>,
+    /// The cursor's viewport cell even when hidden (DECTCEM off); `None` when scrolled off-screen.
+    pub cursor_at: Option<(u16, u16)>,
     /// An explicit prompt jump anchors a cropped pane at the viewport top. Ordinary
     /// scrolling keeps its usual bottom/cursor crop. Set by the data worker, not decoding.
     pub prompt_anchor: bool,
@@ -436,6 +439,7 @@ impl Renderer {
             std::mem::swap(&mut fg, &mut bg);
         }
         let bg_from_program = !reverse_colors && term_bg.is_some_and(|c| Some(c) != default_bg);
+        let cursor_at = snapshot.cursor_viewport()?.map(|p| (p.x, p.y));
         let mut frame = Frame {
             cols: snapshot.cols()?,
             rows: snapshot.rows()?,
@@ -448,10 +452,11 @@ impl Renderer {
             bg,
             bg_from_program,
             cursor: if snapshot.cursor_visible()? {
-                snapshot.cursor_viewport()?.map(|p| (p.x, p.y))
+                cursor_at
             } else {
                 None
             },
+            cursor_at,
             prompt_anchor: false,
             cursor_color: snapshot.cursor_color()?.map(rgb).unwrap_or(fg),
             // Blinking is ignored: terminal content never animates.
@@ -602,7 +607,68 @@ mod tests {
         terminal.vt_write(b"\x1b[?25l");
         let hidden_cursor = renderer.frame(&terminal).unwrap();
         assert!(hidden_cursor.cursor.is_none());
+        assert_eq!(hidden_cursor.cursor_at, Some((0, 1)));
         assert_eq!(hidden_cursor.display_row_start(3), 2);
+    }
+
+    #[test]
+    fn cursor_at_tracks_hidden_alternate_screen_and_scrollback_cursor() {
+        use ghostty_vt::terminal::ScrollViewport;
+        let mut terminal = Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 1 << 16,
+        })
+        .unwrap();
+        let mut renderer = Renderer::new().unwrap();
+
+        // Hide the hardware cursor (DECTCEM off): cursor is None, cursor_at still tracks it.
+        terminal.vt_write(b"abc\x1b[?25l");
+        let hidden = renderer.frame(&terminal).unwrap();
+        assert_eq!(hidden.cursor, None);
+        assert_eq!(hidden.cursor_at, Some((3, 0)));
+
+        // Moving the cursor while hidden updates cursor_at without showing cursor.
+        terminal.vt_write(b"\x1b[3;5H");
+        let moved = renderer.frame(&terminal).unwrap();
+        assert_eq!(moved.cursor, None);
+        assert_eq!(moved.cursor_at, Some((4, 2)));
+
+        // Showing the cursor again makes cursor == cursor_at.
+        terminal.vt_write(b"\x1b[?25h");
+        let shown = renderer.frame(&terminal).unwrap();
+        assert_eq!(shown.cursor, Some((4, 2)));
+        assert_eq!(shown.cursor_at, shown.cursor);
+
+        // Alternate screen with hidden cursor tracks the alt cursor, and leaving restores primary.
+        terminal.vt_write(b"\x1b[?1049h\x1b[?25l\x1b[4;7H");
+        let alt = renderer.frame(&terminal).unwrap();
+        assert_eq!(alt.cursor, None);
+        assert_eq!(alt.cursor_at, Some((6, 3)));
+        terminal.vt_write(b"\x1b[?1049l");
+        let primary = renderer.frame(&terminal).unwrap();
+        assert_eq!(primary.cursor_at, Some((4, 2)));
+        assert_eq!(primary.cursor, None);
+
+        // Scrolling back off the active viewport clears cursor_at; scrolling to bottom restores it.
+        terminal.vt_write(b"\x1b[?25h\x1b[5;1H");
+        for i in 0..10 {
+            terminal.vt_write(format!("line {i}\r\n").as_bytes());
+        }
+        terminal.vt_write(b"\x1b[?25l");
+        let at_bottom = renderer.frame(&terminal).unwrap();
+        assert!(at_bottom.cursor.is_none());
+        assert!(at_bottom.cursor_at.is_some());
+
+        terminal.scroll_viewport(ScrollViewport::Delta(-6));
+        let scrolled = renderer.frame(&terminal).unwrap();
+        assert_eq!(scrolled.cursor, None);
+        assert_eq!(scrolled.cursor_at, None);
+
+        terminal.scroll_viewport(ScrollViewport::Bottom);
+        let restored = renderer.frame(&terminal).unwrap();
+        assert_eq!(restored.cursor, None);
+        assert_eq!(restored.cursor_at, at_bottom.cursor_at);
     }
 
     #[test]
@@ -928,5 +994,89 @@ mod tests {
             assert!(!after_reset.bg_from_program);
             assert_eq!(after_reset.bg, 0x001528);
         }
+    }
+
+    #[test]
+    fn osc11_reset_black_override_and_decscnm_without_defaults() {
+        let opts = || ghostty_vt::TerminalOptions {
+            cols: 20,
+            rows: 3,
+            ..Default::default()
+        };
+
+        // Live OSC 11 -> OSC 111 with default_bg_color() == None on a single Renderer:
+        // verifies no stale RenderState color remains after resetting back to unset.
+        let mut terminal = Terminal::new(opts()).unwrap();
+        let mut renderer = Renderer::new().unwrap();
+        let initial = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (initial.fg, initial.bg, initial.bg_from_program),
+            (0xffffff, 0x000000, false)
+        );
+
+        terminal.vt_write(b"\x1b]11;#1d2a2b\x1b\\");
+        let set = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (set.fg, set.bg, set.bg_from_program),
+            (0xffffff, 0x1d2a2b, true)
+        );
+
+        terminal.vt_write(b"\x1b]111\x1b\\");
+        let reset = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (reset.fg, reset.bg, reset.bg_from_program),
+            (0xffffff, 0x000000, false)
+        );
+
+        // Explicit OSC 11;#000000 when default_bg_color() == None still marks bg_from_program.
+        terminal.vt_write(b"\x1b]11;#000000\x1b\\");
+        let black = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (black.fg, black.bg, black.bg_from_program),
+            (0xffffff, 0x000000, true)
+        );
+
+        // DECSCNM (Mode::REVERSE_COLORS) without defaults swaps fg/bg (bg becomes 0xffffff).
+        let mut terminal = Terminal::new(opts()).unwrap();
+        let mut renderer = Renderer::new().unwrap();
+        terminal.vt_write(b"\x1b[?5h");
+        let reversed = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (reversed.fg, reversed.bg, reversed.bg_from_program),
+            (0x000000, 0xffffff, false)
+        );
+        terminal.vt_write(b"\x1b[?5l");
+        let normal = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (normal.fg, normal.bg, normal.bg_from_program),
+            (0xffffff, 0x000000, false)
+        );
+
+        // DECSCNM with active OSC 11 swaps fg/bg and clears bg_from_program while reversed,
+        // then restores OSC 11 and bg_from_program == true when DECSCNM turns off.
+        terminal.vt_write(b"\x1b]11;#1d2a2b\x1b\\");
+        let osc11 = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (osc11.fg, osc11.bg, osc11.bg_from_program),
+            (0xffffff, 0x1d2a2b, true)
+        );
+
+        terminal.vt_write(b"\x1b[?5h");
+        let osc11_rev = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (osc11_rev.fg, osc11_rev.bg, osc11_rev.bg_from_program),
+            (0x1d2a2b, 0xffffff, false)
+        );
+
+        terminal.vt_write(b"\x1b[?5l");
+        let osc11_restored = renderer.frame(&terminal).unwrap();
+        assert_eq!(
+            (
+                osc11_restored.fg,
+                osc11_restored.bg,
+                osc11_restored.bg_from_program
+            ),
+            (0xffffff, 0x1d2a2b, true)
+        );
     }
 }

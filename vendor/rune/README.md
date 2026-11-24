@@ -15,6 +15,19 @@ paths so the whole dependency graph sees a single `rune`. Nothing outside the ve
 
 ## Changes
 
+- Top-level Linux Wayland windows prefer `wgpu::PresentMode::Mailbox` when advertised by
+  `surface.get_capabilities(adapter).present_modes`, falling back to `AutoVsync` otherwise
+  (`window/present.rs`, applied in `Host::try_create` and `Host::reattach`). Because winit
+  already paces top-level Wayland windows through `wl_surface.frame` callbacks
+  (`pre_present_notify`), FIFO can double-block on compositors/drivers such as KWin + Mesa RADV.
+  X11, macOS, Windows, embedded surfaces, and Wayland layer-shell overlays (`Overlay::attach`,
+  which rely on FIFO vsync under `ControlFlow::Poll`) stay on `AutoVsync` by default.
+  `RUNE_PRESENT_MODE` (`auto`, `fifo`, `fifo-relaxed`/`fifo_relaxed`, `mailbox`, `immediate`)
+  overrides top-level window present mode when supported by the surface, warning once and
+  falling back cleanly otherwise. Hidden `PresentChoice` and `choose_present` exports let
+  `rex-rune` unit-test the policy across every CI target. Remove this patch once upstream Rune
+  picks a non-blocking present mode on Wayland.
+
 - Linux's optional GNOME reduced-motion read clears exit-on-close on GIO's shared
   session connection before constructing GSettings (dconf can initialize GVfs).
   One owned current reference outlives synchronous construction so dconf's deferred
