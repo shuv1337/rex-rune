@@ -39,11 +39,13 @@ fn system_tools() -> Tools<'static> {
 async fn output(
     program: &OsStr,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    agent: Option<&Path>,
 ) -> Result<Output> {
+    let mut cmd = tokio::process::Command::new(program);
+    super::apply_agent_tokio(&mut cmd, agent);
     tokio::time::timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(program)
-            .args(args)
+        cmd.args(args)
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output(),
@@ -93,11 +95,11 @@ impl Config {
     }
 }
 
-async fn config(target: &Target, ssh: &OsStr) -> Result<Config> {
+async fn config(target: &Target, ssh: &OsStr, agent: Option<&Path>) -> Result<Config> {
     crate::platform::local::require_ssh()?;
     let mut args = target.config_options();
     args.extend(["-G".into(), "--".into(), target.destination()]);
-    let result = output(ssh, args).await?;
+    let result = output(ssh, args, agent).await?;
     ensure!(
         result.status.success(),
         "Couldn't read the OpenSSH configuration"
@@ -129,34 +131,45 @@ async fn config(target: &Target, ssh: &OsStr) -> Result<Config> {
     })
 }
 
-pub(super) async fn require_safe_config(target: &Target) -> Result<()> {
-    config(target, system_tools().ssh).await?;
+pub(super) async fn require_safe_config(target: &Target, agent: Option<&Path>) -> Result<()> {
+    config(target, system_tools().ssh, agent).await?;
     Ok(())
 }
 
 /// The name OpenSSH uses in known_hosts, including aliases and non-default ports.
-pub async fn known_host_name(target: &Target) -> Result<String> {
-    Ok(config(target, system_tools().ssh).await?.name())
+pub async fn known_host_name(target: &Target, agent: Option<&Path>) -> Result<String> {
+    Ok(config(target, system_tools().ssh, agent).await?.name())
 }
 
-async fn check(target: &Target, ssh: &OsStr) -> Result<bool> {
-    match lookup(target, ssh).await {
+async fn check(target: &Target, ssh: &OsStr, agent: Option<&Path>) -> Result<bool> {
+    match lookup(target, ssh, agent).await {
         Ok(_) => Ok(true),
         Err(error) if error.downcast_ref::<KeyProblem>() == Some(&KeyProblem::Unknown) => Ok(false),
         Err(error) => Err(error),
     }
 }
 
-pub async fn scan(target: &Target) -> Result<Offer> {
-    scan_with(target, &system_tools(), &crate::platform::dirs::home()).await
+pub async fn scan(target: &Target, agent: Option<&Path>) -> Result<Offer> {
+    scan_with(
+        target,
+        &system_tools(),
+        &crate::platform::dirs::home(),
+        agent,
+    )
+    .await
 }
 
-async fn scan_with(target: &Target, tools: &Tools<'_>, home: &Path) -> Result<Offer> {
-    let config = config(target, tools.ssh).await?;
+async fn scan_with(
+    target: &Target,
+    tools: &Tools<'_>,
+    home: &Path,
+    agent: Option<&Path>,
+) -> Result<Offer> {
+    let config = config(target, tools.ssh, agent).await?;
     let (file, make_parent) = config.file(home)?;
     // A fresh strict lookup, not a scan or the saved status, grants the offer.
     ensure!(
-        !check(target, tools.ssh).await?,
+        !check(target, tools.ssh, agent).await?,
         "OpenSSH already trusts this host's key."
     );
     let name = config.name();
@@ -177,6 +190,7 @@ async fn scan_with(target: &Target, tools: &Tools<'_>, home: &Path) -> Result<Of
             "--",
             &config.host,
         ],
+        None,
     )
     .await?;
     let keys = std::str::from_utf8(&keys.stdout)?;
@@ -206,7 +220,7 @@ async fn scan_with(target: &Target, tools: &Tools<'_>, home: &Path) -> Result<Of
     let scratch = tempfile::tempdir()?;
     let path = scratch.path().join("key");
     std::fs::write(&path, format!("{record}\n"))?;
-    let result = output(tools.keygen, [OsStr::new("-lf"), path.as_os_str()]).await?;
+    let result = output(tools.keygen, [OsStr::new("-lf"), path.as_os_str()], None).await?;
     ensure!(
         result.status.success(),
         "Couldn't read the host key fingerprint."
@@ -222,6 +236,7 @@ async fn scan_with(target: &Target, tools: &Tools<'_>, home: &Path) -> Result<Of
         let result = output(
             tools.keygen,
             [OsStr::new("-H"), OsStr::new("-f"), path.as_os_str()],
+            None,
         )
         .await?;
         ensure!(result.status.success(), "Couldn't hash the host name.");
@@ -249,12 +264,23 @@ async fn scan_with(target: &Target, tools: &Tools<'_>, home: &Path) -> Result<Of
     })
 }
 
-pub async fn trust(offer: &Offer) -> Result<()> {
-    trust_with(offer, &system_tools(), &crate::platform::dirs::home()).await
+pub async fn trust(offer: &Offer, agent: Option<&Path>) -> Result<()> {
+    trust_with(
+        offer,
+        &system_tools(),
+        &crate::platform::dirs::home(),
+        agent,
+    )
+    .await
 }
 
-async fn trust_with(offer: &Offer, tools: &Tools<'_>, home: &Path) -> Result<()> {
-    let config = config(&offer.target, tools.ssh).await?;
+async fn trust_with(
+    offer: &Offer,
+    tools: &Tools<'_>,
+    home: &Path,
+    agent: Option<&Path>,
+) -> Result<()> {
+    let config = config(&offer.target, tools.ssh, agent).await?;
     let (file, _) = config.file(home)?;
     ensure!(
         file == offer.file
@@ -263,17 +289,20 @@ async fn trust_with(offer: &Offer, tools: &Tools<'_>, home: &Path) -> Result<()>
         "The SSH configuration changed. Close this dialog and check again."
     );
     ensure!(
-        !check(&offer.target, tools.ssh).await?,
+        !check(&offer.target, tools.ssh, agent).await?,
         "OpenSSH already trusts this host's key."
     );
     crate::platform::fs::append_ssh_key(&offer.file, &offer.record, offer.make_parent)
         .with_context(|| format!("Couldn't append the key to {}", offer.file.display()))?;
-    if !check(&offer.target, tools.ssh).await.with_context(|| {
-        format!(
-            "Appended the key to {}, but OpenSSH's follow-up check failed",
-            offer.file.display()
-        )
-    })? {
+    if !check(&offer.target, tools.ssh, agent)
+        .await
+        .with_context(|| {
+            format!(
+                "Appended the key to {}, but OpenSSH's follow-up check failed",
+                offer.file.display()
+            )
+        })?
+    {
         bail!(
             "Appended the key to {}, but OpenSSH still does not trust this host. {MANUAL}",
             offer.file.display()
@@ -367,11 +396,11 @@ esac"#,
 
         async fn offer(&self) -> Result<Offer> {
             let target = Target::parse("ssh://tester@alias").unwrap().unwrap();
-            scan_with(&target, &self.tools(), self.dir.path()).await
+            scan_with(&target, &self.tools(), self.dir.path(), None).await
         }
 
         async fn trust(&self, offer: &Offer) -> Result<()> {
-            trust_with(offer, &self.tools(), self.dir.path()).await
+            trust_with(offer, &self.tools(), self.dir.path(), None).await
         }
     }
 
@@ -478,6 +507,7 @@ esac"#,
             super::config(
                 &Target::parse("ssh://alias").unwrap().unwrap(),
                 f.tools().ssh,
+                None,
             )
             .await
             .expect("setup may use a proxy whose key is already trusted");
@@ -496,5 +526,49 @@ esac"#,
                 .contains("disables strict")
         );
         assert!(!f.dir.path().join("scanned").exists());
+    }
+
+    #[tokio::test]
+    async fn scan_and_trust_propagate_ssh_auth_sock_without_identity_agent_flag() {
+        let f = Fixture::new();
+        let known = f.dir.path().join("known");
+        f.config(known.to_str().unwrap(), "");
+        fs::write(f.dir.path().join("recognized"), "").unwrap();
+        let sock_log = f.dir.path().join("sock.log");
+        let args_log = f.dir.path().join("args.log");
+        let wrapped = f.dir.path().join("ssh-wrapped");
+        fs::write(
+            &wrapped,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{SSH_AUTH_SOCK-UNSET}}\" >> '{}'\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+                sock_log.display(),
+                args_log.display(),
+                f.ssh.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapped, fs::Permissions::from_mode(0o700)).unwrap();
+        let tools = Tools {
+            ssh: wrapped.as_os_str(),
+            keyscan: f.scan.as_os_str(),
+            keygen: f.keygen.as_os_str(),
+        };
+        let agent = f.dir.path().join("agent.sock");
+        let target = Target::parse("ssh://tester@alias").unwrap().unwrap();
+        let offer = scan_with(&target, &tools, f.dir.path(), Some(&agent))
+            .await
+            .unwrap();
+        trust_with(&offer, &tools, f.dir.path(), Some(&agent))
+            .await
+            .unwrap();
+        let logged = fs::read_to_string(&sock_log).unwrap();
+        assert!(!logged.is_empty());
+        assert!(logged.lines().all(|line| line == agent.to_str().unwrap()));
+        assert!(
+            !fs::read_to_string(&args_log)
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("identityagent")
+        );
     }
 }

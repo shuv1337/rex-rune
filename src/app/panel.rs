@@ -76,6 +76,12 @@ pub enum Intent {
     ChooseChrome,
     /// Draw the chrome in this palette from now on, then return to Settings.
     Chrome(ChromeTheme),
+    /// The SSH agent picker, from Settings → Remote Hosts.
+    ChooseSshAgent,
+    /// Use this SSH agent for `ssh://` hosts, then return to Settings.
+    SshAgent(rex_rune::settings::ssh::SshAgent),
+    /// Open the custom SSH agent socket form from the SSH agent picker.
+    SshAgentCustom,
     /// Open Settings → Updates.
     Updates,
     /// Trigger an immediate release metadata check.
@@ -184,6 +190,8 @@ impl Intent {
                 | Intent::ClientLabel
                 | Intent::ChooseTheme
                 | Intent::ChooseChrome
+                | Intent::ChooseSshAgent
+                | Intent::SshAgentCustom
                 | Intent::AddHost
                 | Intent::AddMachine(_)
                 | Intent::MachineForm(_)
@@ -320,6 +328,8 @@ pub enum Form {
     HostShell(usize),
     /// Where downloads are saved: `downloads.directory`.
     DownloadFolder,
+    /// Custom SSH agent Unix socket path: `ssh.agent`.
+    SshAgentSocket,
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.
     RenameSession(Option<SessionTarget>),
     RenameWindow(String),
@@ -420,6 +430,8 @@ pub enum PanelKind {
     Fonts(super::font_picker::FontPick),
     /// The chrome palettes.
     Chromes,
+    /// The SSH agent choices (System default, detected agents, Custom socket…).
+    SshAgents,
     /// The values of one setting, from a Settings `select_row`.
     Choice(Choice),
     /// The Add host list of the tailnet's machines, filtered by the search field.
@@ -543,6 +555,7 @@ impl Panel {
                 | PanelKind::Themes
                 | PanelKind::Fonts(_)
                 | PanelKind::Chromes
+                | PanelKind::SshAgents
                 | PanelKind::Choice(_)
                 | PanelKind::Discover
                 | PanelKind::ShortcutMenu
@@ -840,6 +853,9 @@ impl Workspace {
                     e
                 })
                 .collect();
+        }
+        if matches!(panel.kind, PanelKind::SshAgents) {
+            return self.ssh_agent_entries();
         }
         if let PanelKind::Choice(choice) = &panel.kind {
             return choice

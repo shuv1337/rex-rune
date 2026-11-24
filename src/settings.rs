@@ -2,6 +2,7 @@ pub mod interface;
 pub mod recent_paths;
 pub mod recorded;
 pub mod shortcuts;
+pub mod ssh;
 pub mod terminal;
 pub mod typography;
 
@@ -244,6 +245,8 @@ pub struct Settings {
     pub activity_view: ActivityView,
     pub updates: UpdatesConfig,
     pub downloads: DownloadsConfig,
+    #[serde(skip_serializing_if = "ssh::SshConfig::is_default")]
+    pub ssh: ssh::SshConfig,
     /// Passed to `rex skill setup` as `--session-naming`, always explicitly.
     pub agent_session_naming: bool,
     pub chrome_theme: ChromeTheme,
@@ -304,6 +307,7 @@ impl Default for Settings {
             activity_view: ActivityView::default(),
             updates: UpdatesConfig::default(),
             downloads: DownloadsConfig::default(),
+            ssh: ssh::SshConfig::default(),
             agent_session_naming: false,
             chrome_theme: ChromeTheme::default(),
             terminal_theme: TerminalThemeChoice::default(),

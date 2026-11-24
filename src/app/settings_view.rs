@@ -598,32 +598,34 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
 fn hosts(s: &Workspace) -> El {
     let last = s.settings.hosts.len() == 1;
     let cards = (0..s.settings.hosts.len()).map(|i| host_card(s, i, last));
-    page([
-        section(
-            "This client",
-            [card([disclosure(
-                "client-label",
-                "Client label",
-                "Its name on every host. Takes effect when you reopen the app.",
-                &s.settings.client_label(),
-                |s, tx| s.perform(Intent::ClientLabel, tx),
-            )])],
-        ),
-        section(
-            "Hosts",
-            cards.chain([
-                row().px(2.).child(button(
-                    "settings-add-host",
-                    "Add host…",
-                    Pill::Neutral,
-                    |s, tx| s.perform(Intent::AddHost, tx),
-                )),
-                footnote(
-                    "Removing a host only stops this app connecting to it; its sessions keep running.",
-                ),
-            ]),
-        ),
-    ])
+    let mut sections = vec![section(
+        "This client",
+        [card([disclosure(
+            "client-label",
+            "Client label",
+            "Its name on every host. Takes effect when you reopen the app.",
+            &s.settings.client_label(),
+            |s, tx| s.perform(Intent::ClientLabel, tx),
+        )])],
+    )];
+    if let Some(ssh) = super::ssh_agent::section(s) {
+        sections.push(ssh);
+    }
+    sections.push(section(
+        "Hosts",
+        cards.chain([
+            row().px(2.).child(button(
+                "settings-add-host",
+                "Add host…",
+                Pill::Neutral,
+                |s, tx| s.perform(Intent::AddHost, tx),
+            )),
+            footnote(
+                "Removing a host only stops this app connecting to it; its sessions keep running.",
+            ),
+        ]),
+    ));
+    page(sections)
 }
 
 /// The headings of the Shortcuts page, in order. Every action's `category()` is one of them

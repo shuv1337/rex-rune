@@ -17,6 +17,9 @@ mod perform_tests;
 mod server_controls_tests;
 #[path = "server_info_tests.rs"]
 mod server_info_tests;
+#[cfg(unix)]
+#[path = "ssh_agent_tests.rs"]
+mod ssh_agent_tests;
 #[path = "status_sweep_tests.rs"]
 mod status_sweep_tests;
 #[path = "verb_tests.rs"]

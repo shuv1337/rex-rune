@@ -58,7 +58,8 @@ Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json`
   last view (`activity_view`: `"session"` or `"priority"`, the default, omitted
   when saved), the tabs muted on this client (`muted_tabs`), automatic update
   checks (`updates.check`, default `true`), automatic installation for eligible
-  install.sh installs (`updates.install_automatically`, default `false`), and
+  install.sh installs (`updates.install_automatically`, default `false`), the
+  optional SSH agent socket (`ssh.agent`, omitted when System default), and
   whether agents may name sessions (`agent_session_naming`).
 
 Update check state and dismissed versions are stored in
@@ -84,8 +85,9 @@ these pages:
   default shell and generated titles.
 - **Shortcuts**, **Integrations** (Rex's skill and hooks for coding agents on this
   machine), **Notifications** (activity in tabs, desktop notifications, optional
-  sounds and which program changes notify), **Remote Hosts** (add, edit or remove
-  saved hosts), **Updates** and **About**.
+  sounds and which program changes notify), **Remote Hosts** (client label,
+  SSH agent picker on Linux/macOS, and add, edit or remove saved hosts),
+  **Updates** and **About**.
 
 A host's name, endpoint and default shell can also be edited from its sidebar
 header's right-click menu, from Edit host… in Commands, or from an offline

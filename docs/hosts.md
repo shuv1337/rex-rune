@@ -82,6 +82,35 @@ can be changed.
 Ordinary attachment uses socket forwarding and never asks Rex to auto-start a
 server. No local Rex executable or Tailscale is required for SSH attachment; your
 OpenSSH configuration and aliases still apply.
+
+### SSH agent
+
+On Linux and macOS, **Settings → Remote Hosts → SSH** lets you choose which SSH
+agent `ssh` uses for `ssh://` hosts (saved as `ssh.agent` in `workspace.json`,
+omitted when set to **System default**):
+
+- **System default** inherits the process's `SSH_AUTH_SOCK` untouched.
+- **Detected agents** lists known agents whose sockets exist on this machine
+  (Linux: 1Password, Bitwarden including Flatpak/Snap, `gpg-agent`,
+  `gcr-ssh-agent`, GNOME Keyring, OpenSSH/systemd user agent, `yubikey-agent`;
+  macOS: Secretive, 1Password, Bitwarden, `yubikey-agent`, `gpg-agent`), even
+  when `SSH_AUTH_SOCK` already points to one so you can pin it for desktop
+  launches.
+- **Custom socket…** accepts an absolute (`/…`) or home-relative (`~/…`) socket
+  path without `..` segments or control characters, and can be saved even before
+  the socket exists on disk.
+
+Opening **Remote Hosts**, picking an agent, or pressing **Refresh** probes the
+configured and detected Unix sockets off the UI thread using
+`SSH_AGENTC_REQUEST_IDENTITIES` and reads only the 9-byte reply header to show
+the public key count; key blobs, fingerprints and comments are never read or
+stored. Rex Rune sets `SSH_AUTH_SOCK` in child `ssh` and SSH setup environments
+only (never `-o IdentityAgent`), so `IdentityAgent` in `~/.ssh/config` still
+takes precedence for hosts it names. When a chosen or refreshed agent answers
+with at least one key, disconnected `ssh://` hosts that failed SSH
+authentication retry immediately while already-connected hosts stay untouched.
+On Windows, the SSH section is omitted and any saved `ssh.agent` value is
+preserved untouched on disk.
 Discovery uses `server.status` listener metadata after a documented tailnet
 endpoint answers; it never guesses alternate reachable addresses from wildcard,
 loopback or Unix bindings. Built-in Tailscale is not in the server's listener

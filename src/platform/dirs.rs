@@ -180,9 +180,8 @@ fn windows_base(value: Option<std::ffi::OsString>, kind: &str) -> PathBuf {
 }
 
 /// `$XDG_RUNTIME_DIR` where sessions have one: not on macOS or Windows.
-#[cfg(unix)]
-pub(super) fn xdg_runtime() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
+pub fn xdg_runtime() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") || cfg!(windows) {
         return None;
     }
     std::env::var_os("XDG_RUNTIME_DIR")

@@ -50,12 +50,88 @@ pub async fn connect(path: &std::path::Path) -> anyhow::Result<Box<dyn crate::tr
     }
 }
 
+/// Operating system family for platform-specific path tables (such as SSH agent discovery).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostOs {
+    Linux,
+    MacOs,
+    Windows,
+}
+
+pub const HOST_OS: HostOs = if cfg!(target_os = "macos") {
+    HostOs::MacOs
+} else if cfg!(windows) {
+    HostOs::Windows
+} else {
+    HostOs::Linux
+};
+
+/// Whether `ssh://` hosts and SSH agent selection are available on this platform.
+pub const SSH_AVAILABLE: bool = !cfg!(windows);
+
+pub fn ssh_available() -> bool {
+    SSH_AVAILABLE
+}
+
 /// SSH forwards to a local Unix socket. Refuse before discovering or starting anything.
 pub fn require_ssh() -> anyhow::Result<()> {
-    if cfg!(windows) {
+    if !SSH_AVAILABLE {
         anyhow::bail!("ssh:// hosts are not available on Windows yet");
     }
     Ok(())
+}
+
+/// A synchronous byte stream to a local Unix socket.
+pub trait ReadWrite: std::io::Read + std::io::Write {}
+impl<T: std::io::Read + std::io::Write> ReadWrite for T {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnixSocketError {
+    NotFound,
+    NotSocket,
+    Refused,
+    PermissionDenied,
+    TimedOut,
+    Unavailable(&'static str),
+    Other(String),
+}
+
+/// Connect to a local Unix domain socket with bounded read/write timeouts and run `f`.
+pub fn with_unix_socket<T>(
+    path: &std::path::Path,
+    timeout: std::time::Duration,
+    f: impl FnOnce(&mut dyn ReadWrite) -> T,
+) -> Result<T, UnixSocketError> {
+    #[cfg(unix)]
+    {
+        use std::{io::ErrorKind, os::unix::fs::FileTypeExt};
+        let meta = std::fs::metadata(path).map_err(|error| match error.kind() {
+            ErrorKind::NotFound => UnixSocketError::NotFound,
+            ErrorKind::PermissionDenied => UnixSocketError::PermissionDenied,
+            _ => UnixSocketError::Other(error.to_string()),
+        })?;
+        if !meta.file_type().is_socket() {
+            return Err(UnixSocketError::NotSocket);
+        }
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(path).map_err(|error| match error.kind() {
+                ErrorKind::NotFound => UnixSocketError::NotFound,
+                ErrorKind::ConnectionRefused => UnixSocketError::Refused,
+                ErrorKind::PermissionDenied => UnixSocketError::PermissionDenied,
+                ErrorKind::TimedOut | ErrorKind::WouldBlock => UnixSocketError::TimedOut,
+                _ => UnixSocketError::Other(error.to_string()),
+            })?;
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+        Ok(f(&mut stream))
+    }
+    #[cfg(windows)]
+    {
+        let _ = (path, timeout, f);
+        Err(UnixSocketError::Unavailable(
+            "SSH agents are not available on Windows yet",
+        ))
+    }
 }
 
 /// Keep the tunnel folder private and remove only dead processes' old socket folders.

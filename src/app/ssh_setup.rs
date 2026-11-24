@@ -81,6 +81,7 @@ impl Workspace {
     fn spawn_ssh_start(&mut self, endpoint: String) {
         let handle = self.handle.clone();
         let task_endpoint = endpoint.clone();
+        let agent = self.ssh_agent_socket();
         let spawned = std::thread::Builder::new()
             .name("rex-ssh-setup".into())
             .spawn(move || {
@@ -88,7 +89,9 @@ impl Workspace {
                     .enable_all()
                     .build()
                     .map_err(|e| setup::Failure::from(anyhow::Error::from(e)))
-                    .and_then(|runtime| runtime.block_on(setup::start_personal(&task_endpoint)));
+                    .and_then(|runtime| {
+                        runtime.block_on(setup::start_personal(&task_endpoint, agent.as_deref()))
+                    });
                 handle.update(move |s, tx| s.ssh_start_finished(&task_endpoint, result, tx));
             });
         if let Err(error) = spawned {

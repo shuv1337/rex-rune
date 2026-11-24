@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         "Refusing to run without the private fake Rex fixture"
     );
     match mode.as_str() {
-        "lookup" => match rex_rune::ssh::resolve(&target).await {
+        "lookup" => match rex_rune::ssh::resolve(&target, None).await {
             Ok(_) => println!("sock"),
             Err(error) => match Problem::from_error(&error) {
                 Some(Problem::NoServer(facts)) => {
@@ -52,21 +52,21 @@ async fn main() -> Result<()> {
                 }
                 Some(Problem::UnknownKey) => println!("key unknown"),
                 Some(Problem::ChangedKey) => println!("key changed"),
-                None => return Err(error),
+                Some(Problem::AuthFailed) | None => return Err(error),
             },
         },
         "scan" | "trust" => {
-            let offer = hostkey::scan(&target).await?;
+            let offer = hostkey::scan(&target, None).await?;
             println!("fingerprint {}", offer.fingerprint);
             io::stdout().flush()?;
             if mode == "trust" {
                 ensure!(input()? == "trust", "Trust was not confirmed");
-                hostkey::trust(&offer).await?;
+                hostkey::trust(&offer, None).await?;
                 println!("trusted");
             }
         }
         "forward" => {
-            let tunnel = Tunnel::open(&target).await?;
+            let tunnel = Tunnel::open(&target, None).await?;
             let address = tunnel
                 .endpoint()
                 .strip_prefix("unix://")
@@ -76,16 +76,16 @@ async fn main() -> Result<()> {
             println!("forwarded");
         }
         "start" => {
-            rex_rune::ssh::setup::start_personal(endpoint).await?;
+            rex_rune::ssh::setup::start_personal(endpoint, None).await?;
             println!("fake start accepted");
         }
         "install" => {
-            if let Err(error) = install::preflight(&target).await {
+            if let Err(error) = install::preflight(&target, None).await {
                 println!("refused {error}");
                 return Ok(());
             }
             let (send, recv) = mpsc::channel();
-            let run = Run::spawn(&target, rex.as_os_str(), move |event| {
+            let run = Run::spawn(&target, rex.as_os_str(), None, move |event| {
                 let _ = send.send(event);
             })?;
             println!("running");

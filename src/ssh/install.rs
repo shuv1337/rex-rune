@@ -5,6 +5,7 @@ use anyhow::{Context, Result, ensure};
 use std::{
     ffi::OsStr,
     io,
+    path::Path,
     process::Command,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
@@ -299,6 +300,38 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn install_spawn_propagates_ssh_auth_sock() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let rex = dir.path().join("fake-rex");
+        let agent = dir.path().join("install-agent.sock");
+        std::fs::write(
+            &rex,
+            "#!/bin/sh\nprintf 'sock=%s\\n' \"${SSH_AUTH_SOCK-UNSET}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&rex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = Target::parse("ssh://tester@box").unwrap().unwrap();
+        let (send, recv) = mpsc::channel();
+        let _run = Run::spawn(&target, rex.as_os_str(), Some(&agent), move |ev| {
+            let _ = send.send(ev);
+        })
+        .unwrap();
+        let mut out = String::new();
+        loop {
+            match recv.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Output(text) => out.push_str(&text),
+                Event::Exited { .. } => break,
+                _ => {}
+            }
+        }
+        assert!(
+            out.contains(&format!("sock={}", agent.display())),
+            "unexpected output: {out:?}"
+        );
+    }
 }
 
 pub fn command_preview(target: &Target) -> Result<String> {
@@ -353,20 +386,20 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-pub async fn preflight(target: &Target) -> Result<Facts, Refusal> {
+pub async fn preflight(target: &Target, agent: Option<&Path>) -> Result<Facts, Refusal> {
     local::require_ssh().map_err(Refusal::Config)?;
     if target.socket.is_some() {
         return Err(Refusal::NamedSocket);
     }
     let rex = setup::local_rex();
-    let version = setup::output(rex.as_os_str(), &["version".into(), "--json".into()])
+    let version = setup::output(rex.as_os_str(), &["version".into(), "--json".into()], None)
         .await
         .map_err(Refusal::LocalRex)?;
     setup::require_api12(&version, "Local").map_err(Refusal::LocalRex)?;
-    hostkey::require_safe_config(target)
+    hostkey::require_safe_config(target, agent)
         .await
         .map_err(Refusal::Config)?;
-    let error = match super::resolve(target).await {
+    let error = match super::resolve(target, agent).await {
         Ok(_) => return Err(Refusal::ServerPresent),
         Err(e) => e,
     };
@@ -436,20 +469,24 @@ impl Run {
     pub fn spawn(
         target: &Target,
         rex: &OsStr,
+        agent: Option<&Path>,
         events: impl Fn(Event) + Send + 'static,
     ) -> Result<Self> {
         local::require_ssh()?;
-        Self::spawn_command(
-            Command::new(rex)
-                .args(install_args(target)?)
-                .env("TERM", "dumb")
-                .env("NO_COLOR", "1"),
-            events,
-        )
+        let mut cmd = Command::new(rex);
+        super::apply_agent_std(&mut cmd, agent);
+        cmd.args(install_args(target)?)
+            .env("TERM", "dumb")
+            .env("NO_COLOR", "1");
+        Self::spawn_command(&mut cmd, events)
     }
 
-    pub fn start(target: &Target, events: impl Fn(Event) + Send + 'static) -> Result<Self> {
-        Self::spawn(target, setup::local_rex().as_os_str(), events)
+    pub fn start(
+        target: &Target,
+        agent: Option<&Path>,
+        events: impl Fn(Event) + Send + 'static,
+    ) -> Result<Self> {
+        Self::spawn(target, setup::local_rex().as_os_str(), agent, events)
     }
 
     fn spawn_command(cmd: &mut Command, events: impl Fn(Event) + Send + 'static) -> Result<Self> {

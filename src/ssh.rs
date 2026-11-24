@@ -6,16 +6,32 @@
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::io::AsyncReadExt;
 
+pub mod agent;
 pub mod hostkey;
 pub mod install;
 pub mod setup;
+
+/// Propagate the chosen SSH agent to a child command via `SSH_AUTH_SOCK` only.
+/// Never passes `-o IdentityAgent=...`, so `IdentityAgent` in `~/.ssh/config` still takes
+/// precedence for hosts it names.
+pub(crate) fn apply_agent_tokio(cmd: &mut tokio::process::Command, agent: Option<&Path>) {
+    if let Some(socket) = agent {
+        cmd.env("SSH_AUTH_SOCK", socket);
+    }
+}
+
+pub(crate) fn apply_agent_std(cmd: &mut std::process::Command, agent: Option<&Path>) {
+    if let Some(socket) = agent {
+        cmd.env("SSH_AUTH_SOCK", socket);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyProblem {
@@ -62,6 +78,29 @@ fn key_problem(stderr: &str) -> Option<KeyProblem> {
     }
 }
 
+#[derive(Debug)]
+pub struct AuthProblem {
+    message: String,
+}
+
+impl std::fmt::Display for AuthProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AuthProblem {}
+
+fn auth_problem(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        (lower.contains("permission denied (") && lower.contains("publickey"))
+            || lower.contains("too many authentication failures")
+            || lower.contains("no more authentication methods to try")
+            || lower.contains("agent refused operation")
+    })
+}
+
 /// Facts from the last line of the read-only remote lookup. Legacy replies carry
 /// only the user; an unknown OS or uid cannot authorize an installation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +137,7 @@ pub enum Problem {
     NoServer(Facts),
     UnknownKey,
     ChangedKey,
+    AuthFailed,
 }
 
 impl Problem {
@@ -105,10 +145,15 @@ impl Problem {
         if let Some(missing) = error.downcast_ref::<MissingServer>() {
             return Some(Self::NoServer(missing.facts.clone()));
         }
-        match error.downcast_ref::<KeyProblem>()? {
-            KeyProblem::Unknown => Some(Self::UnknownKey),
-            KeyProblem::Changed => Some(Self::ChangedKey),
+        if let Some(key) = error.downcast_ref::<KeyProblem>() {
+            return Some(match key {
+                KeyProblem::Unknown => Self::UnknownKey,
+                KeyProblem::Changed => Self::ChangedKey,
+            });
         }
+        error
+            .downcast_ref::<AuthProblem>()
+            .map(|_| Self::AuthFailed)
     }
 }
 
@@ -366,16 +411,24 @@ impl Tunnel {
     /// A forward for `endpoint` if it is an `ssh://` one, else `None`.
     pub async fn for_endpoint(endpoint: &str) -> Result<Option<Tunnel>> {
         match Target::parse(endpoint)? {
-            Some(target) => Ok(Some(Tunnel::open(&target).await?)),
+            Some(target) => Ok(Some(Tunnel::open(&target, None).await?)),
             None => Ok(None),
         }
     }
 
     /// Find the Rex socket on `target`, then forward it to a local socket and wait until the
     /// local end accepts connections.
-    pub async fn open(target: &Target) -> Result<Tunnel> {
+    pub async fn open(target: &Target, agent: Option<&Path>) -> Result<Tunnel> {
+        Self::open_with(target, std::ffi::OsStr::new("ssh"), agent).await
+    }
+
+    pub(crate) async fn open_with(
+        target: &Target,
+        ssh: &std::ffi::OsStr,
+        agent: Option<&Path>,
+    ) -> Result<Tunnel> {
         crate::platform::local::require_ssh()?;
-        let remote = resolve(target).await?;
+        let remote = resolve_with(target, ssh, agent).await?;
         let local = target.local_socket();
         if let Some(parent) = local.parent() {
             crate::platform::local::prepare_tunnel_directory(parent).await?;
@@ -385,7 +438,9 @@ impl Tunnel {
         // The remote `cat` ends when its input does, so if this process dies without dropping
         // the tunnel, the closed stdin pipe still ends the forward instead of leaving `ssh`
         // behind.
-        let child = tokio::process::Command::new("ssh")
+        let mut cmd = tokio::process::Command::new(ssh);
+        apply_agent_tokio(&mut cmd, agent);
+        let child = cmd
             .args(target.options())
             .args([
                 "-T",
@@ -453,11 +508,15 @@ impl Tunnel {
     }
 
     fn exit_error(&self, status: std::process::ExitStatus) -> anyhow::Error {
-        let problem = key_problem(&self.stderr.lock().expect("ssh stderr"));
-        problem.map_or_else(
-            || anyhow::anyhow!("{}", self.exit_message(status)),
-            Into::into,
-        )
+        let stderr = self.stderr.lock().expect("ssh stderr").clone();
+        if let Some(problem) = key_problem(&stderr) {
+            return problem.into();
+        }
+        let message = self.exit_message(status);
+        if auth_problem(&stderr) {
+            return AuthProblem { message }.into();
+        }
+        anyhow::anyhow!("{message}")
     }
 
     fn exit_message(&self, status: std::process::ExitStatus) -> String {
@@ -538,12 +597,16 @@ fn ssh_error(error: std::io::Error) -> anyhow::Error {
 
 /// Ask the other machine where its Rex server listens, or whether the socket the user named
 /// is there.
-pub async fn resolve(target: &Target) -> Result<String> {
-    resolve_with(target, std::ffi::OsStr::new("ssh")).await
+pub async fn resolve(target: &Target, agent: Option<&Path>) -> Result<String> {
+    resolve_with(target, std::ffi::OsStr::new("ssh"), agent).await
 }
 
-async fn resolve_with(target: &Target, ssh: &std::ffi::OsStr) -> Result<String> {
-    let (stdout, stderr) = lookup(target, ssh).await?;
+async fn resolve_with(
+    target: &Target,
+    ssh: &std::ffi::OsStr,
+    agent: Option<&Path>,
+) -> Result<String> {
+    let (stdout, stderr) = lookup(target, ssh, agent).await?;
     enum Answer {
         Sock(String),
         None(String),
@@ -576,16 +639,21 @@ async fn resolve_with(target: &Target, ssh: &std::ffi::OsStr) -> Result<String> 
     }
 }
 
-async fn lookup(target: &Target, ssh: &std::ffi::OsStr) -> Result<(String, String)> {
+async fn lookup(
+    target: &Target,
+    ssh: &std::ffi::OsStr,
+    agent: Option<&Path>,
+) -> Result<(String, String)> {
     crate::platform::local::require_ssh()?;
     let script = match &target.socket {
         Some(socket) => check_script(socket),
         None => RESOLVE.to_owned(),
     };
+    let mut cmd = tokio::process::Command::new(ssh);
+    apply_agent_tokio(&mut cmd, agent);
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        tokio::process::Command::new(ssh)
-            .args(target.options())
+        cmd.args(target.options())
             .arg("--")
             .arg(target.destination())
             .arg(format!("sh -c '{script}'"))
@@ -601,11 +669,15 @@ async fn lookup(target: &Target, ssh: &std::ffi::OsStr) -> Result<(String, Strin
         if let Some(problem) = key_problem(&stderr) {
             return Err(problem.into());
         }
-        bail!(
+        let message = format!(
             "ssh {}: {}",
             target.destination(),
             last_line(&stderr).unwrap_or_else(|| format!("exited ({})", output.status))
         );
+        if auth_problem(&stderr) {
+            return Err(AuthProblem { message }.into());
+        }
+        bail!("{message}");
     }
     Ok((
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -870,5 +942,124 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn auth_failures_are_classified_below_host_key_problems() {
+        for stderr in [
+            "user@box: Permission denied (publickey).",
+            "user@box: Permission denied (publickey,keyboard-interactive).",
+            "Received disconnect from 10.0.0.1 port 22:2: Too many authentication failures",
+            "user@box: No more authentication methods to try.",
+            "sign_and_send_pubkey: signing failed for ED25519 \"key\" from agent: agent refused operation",
+        ] {
+            assert!(auth_problem(stderr), "{stderr:?}");
+            assert_eq!(key_problem(stderr), None, "{stderr:?}");
+        }
+        for non_auth in [
+            "ssh: connect to host box port 22: Connection refused",
+            "user@box: Permission denied (password).",
+            "Host key verification failed.",
+        ] {
+            assert!(!auth_problem(non_auth), "{non_auth:?}");
+        }
+        // Host key problems must keep higher priority when both lines appear.
+        let combined = "No ED25519 host key is known for box and you have requested strict checking.\nuser@box: Permission denied (publickey).\n";
+        assert_eq!(key_problem(combined), Some(KeyProblem::Unknown));
+    }
+
+    #[tokio::test]
+    async fn lookup_propagates_ssh_auth_sock_only_when_configured_without_identity_agent_flag() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join("fake-ssh");
+        let env_log = dir.path().join("env.log");
+        let args_log = dir.path().join("args.log");
+        std::fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{SSH_AUTH_SOCK-UNSET}}\" > '{}'\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'sock /run/rex/server.sock\\n'\n",
+                env_log.display(),
+                args_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let target = Target::parse("ssh://me@box").unwrap().unwrap();
+        let custom = dir.path().join("custom-agent.sock");
+
+        // Configured agent sets SSH_AUTH_SOCK and never passes -o IdentityAgent.
+        let sock = resolve_with(&target, ssh.as_os_str(), Some(&custom))
+            .await
+            .unwrap();
+        assert_eq!(sock, "/run/rex/server.sock");
+        assert_eq!(
+            std::fs::read_to_string(&env_log).unwrap(),
+            custom.display().to_string()
+        );
+        let args = std::fs::read_to_string(&args_log).unwrap();
+        assert!(
+            !args.to_ascii_lowercase().contains("identityagent"),
+            "must never pass -o IdentityAgent: {args}"
+        );
+
+        // System default (None) leaves inherited SSH_AUTH_SOCK untouched.
+        let expected_inherited =
+            std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "UNSET".to_owned());
+        resolve_with(&target, ssh.as_os_str(), None).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&env_log).unwrap(),
+            expected_inherited
+        );
+
+        // Auth failure from lookup maps to Problem::AuthFailed.
+        let deny = dir.path().join("deny-ssh");
+        std::fs::write(
+            &deny,
+            "#!/bin/sh\necho 'me@box: Permission denied (publickey).' >&2\nexit 255\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&deny, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let err = resolve_with(&target, deny.as_os_str(), Some(&custom))
+            .await
+            .unwrap_err();
+        assert_eq!(Problem::from_error(&err), Some(Problem::AuthFailed));
+        assert!(err.to_string().contains("Permission denied (publickey)"));
+    }
+
+    #[test]
+    fn ssh_config_identity_agent_takes_precedence_over_ssh_auth_sock_env() {
+        let Ok(probe) = std::process::Command::new("ssh").arg("-V").output() else {
+            return;
+        };
+        if !probe.status.success() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("ssh_config");
+        let config_agent = dir.path().join("from-config.sock");
+        let env_agent = dir.path().join("from-env.sock");
+        std::fs::write(
+            &config,
+            format!(
+                "Host special-box\n  IdentityAgent \"{}\"\n",
+                config_agent.display()
+            ),
+        )
+        .unwrap();
+        let mut cmd = std::process::Command::new("ssh");
+        apply_agent_std(&mut cmd, Some(&env_agent));
+        let out = cmd
+            .args(["-F", config.to_str().unwrap(), "-G", "special-box"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let identity_agent = stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("identityagent "))
+            .unwrap_or_default();
+        assert_eq!(identity_agent, config_agent.to_str().unwrap());
     }
 }

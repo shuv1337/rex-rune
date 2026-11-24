@@ -178,6 +178,7 @@ pub struct Workspace {
     #[cfg(test)]
     pub notification_outbox: super::notify::Outbox,
     pub integrations: super::integrations::Integrations,
+    pub ssh_agent: super::ssh_agent::SshAgentState,
     pub ssh_setup: super::ssh_setup::Setup,
     pub(super) ssh_install: Option<super::ssh_install::Install>,
     pub(super) install_serial: u64,
@@ -344,6 +345,7 @@ impl Workspace {
             #[cfg(test)]
             notification_outbox: Default::default(),
             integrations: Default::default(),
+            ssh_agent: Default::default(),
             ssh_setup: Default::default(),
             ssh_install: None,
             install_serial: 0,
@@ -406,7 +408,7 @@ impl Workspace {
         } else {
             self.settings.sessions.get(&host.endpoint).cloned()
         };
-        let connection = HostConnection::spawn_labeled(
+        let connection = HostConnection::spawn_with_ssh_agent(
             host.endpoint.clone(),
             preferred,
             cli.then(|| self.options.new.clone())
@@ -416,6 +418,7 @@ impl Workspace {
             index == self.active,
             self.declared_theme(),
             self.settings.client_label(),
+            self.ssh_agent_socket(),
         );
         let _ = connection
             .commands
@@ -1431,6 +1434,7 @@ impl Workspace {
                 action,
                 Intent::Theme(_)
                     | Intent::Chrome(_)
+                    | Intent::SshAgent(_)
                     | Intent::Choose(_)
                     | Intent::Shortcuts(_)
                     | Intent::Font(_)
@@ -1494,6 +1498,15 @@ impl Workspace {
                     self.panel.as_mut().unwrap().selected = current;
                 }
             }
+            Intent::ChooseSshAgent => self.open_ssh_agents(),
+            Intent::SshAgent(agent) => {
+                self.select_ssh_agent(agent);
+                match self.settings_back() {
+                    Some(back) => self.panel = Some(back),
+                    None => self.close_panel(tx),
+                }
+            }
+            Intent::SshAgentCustom => self.open_ssh_agent_custom(),
             Intent::Choose(index) => self.choose(index, tx),
             Intent::Chrome(chrome) => {
                 self.set_chrome(chrome, tx);
@@ -1603,6 +1616,9 @@ impl Workspace {
                 if self.settings_section == SettingsSection::Notifications {
                     self.notification_command(super::notify::Command::Check);
                     self.sound_request(super::sounds::Request::Check);
+                }
+                if self.settings_section == SettingsSection::Hosts {
+                    self.refresh_ssh_agents(false);
                 }
             }
             Intent::Updates => self.open_updates_settings(),
@@ -2039,6 +2055,7 @@ impl Workspace {
                     | PanelKind::Themes
                     | PanelKind::Fonts(_)
                     | PanelKind::Chromes
+                    | PanelKind::SshAgents
                     | PanelKind::Choice(_)
                     | PanelKind::Discover
                     | PanelKind::ShortcutMenu
@@ -2046,6 +2063,10 @@ impl Workspace {
             ) && previous
                 .as_ref()
                 .is_some_and(|p| matches!(p.kind, PanelKind::Settings)))
+            || (matches!(kind, PanelKind::Form(Form::SshAgentSocket))
+                && previous
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.kind, PanelKind::SshAgents)))
             || (matches!(
                 kind,
                 PanelKind::Form(Form::AddSsh(_) | Form::AddHost | Form::Discovered(_))
@@ -2089,6 +2110,9 @@ impl Workspace {
         }
         if section == SettingsSection::Shortcuts {
             self.reload_shortcuts();
+        }
+        if section == SettingsSection::Hosts {
+            self.refresh_ssh_agents(false);
         }
         if section == SettingsSection::Integrations
             && self.integrations.status == super::integrations::AgentStatus::Unknown
@@ -2274,6 +2298,8 @@ impl Workspace {
                 } else if let Form::DownloadFolder = form {
                     // Empty goes back to the system's Downloads folder.
                     super::downloads::folder_error(&values[0]).map(str::to_owned)
+                } else if let Form::SshAgentSocket = form {
+                    super::ssh_agent::validate_socket_form(&values[0]).err()
                 } else if values.first().is_none_or(|s| s.is_empty()) {
                     Some("Enter a name".to_owned())
                 } else if let Form::AddSsh(index) = form {
@@ -2327,6 +2353,13 @@ impl Workspace {
                         self.save();
                     }
                     Form::DownloadFolder => self.set_download_folder(&values[0]),
+                    Form::SshAgentSocket => {
+                        if let Ok(socket) = super::ssh_agent::validate_socket_form(&values[0]) {
+                            self.select_ssh_agent(rex_rune::settings::ssh::SshAgent::Socket(
+                                socket,
+                            ));
+                        }
+                    }
                     Form::RenameSession(None) => self.request("session.set_label", json!({"label":values[0]})),
                     Form::RenameSession(Some(session)) => {
                         self.session_request(&session, "session.set_label", json!({"label":values[0]}))

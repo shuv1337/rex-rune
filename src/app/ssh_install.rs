@@ -128,6 +128,7 @@ impl Workspace {
         #[cfg(not(test))]
         {
             let endpoint = self.ssh_install.as_ref().unwrap().endpoint.clone();
+            let agent = self.ssh_agent_socket();
             let handle = self.handle.clone();
             if let Err(error) = std::thread::Builder::new()
                 .name("rex-install-check".into())
@@ -138,7 +139,7 @@ impl Workspace {
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()?;
-                        Ok(rt.block_on(install::preflight(&target))?)
+                        Ok(rt.block_on(install::preflight(&target, agent.as_deref()))?)
                     })();
                     handle.update(move |s, _| s.install_checked(serial, result));
                 })
@@ -156,6 +157,8 @@ impl Workspace {
             return;
         }
         let present = self.install_host_exists(run);
+        #[cfg(not(test))]
+        let agent = self.ssh_agent_socket();
         let run = self.ssh_install.as_mut().unwrap();
         if !present {
             run.phase = Phase::Refused("This host is no longer saved.".into());
@@ -171,7 +174,7 @@ impl Workspace {
                         .expect("checked SSH endpoint")
                         .unwrap();
                     let handle = self.handle.clone();
-                    match Run::start(&target, move |event| {
+                    match Run::start(&target, agent.as_deref(), move |event| {
                         handle.update(move |s, _| s.install_event(serial, event));
                     }) {
                         Ok(process) => run.process = Some(process),

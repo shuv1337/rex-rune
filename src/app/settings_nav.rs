@@ -82,6 +82,9 @@ fn keywords(page: Page) -> &'static str {
             SettingsSection::Shortcuts => "keys keyboard bindings keymap hotkeys",
             SettingsSection::Integrations => "agents skill hooks claude codex opencode pi",
             SettingsSection::Notifications => "alerts sound bell desktop activity status",
+            SettingsSection::Hosts if rex_rune::platform::local::ssh_available() => {
+                "servers ssh agent 1password bitwarden secretive gpg yubikey custom socket identityagent tailscale tailnet endpoint remote control"
+            }
             SettingsSection::Hosts => "servers ssh tailscale tailnet endpoint remote control",
             SettingsSection::Updates => "upgrade version release",
             SettingsSection::About => "version build license licence credits",

@@ -145,6 +145,14 @@ fn form(s: &Workspace, form: &Form) -> El {
                 .wrap(),
         );
     }
+    if let Form::SshAgentSocket = form {
+        body = body.child(
+            text("Path to a Unix SSH agent socket (/… or ~/…). Saved even if the agent is not running yet; IdentityAgent in ~/.ssh/config still chooses the agent for hosts it names.")
+                .font(ui(12.))
+                .color(rgb(muted()))
+                .wrap(),
+        );
+    }
     // A tab the user named can go back to the title its program sets.
     let named_tab = matches!(form, Form::RenameWindow(_))
         && panel.tab.as_ref().is_some_and(|tab| s.tab_named(tab));

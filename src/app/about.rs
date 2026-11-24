@@ -116,6 +116,7 @@ pub(super) fn state(host: &HostModel) -> &'static str {
             rex_rune::ssh::Problem::UnknownKey => "host key not trusted",
             rex_rune::ssh::Problem::ChangedKey => "host key changed",
             rex_rune::ssh::Problem::NoServer(_) => "no server found over SSH",
+            rex_rune::ssh::Problem::AuthFailed => "SSH authentication failed",
         }
     } else if host.status.starts_with("Connecting") {
         "connecting"

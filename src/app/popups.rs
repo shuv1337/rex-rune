@@ -238,7 +238,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     // The values of one setting: a short list with the current one checked.
     let values = matches!(panel.kind, PanelKind::Choice(_) | PanelKind::Chromes);
     // Lists that mark the current value keep the check's column on every row, so names align.
-    let checks = values || matches!(panel.kind, PanelKind::Themes);
+    let checks = values || matches!(panel.kind, PanelKind::Themes | PanelKind::SshAgents);
     let [vw, vh] = viewport;
     // The control a Settings popup button opened this list from, `[x, y, w, h]` where layout
     // put it: the list goes right under it, or right above when there is more room there.
@@ -258,7 +258,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         220.
     } else if pane || matches!(panel.kind, PanelKind::ShortcutMenu) {
         280.
-    } else if sessions {
+    } else if sessions || matches!(panel.kind, PanelKind::SshAgents) {
         340.
     } else if discover {
         super::discover::LIST_WIDTH
@@ -344,6 +344,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         PanelKind::Hosts(_) => "hosts",
         PanelKind::Themes => "themes",
         PanelKind::Chromes => "chromes",
+        PanelKind::SshAgents => "ssh-agents",
         PanelKind::Choice(_) => "choice",
         PanelKind::Discover => "discover",
         PanelKind::Session => "session-menu",

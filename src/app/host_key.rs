@@ -35,7 +35,7 @@ impl Workspace {
         match self.hosts.get(host)?.model.ssh_problem.as_ref()? {
             Problem::UnknownKey => Some(KeyProblem::Unknown),
             Problem::ChangedKey => Some(KeyProblem::Changed),
-            Problem::NoServer(_) => None,
+            Problem::NoServer(_) | Problem::AuthFailed => None,
         }
     }
 
@@ -64,15 +64,22 @@ impl Workspace {
             &title,
             &[],
         );
+        let agent = self.ssh_agent_socket();
         if problem == KeyProblem::Changed {
             self.host_key.phase = Phase::Changed(None);
             self.key_work(serial, endpoint, async move {
-                Ok(Phase::Changed(hostkey::known_host_name(&target).await.ok()))
+                Ok(Phase::Changed(
+                    hostkey::known_host_name(&target, agent.as_deref())
+                        .await
+                        .ok(),
+                ))
             });
             return;
         }
         self.key_work(serial, endpoint, async move {
-            hostkey::scan(&target).await.map(Phase::Offer)
+            hostkey::scan(&target, agent.as_deref())
+                .await
+                .map(Phase::Offer)
         });
     }
 
@@ -88,9 +95,10 @@ impl Workspace {
             return;
         };
         let offer = offer.clone();
+        let agent = self.ssh_agent_socket();
         self.host_key.phase = Phase::Saving;
         self.key_work(serial, endpoint.into(), async move {
-            hostkey::trust(&offer).await?;
+            hostkey::trust(&offer, agent.as_deref()).await?;
             Ok(Phase::Saved(""))
         });
     }
