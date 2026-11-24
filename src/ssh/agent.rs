@@ -78,6 +78,10 @@ pub struct Report {
     pub detected: Vec<DetectedAgent>,
 }
 
+fn is_posix_absolute(path: &Path) -> bool {
+    path.is_absolute() || path.to_str().is_some_and(|s| s.starts_with('/'))
+}
+
 /// Pure table of known SSH agent socket locations for `os`.
 /// Never reads real environment variables or touches the filesystem.
 pub fn candidates_for(
@@ -85,12 +89,11 @@ pub fn candidates_for(
     home: Option<&Path>,
     runtime_dir: Option<&Path>,
     gnupg_home: Option<&Path>,
-    _env_sock: Option<&Path>,
 ) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
-    let home = home.filter(|p| !p.as_os_str().is_empty() && p.is_absolute());
-    let runtime_dir = runtime_dir.filter(|p| !p.as_os_str().is_empty() && p.is_absolute());
-    let gnupg_home = gnupg_home.filter(|p| !p.as_os_str().is_empty() && p.is_absolute());
+    let home = home.filter(|p| !p.as_os_str().is_empty() && is_posix_absolute(p));
+    let runtime_dir = runtime_dir.filter(|p| !p.as_os_str().is_empty() && is_posix_absolute(p));
+    let gnupg_home = gnupg_home.filter(|p| !p.as_os_str().is_empty() && is_posix_absolute(p));
 
     let push = |out: &mut Vec<Candidate>, name: &'static str, saved: String, path: PathBuf| {
         if !out.iter().any(|existing| existing.path == path) {
@@ -104,8 +107,10 @@ pub fn candidates_for(
     };
     let push_abs = |out: &mut Vec<Candidate>, name: &'static str, path: PathBuf| {
         let saved = match home.and_then(|h| path.strip_prefix(h).ok()) {
-            Some(rest) if !rest.as_os_str().is_empty() => format!("~/{}", rest.display()),
-            _ => path.to_string_lossy().into_owned(),
+            Some(rest) if !rest.as_os_str().is_empty() => {
+                format!("~/{}", rest.to_string_lossy().replace('\\', "/"))
+            }
+            _ => path.to_string_lossy().replace('\\', "/"),
         };
         push(out, name, saved, path);
     };
@@ -244,8 +249,9 @@ pub(crate) fn probe_io<S: Read + Write + ?Sized>(stream: &mut S) -> AgentHealth 
     }
     let keys = u32::from_be_bytes(count_buf);
     // Each identity entry in RFC SSH_AGENT_IDENTITIES_ANSWER has at least two 4-byte lengths
-    // (key blob length + comment length). Reject impossible headers without reading any blobs.
-    if keys > 0 && u64::from(len) < 5 + u64::from(keys) * 8 {
+    // (key blob length + comment length). A zero-key reply has exact body length 5 (type + nkeys).
+    // Reject impossible headers without reading any blobs.
+    if (keys == 0 && len != 5) || (keys > 0 && u64::from(len) < 5 + u64::from(keys) * 8) {
         return AgentHealth::NotAnswering("Malformed agent reply".into());
     }
     AgentHealth::Answering { keys }
@@ -267,7 +273,7 @@ fn io_health(error: std::io::Error) -> AgentHealth {
     }
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+pub fn same_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -294,7 +300,7 @@ pub fn discover_in(
     configured: &SshAgent,
 ) -> Report {
     let env_sock = env_sock.filter(|p| !p.as_os_str().is_empty());
-    let candidates = candidates_for(os, home, runtime_dir, gnupg_home, env_sock);
+    let candidates = candidates_for(os, home, runtime_dir, gnupg_home);
 
     let mut cache: HashMap<PathBuf, AgentHealth> = HashMap::new();
     let mut probe_cached = |path: &Path| -> AgentHealth {
@@ -392,7 +398,8 @@ mod tests {
         let runtime = Path::new("/fake/run/1000");
         let gnupg = Path::new("/fake/gnupg");
 
-        let linux = candidates_for(HostOs::Linux, Some(home), Some(runtime), Some(gnupg), None);
+        let linux = candidates_for(HostOs::Linux, Some(home), Some(runtime), Some(gnupg));
+        assert!(linux.iter().all(|c| !c.saved.contains('\\')));
         let linux_paths: Vec<(&str, PathBuf)> =
             linux.iter().map(|c| (c.name, c.path.clone())).collect();
         for expected in [
@@ -424,7 +431,8 @@ mod tests {
             );
         }
 
-        let mac = candidates_for(HostOs::MacOs, Some(home), None, Some(gnupg), None);
+        let mac = candidates_for(HostOs::MacOs, Some(home), None, Some(gnupg));
+        assert!(mac.iter().all(|c| !c.saved.contains('\\')));
         let mac_paths: Vec<(&str, PathBuf)> =
             mac.iter().map(|c| (c.name, c.path.clone())).collect();
         for expected in [
@@ -464,13 +472,7 @@ mod tests {
         }
 
         // Duplicate GNUPGHOME == ~/.gnupg is deduplicated.
-        let dedup = candidates_for(
-            HostOs::Linux,
-            Some(home),
-            None,
-            Some(&home.join(".gnupg")),
-            None,
-        );
+        let dedup = candidates_for(HostOs::Linux, Some(home), None, Some(&home.join(".gnupg")));
         assert_eq!(
             dedup
                 .iter()
@@ -479,7 +481,7 @@ mod tests {
             1
         );
 
-        assert!(candidates_for(HostOs::Windows, Some(home), None, None, None).is_empty());
+        assert!(candidates_for(HostOs::Windows, Some(home), None, None).is_empty());
     }
 
     #[test]
@@ -546,6 +548,11 @@ mod tests {
         // Impossible key count for stated length
         assert!(matches!(
             run(vec![0, 0, 0, 5, 12, 0, 0, 0, 3]),
+            AgentHealth::NotAnswering(msg) if msg.contains("Malformed")
+        ));
+        // Zero keys with trailing garbage (len != 5) rejected
+        assert!(matches!(
+            run(vec![0, 0, 0, 6, 12, 0, 0, 0, 0, 0xff]),
             AgentHealth::NotAnswering(msg) if msg.contains("Malformed")
         ));
     }

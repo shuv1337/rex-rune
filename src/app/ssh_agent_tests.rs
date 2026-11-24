@@ -73,7 +73,7 @@ fn ssh_agent_never_probes_at_startup_and_drops_stale_generations() {
     // Generation-2 reply with keys > 0 updates state and wakes hosts!
     let good = sample_report(AgentHealth::Answering { keys: 2 }, Some("1Password"));
     ws.apply_ssh_agent_probe(2, good.clone());
-    assert_eq!(ws.ssh_agent.state, ProbeState::Ready(good));
+    assert_eq!(ws.ssh_agent.state, ProbeState::Ready(good.clone()));
     assert_eq!(ws.ssh_agent.sent_host_updates.len(), 2);
     assert!(
         ws.ssh_agent
@@ -81,6 +81,39 @@ fn ssh_agent_never_probes_at_startup_and_drops_stale_generations() {
             .iter()
             .all(|(_, sock, wake)| sock.is_none() && *wake)
     );
+
+    // A non-waking re-entry while a waking Refresh is in flight must preserve pending_wake.
+    ws.ssh_agent.sent_host_updates.clear();
+    ws.refresh_ssh_agents(true);
+    ws.refresh_ssh_agents(false);
+    ws.apply_ssh_agent_probe(4, good);
+    assert_eq!(ws.ssh_agent.sent_host_updates.len(), 2);
+    assert!(
+        ws.ssh_agent
+            .sent_host_updates
+            .iter()
+            .all(|(_, _, wake)| *wake)
+    );
+}
+
+#[test]
+fn custom_socket_aliasing_detected_agent_marks_existing_row_without_duplicating() {
+    let mut ws = workspace_hosts(1);
+    ws.ssh_agent.available = true;
+    ws.settings.ssh.agent = SshAgent::Socket("/fake/home/.1password/agent.sock".into());
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    ws.open_section(SettingsSection::Hosts);
+    ws.apply_ssh_agent_probe(
+        1,
+        sample_report(AgentHealth::Answering { keys: 2 }, Some("1Password")),
+    );
+
+    let entries = ws.ssh_agent_entries();
+    // System default + 1Password + Bitwarden + Custom socket… (no duplicate custom row).
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.iter().filter(|e| e.current).count(), 1);
+    assert!(entries.iter().any(|e| e.label == "1Password" && e.current));
+    assert!(!entries.iter().any(|e| e.label == "Custom socket"));
 }
 
 #[test]
@@ -280,6 +313,18 @@ fn ssh_section_is_omitted_when_unavailable_and_saved_agent_is_preserved() {
         ws.ssh_agent.probe_requests.is_empty(),
         "unavailable platform must never probe"
     );
+
+    // Search must also omit SSH-agent aliases when SSH is unavailable.
+    for query in ["1password", "identityagent"] {
+        ws.settings_nav.search.text = query.into();
+        ws.settings_search_changed();
+        assert!(
+            ws.settings_nav.hits().is_empty(),
+            "search {query:?} must not match when SSH is unavailable: {:?}",
+            ws.settings_nav.hits()
+        );
+    }
+    ws.clear_settings_search();
 
     let mut rt = runtime_at(ws, (1024., 700.));
     settle(&mut rt);

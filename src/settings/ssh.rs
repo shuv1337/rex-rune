@@ -102,12 +102,16 @@ pub fn parse_socket(input: &str) -> Result<String, &'static str> {
     Ok(path.to_owned())
 }
 
+fn is_posix_absolute(path: &Path) -> bool {
+    path.is_absolute() || path.to_str().is_some_and(|s| s.starts_with('/'))
+}
+
 /// Expand a validated socket path (`/` or `~/`) against `home`.
 pub fn expand_socket(socket: &str, home: &Path) -> Option<PathBuf> {
     let path = parse_socket(socket).ok()?;
     match path.strip_prefix("~/") {
         Some(rest) => {
-            if home.as_os_str().is_empty() || !home.is_absolute() {
+            if home.as_os_str().is_empty() || !is_posix_absolute(home) {
                 return None;
             }
             Some(home.join(rest))

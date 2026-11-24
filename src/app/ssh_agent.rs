@@ -95,7 +95,7 @@ impl Workspace {
         }
         self.ssh_agent.generation += 1;
         let generation = self.ssh_agent.generation;
-        self.ssh_agent.pending_wake = wake_on_ready;
+        self.ssh_agent.pending_wake |= wake_on_ready;
         self.ssh_agent.state = ProbeState::Checking;
         let configured = self.settings.ssh.agent.clone();
 
@@ -211,6 +211,7 @@ impl Workspace {
         system.current = self.settings.ssh.agent.is_system();
         entries.push(system);
 
+        let saved_resolved = self.ssh_agent_socket();
         let mut matched_saved = self.settings.ssh.agent.is_system();
         if let Some(report) = report {
             for agent in &report.detected {
@@ -225,8 +226,10 @@ impl Workspace {
                 } else {
                     agent.name.to_owned()
                 };
-                let current =
-                    matches!(&self.settings.ssh.agent, SshAgent::Socket(s) if s == &agent.saved);
+                let current = matches!(&self.settings.ssh.agent, SshAgent::Socket(s) if s == &agent.saved)
+                    || saved_resolved.as_deref().is_some_and(|resolved| {
+                        rex_rune::ssh::agent::same_path(resolved, &agent.path)
+                    });
                 matched_saved |= current;
                 let mut entry = Entry::new(
                     label,

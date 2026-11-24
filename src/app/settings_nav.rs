@@ -68,7 +68,7 @@ impl Page {
 }
 
 /// Discovery aliases name existing pages, not promises of controls on them.
-fn keywords(page: Page) -> &'static str {
+fn keywords(page: Page, ssh_available: bool) -> &'static str {
     match page {
         Page::Sub(SubPage::AdvancedFont) => "font leading tracking spacing fallback bold italic",
         Page::Section(section) => match section {
@@ -82,7 +82,7 @@ fn keywords(page: Page) -> &'static str {
             SettingsSection::Shortcuts => "keys keyboard bindings keymap hotkeys",
             SettingsSection::Integrations => "agents skill hooks claude codex opencode pi",
             SettingsSection::Notifications => "alerts sound bell desktop activity status",
-            SettingsSection::Hosts if rex_rune::platform::local::ssh_available() => {
+            SettingsSection::Hosts if ssh_available => {
                 "servers ssh agent 1password bitwarden secretive gpg yubikey custom socket identityagent tailscale tailnet endpoint remote control"
             }
             SettingsSection::Hosts => "servers ssh tailscale tailnet endpoint remote control",
@@ -383,7 +383,7 @@ fn rank(query: &str, words: &[&str], label: &str, more: &str) -> Option<u8> {
 
 /// Pages by title and keywords, rows by label, helper and section. Best match first;
 /// equal ranks keep the sidebar order and each page's row order.
-fn search(index: &[Indexed], query: &str) -> Vec<Hit> {
+fn search(index: &[Indexed], query: &str, ssh_available: bool) -> Vec<Hit> {
     let query = query.trim().to_lowercase();
     let words: Vec<&str> = query.split_whitespace().collect();
     if words.is_empty() {
@@ -391,7 +391,7 @@ fn search(index: &[Indexed], query: &str) -> Vec<Hit> {
     }
     let mut hits = Vec::new();
     for page in Page::all() {
-        if let Some(rank) = rank(&query, &words, page.title(), keywords(page)) {
+        if let Some(rank) = rank(&query, &words, page.title(), keywords(page, ssh_available)) {
             hits.push((
                 rank,
                 Hit {
@@ -513,10 +513,12 @@ impl Workspace {
         if self.settings_nav.index.is_none() {
             self.settings_nav.index = Some(Page::all().flat_map(|page| read(self, page)).collect());
         }
+        let ssh_available = self.ssh_agent.available;
         let nav = &mut self.settings_nav;
         nav.hits = search(
             nav.index.as_deref().unwrap_or_default(),
             nav.search.text.trim(),
+            ssh_available,
         );
         nav.selected = 0;
     }
@@ -713,19 +715,32 @@ mod tests {
                 helper: "Matching terminal colours.".into(),
             },
         ];
-        assert_eq!(search(&index, "  PADDING ")[0].label, "Pane padding");
+        assert_eq!(search(&index, "  PADDING ", true)[0].label, "Pane padding");
         assert_eq!(
-            search(&index, "sound")[0].page,
+            search(&index, "sound", true)[0].page,
             Page::Section(SettingsSection::Notifications)
         );
-        assert!(!search(&index, "sound")[0].row);
-        assert_eq!(search(&index, "typography")[0].label, "Font size");
+        assert!(!search(&index, "sound", true)[0].row);
+        assert_eq!(search(&index, "typography", true)[0].label, "Font size");
         assert!(
-            search(&index, "terminal padding")
+            search(&index, "terminal padding", true)
                 .iter()
                 .any(|hit| hit.label == "Pane padding")
         );
-        assert!(search(&index, "font zebra").is_empty());
-        assert!(search(&index, "   ").is_empty());
+        assert!(search(&index, "font zebra", true).is_empty());
+        assert!(search(&index, "   ", true).is_empty());
+        assert!(
+            search(&index, "1password", true)
+                .iter()
+                .any(|hit| hit.page == SettingsSection::Hosts)
+        );
+        assert!(
+            search(&index, "1password", false).is_empty(),
+            "SSH agent aliases must not match when SSH is unavailable"
+        );
+        assert!(
+            search(&index, "identityagent", false).is_empty(),
+            "IdentityAgent alias must not match when SSH is unavailable"
+        );
     }
 }
