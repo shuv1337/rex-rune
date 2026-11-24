@@ -356,24 +356,19 @@ impl Frame {
         Some((row * cols + start, row * cols + end))
     }
     /// An explicit prompt jump keeps the viewport top visible in a smaller pane. Otherwise
-    /// cropping retains the newest rows, the program cursor, the copy-mode cursor, or a
+    /// cropping retains the newest rows, the program cursor, the copy-mode crop origin, or a
     /// selected search match. Search navigation clears the prompt anchor; an old match must
     /// not hide a new prompt. This never changes the server size.
     pub fn display_row_start(&self, visible_rows: usize) -> usize {
         let visible = visible_rows.max(1);
         let bottom = (self.rows as usize).saturating_sub(visible);
-        if self.prompt_anchor && self.copy.is_none() {
+        if let Some(copy) = self.copy {
+            return usize::from(copy.display_start).min(bottom);
+        }
+        if self.prompt_anchor {
             return 0;
         }
         let start = self.cursor.map_or(bottom, |(_, y)| bottom.min(y as usize));
-        if let Some(copy) = self.copy {
-            let row = usize::from(copy.cursor.1).min((self.rows as usize).saturating_sub(1));
-            return if row < start {
-                row
-            } else {
-                start.max((row + 1).saturating_sub(visible)).min(bottom)
-            };
-        }
         let Some(found) = self.search.as_ref().and_then(|s| s.selected) else {
             return start;
         };
@@ -383,25 +378,6 @@ impl Frame {
         } else {
             start.max((row + 1).saturating_sub(visible)).min(bottom)
         }
-    }
-
-    /// Like [`Self::display_row_start`], but when copy mode is active on a cropped pane it
-    /// preserves `previous` while the copy cursor stays inside `previous..previous + visible_rows`,
-    /// shifting by the minimum amount only when the cursor leaves that window so cropped
-    /// navigation does not double-scroll.
-    pub fn display_row_start_at(&self, visible_rows: usize, previous: usize) -> usize {
-        let visible = visible_rows.max(1);
-        let bottom = (self.rows as usize).saturating_sub(visible);
-        if let Some(copy) = self.copy {
-            let row = usize::from(copy.cursor.1).min((self.rows as usize).saturating_sub(1));
-            let start = previous.min(bottom);
-            return if row < start {
-                row
-            } else {
-                start.max((row + 1).saturating_sub(visible)).min(bottom)
-            };
-        }
-        self.display_row_start(visible_rows)
     }
 
     pub fn selected_text(&self, a: usize, b: usize) -> String {
@@ -643,28 +619,24 @@ mod tests {
         assert_eq!(hidden_cursor.cursor_at, Some((0, 1)));
         assert_eq!(hidden_cursor.display_row_start(3), 2);
 
-        // Copy-mode cursor overrides bottom alignment on cropped panes, and
-        // display_row_start_at keeps the previous crop window stable without double-scrolling.
+        // Copy-mode display_start is the single source of truth on cropped panes, clamped
+        // cleanly to rows - visible without separate UI crop tracking.
         let mut with_copy = hidden_cursor;
         with_copy.copy = Some(CopyView {
             epoch: 1,
             cursor: (0, 0),
             wide: false,
             unit: None,
+            display_start: 0,
         });
         assert_eq!(with_copy.display_row_start(3), 0);
-        assert_eq!(with_copy.display_row_start_at(3, 2), 0);
-        with_copy.copy.as_mut().unwrap().cursor = (0, 2);
+        with_copy.copy.as_mut().unwrap().display_start = 1;
+        assert_eq!(with_copy.display_row_start(3), 1);
+        with_copy.copy.as_mut().unwrap().display_start = 99;
         assert_eq!(
-            with_copy.display_row_start_at(3, 0),
-            0,
-            "row 2 stays inside 0..3 without shifting"
-        );
-        with_copy.copy.as_mut().unwrap().cursor = (0, 3);
-        assert_eq!(
-            with_copy.display_row_start_at(3, 0),
-            1,
-            "row 3 shifts minimally to 1..4"
+            with_copy.display_row_start(3),
+            2,
+            "clamped to rows - visible"
         );
     }
 

@@ -88,11 +88,14 @@ impl Controller {
         self.revision = input.revision;
         let screen = terminal.active_screen()? as i32;
         if self.screen != Some(screen) {
+            let switched = self.screen.is_some();
             self.gesture.reset(terminal);
             self.pointer = None;
-            terminal.set_selection(None)?;
+            if switched {
+                terminal.set_selection(None)?;
+            }
             self.screen = Some(screen);
-            if !matches!(input.phase, Phase::Down(_) | Phase::All) {
+            if !matches!(input.phase, Phase::Down(_) | Phase::All | Phase::Clear) {
                 return Ok(());
             }
         }
@@ -158,6 +161,10 @@ impl Controller {
             }
         }
         Ok(())
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.pointer.is_some()
     }
 
     pub fn autoscrolling(&self, terminal: &Terminal) -> bool {

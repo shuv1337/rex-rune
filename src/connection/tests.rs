@@ -2046,6 +2046,7 @@ async fn copy_mode_worker_round_trip_yank_generation_guard_and_auto_exit() {
             assert!(generation >= 1);
 
             // 1. Stale generation is ignored without stamping selection_revision or entering copy mode.
+            let rev_before = model.lock().unwrap().revision;
             cmd_tx
                 .send(DataCommand::CopyMode(CopyModeInput {
                     generation: generation + 99,
@@ -2055,6 +2056,24 @@ async fn copy_mode_worker_round_trip_yank_generation_guard_and_auto_exit() {
                     op: CopyModeOp::Begin,
                 }))
                 .unwrap();
+            // Deterministic fence: a benign CursorStyle update proves the stale CopyMode
+            // command ahead of it in the FIFO channel was already processed and ignored.
+            cmd_tx
+                .send(DataCommand::CursorStyle(crate::terminal::CursorShape::Bar))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| m.revision > rev_before).await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(
+                    frame.copy, None,
+                    "stale generation must not enter copy mode"
+                );
+                assert_eq!(
+                    frame.selection_revision, 0,
+                    "stale generation must not stamp selection_revision"
+                );
+            }
 
             // 2. Valid Begin + Top + Select(Char) + WordEnd -> check frame.copy & selection_revision.
             cmd_tx
@@ -2114,6 +2133,7 @@ async fn copy_mode_worker_round_trip_yank_generation_guard_and_auto_exit() {
                         cursor: (4, 0),
                         wide: false,
                         unit: Some(CopyUnit::Char),
+                        display_start: 0,
                     })
                 );
                 assert_eq!(frame.selection_text.as_deref(), Some("alpha"));
@@ -2203,6 +2223,240 @@ async fn copy_mode_worker_round_trip_yank_generation_guard_and_auto_exit() {
             ));
 
             drop(push_tx);
+            cmd_tx.send(DataCommand::Stop).unwrap();
+            worker.await.unwrap();
+        })
+        .await;
+
+    ticket_task.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn copy_mode_and_pointer_selection_coordinate_without_clobber_or_orphans() {
+    use crate::terminal::{
+        copy_mode::{CopyModeInput, CopyModeOp, CopyMotion, CopyUnit},
+        selection::{Geometry, Input as SelInput, Phase},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+
+    let mut source = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 20,
+        rows: 4,
+        max_scrollback: 1 << 16,
+    })
+    .unwrap();
+    for i in 0..20 {
+        source.vt_write(format!("line-{i:02} alpha beta\r\n").as_bytes());
+    }
+    let snapshot = ghostty_vt::snapshot::encode(&source).unwrap().to_vec();
+    drop(source);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, wire::PROTOCOL).await;
+        let _hello = ws.next().await.unwrap().unwrap().into_data();
+        let mut welcome = vec![0u8; 32];
+        welcome[0] = 0x81;
+        welcome[24] = 1;
+        ws.send(Message::Binary(welcome.into())).await.unwrap();
+        ws.send(Message::Binary(snapshot.into())).await.unwrap();
+        while ws.next().await.is_some() {}
+    });
+
+    let (host_tx, host_rx) = flume::unbounded::<HostCommand>();
+    let ticket_task = tokio::spawn(async move {
+        if let Ok(HostCommand::Ticket { reply, .. }) = host_rx.recv_async().await {
+            let _ = reply.send(Ok(TerminalTicket {
+                token: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                bundled: false,
+            }));
+        }
+    });
+
+    let model = Arc::new(Mutex::new(Model::default()));
+    let (wake_tx, wake_rx) = flume::bounded(1);
+    let (host_wake_tx, _host_wake_rx) = flume::bounded(1);
+    let (cmd_tx, cmd_rx) = flume::unbounded::<DataCommand>();
+    let pane = PaneShared {
+        model: model.clone(),
+        wake: wake_tx,
+        host_wake: host_wake_tx,
+    };
+
+    async fn wait_for(
+        model: &Arc<Mutex<Model>>,
+        wake_rx: &flume::Receiver<()>,
+        pred: impl Fn(&Model) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pred(&model.lock().unwrap()) {
+                    return;
+                }
+                wake_rx.recv_async().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let geom = Geometry {
+        columns: 20,
+        cell_width: 10,
+        padding_left: 0,
+        screen_height: 80,
+    };
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let worker = tokio::task::spawn_local(run_data(
+                endpoint,
+                SESSION.into(),
+                "block:coord".into(),
+                host_tx,
+                cmd_rx,
+                pane,
+            ));
+
+            wait_for(&model, &wake_rx, |m| m.connected && m.frame.is_some()).await;
+            let generation = model.lock().unwrap().restore_generation;
+
+            // (a) Active edge pointer drag (which would autoscroll) -> CopyMode::Begin stops the drag.
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 1,
+                    phase: Phase::Down(1),
+                    at: (0, 2),
+                    position: (0., 40.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 2,
+                    phase: Phase::Move,
+                    at: (0, 0),
+                    position: (0., -20.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 3,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 3)
+            })
+            .await;
+            let cursor_after_begin = model.lock().unwrap().frame.as_ref().unwrap().copy.unwrap();
+            assert_eq!(
+                model.lock().unwrap().frame.as_ref().unwrap().selection_text,
+                None,
+                "Begin clears prior pointer selection and stops drag"
+            );
+
+            // (b) Select(Char) in copy mode -> stray Selection(Phase::Up) and idle Phase::Move
+            //     must NOT drop copy mode's ownership or leave an orphaned Ghostty highlight on End.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 4,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 5,
+                    visible_rows: None,
+                    op: CopyModeOp::Select(CopyUnit::Char),
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 6,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::WordEnd,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            // Stray Phase::Up + idle Phase::Move while no drag is active:
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 7,
+                    phase: Phase::Up,
+                    at: (0, 0),
+                    position: (0., 0.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 8,
+                    phase: Phase::Move,
+                    at: (2, 0),
+                    position: (20., 0.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 8)
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(frame.copy.unwrap().unit, Some(CopyUnit::Char));
+                assert_eq!(frame.selection_text.as_deref(), Some("line"));
+                assert_eq!(cursor_after_begin.epoch, 1);
+            }
+
+            // Now End copy mode: Ghostty's selection MUST be cleared (no orphan highlight).
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 9,
+                    visible_rows: None,
+                    op: CopyModeOp::End,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 9)
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(frame.copy, None);
+                assert_eq!(
+                    frame.selection_text, None,
+                    "End clears copy-mode selection cleanly after stray pointer Up/Move"
+                );
+            }
+
             cmd_tx.send(DataCommand::Stop).unwrap();
             worker.await.unwrap();
         })

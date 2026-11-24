@@ -2603,6 +2603,20 @@ async fn resize(
     Ok(())
 }
 
+fn fail_copy_mode(
+    copy_mode: &mut crate::terminal::copy_mode::Controller,
+    shared: &PaneShared,
+    error: anyhow::Error,
+) {
+    let ended = copy_mode.reset();
+    shared.update(|m| {
+        m.notice = Some(format!("Copy mode failed: {error:#}"));
+        if let Some(epoch) = ended {
+            m.copy_ended_epoch = m.copy_ended_epoch.max(epoch);
+        }
+    });
+}
+
 async fn run_data(
     endpoint: String,
     session: String,
@@ -2673,12 +2687,29 @@ async fn run_data(
                         dirty = true;
                     }
                     command = commands.recv_async() => match command {
-                        Ok(DataCommand::Selection(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &stream.terminal { selection.apply(terminal, input)?; selection_revision = selection.revision; copy_mode.clear_owned_selection(); dirty = true; },
+                        Ok(DataCommand::Selection(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &stream.terminal {
+                            let replaces = matches!(
+                                input.phase,
+                                crate::terminal::selection::Phase::Down(_)
+                                    | crate::terminal::selection::Phase::Clear
+                                    | crate::terminal::selection::Phase::All
+                            ) || (matches!(input.phase, crate::terminal::selection::Phase::Move)
+                                && selection.is_dragging());
+                            selection.apply(terminal, input)?;
+                            selection_revision = selection.revision;
+                            if replaces {
+                                copy_mode.clear_owned_selection();
+                            }
+                            dirty = true;
+                        },
                         Ok(DataCommand::CopyMode(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &mut stream.terminal {
                             match copy_mode.apply(terminal, Some(&search), input) {
                                 Ok(outcome) if outcome.accepted => {
                                     prompt_anchor = false;
                                     selection_revision = input.revision;
+                                    if let Err(error) = selection.stop(terminal) {
+                                        shared.update(|m| m.notice = Some(format!("Copy mode failed: {error:#}")));
+                                    }
                                     if let Some(yank) = outcome.yank {
                                         pending_yank = Some(yank);
                                     }
@@ -2686,13 +2717,22 @@ async fn run_data(
                                 }
                                 Ok(_) => {}
                                 Err(error) => {
-                                    shared.update(|m| m.notice = Some(format!("Copy mode failed: {error:#}")));
+                                    fail_copy_mode(&mut copy_mode, &shared, error);
                                     dirty = true;
                                 }
                             }
                         },
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } else if !value && let Some(terminal) = &stream.terminal { selection.stop(terminal)?; } visible = value; }
-                        Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); selection.after_scroll(terminal)?; copy_mode.after_viewport_scroll(terminal)?; dirty = true; },
+                        Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal {
+                            prompt_anchor = false;
+                            let before = terminal.scrollbar()?.offset as usize;
+                            terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta));
+                            selection.after_scroll(terminal)?;
+                            if let Err(error) = copy_mode.after_viewport_scroll_delta(terminal, before, delta) {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
+                            dirty = true;
+                        },
                         Ok(DataCommand::CursorStyle(shape)) => { cursor_style = shape; stream.set_cursor_style(shape)?; dirty = true; },
                         Ok(DataCommand::PromptStep(older)) => if let Some(terminal) = &mut stream.terminal {
                             let before = terminal.scrollbar()?.offset;
@@ -2701,14 +2741,33 @@ async fn run_data(
                                 prompt_anchor = !terminal.is_viewport_active()?;
                             }
                             selection.after_scroll(terminal)?;
-                            copy_mode.after_viewport_scroll(terminal)?;
+                            if let Err(error) = copy_mode.after_viewport_scroll(terminal) {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
                             dirty = true;
                         },
-                        Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); copy_mode.after_viewport_scroll(terminal)?; dirty = true; },
+                        Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal {
+                            prompt_anchor = false;
+                            terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom);
+                            if let Err(error) = copy_mode.after_scroll_bottom(terminal) {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
+                            dirty = true;
+                        },
                         // A search that fails is dropped with a notice; the terminal's stream is not its to end.
                         Ok(DataCommand::Search(needle)) => { prompt_anchor = false; if let Err(error) = search.set_needle(stream.terminal.as_ref(), needle) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } dirty = true; },
                         // Ghostty scrolls the selected match into view.
-                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; if let Err(error) = search.step(terminal, older) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } selection.after_scroll(terminal)?; if copy_mode.is_active() { let _ = copy_mode.move_to_match(terminal, &search); } dirty = true; },
+                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &mut stream.terminal {
+                            prompt_anchor = false;
+                            if let Err(error) = search.step(terminal, older) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); }
+                            selection.after_scroll(terminal)?;
+                            if copy_mode.is_active()
+                                && let Err(error) = copy_mode.move_to_match(terminal, &search)
+                            {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
+                            dirty = true;
+                        },
                         Ok(DataCommand::Reconnect) => { shared.status("Reconnecting terminal…", false); return Ok(false); }
                         Ok(DataCommand::Stop) | Err(_) => return Ok(true),
                     },
@@ -2722,19 +2781,19 @@ async fn run_data(
                                 Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); false }
                             };
                             if let Err(error) = copy_mode.sync(terminal) {
-                                let ended = copy_mode.reset();
-                                shared.update(|m| {
-                                    m.notice = Some(format!("Copy mode failed: {error:#}"));
-                                    if let Some(epoch) = ended {
-                                        m.copy_ended_epoch = m.copy_ended_epoch.max(epoch);
-                                    }
-                                });
+                                fail_copy_mode(&mut copy_mode, &shared, error);
                             }
                             let mut frame = renderer.frame(terminal)?;
                             if terminal.is_viewport_active()? { prompt_anchor = false; }
                             frame.prompt_anchor = prompt_anchor;
                             frame.selection_revision = selection_revision;
-                            frame.copy = copy_mode.view(terminal)?;
+                            frame.copy = match copy_mode.view(terminal) {
+                                Ok(view) => view,
+                                Err(error) => {
+                                    fail_copy_mode(&mut copy_mode, &shared, error);
+                                    None
+                                }
+                            };
                             frame.search = match search.results(terminal) {
                                 Ok(results) => results,
                                 Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); None }

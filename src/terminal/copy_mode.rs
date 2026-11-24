@@ -124,6 +124,9 @@ pub struct CopyView {
     /// `true` iff the cell under `cursor` is a wide character (`CellWide::Wide`).
     pub wide: bool,
     pub unit: Option<CopyUnit>,
+    /// First viewport row shown on a cropped pane (`0` on uncropped panes).
+    /// Single source of truth consumed by [`crate::terminal::Frame::display_row_start`].
+    pub display_start: u16,
 }
 
 /// Race-free yank payload emitted by [`CopyModeOp::Yank`] or [`CopyModeOp::YankLine`].
@@ -216,6 +219,12 @@ impl Controller {
         input: CopyModeInput,
     ) -> Result<ApplyOutcome> {
         if matches!(input.op, CopyModeOp::Begin) {
+            if input.epoch == 0 || input.epoch <= self.ended_epoch {
+                return Ok(ApplyOutcome {
+                    accepted: false,
+                    yank: None,
+                });
+            }
             self.begin(terminal, input.epoch, input.visible_rows)?;
             return Ok(ApplyOutcome {
                 accepted: true,
@@ -290,8 +299,7 @@ impl Controller {
                 })
             }
             CopyModeOp::Scroll(delta) => {
-                terminal.scroll_viewport(ScrollViewport::Delta(delta as isize));
-                self.clamp_cursor_to_viewport(terminal)?;
+                self.scroll_view(terminal, delta as isize)?;
                 Ok(ApplyOutcome {
                     accepted: true,
                     yank: None,
@@ -318,7 +326,7 @@ impl Controller {
                 let yank = self.yank_lines(terminal, input.epoch, input.revision, count)?;
                 Ok(ApplyOutcome {
                     accepted: true,
-                    yank: Some(yank),
+                    yank,
                 })
             }
         }
@@ -326,9 +334,10 @@ impl Controller {
 
     /// Reconcile copy mode after incoming PTY output, resize/reflow, or screen switches.
     ///
-    /// Keeps the tracked cursor pinned to its exact content, reveals it if new output
-    /// pushed it off the active viewport, re-normalizes off `SpacerTail`, re-syncs
-    /// any active selection, and auto-ends cleanly on screen switch or lost tracked ref.
+    /// Keeps the tracked cursor and anchor pinned to their exact content, reveals the
+    /// cursor if new output pushed it off the active viewport, re-normalizes both off
+    /// `SpacerTail`/`SpacerHead`, re-syncs any active selection, and auto-ends cleanly
+    /// on screen switch or lost tracked ref.
     pub fn sync(&mut self, terminal: &mut Terminal) -> Result<()> {
         if !self.validate_alive(terminal)? {
             return Ok(());
@@ -357,18 +366,104 @@ impl Controller {
                 }),
             )?;
         }
+        if let Some(anchor) = active.anchor.as_mut() {
+            let Some(apt) = anchor.point(PointSpace::Screen)? else {
+                self.auto_end(terminal, true)?;
+                return Ok(());
+            };
+            let ay = (apt.y as usize).min(total_rows - 1);
+            let ax = normalize_col(terminal, ay, apt.x)?;
+            if ax != apt.x || ay as u32 != apt.y {
+                anchor.set(
+                    terminal,
+                    Point::Screen(PointCoordinate {
+                        x: ax,
+                        y: ay as u32,
+                    }),
+                )?;
+            }
+        }
         ensure_visible(terminal, active, y)?;
         sync_selection(terminal, active)?;
         Ok(())
     }
 
     /// Clamp the copy cursor into the current viewport after an explicit scroll
-    /// (`Scroll`, `PromptStep`, `Bottom`) while keeping copy mode active.
+    /// (`PromptStep`) while keeping copy mode active.
     pub fn after_viewport_scroll(&mut self, terminal: &mut Terminal) -> Result<()> {
         if !self.validate_alive(terminal)? {
             return Ok(());
         }
         self.clamp_cursor_to_viewport(terminal)
+    }
+
+    /// Reconcile copy mode after an explicit delta scroll (`DataCommand::Scroll`),
+    /// shifting the cropped window when Ghostty's viewport saturates at top or bottom
+    /// so every row remains reachable on cropped panes.
+    pub fn after_viewport_scroll_delta(
+        &mut self,
+        terminal: &mut Terminal,
+        before_offset: usize,
+        delta: isize,
+    ) -> Result<()> {
+        if !self.validate_alive(terminal)? {
+            return Ok(());
+        }
+        self.apply_crop_overflow(terminal, before_offset, delta)?;
+        self.clamp_cursor_to_viewport(terminal)
+    }
+
+    /// Reconcile copy mode after scrolling to bottom (`DataCommand::Bottom`), advancing
+    /// a cropped pane's `crop_start` to `rows - visible_rows` so the newest rows are
+    /// shown and clamping the cursor into the visible slice.
+    pub fn after_scroll_bottom(&mut self, terminal: &mut Terminal) -> Result<()> {
+        if !self.validate_alive(terminal)? {
+            return Ok(());
+        }
+        if let Some(active) = &mut self.active {
+            let rows = terminal.rows()?;
+            let vis = effective_visible(active.visible_rows, rows);
+            active.crop_start = usize::from(rows).saturating_sub(vis);
+        }
+        self.clamp_cursor_to_viewport(terminal)
+    }
+
+    fn scroll_view(&mut self, terminal: &mut Terminal, delta: isize) -> Result<()> {
+        let before = terminal.scrollbar()?.offset as usize;
+        terminal.scroll_viewport(ScrollViewport::Delta(delta));
+        self.apply_crop_overflow(terminal, before, delta)?;
+        self.clamp_cursor_to_viewport(terminal)
+    }
+
+    fn apply_crop_overflow(
+        &mut self,
+        terminal: &Terminal,
+        before_offset: usize,
+        delta: isize,
+    ) -> Result<()> {
+        let Some(active) = &mut self.active else {
+            return Ok(());
+        };
+        let rows = terminal.rows()?;
+        if rows == 0 {
+            return Ok(());
+        }
+        let after = terminal.scrollbar()?.offset as usize;
+        let vis = effective_visible(active.visible_rows, rows);
+        let max_crop = usize::from(rows).saturating_sub(vis);
+        active.crop_start = active.crop_start.min(max_crop);
+        if delta < 0 {
+            let wanted = delta.unsigned_abs();
+            let moved = before_offset.saturating_sub(after);
+            let leftover = wanted.saturating_sub(moved);
+            active.crop_start = active.crop_start.saturating_sub(leftover);
+        } else if delta > 0 {
+            let wanted = delta as usize;
+            let moved = after.saturating_sub(before_offset);
+            let leftover = wanted.saturating_sub(moved);
+            active.crop_start = active.crop_start.saturating_add(leftover).min(max_crop);
+        }
+        Ok(())
     }
 
     /// Move the copy cursor to the active search match's start cell, reveal it, and
@@ -429,11 +524,15 @@ impl Controller {
             Some(gref) => gref.cell()?.wide()? == CellWide::Wide,
             None => false,
         };
+        let vis = effective_visible(active.visible_rows, rows);
+        let max_crop = usize::from(rows).saturating_sub(vis);
+        let display_start = active.crop_start.min(max_crop) as u16;
         Ok(Some(CopyView {
             epoch: active.epoch,
             cursor: (vp_x, vp_y),
             wide,
             unit: active.unit,
+            display_start,
         }))
     }
 
@@ -450,6 +549,7 @@ impl Controller {
         let total_rows = terminal.total_rows()?;
         if cols == 0 || rows == 0 || total_rows == 0 {
             self.active = None;
+            self.ended_epoch = self.ended_epoch.max(epoch);
             return Ok(());
         }
         let screen = terminal.active_screen()?;
@@ -627,11 +727,10 @@ impl Controller {
         let vis = effective_visible(active.visible_rows, rows);
         let max_crop = (rows as usize).saturating_sub(vis);
         active.crop_start = active.crop_start.min(max_crop);
-        let vis_top = vp_top.saturating_add(active.crop_start);
-        let vis_bot = vis_top
-            .saturating_add(vis.saturating_sub(1))
-            .min(total_rows - 1);
-        let cur_y = (pt.y as usize).min(total_rows - 1);
+        let max_row = total_rows.saturating_sub(1);
+        let vis_top = vp_top.saturating_add(active.crop_start).min(max_row);
+        let vis_bot = vis_top.saturating_add(vis.saturating_sub(1)).min(max_row);
+        let cur_y = (pt.y as usize).min(max_row);
         let clamped_y = cur_y.clamp(vis_top, vis_bot);
         if clamped_y != cur_y {
             let x = normalize_col(terminal, clamped_y, active.desired_col)?;
@@ -677,28 +776,34 @@ impl Controller {
         epoch: u64,
         revision: u64,
         count: u32,
-    ) -> Result<CopyYank> {
-        let active = self.active.as_mut().expect("validated active");
+    ) -> Result<Option<CopyYank>> {
+        let Some(active) = &mut self.active else {
+            return Ok(None);
+        };
         let total_rows = terminal.total_rows()?;
         let cols = terminal.cols()?;
-        let pt = active
-            .cursor
-            .point(PointSpace::Screen)?
-            .unwrap_or(PointCoordinate { x: 0, y: 0 });
+        let Some(pt) = active.cursor.point(PointSpace::Screen)? else {
+            self.auto_end(terminal, true)?;
+            return Ok(None);
+        };
         let text = if total_rows == 0 || cols == 0 {
             String::new()
         } else {
-            let top_y = (pt.y as usize).min(total_rows - 1);
-            let bot_y = top_y
-                .saturating_add((count as usize).saturating_sub(1))
-                .min(total_rows - 1);
+            let cur_y = (pt.y as usize).min(total_rows - 1);
+            let (start_y, mut end_y) = logical_line_bounds(terminal, cur_y, total_rows)?;
+            for _ in 1..count {
+                if end_y + 1 >= total_rows {
+                    break;
+                }
+                end_y = logical_line_bounds(terminal, end_y + 1, total_rows)?.1;
+            }
             let start = terminal.grid_ref(Point::Screen(PointCoordinate {
                 x: 0,
-                y: top_y as u32,
+                y: start_y as u32,
             }))?;
             let end = terminal.grid_ref(Point::Screen(PointCoordinate {
                 x: cols - 1,
-                y: bot_y as u32,
+                y: end_y as u32,
             }))?;
             let sel = Selection::new(start, end, false);
             format_selection(terminal, Some(&sel), &mut self.copy_buffer)?
@@ -709,11 +814,11 @@ impl Controller {
             active.unit = None;
             terminal.set_selection(None)?;
         }
-        Ok(CopyYank {
+        Ok(Some(CopyYank {
             epoch,
             revision,
             text,
-        })
+        }))
     }
 
     fn apply_move(
@@ -761,7 +866,11 @@ impl Controller {
                     if next >= cols {
                         break;
                     }
-                    x = row.normalize_col(next);
+                    let next_norm = row.normalize_col(next);
+                    if next_norm <= x {
+                        break;
+                    }
+                    x = next_norm;
                 }
                 (x, cur_y, true)
             }
@@ -800,7 +909,7 @@ impl Controller {
                 (x, y, false)
             }
             CopyMotion::ViewportTop => {
-                let (vis_top, vis_bot) = visible_window(terminal, active, total_rows, rows);
+                let (vis_top, vis_bot) = visible_window(terminal, active, total_rows, rows)?;
                 let y = vis_top
                     .saturating_add(count_usize.saturating_sub(1))
                     .min(vis_bot);
@@ -808,13 +917,13 @@ impl Controller {
                 (x, y, false)
             }
             CopyMotion::ViewportMiddle => {
-                let (vis_top, vis_bot) = visible_window(terminal, active, total_rows, rows);
+                let (vis_top, vis_bot) = visible_window(terminal, active, total_rows, rows)?;
                 let y = vis_top + (vis_bot - vis_top) / 2;
                 let x = normalize_col(terminal, y, active.desired_col)?;
                 (x, y, false)
             }
             CopyMotion::ViewportBottom => {
-                let (vis_top, vis_bot) = visible_window(terminal, active, total_rows, rows);
+                let (vis_top, vis_bot) = visible_window(terminal, active, total_rows, rows)?;
                 let y = vis_bot
                     .saturating_sub(count_usize.saturating_sub(1))
                     .max(vis_top);
@@ -921,16 +1030,15 @@ fn visible_window(
     active: &mut Active,
     total_rows: usize,
     rows: u16,
-) -> (usize, usize) {
-    let vp_top = terminal.scrollbar().map_or(0, |sb| sb.offset as usize);
+) -> Result<(usize, usize)> {
+    let vp_top = terminal.scrollbar()?.offset as usize;
     let vis = effective_visible(active.visible_rows, rows);
     let max_crop = (rows as usize).saturating_sub(vis);
     active.crop_start = active.crop_start.min(max_crop);
-    let vis_top = vp_top.saturating_add(active.crop_start);
-    let vis_bot = vis_top
-        .saturating_add(vis.saturating_sub(1))
-        .min(total_rows.saturating_sub(1));
-    (vis_top, vis_bot)
+    let max_row = total_rows.saturating_sub(1);
+    let vis_top = vp_top.saturating_add(active.crop_start).min(max_row);
+    let vis_bot = vis_top.saturating_add(vis.saturating_sub(1)).min(max_row);
+    Ok((vis_top, vis_bot))
 }
 
 fn ensure_visible(terminal: &mut Terminal, active: &mut Active, y: usize) -> Result<()> {
@@ -969,11 +1077,51 @@ fn normalize_col(terminal: &Terminal, y: usize, col: u16) -> Result<u16> {
         return Ok(0);
     }
     let mut x = col.min(cols - 1);
-    let gref = terminal.grid_ref(Point::Screen(PointCoordinate { x, y: y as u32 }))?;
-    if gref.cell()?.wide()? == CellWide::SpacerTail && x > 0 {
-        x -= 1;
+    while x > 0 {
+        let gref = terminal.grid_ref(Point::Screen(PointCoordinate { x, y: y as u32 }))?;
+        if matches!(
+            gref.cell()?.wide()?,
+            CellWide::SpacerTail | CellWide::SpacerHead
+        ) {
+            x -= 1;
+        } else {
+            break;
+        }
     }
     Ok(x)
+}
+
+/// Inclusive screen row bounds `(start_y, end_y)` of the soft-wrapped logical line
+/// containing row `y`, bounded by `MAX_WORD_SCAN_ROWS` in each direction.
+fn logical_line_bounds(terminal: &Terminal, y: usize, total_rows: usize) -> Result<(usize, usize)> {
+    let max_row = total_rows.saturating_sub(1);
+    let mut start_y = y.min(max_row);
+    let mut steps = 0;
+    while start_y > 0 && steps < MAX_WORD_SCAN_ROWS {
+        let prev = terminal.grid_ref(Point::Screen(PointCoordinate {
+            x: 0,
+            y: (start_y - 1) as u32,
+        }))?;
+        if !prev.row()?.is_wrapped()? {
+            break;
+        }
+        start_y -= 1;
+        steps += 1;
+    }
+    let mut end_y = y.min(max_row);
+    let mut steps = 0;
+    while end_y < max_row && steps < MAX_WORD_SCAN_ROWS {
+        let cur = terminal.grid_ref(Point::Screen(PointCoordinate {
+            x: 0,
+            y: end_y as u32,
+        }))?;
+        if !cur.row()?.is_wrapped()? {
+            break;
+        }
+        end_y += 1;
+        steps += 1;
+    }
+    Ok((start_y, end_y))
 }
 
 fn wide_end_col(terminal: &Terminal, y: u32, col: u16, cols: u16) -> Result<u16> {
@@ -990,16 +1138,26 @@ fn sync_selection(terminal: &Terminal, active: &Active) -> Result<()> {
     let (Some(unit), Some(anchor)) = (active.unit, &active.anchor) else {
         return Ok(());
     };
-    let (Some(a), Some(c)) = (
+    let (Some(a_raw), Some(c_raw)) = (
         anchor.point(PointSpace::Screen)?,
         active.cursor.point(PointSpace::Screen)?,
     ) else {
         return Ok(());
     };
     let cols = terminal.cols()?;
-    if cols == 0 {
+    let total_rows = terminal.total_rows()?;
+    if cols == 0 || total_rows == 0 {
         return Ok(());
     }
+    let max_row = total_rows - 1;
+    let a = PointCoordinate {
+        x: normalize_col(terminal, (a_raw.y as usize).min(max_row), a_raw.x)?,
+        y: (a_raw.y as usize).min(max_row) as u32,
+    };
+    let c = PointCoordinate {
+        x: normalize_col(terminal, (c_raw.y as usize).min(max_row), c_raw.x)?,
+        y: (c_raw.y as usize).min(max_row) as u32,
+    };
     let sel = match unit {
         CopyUnit::Char => {
             let (first, last) = if (a.y, a.x) <= (c.y, c.x) {
@@ -1016,12 +1174,15 @@ fn sync_selection(terminal: &Terminal, active: &Active) -> Result<()> {
             Selection::new(start_ref, end_ref, false)
         }
         CopyUnit::Line => {
-            let top_y = a.y.min(c.y);
-            let bot_y = a.y.max(c.y);
-            let start_ref = terminal.grid_ref(Point::Screen(PointCoordinate { x: 0, y: top_y }))?;
+            let top_y = logical_line_bounds(terminal, a.y.min(c.y) as usize, total_rows)?.0;
+            let bot_y = logical_line_bounds(terminal, a.y.max(c.y) as usize, total_rows)?.1;
+            let start_ref = terminal.grid_ref(Point::Screen(PointCoordinate {
+                x: 0,
+                y: top_y as u32,
+            }))?;
             let end_ref = terminal.grid_ref(Point::Screen(PointCoordinate {
                 x: cols - 1,
-                y: bot_y,
+                y: bot_y as u32,
             }))?;
             Selection::new(start_ref, end_ref, false)
         }
@@ -1135,6 +1296,9 @@ impl CellInfo {
 struct RowData {
     is_wrapped: bool,
     cells: Vec<CellInfo>,
+    /// Cached logical (non-spacer, trailing-padding-trimmed on non-wrapped rows) cells
+    /// so repeated word/WORD steps on long wrapped lines stay O(N).
+    logical: Vec<(u16, CellInfo)>,
 }
 
 impl RowData {
@@ -1143,7 +1307,12 @@ impl RowData {
             return 0;
         }
         let mut x = (col as usize).min(self.cells.len() - 1);
-        if self.cells[x].wide == CellWide::SpacerTail && x > 0 {
+        while x > 0
+            && matches!(
+                self.cells[x].wide,
+                CellWide::SpacerTail | CellWide::SpacerHead
+            )
+        {
             x -= 1;
         }
         x as u16
@@ -1172,25 +1341,11 @@ impl RowData {
             .map(|(i, _)| i as u16)
     }
 
-    /// Columns holding logical characters on this row (skipping `SpacerTail` and
+    /// Cached columns holding logical characters on this row (skipping `SpacerTail` and
     /// `SpacerHead`). On a non-wrapped row, trailing blank padding after the last
     /// non-blank character is excluded so hard newlines break cleanly.
-    fn logical_cols(&self) -> Vec<(u16, CellInfo)> {
-        let limit = if self.is_wrapped {
-            self.cells.len()
-        } else {
-            match self.last_non_blank_col() {
-                Some(last) => (last as usize) + 1,
-                None => 0,
-            }
-        };
-        let mut out = Vec::with_capacity(limit);
-        for (i, &cell) in self.cells.iter().take(limit).enumerate() {
-            if !cell.is_spacer() {
-                out.push((i as u16, cell));
-            }
-        }
-        out
+    fn logical_cols(&self) -> &[(u16, CellInfo)] {
+        &self.logical
     }
 }
 
@@ -1213,7 +1368,27 @@ fn read_row(terminal: &Terminal, y: usize, cols: u16) -> Result<RowData> {
             };
         cells.push(CellInfo { wide, ch });
     }
-    Ok(RowData { is_wrapped, cells })
+    let limit = if is_wrapped {
+        cells.len()
+    } else {
+        cells
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, c)| !c.is_spacer() && !c.is_blank())
+            .map_or(0, |(i, _)| i + 1)
+    };
+    let mut logical = Vec::with_capacity(limit);
+    for (i, &cell) in cells.iter().take(limit).enumerate() {
+        if !cell.is_spacer() {
+            logical.push((i as u16, cell));
+        }
+    }
+    Ok(RowData {
+        is_wrapped,
+        cells,
+        logical,
+    })
 }
 
 struct RowCache<'a> {
@@ -1328,7 +1503,7 @@ fn find_next_non_space(
     big: bool,
 ) -> Result<Option<(u16, usize, CellInfo)>> {
     if let Some(row) = cache.row(y)? {
-        for (col, cell) in row.logical_cols() {
+        for &(col, cell) in row.logical_cols() {
             if col > x && cell.class(big) != CharClass::Space {
                 return Ok(Some((col, y, cell)));
             }
@@ -1339,7 +1514,7 @@ fn find_next_non_space(
         let Some(row) = cache.row(ny)? else {
             return Ok(None);
         };
-        for (col, cell) in row.logical_cols() {
+        for &(col, cell) in row.logical_cols() {
             if cell.class(big) != CharClass::Space {
                 return Ok(Some((col, ny, cell)));
             }
@@ -1357,7 +1532,7 @@ fn find_prev_non_space(
     big: bool,
 ) -> Result<Option<(u16, usize, CellInfo)>> {
     if let Some(row) = cache.row(y)? {
-        for (col, cell) in row.logical_cols().into_iter().rev() {
+        for &(col, cell) in row.logical_cols().iter().rev() {
             if col < x && cell.class(big) != CharClass::Space {
                 return Ok(Some((col, y, cell)));
             }
@@ -1369,7 +1544,7 @@ fn find_prev_non_space(
         let Some(row) = cache.row(py)? else {
             return Ok(None);
         };
-        for (col, cell) in row.logical_cols().into_iter().rev() {
+        for &(col, cell) in row.logical_cols().iter().rev() {
             if cell.class(big) != CharClass::Space {
                 return Ok(Some((col, py, cell)));
             }
@@ -1572,6 +1747,7 @@ mod tests {
                 cursor: (7, 5),
                 wide: false,
                 unit: None,
+                display_start: 0,
             })
         );
 
@@ -1760,10 +1936,319 @@ mod tests {
         let mut renderer = Renderer::new().unwrap();
         let mut frame = renderer.frame(&term).unwrap();
         frame.copy = ctrl.view(&term).unwrap();
-        let crop = frame.display_row_start_at(3, 3);
+        let view = frame.copy.unwrap();
+        let crop = frame.display_row_start(3);
+        assert_eq!(
+            crop,
+            usize::from(view.display_start),
+            "Frame::display_row_start uses CopyView::display_start as single source of truth"
+        );
         assert_eq!(crop, 2, "cropped view shifts by 1 to show vp row 2");
-        assert!(frame.copy.unwrap().cursor.1 as usize >= crop);
-        assert!((frame.copy.unwrap().cursor.1 as usize) < crop + 3);
+        assert!(view.cursor.1 as usize >= crop);
+        assert!((view.cursor.1 as usize) < crop + 3);
+    }
+
+    #[test]
+    fn cropped_pane_scroll_and_bottom_reach_every_row_with_and_without_scrollback() {
+        let mut renderer = Renderer::new().unwrap();
+
+        // Case A: With scrollback (rows = 6, vis = 3, total = 20 -> max_vp_top = 14, max_crop = 3).
+        let mut term = make_terminal(16, 6, 1 << 16);
+        for i in 0..20 {
+            let nl = if i < 19 { "\r\n" } else { "" };
+            term.vt_write(format!("row-{i:02}{nl}").as_bytes());
+        }
+        assert_eq!(term.total_rows().unwrap(), 20);
+        let mut ctrl = Controller::default();
+        ctrl.apply(&mut term, None, cmd(1, 1, Some(3), CopyModeOp::Begin))
+            .unwrap();
+        assert_eq!(cursor_screen(&ctrl).1, 19);
+
+        // Scroll up past scrollback top: vp_top saturates at 0 and crop_start shifts to 0.
+        ctrl.apply(&mut term, None, cmd(1, 2, Some(3), CopyModeOp::Scroll(-50)))
+            .unwrap();
+        assert_eq!(term.scrollbar().unwrap().offset, 0);
+        let view = ctrl.view(&term).unwrap().unwrap();
+        assert_eq!(view.display_start, 0, "top rows 0..3 are reachable");
+        assert!(cursor_screen(&ctrl).1 <= 2);
+        let mut frame = renderer.frame(&term).unwrap();
+        frame.copy = Some(view);
+        assert_eq!(frame.display_row_start(3), usize::from(view.display_start));
+
+        // Scroll down past bottom: vp_top saturates at 14 and crop_start shifts to 3.
+        ctrl.apply(&mut term, None, cmd(1, 3, Some(3), CopyModeOp::Scroll(50)))
+            .unwrap();
+        assert_eq!(term.scrollbar().unwrap().offset, 14);
+        let view = ctrl.view(&term).unwrap().unwrap();
+        assert_eq!(view.display_start, 3, "newest rows 17..20 are reachable");
+        assert!(cursor_screen(&ctrl).1 >= 17);
+        let mut frame = renderer.frame(&term).unwrap();
+        frame.copy = Some(view);
+        assert_eq!(frame.display_row_start(3), usize::from(view.display_start));
+
+        // Scroll back to top, then Bottom (`after_scroll_bottom`) must restore crop_start = 3.
+        ctrl.apply(&mut term, None, cmd(1, 4, Some(3), CopyModeOp::Scroll(-50)))
+            .unwrap();
+        assert_eq!(ctrl.view(&term).unwrap().unwrap().display_start, 0);
+        term.scroll_viewport(ScrollViewport::Bottom);
+        ctrl.after_scroll_bottom(&mut term).unwrap();
+        let view = ctrl.view(&term).unwrap().unwrap();
+        assert_eq!(view.display_start, 3);
+        assert!(cursor_screen(&ctrl).1 >= 17);
+
+        // Case B: Without scrollback / alternate screen (rows = 6, vis = 3, total = 6, max_vp_top = 0).
+        let mut alt = make_terminal(16, 6, 1 << 16);
+        alt.vt_write(b"\x1b[?1049h\x1b[H0\r\n1\r\n2\r\n3\r\n4\r\n5");
+        let mut alt_ctrl = Controller::default();
+        alt_ctrl
+            .apply(&mut alt, None, cmd(1, 1, Some(3), CopyModeOp::Begin))
+            .unwrap();
+        assert_eq!(alt_ctrl.view(&alt).unwrap().unwrap().display_start, 3);
+        // Scroll up reaches row 0 even when Ghostty has zero scrollback.
+        alt_ctrl
+            .apply(&mut alt, None, cmd(1, 2, Some(3), CopyModeOp::Scroll(-10)))
+            .unwrap();
+        let view = alt_ctrl.view(&alt).unwrap().unwrap();
+        assert_eq!(view.display_start, 0);
+        assert!(cursor_screen(&alt_ctrl).1 <= 2);
+        // Scroll down reaches row 5 again.
+        alt_ctrl
+            .apply(&mut alt, None, cmd(1, 3, Some(3), CopyModeOp::Scroll(10)))
+            .unwrap();
+        let view = alt_ctrl.view(&alt).unwrap().unwrap();
+        assert_eq!(view.display_start, 3);
+        assert!(cursor_screen(&alt_ctrl).1 >= 3);
+    }
+
+    #[test]
+    fn line_selection_and_yank_line_expand_across_soft_wrapped_logical_lines() {
+        let mut term = make_terminal(5, 8, 1 << 16);
+        // Line 1 (3 soft-wrapped rows 0..=2): "aaaaabbbbbccccc"
+        // Line 2 (3 soft-wrapped rows 3..=5): "ddddddeeeeeefff"
+        // Line 3 (1 row 6): "tail"
+        term.vt_write(b"aaaaabbbbbccccc\r\nddddddeeeeeefff\r\ntail");
+        let mut ctrl = Controller::default();
+        step(&mut ctrl, &mut term, 1, CopyModeOp::Begin);
+
+        // Move to middle row (row 1) of the first 3-row wrapped line.
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::LineNumber(2),
+                count: 1,
+            },
+        );
+        assert_eq!(cursor_screen(&ctrl).1, 1);
+
+        // Visual Line (`V`) on row 1 must expand to cover rows 0..=2 and yank whole line 1.
+        step(&mut ctrl, &mut term, 1, CopyModeOp::Select(CopyUnit::Line));
+        let mut renderer = Renderer::new().unwrap();
+        let frame = renderer.frame(&term).unwrap();
+        assert_eq!(frame.selection_rows[0], Some((0, 4)));
+        assert_eq!(frame.selection_rows[1], Some((0, 4)));
+        assert_eq!(frame.selection_rows[2], Some((0, 4)));
+        assert_eq!(frame.selection_rows[3], None);
+        let v_yank = ctrl
+            .apply(&mut term, None, cmd(1, 2, None, CopyModeOp::Yank))
+            .unwrap()
+            .yank
+            .unwrap();
+        assert_eq!(v_yank.text, "aaaaabbbbbccccc");
+
+        // `yy` (`YankLine { count: 1 }`) from row 1 yanks the entire 3-row wrapped logical line.
+        let yy = ctrl
+            .apply(
+                &mut term,
+                None,
+                cmd(1, 3, None, CopyModeOp::YankLine { count: 1 }),
+            )
+            .unwrap()
+            .yank
+            .unwrap();
+        assert_eq!(yy.text, "aaaaabbbbbccccc");
+
+        // `2yy` (`YankLine { count: 2 }`) counts whole logical lines, yanking both 3-row lines.
+        let two_yy = ctrl
+            .apply(
+                &mut term,
+                None,
+                cmd(1, 4, None, CopyModeOp::YankLine { count: 2 }),
+            )
+            .unwrap()
+            .yank
+            .unwrap();
+        assert_eq!(two_yy.text, "aaaaabbbbbccccc\nddddddeeeeeefff");
+    }
+
+    #[test]
+    fn spacer_head_normalization_and_right_guard_on_narrow_wide_wrap() {
+        let mut term = make_terminal(4, 4, 1 << 16);
+        // cols = 4:
+        // Row 0: 'a'(0), '世'(1), SpacerTail(2), SpacerHead(3) [wrapped]
+        // Row 1: '界'(0), SpacerTail(1)
+        // Row 2: "0123"
+        term.vt_write("a世界\r\n0123".as_bytes());
+        let mut ctrl = Controller::default();
+        step(&mut ctrl, &mut term, 1, CopyModeOp::Begin);
+
+        // Move to row 0, col 0 ('a'), then Right -> '世' (1), then Right again must NOT land on SpacerHead (3).
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::Top,
+                count: 1,
+            },
+        );
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::LineStart,
+                count: 1,
+            },
+        );
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::Right,
+                count: 1,
+            },
+        );
+        assert_eq!(cursor_screen(&ctrl), (1, 0));
+        assert!(ctrl.view(&term).unwrap().unwrap().wide);
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::Right,
+                count: 5,
+            },
+        );
+        assert_eq!(
+            cursor_screen(&ctrl),
+            (1, 0),
+            "Right from '世' must not park on SpacerHead col 3"
+        );
+
+        // Vertical Up from row 2 col 3 (desired_col = 3) onto row 0 must normalize off SpacerHead to '世' (1).
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::LineNumber(3),
+                count: 1,
+            },
+        );
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::LineEnd,
+                count: 1,
+            },
+        );
+        assert_eq!(cursor_screen(&ctrl), (3, 2));
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::Up,
+                count: 2,
+            },
+        );
+        assert_eq!(cursor_screen(&ctrl), (1, 0));
+        assert!(ctrl.view(&term).unwrap().unwrap().wide);
+
+        // WordEnd from 'a' (0, 0) crosses SpacerHead without splitting "a世界", landing on '界' (0, 1).
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::LineStart,
+                count: 1,
+            },
+        );
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::WordEnd,
+                count: 1,
+            },
+        );
+        assert_eq!(cursor_screen(&ctrl), (0, 1));
+        assert!(ctrl.view(&term).unwrap().unwrap().wide);
+    }
+
+    #[test]
+    fn sync_normalizes_anchor_off_wide_spacer_tail() {
+        let mut term = make_terminal(10, 3, 1 << 16);
+        term.vt_write(b"abcd\r\n");
+        let mut ctrl = Controller::default();
+        step(&mut ctrl, &mut term, 1, CopyModeOp::Begin);
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::Top,
+                count: 1,
+            },
+        );
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::LineStart,
+                count: 1,
+            },
+        );
+        // Anchor at col 2 ('c'), extend cursor to col 3 ('d').
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::Right,
+                count: 2,
+            },
+        );
+        step(&mut ctrl, &mut term, 1, CopyModeOp::Select(CopyUnit::Char));
+        step(
+            &mut ctrl,
+            &mut term,
+            1,
+            CopyModeOp::Move {
+                motion: CopyMotion::Right,
+                count: 1,
+            },
+        );
+        // Overwrite cols 1..=2 with wide '世' so the anchor at col 2 becomes SpacerTail.
+        term.vt_write("\x1b[1;2H世".as_bytes());
+        ctrl.sync(&mut term).unwrap();
+        let yank = ctrl
+            .apply(&mut term, None, cmd(1, 2, None, CopyModeOp::Yank))
+            .unwrap()
+            .yank
+            .unwrap();
+        assert_eq!(
+            yank.text, "世d",
+            "anchor normalized off SpacerTail keeps '世' intact"
+        );
     }
 
     #[test]
@@ -2743,7 +3228,7 @@ mod tests {
         );
         assert_eq!(cursor_screen(&wrap_ctrl), (2, 1));
         assert!(wrap_ctrl.view(&wrap_term).unwrap().unwrap().wide);
-        // YankLine across all 3 wrapped rows ("abcd"+SpacerHead, "世界 ", "xy") unwraps cleanly.
+        // YankLine { count: 1 } (`yy`) expands across all 3 wrapped rows of the logical line.
         step(
             &mut wrap_ctrl,
             &mut wrap_term,
@@ -2757,7 +3242,7 @@ mod tests {
             .apply(
                 &mut wrap_term,
                 None,
-                cmd(1, 3, None, CopyModeOp::YankLine { count: 3 }),
+                cmd(1, 3, None, CopyModeOp::YankLine { count: 1 }),
             )
             .unwrap()
             .yank
@@ -2969,5 +3454,10 @@ mod tests {
         assert_eq!(ctrl.reset(), Some(5));
         assert!(!ctrl.is_active());
         assert_eq!(ctrl.ended_epoch(), 5);
+
+        // Stale Begin with epoch == 0 or epoch <= ended_epoch is ignored.
+        assert!(!step(&mut ctrl, &mut term, 0, CopyModeOp::Begin).accepted);
+        assert!(!step(&mut ctrl, &mut term, 5, CopyModeOp::Begin).accepted);
+        assert!(!ctrl.is_active());
     }
 }
