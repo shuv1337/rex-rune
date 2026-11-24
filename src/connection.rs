@@ -756,8 +756,12 @@ impl ControlState {
                 .flatten()
         });
         let is_copy = event.name == "block_event" && clipboard::is_copy(&event.payload);
+        // `session.view` carries layout, not program status, title, or process metadata, so
+        // only `session_view_changed` drops are superseded by a newer `view_seq`.
+        let view_covered = event.name != "event_dropped" || event_type == "session_view_changed";
         if !list_event
             && !is_copy
+            && view_covered
             && let Some(id) = session
         {
             floor = floor.max(self.view_seq.get(id).copied().unwrap_or(0));
@@ -1137,7 +1141,12 @@ async fn refresh(
     apply_view(shared, id, reply.value);
     Ok(())
 }
-async fn list(control: &mut Client, shared: &Shared, state: &mut ControlState) -> Result<()> {
+async fn list(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+) -> Result<()> {
     let reply = tokio::time::timeout(
         Duration::from_secs(8),
         control.call_with_seq(session::AttachAll::new("all")),
@@ -1178,6 +1187,7 @@ async fn list(control: &mut Client, shared: &Shared, state: &mut ControlState) -
         }
     });
     for (id, blocks) in removed {
+        sweep.cancel_session(&id);
         state.forget_session(&id, blocks);
     }
     Ok(())
@@ -1398,6 +1408,7 @@ fn remove_session(
     shared: &Shared,
     workers: &mut HashMap<String, PaneWorker>,
     state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
     id: &str,
 ) {
     let blocks: Vec<_> = workers
@@ -1426,6 +1437,7 @@ fn remove_session(
             m.selected = None;
         }
     });
+    sweep.cancel_session(id);
     state.forget_session(id, forgotten);
 }
 
@@ -1465,6 +1477,7 @@ async fn handle_event(
     shared: &Shared,
     workers: &mut HashMap<String, PaneWorker>,
     state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
     keymap: Option<&keymap::Declaration>,
     server_reads: &mut server_info::Reader,
     hosts_reads: &mut hosts::Reader,
@@ -1547,31 +1560,28 @@ async fn handle_event(
             match event_type {
                 "session_destroyed" => {
                     if let Some(id) = session_id {
-                        remove_session(shared, workers, state, id);
+                        remove_session(shared, workers, state, sweep, id);
                     } else {
-                        list(control, shared, state).await?;
+                        list(control, shared, state, sweep).await?;
                     }
                 }
                 "session_created" | "session_moved" | "session_label_changed" => {
-                    list(control, shared, state).await?;
-                    if event_type == "session_label_changed"
-                        && let Some(id) = session_id
-                    {
+                    list(control, shared, state, sweep).await?;
+                    if event_type == "session_label_changed" {
                         shared.update(|m| {
-                            if let Some(label) = m
-                                .sessions
-                                .iter()
-                                .find(|s| s.session_id == id)
-                                .map(|s| s.label.clone())
-                                && let Some(view) = m.views.get_mut(id)
-                            {
-                                view.label = Some(label);
+                            for session in &m.sessions {
+                                if let Some(view) = m.views.get_mut(&session.session_id) {
+                                    view.label = Some(session.label.clone());
+                                }
                             }
                         });
                     }
                 }
                 _ if let Some(id) = session_id => {
                     let dropped_block = event.payload["block_id"].as_str().map(str::to_owned);
+                    // Cancel any in-flight background status reads for this session before
+                    // awaiting `refresh` so late replies cannot race with recovery.
+                    sweep.cancel_session(id);
                     let (should_refresh, mut forget) = {
                         let m = shared.model.lock().expect("host model");
                         let has_view = m.views.contains_key(id);
@@ -1606,7 +1616,7 @@ async fn handle_event(
                                     ))
                                 ) =>
                             {
-                                remove_session(shared, workers, state, id);
+                                remove_session(shared, workers, state, sweep, id);
                                 return Ok(());
                             }
                             Err(error) => return Err(error),
@@ -1637,10 +1647,11 @@ async fn handle_event(
                         state.status_queried.remove(block);
                         state.status_failed.remove(block);
                         state.status_reading.remove(block);
+                        sweep.cancel_block(block);
                     }
                 }
                 _ if event_type.starts_with("session_") => {
-                    list(control, shared, state).await?;
+                    list(control, shared, state, sweep).await?;
                 }
                 _ => {
                     log::debug!("ignoring unhandled server-wide event_dropped: {event_type:?}");
@@ -1648,14 +1659,14 @@ async fn handle_event(
             }
         }
         "session_created" | "session_moved" => {
-            list(control, shared, state).await?;
+            list(control, shared, state, sweep).await?;
         }
         "session_destroyed" => {
             if let Some(id) = event.payload["session_id"]
                 .as_str()
                 .or(event.session_id.as_deref())
             {
-                remove_session(shared, workers, state, id);
+                remove_session(shared, workers, state, sweep, id);
             }
         }
         "session_label_changed" => {
@@ -1700,6 +1711,7 @@ async fn handle_event(
                 if let Some(worker) = workers.remove(block) {
                     let _ = worker.commands.send(DataCommand::Stop);
                 }
+                sweep.cancel_block(block);
                 state.forget_block(block);
                 shared.update(|m| {
                     m.terminals.remove(block);
@@ -1888,6 +1900,7 @@ async fn run_host(
                 m.activity_incomplete = false;
             });
             let mut state = ControlState::default();
+            let mut sweep = status_sweep::Reader::default();
             let mut downloads = downloads::Downloads::default();
             let mut busy_since = Some(Instant::now());
             let boot = bootstrap_request(wanted.as_deref(), create.is_some(), workers.values().map(|w| w.session.clone()));
@@ -1914,7 +1927,7 @@ async fn run_host(
                 let layout = crate::layout::shell_layout(shell.as_deref(), new_block_theme(shared, theme.as_ref()));
                 let created = request(&mut control, "session.create", json!({"label":label,"initial_windows":[{"layout":layout}]})).await?;
                 preferred = created["session_id"].as_str().map(str::to_owned);
-                list(&mut control, shared, &mut state).await?;
+                list(&mut control, shared, &mut state, &mut sweep).await?;
             }
             let selected = {
                 let model = shared.model.lock().expect("host model");
@@ -1930,7 +1943,7 @@ async fn run_host(
             });
             let session_ids: HashSet<_> = shared.model.lock().expect("host model").sessions.iter().map(|s| s.session_id.clone()).collect();
             let stale: HashSet<_> = workers.values().filter(|w| !session_ids.contains(&w.session)).map(|w| w.session.clone()).collect();
-            for id in stale { remove_session(shared, &mut workers, &mut state, &id); }
+            for id in stale { remove_session(shared, &mut workers, &mut state, &mut sweep, &id); }
             let mut attached: HashSet<String> = workers.values().map(|w| w.session.clone()).collect();
             if let Some(id) = &selected { attached.insert(id.clone()); }
             for id in attached {
@@ -1951,6 +1964,7 @@ async fn run_host(
                     shared,
                     &mut workers,
                     &mut state,
+                    &mut sweep,
                     keymap.as_deref(),
                     &mut server_reads,
                     &mut hosts_reads,
@@ -1976,7 +1990,6 @@ async fn run_host(
             retry = 0;
             prefetch.reset();
             view_fetches.reset();
-            let mut sweep = status_sweep::Reader::default();
             let mut pace = tokio::time::interval(prefetch::PACE);
             pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut expiry = tokio::time::interval(Duration::from_millis(100));
@@ -1994,6 +2007,7 @@ async fn run_host(
                             shared,
                             &mut workers,
                             &mut state,
+                            &mut sweep,
                             keymap.as_deref(),
                             &mut server_reads,
                             &mut hosts_reads,
@@ -2148,6 +2162,7 @@ async fn run_host(
                             shared,
                             &mut workers,
                             &mut state,
+                            &mut sweep,
                             keymap.as_deref(),
                             &mut server_reads,
                             &mut hosts_reads,
@@ -2242,6 +2257,7 @@ async fn run_host(
                                     shared,
                                     &mut workers,
                                     &mut state,
+                                    &mut sweep,
                                     Some(&session),
                                 )
                                 .await
@@ -2347,7 +2363,7 @@ async fn run_host(
                         }
                         if matches!(command, HostCommand::Select(_) | HostCommand::Navigate { .. } | HostCommand::CreateSession { .. }) { preferred = None; }
                         let navigation = match &command { HostCommand::Navigate { id, .. } => Some(*id), _ => None };
-                        let outcome = handle_command(command, &mut control, shared, &mut workers, &mut state, &mut theme).await;
+                        let outcome = handle_command(command, &mut control, shared, &mut workers, &mut state, &mut sweep, &mut theme).await;
                         if let Some(id) = navigation {
                             shared.update(|m| m.navigation_result = Some((id, outcome.is_ok())));
                         }
@@ -2610,6 +2626,7 @@ async fn after_request(
     shared: &Shared,
     workers: &mut HashMap<String, PaneWorker>,
     state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
     session: Option<&str>,
 ) -> Result<()> {
     shared.update(|m| m.notice = None);
@@ -2622,7 +2639,7 @@ async fn after_request(
                     Some(rexrs::Error::Api(rexrs::ApiError::SessionNotFound { .. }))
                 ) =>
             {
-                remove_session(shared, workers, state, id)
+                remove_session(shared, workers, state, sweep, id)
             }
             result => result?,
         }
@@ -2636,6 +2653,7 @@ async fn handle_command(
     shared: &Shared,
     workers: &mut HashMap<String, PaneWorker>,
     state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
     theme: &mut Option<SetTheme>,
 ) -> Result<()> {
     match command {
@@ -2707,10 +2725,10 @@ async fn handle_command(
             });
         }
         HostCommand::RefreshSessions => {
-            list(control, shared, state).await?;
+            list(control, shared, state, sweep).await?;
             // A selected session that has gone is forgotten by the list, not re-read.
             let selected = shared.model.lock().expect("host model").selected.clone();
-            after_request(control, shared, workers, state, selected.as_deref()).await?;
+            after_request(control, shared, workers, state, sweep, selected.as_deref()).await?;
         }
         HostCommand::CreateSession { label, shell } => {
             let layout = crate::layout::shell_layout(
@@ -2724,7 +2742,7 @@ async fn handle_command(
             }
             let created = request(control, "session.create", payload).await?;
             let id = created["session_id"].as_str().context("new session ID")?;
-            list(control, shared, state).await?;
+            list(control, shared, state, sweep).await?;
             attach(control, shared, state, id).await?;
             shared.update(|m| {
                 m.background_views.remove(id);
@@ -2735,7 +2753,15 @@ async fn handle_command(
         HostCommand::Request { method, payload } => {
             let session_id = payload["session_id"].as_str().map(str::to_owned);
             request(control, &method, payload).await?;
-            after_request(control, shared, workers, state, session_id.as_deref()).await?;
+            after_request(
+                control,
+                shared,
+                workers,
+                state,
+                sweep,
+                session_id.as_deref(),
+            )
+            .await?;
         }
         HostCommand::NewTerminal {
             method,
@@ -2751,7 +2777,7 @@ async fn handle_command(
             }
             // Creation is sent once. A failure follows the ordinary request path; never replay.
             request(control, &method, payload).await?;
-            after_request(control, shared, workers, state, Some(&session)).await?;
+            after_request(control, shared, workers, state, sweep, Some(&session)).await?;
         }
         HostCommand::Ticket {
             session,

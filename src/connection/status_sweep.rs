@@ -140,6 +140,14 @@ impl Reader {
         self.reads.len()
     }
 
+    pub(super) fn cancel_block(&mut self, block: &str) {
+        self.reads.retain(|read| read.block != block);
+    }
+
+    pub(super) fn cancel_session(&mut self, session: &str) {
+        self.reads.retain(|read| read.session != session);
+    }
+
     pub async fn start(
         &mut self,
         control: &mut Client,
@@ -304,6 +312,58 @@ mod tests {
         drop(senders);
         // Its sender gone (the connection's transport dropped it): a failed read.
         assert_eq!(reader.finished().await, ("s".into(), "b".into(), None));
+        assert_eq!(reader.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_block_and_session_drop_receivers_and_free_slots() {
+        let far = || {
+            Box::pin(tokio::time::sleep_until(
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            ))
+        };
+        let (tx_a, rx_a) = oneshot::channel();
+        let (tx_b, rx_b) = oneshot::channel();
+        let (tx_c, rx_c) = oneshot::channel();
+        let mut reader = Reader {
+            reads: vec![
+                Read {
+                    session: "s1".into(),
+                    block: "b1".into(),
+                    reply: rx_a,
+                    deadline: far(),
+                },
+                Read {
+                    session: "s1".into(),
+                    block: "b2".into(),
+                    reply: rx_b,
+                    deadline: far(),
+                },
+                Read {
+                    session: "s2".into(),
+                    block: "b3".into(),
+                    reply: rx_c,
+                    deadline: far(),
+                },
+            ],
+        };
+        assert_eq!(reader.in_flight(), 3);
+        reader.cancel_block("b1");
+        assert_eq!(reader.in_flight(), 2);
+        assert!(tx_a.send("late".into()).is_err());
+
+        reader.cancel_session("s1");
+        assert_eq!(reader.in_flight(), 1);
+        assert!(tx_b.send("late".into()).is_err());
+
+        tx_c.send(
+            json!({"type":"response","id":"x","payload":{"records":[{"id":"ok","state":"done"}]}})
+                .to_string(),
+        )
+        .unwrap();
+        let (session, block, reply) = reader.finished().await;
+        assert_eq!((session.as_str(), block.as_str()), ("s2", "b3"));
+        assert_eq!(reply.unwrap()["records"][0]["id"], "ok");
         assert_eq!(reader.in_flight(), 0);
     }
 }

@@ -114,17 +114,23 @@ Summary of schema and protocol changes from revision 14 through revision 21:
    - Non-transport reply failures (`not_found` when another app answered first,
      or timeouts) are debug-logged, never retried, and never disconnect the host.
    - Ignores `client_prompt_ended` quietly.
-4. **`event_dropped` recovery (`src/connection.rs`):**
+4. **`event_dropped` recovery (`src/connection.rs`, `src/connection/status_sweep.rs`):**
    - List-level session drops (`session_created`, `session_moved`,
      `session_label_changed`) re-list sessions via `session.attach_all` (even
-     when `payload.session_id` is populated), and `session_destroyed` removes
-     the named session (or re-lists when unnamed).
-   - Other session-scoped drops refresh the session view (when opened or
-     selected; or clear `viewed` / mark in-flight fetches stale when unplaced),
-     clear once-read block metadata marks (`queried`, `status_queried`,
-     `status_failed`, `status_reading`, `status_read`), and downgrade existing
-     activity records' `live` flag so a dropped `StatusRemoved` event is cleared
-     by the subsequent `program_status` read.
+     when `payload.session_id` is populated), reconcile cached view labels from
+     the refreshed list (whether `session_id` is present or omitted), and
+     `session_destroyed` removes the named session (or re-lists when unnamed).
+   - `ControlState::includes` applies `view_seq` to `event_dropped` only when
+     `event_type == "session_view_changed"` so dropped `block_event` or
+     `program_status_removed` notices are not suppressed by a concurrent
+     `session.view` that does not carry block metadata.
+   - Other session-scoped drops cancel superseded in-flight detached
+     `status_sweep::Reader` reads for the session/blocks, refresh the session
+     view (when opened or selected; or clear `viewed` / mark in-flight fetches
+     stale when unplaced), clear once-read block metadata marks (`queried`,
+     `status_queried`, `status_failed`, `status_reading`, `status_read`), and
+     downgrade existing activity records' `live` flag so a dropped
+     `StatusRemoved` event is cleared by the subsequent `program_status` read.
    - Server-wide drops trigger `client.keymap` refresh for `keymap_changed`,
      `hosts.list` re-read for `hosts_changed`, and `server.status` re-read for
      `tailscale_status_changed`.
@@ -184,7 +190,7 @@ Summary of schema and protocol changes from revision 14 through revision 21:
 | `cargo +1.96.1 clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings` | Pass |
 | `cargo +1.96.1 test --manifest-path vendor/rexrs/Cargo.toml --all-features` | **167 passed**, 0 failed, 10 ignored (live tests) |
-| `cargo +1.96.1 test --locked --all-features` | **1,420 passed**, 0 failed, 6 ignored (479 lib, 933 headless UI, 8 integration) |
+| `cargo +1.96.1 test --locked --all-features` | **1,422 passed**, 0 failed, 6 ignored (481 lib, 933 headless UI, 8 integration) |
 | `cargo +1.96.1 build --locked --release --bin rex-rune` | Pass |
 | `cargo +1.96.1 build --locked --no-default-features --bin rex-probe --bin rex-workspace-probe` | Pass |
 
