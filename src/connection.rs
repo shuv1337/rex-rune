@@ -2517,91 +2517,56 @@ async fn run_host(
             },
             false,
         );
-        retry += 1;
-        let delay = tokio::time::sleep(Duration::from_secs((1_u64 << retry.min(3)).min(8)));
-        tokio::pin!(delay);
+        let mut retry_now = false;
+        let mut delay = None;
         loop {
-            tokio::select! {
-                _ = &mut delay => break,
-                command = commands.recv_async() => match command {
-                    Ok(HostCommand::Shutdown) | Err(_) => return Ok(()),
-                    Ok(HostCommand::Reconnect) => break,
-                    Ok(HostCommand::SshAgent { socket, wake_auth_retry }) => {
-                        ssh_auth_sock = socket;
-                        let auth_failed = shared
-                            .model
-                            .lock()
-                            .expect("host model")
-                            .ssh_problem
-                            == Some(crate::ssh::Problem::AuthFailed);
-                        if wake_auth_retry && ssh.is_some() && auth_failed {
-                            retry = 0;
-                            break;
-                        }
+            // Settle the older, deferred work before reading newer commands or starting
+            // the retry timer. Drain the channel again at the end so nothing is replayed.
+            let (command, in_backoff) = if let Some(command) = deferred_commands.pop_front() {
+                (command, false)
+            } else if retry_now {
+                let Ok(command) = commands.try_recv() else {
+                    break;
+                };
+                (command, false)
+            } else {
+                let delay = delay.get_or_insert_with(|| {
+                    retry += 1;
+                    Box::pin(tokio::time::sleep(Duration::from_secs(
+                        (1_u64 << retry.min(3)).min(8),
+                    )))
+                });
+                tokio::select! {
+                    _ = delay => {
+                        retry_now = true;
+                        continue;
                     }
-                    Ok(HostCommand::Select(id)) => preferred = Some(id),
-                    Ok(HostCommand::Navigate { id, .. }) => reject_navigation(shared, id),
-                    Ok(HostCommand::Visibility(visible)) => shared.update(|m|m.visible=visible),
-                    Ok(HostCommand::PrefetchViews(sessions)) => prefetch.set_eligible(sessions),
-                    Ok(HostCommand::Theme(new)) => theme = new,
-                    Ok(HostCommand::Keymap(new)) => keymap = Some(new),
-                    Ok(HostCommand::Prompts(enabled)) => prompts_enabled = enabled,
-                    Ok(HostCommand::Identify) => server_reads.want(),
-                    Ok(HostCommand::WatchSharedHosts) => hosts_reads.want(),
-                    Ok(HostCommand::PutSharedHost { id, epoch, .. }) => hosts::reject_write(
-                        shared,
-                        id,
-                        epoch,
-                        hosts::WriteKind::Put,
-                        "disconnected",
-                        "Shared host change not sent while disconnected. Try again after reconnecting.",
-                    ),
-                    Ok(HostCommand::RemoveSharedHost { id, epoch, .. }) => hosts::reject_write(
-                        shared,
-                        id,
-                        epoch,
-                        hosts::WriteKind::Remove,
-                        "disconnected",
-                        "Shared host removal not sent while disconnected. Try again after reconnecting.",
-                    ),
-                    Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
-                    Ok(
-                        HostCommand::Claim { .. }
-                        | HostCommand::PerformReply { .. }
-                        | HostCommand::PromptReply { .. }
-                        | HostCommand::FetchView { .. },
-                    ) => {}
-                    Ok(HostCommand::ListDir(request)) => directory::finish(shared, &request, Err(directory::Failure::Disconnected)),
-                    Ok(HostCommand::Download(request)) => downloads::refuse(shared, *request, crate::download::Failure::Disconnected),
-                    Ok(HostCommand::DownloadConfirm(_) | HostCommand::DownloadCancel(_)) => {}
-                    Ok(HostCommand::Terminal { block, command: Command::Selection(input), .. }) => {
-                        if let Some(worker) = workers.get(&block) { let _ = worker.commands.send(DataCommand::Selection(input)); }
+                    command = commands.recv_async() => {
+                        let Ok(command) = command else { return Ok(()); };
+                        (command, true)
                     }
-                    Ok(HostCommand::Terminal { block, command: Command::Resize(a,b,c,d), .. }) => {
-                        if let Some(worker) = workers.get_mut(&block) { worker.size = Some((a,b,c,d)); }
-                    }
-                    Ok(HostCommand::Terminal { block, command, .. }) if forward_search(&workers, &block, &command) => {}
-                    Ok(HostCommand::ResizeLayer { .. }) => shared.update(|m| {
-                        m.notice = Some(crate::layers::Blocked::NotConnected.sentence());
-                    }),
-                    Ok(_) => shared.update(|m| m.notice = Some("Action not sent while disconnected. Try it again after reconnecting.".into())),
                 }
-            }
-        }
-        // Settle work buffered by an exclusive action before draining the channel.
-        // Never replay input queued before a failure.
-        while let Some(command) = deferred_commands
-            .pop_front()
-            .or_else(|| commands.try_recv().ok())
-        {
+            };
             match command {
                 HostCommand::Shutdown => return Ok(()),
+                HostCommand::Reconnect => retry_now = true,
                 HostCommand::Select(id) => preferred = Some(id),
                 HostCommand::Navigate { id, .. } => reject_navigation(shared, id),
                 HostCommand::Visibility(visible) => shared.update(|m| m.visible = visible),
                 HostCommand::PrefetchViews(sessions) => prefetch.set_eligible(sessions),
                 HostCommand::Theme(new) => theme = new,
-                HostCommand::SshAgent { socket, .. } => ssh_auth_sock = socket,
+                HostCommand::SshAgent { socket, wake_auth_retry } => {
+                    ssh_auth_sock = socket;
+                    if in_backoff
+                        && wake_auth_retry
+                        && ssh.is_some()
+                        && shared.model.lock().expect("host model").ssh_problem
+                            == Some(crate::ssh::Problem::AuthFailed)
+                    {
+                        retry = 0;
+                        retry_now = true;
+                    }
+                }
                 HostCommand::Keymap(new) => keymap = Some(new),
                 HostCommand::Prompts(enabled) => prompts_enabled = enabled,
                 HostCommand::Identify => server_reads.want(),
@@ -2612,7 +2577,11 @@ async fn run_host(
                     epoch,
                     hosts::WriteKind::Put,
                     "disconnected",
-                    "Shared host change not sent: the connection dropped first. Try again after reconnecting.",
+                    if in_backoff {
+                        "Shared host change not sent while disconnected. Try again after reconnecting."
+                    } else {
+                        "Shared host change not sent: the connection dropped first. Try again after reconnecting."
+                    },
                 ),
                 HostCommand::RemoveSharedHost { id, epoch, .. } => hosts::reject_write(
                     shared,
@@ -2620,14 +2589,27 @@ async fn run_host(
                     epoch,
                     hosts::WriteKind::Remove,
                     "disconnected",
-                    "Shared host removal not sent: the connection dropped first. Try again after reconnecting.",
+                    if in_backoff {
+                        "Shared host removal not sent while disconnected. Try again after reconnecting."
+                    } else {
+                        "Shared host removal not sent: the connection dropped first. Try again after reconnecting."
+                    },
                 ),
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
-                HostCommand::Terminal { block, command, .. } => {
-                    forward_search(&workers, &block, &command);
+                HostCommand::Terminal { block, command: Command::Selection(input), .. } if in_backoff => {
+                    if let Some(worker) = workers.get(&block) {
+                        let _ = worker.commands.send(DataCommand::Selection(input));
+                    }
                 }
+                HostCommand::Terminal { block, command: Command::Resize(a,b,c,d), .. } if in_backoff => {
+                    if let Some(worker) = workers.get_mut(&block) {
+                        worker.size = Some((a,b,c,d));
+                    }
+                }
+                HostCommand::Terminal { block, command, .. }
+                    if forward_search(&workers, &block, &command) => {}
                 HostCommand::ListDir(request) => {
                     directory::finish(shared, &request, Err(directory::Failure::Disconnected))
                 }
@@ -2636,7 +2618,7 @@ async fn run_host(
                 }
                 // Confirmed, but the connection failed before it was read: say so, since
                 // the dialog has already closed.
-                HostCommand::StopServer { .. } => shared.update(|m| {
+                HostCommand::StopServer { .. } if !in_backoff => shared.update(|m| {
                     m.notice = Some(
                         "Stop not sent: the connection dropped first. Check the host before trying again. Nothing was retried."
                             .into(),
@@ -2645,6 +2627,15 @@ async fn run_host(
                 }),
                 HostCommand::ResizeLayer { .. } => shared.update(|m| {
                     m.notice = Some(crate::layers::Blocked::NotConnected.sentence());
+                }),
+                HostCommand::Claim { .. }
+                | HostCommand::PerformReply { .. }
+                | HostCommand::PromptReply { .. }
+                | HostCommand::FetchView { .. }
+                | HostCommand::DownloadConfirm(_)
+                | HostCommand::DownloadCancel(_) => {}
+                _ if in_backoff => shared.update(|m| {
+                    m.notice = Some("Action not sent while disconnected. Try it again after reconnecting.".into());
                 }),
                 _ => {}
             }

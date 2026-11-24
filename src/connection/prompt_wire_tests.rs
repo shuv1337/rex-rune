@@ -259,7 +259,7 @@ async fn action_wait_promotes_on_prompt_and_applies_client_actions_after_reply()
 }
 
 #[tokio::test]
-async fn deferred_commands_get_disconnected_results_instead_of_being_dropped() {
+async fn deferred_commands_settle_before_backoff_and_newer_settings_win() {
     let (listener, host) = fixture().await;
     let (action_seen, wait_for_action) = oneshot::channel();
     let (drained, wait_for_drain) = oneshot::channel();
@@ -271,8 +271,9 @@ async fn deferred_commands_get_disconnected_results_instead_of_being_dropped() {
         timeout(WAIT, wait_for_drain).await.unwrap().unwrap();
         ws.close(None).await.unwrap();
         close(&mut ws).await;
-        // Keep the address valid until the test has checked the old epoch's receipts.
-        listener
+        let (mut ws, boot) = boot_req(&listener, 21).await;
+        boot_empty(&mut ws, &boot).await;
+        close(&mut ws).await;
     });
     connected(&host).await;
     let epoch = host.model.lock().unwrap().connection_epoch;
@@ -307,10 +308,35 @@ async fn deferred_commands_get_disconnected_results_instead_of_being_dropped() {
         assert!(model.directory.is_none());
     }
     drained.send(()).unwrap();
-    let receipt = until(&host, |m| m.directory.clone()).await;
+    until(&host, |m| (!m.connected).then_some(())).await;
+    // Queue a newer setting while the socket is down, before the two-second retry.
+    command(&host, HostCommand::Visibility(false));
+    let (send_ticket, ticket_reply) = oneshot::channel();
+    command(
+        &host,
+        HostCommand::Ticket {
+            session: SESSION.into(),
+            block: "pane".into(),
+            reply: send_ticket,
+        },
+    );
+    let receipt = timeout(
+        Duration::from_secs(1),
+        until(&host, |m| m.directory.clone()),
+    )
+    .await
+    .expect("deferred listing must fail before reconnect backoff elapses");
     assert_eq!((receipt.id, receipt.epoch), (71, epoch));
     assert_eq!(receipt.result, Err(directory::Failure::Disconnected));
-    until(&host, |m| (!m.connected && m.visible).then_some(())).await;
+    assert!(matches!(
+        timeout(WAIT, ticket_reply).await.unwrap().unwrap(),
+        Err(message) if message == "Host is reconnecting"
+    ));
+    let visible = until(&host, |m| {
+        (m.connected && m.connection_epoch > epoch).then_some(m.visible)
+    })
+    .await;
+    assert!(!visible, "the deferred setting overwrote a newer one");
     drop(host);
     server.await.unwrap();
 }

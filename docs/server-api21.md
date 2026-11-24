@@ -130,7 +130,7 @@ Summary of schema and protocol changes from revision 14 through revision 21:
      ordinary work again and extends the action's wait to at least 35 seconds
      past the prompt deadline. Queued `client_actions` still apply when the
      response arrives. Disconnect discards outstanding action waits but still
-     settles buffered commands through the ordinary disconnect handling.
+     settles buffered commands before reconnect backoff, ahead of newer commands.
 4. **`event_dropped` recovery (`src/connection.rs`, `src/connection/status_sweep.rs`):**
    - List-level session drops (`session_created`, `session_moved`,
      `session_label_changed`) re-list sessions via `session.attach_all` (even
