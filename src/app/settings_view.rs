@@ -517,6 +517,7 @@ fn terminal(s: &Workspace) -> El {
 fn host_card(s: &Workspace, i: usize, last: bool) -> El {
     let host = &s.settings.hosts[i];
     let managed = s.is_shared_managed(i);
+    let blocked = s.shared_write_blocked(i);
     let shared_record = s.shared_host_record(i);
     let connected = s.hosts.get(i).is_some_and(|h| h.model.connected);
     let mut actions = row().gap(6.).center_y();
@@ -531,12 +532,8 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
                 move |s, tx| s.perform(Intent::RetryHost(i), tx),
             ));
     }
-    actions = actions.child(if managed {
-        unavailable(
-            &format!("host-edit:{i}"),
-            "Edit…",
-            super::shared_hosts::MANAGED_REASON,
-        )
+    actions = actions.child(if let Some(reason) = &blocked {
+        unavailable(&format!("host-edit:{i}"), "Edit…", reason)
     } else {
         button(
             &format!("host-edit:{i}"),
@@ -545,12 +542,8 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
             move |s, tx| s.perform(Intent::EditHost(i), tx),
         )
     });
-    actions = actions.child(if managed {
-        unavailable(
-            &format!("host-remove:{i}"),
-            "Remove…",
-            super::shared_hosts::MANAGED_REASON,
-        )
+    actions = actions.child(if let Some(reason) = &blocked {
+        unavailable(&format!("host-remove:{i}"), "Remove…", reason)
     } else if last {
         unavailable(
             &format!("host-remove:{i}"),
@@ -592,8 +585,11 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
         .child(address);
     if managed {
         let provenance = match shared_record.and_then(|r| r.source.as_deref()) {
-            Some(src) => format!("Shared via rex hosts · Declared in {src}"),
-            None => "Shared via rex hosts".to_owned(),
+            Some(src) => format!("Shared via rex hosts · Declared in {src} (read-only)"),
+            None => match &blocked {
+                Some(reason) => format!("Shared via rex hosts · {reason}"),
+                None => "Shared via rex hosts".to_owned(),
+            },
         };
         header_info = header_info.child(
             text(provenance)
@@ -669,7 +665,7 @@ fn hosts(s: &Workspace) -> El {
                 |s, tx| s.perform(Intent::AddHost, tx),
             )),
             footnote(
-                "Removing a host only stops this app connecting to it; its sessions keep running.",
+                "Removing a local host only stops this app connecting to it; removing a shared host also removes it from Rex's shared host list. Sessions keep running.",
             ),
         ]),
     ));

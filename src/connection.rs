@@ -312,10 +312,12 @@ pub struct HostModel {
     pub theme_declared: bool,
     /// What the server says about itself; see [`server_info`].
     pub server_info: server_info::ServerInfo,
-    /// Read-only shared host list from this server (`hosts.list` / `hosts_changed`).
+    /// Shared host list from this server (`hosts.list` / `hosts_changed`).
     pub shared: hosts::SharedHostState,
     /// Bumped whenever `shared` updates from a `hosts.list` reply.
     pub shared_revision: u64,
+    /// Completed shared-host write outcomes (`hosts.put` / `hosts.remove`), taken once by the UI.
+    pub shared_writes: Vec<hosts::WriteResult>,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -490,8 +492,21 @@ pub enum HostCommand {
     /// when the server says it changed; see [`server_info`]. Read-only, and a refusal is quiet.
     Identify,
     /// Read `hosts.list` once per connection and re-read on `hosts_changed`; see [`hosts`].
-    /// Read-only; never sends `hosts.put` or `hosts.remove`.
     WatchSharedHosts,
+    /// Create or update one host in this server's shared host list (`hosts.put`) on `epoch` only.
+    /// Never auto-retried or queued across reconnects.
+    PutSharedHost {
+        id: u64,
+        epoch: u64,
+        host: Value,
+    },
+    /// Remove one host from this server's shared host list (`hosts.remove`) on `epoch` only.
+    /// Never auto-retried or queued across reconnects.
+    RemoveSharedHost {
+        id: u64,
+        epoch: u64,
+        host_id: String,
+    },
     Action {
         generation: u64,
         request: Box<rexrs::api::client::Action>,
@@ -1688,11 +1703,13 @@ async fn run_host(
                         if event.name == "hosts_changed"
                             && hosts::changed(
                                 &shared.model.lock().expect("host model").shared,
-                                hosts_reads.in_flight(),
+                                hosts_reads.in_flight_hash(),
                                 &event.payload,
                             )
                         {
-                            hosts_reads.reread(&mut control).await?;
+                            hosts_reads
+                                .reread_for(&mut control, event.payload["hash"].as_str())
+                                .await?;
                         }
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
@@ -1784,11 +1801,13 @@ async fn run_host(
                         if event.name == "hosts_changed"
                             && hosts::changed(
                                 &shared.model.lock().expect("host model").shared,
-                                hosts_reads.in_flight(),
+                                hosts_reads.in_flight_hash(),
                                 &event.payload,
                             )
                         {
-                            hosts_reads.reread(&mut control).await?;
+                            hosts_reads
+                                .reread_for(&mut control, event.payload["hash"].as_str())
+                                .await?;
                         }
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
@@ -1918,6 +1937,14 @@ async fn run_host(
                             hosts_reads.watch(&mut control, retryable).await?;
                             continue;
                         }
+                        if let HostCommand::PutSharedHost { id, epoch, host } = command {
+                            hosts::execute_put(&mut control, shared, &mut hosts_reads, id, epoch, host).await?;
+                            continue;
+                        }
+                        if let HostCommand::RemoveSharedHost { id, epoch, host_id } = command {
+                            hosts::execute_remove(&mut control, shared, &mut hosts_reads, id, epoch, host_id).await?;
+                            continue;
+                        }
                         if let HostCommand::Upload { session, block, files } = command {
                             if let Err(error) = upload(&mut control, shared, &endpoint, &session, &block, files).await {
                                 shared.update(|m| m.notice = Some(format!("Upload failed: {error:#}")));
@@ -2010,6 +2037,22 @@ async fn run_host(
                     Ok(HostCommand::Keymap(new)) => keymap = Some(new),
                     Ok(HostCommand::Identify) => server_reads.want(),
                     Ok(HostCommand::WatchSharedHosts) => hosts_reads.want(),
+                    Ok(HostCommand::PutSharedHost { id, epoch, .. }) => hosts::reject_write(
+                        shared,
+                        id,
+                        epoch,
+                        hosts::WriteKind::Put,
+                        "disconnected",
+                        "Shared host change not sent while disconnected. Try again after reconnecting.",
+                    ),
+                    Ok(HostCommand::RemoveSharedHost { id, epoch, .. }) => hosts::reject_write(
+                        shared,
+                        id,
+                        epoch,
+                        hosts::WriteKind::Remove,
+                        "disconnected",
+                        "Shared host removal not sent while disconnected. Try again after reconnecting.",
+                    ),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
                     Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
                     Ok(HostCommand::ListDir(request)) => directory::finish(shared, &request, Err(directory::Failure::Disconnected)),
@@ -2042,6 +2085,22 @@ async fn run_host(
                 HostCommand::Keymap(new) => keymap = Some(new),
                 HostCommand::Identify => server_reads.want(),
                 HostCommand::WatchSharedHosts => hosts_reads.want(),
+                HostCommand::PutSharedHost { id, epoch, .. } => hosts::reject_write(
+                    shared,
+                    id,
+                    epoch,
+                    hosts::WriteKind::Put,
+                    "disconnected",
+                    "Shared host change not sent: the connection dropped first. Try again after reconnecting.",
+                ),
+                HostCommand::RemoveSharedHost { id, epoch, .. } => hosts::reject_write(
+                    shared,
+                    id,
+                    epoch,
+                    hosts::WriteKind::Remove,
+                    "disconnected",
+                    "Shared host removal not sent: the connection dropped first. Try again after reconnecting.",
+                ),
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
@@ -2498,6 +2557,8 @@ async fn handle_command(
         | HostCommand::Keymap(_)
         | HostCommand::Identify
         | HostCommand::WatchSharedHosts
+        | HostCommand::PutSharedHost { .. }
+        | HostCommand::RemoveSharedHost { .. }
         | HostCommand::Download(_)
         | HostCommand::DownloadConfirm(_)
         | HostCommand::DownloadCancel(_)

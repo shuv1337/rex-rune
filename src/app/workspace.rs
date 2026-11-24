@@ -479,8 +479,11 @@ impl Workspace {
             return;
         }
         if self.is_shared_managed(index) {
+            let reason = self.shared_write_blocked(index).unwrap_or_else(|| {
+                "Confirm removal to remove it from Rex's shared host list".into()
+            });
             self.inform(format!(
-                "{} is managed by rex hosts (read-only). Turn off shared host sync in Settings → Remote Hosts to remove it locally.",
+                "{} cannot be removed directly: {reason}.",
                 self.settings.hosts[index].label
             ));
             return;
@@ -527,8 +530,12 @@ impl Workspace {
             && (self.settings.hosts[index].label != label
                 || self.settings.hosts[index].endpoint != endpoint)
         {
+            let reason = self.shared_write_blocked(index).unwrap_or_else(|| {
+                "Shared host edits must go through Edit host to update Rex's shared host list"
+                    .into()
+            });
             self.inform(format!(
-                "{} is managed by rex hosts (read-only). Edit its default shell locally, or turn off shared host sync in Settings → Remote Hosts.",
+                "{} cannot be edited directly: {reason}.",
                 self.settings.hosts[index].label
             ));
             return;
@@ -578,7 +585,7 @@ impl Workspace {
         let activity_selection = self.activity_selection();
         let id = self.hosts[index].id;
         let old_session = self.hosts[index].model.selected.clone();
-        let (mut model, notices, clipboard, bells, client_actions, performs) = {
+        let (mut model, notices, clipboard, bells, client_actions, performs, shared_writes) = {
             let mut shared = self.hosts[index]
                 .connection
                 .model
@@ -589,6 +596,7 @@ impl Workspace {
             let bells = std::mem::take(&mut shared.bells);
             let client_actions = std::mem::take(&mut shared.client_actions);
             let performs = std::mem::take(&mut shared.performs);
+            let shared_writes = std::mem::take(&mut shared.shared_writes);
             (
                 shared.clone(),
                 notices,
@@ -596,6 +604,7 @@ impl Workspace {
                 bells,
                 client_actions,
                 performs,
+                shared_writes,
             )
         };
         for (block, connection) in &model.terminals {
@@ -732,7 +741,14 @@ impl Workspace {
         self.sync_tabs(index, tx);
         self.process_downloads(index, tx);
         self.process_directory(index);
+        self.apply_shared_writes(shared_writes, tx);
+        let Some(index) = self.host_index(id) else {
+            return;
+        };
         self.sync_shared_hosts(index, tx);
+        let Some(index) = self.host_index(id) else {
+            return;
+        };
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
             self.layer_drag = None;
@@ -1602,11 +1618,24 @@ impl Workspace {
             Intent::HostKey(host) => self.preview_host_key(host),
             Intent::AddMachine(index) => self.add_machine(index, tx),
             Intent::MachineForm(index) => self.machine_form(index),
-            Intent::AddHostManually => self.open_panel(
-                PanelKind::Form(Form::AddHost),
-                "Add host by endpoint",
-                &[("Host name", "my-host", ""), ("Endpoint", "https://host.example.ts.net, ssh://user@host[/socket] or unix:///path", "")],
-            ),
+            Intent::AddHostManually => {
+                let save_shared = self.can_save_shared_host();
+                self.open_panel(
+                    PanelKind::Form(Form::AddHost),
+                    "Add host by endpoint",
+                    &[
+                        ("Host name", "my-host", ""),
+                        (
+                            "Endpoint",
+                            "https://host.example.ts.net, ssh://user@host[/socket] or unix:///path",
+                            "",
+                        ),
+                    ],
+                );
+                if let Some(panel) = &mut self.panel {
+                    panel.save_shared = save_shared;
+                }
+            }
             Intent::NewWindow => {
                 if let Some(session) = self.model().selected.clone() {
                     let from = self.focused_block();
@@ -1675,14 +1704,31 @@ impl Workspace {
             Intent::CheckUpdates => self.check_updates_now(),
             Intent::Downloads => self.open_panel(PanelKind::Downloads, "Downloads", &[]),
             Intent::EditHost(host) => {
-                if self.is_shared_managed(host) {
+                if host >= self.settings.hosts.len() {
+                    return;
+                }
+                if let Some(reason) = self.shared_write_blocked(host) {
                     self.inform(format!(
-                        "{} is managed by rex hosts (read-only). Edit its default shell locally, or turn off shared host sync in Settings → Remote Hosts.",
+                        "{} cannot be edited: {reason}. Edit its default shell locally, or turn off shared host sync in Settings → Remote Hosts.",
+                        self.settings.hosts[host].label
+                    ));
+                    return;
+                }
+                if let Some(link) = &self.settings.hosts[host].shared
+                    && self.is_shared_managed(host)
+                    && self.has_pending_shared_write_for(&link.id)
+                {
+                    self.inform(format!(
+                        "A shared host change for {} is already in progress.",
                         self.settings.hosts[host].label
                     ));
                     return;
                 }
                 let h = self.settings.hosts[host].clone();
+                let opened_shared_id = self
+                    .is_shared_managed(host)
+                    .then(|| h.shared.as_ref().map(|l| l.id.clone()))
+                    .flatten();
                 self.open_panel(
                     PanelKind::Form(Form::EditHost(host)),
                     &format!("Edit {}", h.label),
@@ -1692,17 +1738,40 @@ impl Workspace {
                         ("Default shell", "Server default — e.g. zsh or /bin/zsh", h.shell.as_deref().unwrap_or("")),
                     ],
                 );
+                if let Some(panel) = &mut self.panel {
+                    panel.opened_shared_id = opened_shared_id;
+                }
             }
             Intent::RemoveHost(host) => {
-                if self.is_shared_managed(host) {
+                if self.settings.hosts.len() <= 1 || host >= self.settings.hosts.len() {
+                    return;
+                }
+                if let Some(reason) = self.shared_write_blocked(host) {
                     self.inform(format!(
-                        "{} is managed by rex hosts (read-only). Turn off shared host sync in Settings → Remote Hosts to remove it locally.",
+                        "{} cannot be removed: {reason}. Turn off shared host sync in Settings → Remote Hosts to manage it locally.",
+                        self.settings.hosts[host].label
+                    ));
+                    return;
+                }
+                if let Some(link) = &self.settings.hosts[host].shared
+                    && self.is_shared_managed(host)
+                    && self.has_pending_shared_write_for(&link.id)
+                {
+                    self.inform(format!(
+                        "A shared host change for {} is already in progress.",
                         self.settings.hosts[host].label
                     ));
                     return;
                 }
                 let label = self.settings.hosts[host].label.clone();
+                let opened_shared_id = self
+                    .is_shared_managed(host)
+                    .then(|| self.settings.hosts[host].shared.as_ref().map(|l| l.id.clone()))
+                    .flatten();
                 self.open_panel(PanelKind::RemoveHost(host), &format!("Remove {label}?"), &[]);
+                if let Some(panel) = &mut self.panel {
+                    panel.opened_shared_id = opened_shared_id;
+                }
             }
             Intent::Retry => self.send(self.active, HostCommand::Reconnect),
             Intent::Command(command) => command.run(self, tx),
@@ -2380,7 +2449,10 @@ impl Workspace {
                                 .hosts
                                 .iter()
                                 .enumerate()
-                                .any(|(i, h)| Some(i) != editing && h.endpoint == values[1])
+                                .any(|(i, h)| {
+                                    Some(i) != editing
+                                        && rex_rune::hosts::same_endpoint(&h.endpoint, &values[1])
+                                })
                                 .then(|| "This endpoint is already in the workspace".to_owned())
                         })
                         .or_else(|| {
@@ -2393,6 +2465,45 @@ impl Workspace {
                                     "Enter one shell name or path, without arguments.".to_owned()
                                 })
                         })
+                        .or_else(|| {
+                            let panel = self.panel.as_ref()?;
+                            match form {
+                                Form::AddHost if panel.save_shared && !self.can_save_shared_host() => {
+                                    Some("Local Rex server is not ready to save shared hosts. Turn off \"Save to shared Rex host list\" to add locally, or reconnect first.".to_owned())
+                                }
+                                Form::EditHost(host) => {
+                                    let saved = self.settings.hosts.get(host)?;
+                                    let label_or_ep_changed =
+                                        saved.label != values[0] || saved.endpoint != values[1];
+                                    if !label_or_ep_changed {
+                                        return None;
+                                    }
+                                    let current_shared_id = self
+                                        .is_shared_managed(host)
+                                        .then(|| saved.shared.as_ref().map(|l| l.id.clone()))
+                                        .flatten();
+                                    if panel.opened_shared_id != current_shared_id {
+                                        return Some(
+                                            "This host's shared status changed while Edit host was open. Reopen Edit host to edit it."
+                                                .to_owned(),
+                                        );
+                                    }
+                                    if let Some(reason) = self.shared_write_blocked(host) {
+                                        return Some(reason);
+                                    }
+                                    if let Some(id) = current_shared_id.as_deref()
+                                        && self.has_pending_shared_write_for(id)
+                                    {
+                                        return Some(
+                                            "A shared host change for this host is already in progress."
+                                                .to_owned(),
+                                        );
+                                    }
+                                    None
+                                }
+                                _ => None,
+                            }
+                        })
                 } else {
                     None
                 };
@@ -2400,6 +2511,7 @@ impl Workspace {
                     self.panel.as_mut().unwrap().error = Some(error);
                     return;
                 }
+                let save_shared = self.panel.as_ref().is_some_and(|p| p.save_shared);
                 let target = self.panel.as_ref().and_then(|p| p.target.clone());
                 let tab = self.panel.as_ref().and_then(|p| p.tab.clone());
                 let back = self.settings_back();
@@ -2441,6 +2553,11 @@ impl Workspace {
                         ),
                         None => self.request("session.set_block_label", json!({"block_id":id,"label":values[0]})),
                     },
+                    Form::AddHost if save_shared => {
+                        if let Err(reason) = self.start_shared_add(values[0].clone(), values[1].clone()) {
+                            self.notify(reason);
+                        }
+                    }
                     Form::AddHost | Form::Discovered(_) => self.add_host(
                         Host {
                             label: values[0].clone(),
@@ -2469,15 +2586,51 @@ impl Workspace {
                     }
                     Form::EditHost(host) => {
                         let shell = values.get(2).filter(|v| !v.is_empty()).cloned();
-                        self.edit_host(host, values[0].clone(), values[1].clone(), shell);
+                        let shared_label_or_ep_changed = self.is_shared_managed(host)
+                            && self.settings.hosts.get(host).is_some_and(|saved| {
+                                saved.label != values[0] || saved.endpoint != values[1]
+                            });
+                        if shared_label_or_ep_changed {
+                            if let Err(reason) = self.start_shared_edit(
+                                host,
+                                values[0].clone(),
+                                values[1].clone(),
+                                shell,
+                                true,
+                                None,
+                            ) {
+                                self.notify(reason);
+                            }
+                        } else {
+                            self.edit_host(host, values[0].clone(), values[1].clone(), shell);
+                        }
                     }
                 }
                 self.update_title(tx);
                 self.panel = back.or(self.panel.take());
             }
             PanelKind::RemoveHost(host) => {
+                let opened_shared_id = self.panel.as_ref().and_then(|p| p.opened_shared_id.clone());
                 let back = self.settings_back();
-                self.remove_host(host, tx);
+                self.close_panel(tx);
+                if let Some(saved) = self.settings.hosts.get(host).cloned() {
+                    let current_shared_id = self
+                        .is_shared_managed(host)
+                        .then(|| saved.shared.as_ref().map(|l| l.id.clone()))
+                        .flatten();
+                    if opened_shared_id != current_shared_id {
+                        self.inform(format!(
+                            "{} changed while the confirmation was open. Nothing was removed.",
+                            saved.label
+                        ));
+                    } else if current_shared_id.is_some() {
+                        if let Err(reason) = self.start_shared_remove(host) {
+                            self.notify(format!("Could not remove {}: {reason}.", saved.label));
+                        }
+                    } else {
+                        self.remove_host(host, tx);
+                    }
+                }
                 self.panel = back;
             }
             PanelKind::ResetShortcuts => {

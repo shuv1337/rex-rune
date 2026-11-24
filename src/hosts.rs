@@ -43,6 +43,12 @@ impl SharedHost {
         })
     }
 
+    /// Whether this record was declared in Rex's configuration (e.g. `init.lua:<line>`).
+    /// Declared hosts are always read-only in Rex Rune.
+    pub fn is_declared(&self) -> bool {
+        self.source.is_some()
+    }
+
     /// Expanded candidate endpoints in preference order, deduplicated.
     pub fn expanded_endpoints(&self) -> Vec<String> {
         expand_endpoints(&self.endpoints)
@@ -54,6 +60,90 @@ impl SharedHost {
             .into_iter()
             .find(|ep| validate_host(&self.label, ep).is_ok())
     }
+}
+
+/// Build the `host` JSON object for a `hosts.put` update to an existing stored record.
+///
+/// Starts from `record.raw` so `id`, `icon`, `added_from`, `host_id`, and all unknown fields
+/// survive untouched. Updates `"label"` to the trimmed label. When `next_endpoint` differs
+/// canonically from `previous_endpoint`, replaces the matching entry in `record.endpoints`
+/// in place while preserving unrelated endpoints and deduplicating by canonical endpoint;
+/// when the endpoint did not change canonically, `record.endpoints` stays verbatim (preserving
+/// bare hostnames such as `studio.ts.net`).
+pub fn build_put_update(
+    record: &SharedHost,
+    label: &str,
+    previous_endpoint: &str,
+    next_endpoint: &str,
+) -> Value {
+    let mut obj = record.raw.clone();
+    obj.insert("label".into(), Value::String(label.trim().to_owned()));
+
+    let next_trimmed = next_endpoint.trim();
+    let updated_endpoints: Vec<String> = if same_endpoint(previous_endpoint, next_trimmed) {
+        if record.endpoints.is_empty() && !next_trimmed.is_empty() {
+            vec![next_trimmed.to_owned()]
+        } else {
+            record.endpoints.clone()
+        }
+    } else {
+        let prev_canon = canonical_endpoint(previous_endpoint);
+        let mut raw_list = Vec::with_capacity(record.endpoints.len() + 1);
+        let mut replaced = false;
+        for existing in &record.endpoints {
+            let matches_prev = !replaced
+                && expand_endpoint(existing)
+                    .iter()
+                    .any(|exp| canonical_endpoint(exp) == prev_canon);
+            if matches_prev {
+                raw_list.push(next_trimmed.to_owned());
+                replaced = true;
+            } else {
+                raw_list.push(existing.clone());
+            }
+        }
+        if !replaced && !next_trimmed.is_empty() {
+            raw_list.insert(0, next_trimmed.to_owned());
+        }
+        let mut seen = HashSet::new();
+        let mut deduped = Vec::with_capacity(raw_list.len());
+        for ep in raw_list {
+            let ep_trimmed = ep.trim();
+            if ep_trimmed.is_empty() {
+                continue;
+            }
+            if seen.insert(canonical_endpoint(ep_trimmed)) {
+                deduped.push(ep_trimmed.to_owned());
+            }
+        }
+        deduped
+    };
+
+    obj.insert(
+        "endpoints".into(),
+        Value::Array(updated_endpoints.into_iter().map(Value::String).collect()),
+    );
+    Value::Object(obj)
+}
+
+/// Build the `host` JSON object for a `hosts.put` request creating a new stored shared host.
+/// Leaves `id` absent so the Rex server generates its canonical `host:<uuidv7>` identifier.
+pub fn build_put_create(label: &str, endpoint: &str, added_from: Option<&str>) -> Value {
+    let mut obj = Map::new();
+    obj.insert("label".into(), Value::String(label.trim().to_owned()));
+    obj.insert(
+        "endpoints".into(),
+        Value::Array(vec![Value::String(endpoint.trim().to_owned())]),
+    );
+    if let Some(source) = added_from.map(str::trim).filter(|s| !s.is_empty()) {
+        obj.insert("added_from".into(), Value::String(source.to_owned()));
+    }
+    Value::Object(obj)
+}
+
+/// Build the wire payload for `hosts.remove`.
+pub fn build_remove_payload(host_id: &str) -> Value {
+    serde_json::json!({ "id": host_id.trim() })
 }
 
 /// One diagnostic from `hosts.list`'s `diagnostics` array, preserved ready to show.
@@ -278,6 +368,9 @@ pub struct UnconnectableHost {
     pub endpoints: Vec<String>,
     pub source: Option<String>,
     pub reason: String,
+    /// True when the record had a valid endpoint that was skipped because another workspace row
+    /// already owns that canonical endpoint; false when no supported endpoint exists.
+    pub duplicate: bool,
 }
 
 /// Pure reconciliation plan produced by [`reconcile`].
@@ -301,13 +394,13 @@ impl ReconcilePlan {
 }
 
 /// Pick the first usable endpoint for `record` that does not point at `source_canon` and does
-/// not overlap any canonical endpoint already owned in `used_endpoints`. Returns `Err(reason)`
-/// when no unused valid endpoint exists.
+/// not overlap any canonical endpoint already owned in `used_endpoints`. Returns
+/// `Err((reason, duplicate))` when no unused valid endpoint exists.
 fn pick_unused_endpoint(
     record: &SharedHost,
     source_canon: &str,
     used_endpoints: &HashSet<String>,
-) -> Result<String, String> {
+) -> Result<String, (String, bool)> {
     let mut saw_duplicate = false;
     for raw in &record.endpoints {
         let expanded = expand_endpoint(raw);
@@ -332,9 +425,9 @@ fn pick_unused_endpoint(
         }
     }
     if saw_duplicate {
-        Err("endpoint already in workspace".into())
+        Err(("endpoint already in workspace".into(), true))
     } else {
-        Err(unconnectable_reason(record))
+        Err((unconnectable_reason(record), false))
     }
 }
 
@@ -438,7 +531,7 @@ pub fn reconcile(
                         used_endpoints.insert(next_canon);
                         (first_valid, true)
                     }
-                    Err(reason) => {
+                    Err((reason, duplicate)) => {
                         // Keep existing saved endpoint untouched rather than colliding or
                         // spawning a broken worker, and surface the unusable/duplicate record.
                         plan.unconnectable.push(UnconnectableHost {
@@ -447,6 +540,7 @@ pub fn reconcile(
                             endpoints: record.endpoints.clone(),
                             source: record.source.clone(),
                             reason,
+                            duplicate,
                         });
                         (host.endpoint.clone(), false)
                     }
@@ -519,13 +613,14 @@ pub fn reconcile(
                     },
                 });
             }
-            Err(reason) => {
+            Err((reason, duplicate)) => {
                 plan.unconnectable.push(UnconnectableHost {
                     id: record.id.clone(),
                     label: record.label.clone(),
                     endpoints: record.endpoints.clone(),
                     source: record.source.clone(),
                     reason,
+                    duplicate,
                 });
             }
         }
@@ -970,5 +1065,129 @@ mod tests {
         );
         assert!(!suppressed.has_host_changes());
         assert!(suppressed.unconnectable.is_empty());
+    }
+
+    #[test]
+    fn declared_predicate_and_duplicate_vs_unconnectable_flag() {
+        let stored = SharedHost::from_value(&json!({
+            "id": "host:1",
+            "label": "Stored",
+            "endpoints": ["stored.invalid"]
+        }))
+        .unwrap();
+        let declared = SharedHost::from_value(&json!({
+            "id": "host:2",
+            "label": "Declared",
+            "endpoints": ["declared.invalid"],
+            "source": "init.lua:4"
+        }))
+        .unwrap();
+        assert!(!stored.is_declared());
+        assert!(declared.is_declared());
+
+        let local = vec![
+            local_host("Local", SOURCE),
+            local_host("Existing", "https://dup.invalid"),
+        ];
+        let list = list_of(vec![
+            shared_record("host:dup", "Dup", &["dup.invalid"], None),
+            shared_record("host:bad", "Bad", &["ftp://bad.invalid"], None),
+        ]);
+        let plan = reconcile(&local, SOURCE, &list, None);
+        assert_eq!(plan.links.len(), 1);
+        assert!(
+            plan.unconnectable
+                .iter()
+                .any(|u| u.label == "Bad" && !u.duplicate)
+        );
+
+        let dup_list = list_of(vec![
+            shared_record("host:a", "A", &["only.invalid"], None),
+            shared_record("host:b", "B", &["only.invalid"], None),
+        ]);
+        let dup_plan = reconcile(&[local_host("Local", SOURCE)], SOURCE, &dup_list, None);
+        assert_eq!(dup_plan.unconnectable.len(), 1);
+        assert_eq!(dup_plan.unconnectable[0].label, "B");
+        assert!(dup_plan.unconnectable[0].duplicate);
+    }
+
+    #[test]
+    fn build_put_update_preserves_unknown_fields_and_unrelated_endpoints() {
+        let record = SharedHost::from_value(&json!({
+            "id": "host:0199abcd-1234-7abc-8def-0123456789ab",
+            "label": "Studio",
+            "endpoints": ["studio.invalid", "ssh://alice@studio.invalid"],
+            "icon": "server",
+            "added_from": "laptop",
+            "host_id": "11111111-2222-3333-4444-555555555555",
+            "custom_extra": {"nested": [1, 2, 3]}
+        }))
+        .unwrap();
+
+        // Rename-only edit: endpoint unchanged canonically (expanded from bare studio.invalid)
+        // must keep bare "studio.invalid" and every other endpoint and unknown field intact.
+        let renamed = build_put_update(
+            &record,
+            "  Studio Pro  ",
+            "https://studio.invalid",
+            "HTTPS://Studio.Invalid:443/",
+        );
+        assert_eq!(renamed["id"], "host:0199abcd-1234-7abc-8def-0123456789ab");
+        assert_eq!(renamed["label"], "Studio Pro");
+        assert_eq!(
+            renamed["endpoints"],
+            json!(["studio.invalid", "ssh://alice@studio.invalid"])
+        );
+        assert_eq!(renamed["icon"], "server");
+        assert_eq!(renamed["added_from"], "laptop");
+        assert_eq!(renamed["host_id"], "11111111-2222-3333-4444-555555555555");
+        assert_eq!(renamed["custom_extra"], json!({"nested": [1, 2, 3]}));
+
+        // Endpoint edit replaces only the matching endpoint while keeping the sibling endpoint.
+        let moved = build_put_update(
+            &record,
+            "Studio Pro",
+            "https://studio.invalid",
+            "https://studio-new.invalid:8443",
+        );
+        assert_eq!(
+            moved["endpoints"],
+            json!([
+                "https://studio-new.invalid:8443",
+                "ssh://alice@studio.invalid"
+            ])
+        );
+        assert_eq!(moved["custom_extra"], json!({"nested": [1, 2, 3]}));
+
+        // Editing first endpoint to match the second deduplicates cleanly.
+        let deduped = build_put_update(
+            &record,
+            "Studio",
+            "https://studio.invalid",
+            "SSH://alice@STUDIO.invalid/",
+        );
+        assert_eq!(deduped["endpoints"], json!(["SSH://alice@STUDIO.invalid/"]));
+    }
+
+    #[test]
+    fn build_put_create_and_remove_match_wire_contract() {
+        let created = build_put_create("  Lab  ", " https://lab.invalid ", Some("  workstation "));
+        assert_eq!(
+            created,
+            json!({
+                "label": "Lab",
+                "endpoints": ["https://lab.invalid"],
+                "added_from": "workstation"
+            })
+        );
+        assert!(created.get("id").is_none());
+
+        let no_source = build_put_create("Lab", "https://lab.invalid", Some("   "));
+        assert!(no_source.get("added_from").is_none());
+
+        assert_eq!(
+            build_remove_payload("  host:123  "),
+            json!({"id": "host:123"})
+        );
     }
 }

@@ -777,7 +777,7 @@ impl Workspace {
         use Group::Host as G;
         let host = self.active;
         let saved = &self.settings.hosts[host];
-        let managed = self.is_shared_managed(host);
+        let blocked = self.shared_write_blocked(host);
         let name = &saved.label;
         let mut edit = Command::new(
             "host.edit",
@@ -785,10 +785,10 @@ impl Workspace {
             format!("Edit host {name}…"),
             Intent::EditHost(host),
         )
-        .enabled(!managed)
+        .enabled(blocked.is_none())
         .keywords("endpoint name");
-        if managed {
-            edit = edit.detail(super::shared_hosts::MANAGED_REASON);
+        if let Some(reason) = &blocked {
+            edit = edit.detail(reason.clone());
         }
         let mut rows = vec![
             Command::action("host.switch", G, "Switch host…", "client.host.switch"),
@@ -880,11 +880,11 @@ impl Workspace {
                     format!("Remove host {name}…"),
                     Intent::RemoveHost(host),
                 )
-                .enabled(self.settings.hosts.len() > 1 && !managed)
+                .enabled(self.settings.hosts.len() > 1 && blocked.is_none())
                 .keywords("forget delete")
                 .destructive();
-                if managed {
-                    remove = remove.detail(super::shared_hosts::MANAGED_REASON);
+                if let Some(reason) = &blocked {
+                    remove = remove.detail(reason.clone());
                 }
                 remove
             },

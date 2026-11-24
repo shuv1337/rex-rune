@@ -8,7 +8,7 @@ use super::{
 };
 use rex_rune::settings::NoticePosition;
 use rune::{Cursor, El, Tx, col, el, row, text};
-use rune_kit::TextField;
+use rune_kit::{Switch, TextField};
 
 fn modal(s: &Workspace, viewport: [f32; 2], body: El) -> El {
     let panel = col()
@@ -95,13 +95,13 @@ fn form(s: &Workspace, form: &Form) -> El {
                 .key("form-error"),
         );
     }
-    if let Form::EditHost(_) = form {
-        body = body.child(
-            text("A new endpoint connects to a different server; sessions on the old one keep running. The shell applies to new sessions, tabs and splits.")
-                .font(ui(12.))
-                .color(rgb(muted()))
-                .wrap(),
-        );
+    if let Form::EditHost(host) = form {
+        let note = if s.is_shared_managed(*host) {
+            "Name and endpoint changes update Rex's shared host list. A new endpoint connects to a different server; sessions on the old one keep running. The default shell stays on this client."
+        } else {
+            "A new endpoint connects to a different server; sessions on the old one keep running. The shell applies to new sessions, tabs and splits."
+        };
+        body = body.child(text(note).font(ui(12.)).color(rgb(muted())).wrap());
     }
     if let Form::AddSsh(index) = form {
         body = body.child(
@@ -122,6 +122,34 @@ fn form(s: &Workspace, form: &Form) -> El {
         );
     }
     if let Form::AddHost = form {
+        if s.can_save_shared_host() || panel.save_shared {
+            body = body.child(
+                row()
+                    .key("save-shared-host-row")
+                    .w_full()
+                    .center_y()
+                    .gap(12.)
+                    .child(
+                        text("Save to shared Rex host list")
+                            .font(ui(13.))
+                            .color(rgb(ink()))
+                            .grow(1.),
+                    )
+                    .child(
+                        Switch::new(panel.save_shared)
+                            .label("Save to shared Rex host list")
+                            .hide_label()
+                            .on_toggle(|s: &mut Workspace| {
+                                if let Some(panel) = &mut s.panel {
+                                    panel.save_shared = !panel.save_shared;
+                                    panel.error = None;
+                                }
+                            })
+                            .build(k)
+                            .key("save-shared-host"),
+                    ),
+            );
+        }
         body = body.child(
             text("https:// reaches a Rex server over the network (a bare host name is tried on port 443, then 7297); ssh://user@host[/socket] forwards a server's socket over SSH; unix:// is a socket on this machine.")
                 .font(ui(12.))
@@ -285,14 +313,25 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
         PanelKind::Settings => return Some(super::settings_view::settings(s, viewport)),
         PanelKind::RemoveHost(host) => {
             let label = &s.settings.hosts[*host].label;
-            confirm_with(
-                &panel.title,
-                &format!(
-                    "Rex Rune stops connecting to {label} and forgets it. Its sessions and programs keep running on that server, and you can add it again later."
-                ),
-                "Keep host",
-                "Remove host",
-            )
+            if s.is_shared_managed(*host) {
+                confirm_with(
+                    &panel.title,
+                    &format!(
+                        "Removes {label} from Rex's shared host list for every client connected to this server. Its sessions and programs keep running on that server, and you can add it again later."
+                    ),
+                    "Keep host",
+                    "Remove from shared list",
+                )
+            } else {
+                confirm_with(
+                    &panel.title,
+                    &format!(
+                        "Rex Rune stops connecting to {label} and forgets it. Its sessions and programs keep running on that server, and you can add it again later."
+                    ),
+                    "Keep host",
+                    "Remove host",
+                )
+            }
         }
         PanelKind::ResetShortcuts => confirm_with(
             &panel.title,

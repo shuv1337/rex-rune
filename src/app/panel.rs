@@ -502,6 +502,11 @@ pub struct Panel {
     pub anchor_to: Option<String>,
     /// A switcher row being renamed in place, and its field.
     pub rename: Option<(SessionTarget, TextEdit)>,
+    /// For `Form::AddHost`: whether to save the new host to Rex's shared host list (`hosts.put`).
+    pub save_shared: bool,
+    /// For `Form::EditHost` / `PanelKind::RemoveHost`: the host's `shared.id` when the panel
+    /// opened, so a stale dialog cannot mutate a host whose shared link changed meanwhile.
+    pub opened_shared_id: Option<String>,
 }
 
 impl Panel {
@@ -537,6 +542,8 @@ impl Panel {
             anchor: None,
             anchor_to: None,
             rename: None,
+            save_shared: false,
+            opened_shared_id: None,
         }
     }
     pub fn is_list(&self) -> bool {
@@ -690,19 +697,15 @@ impl Workspace {
                 Entry::new("Retry connection", "", "", Intent::RetryHost(target.host))
                     .in_section(2),
             );
-            let managed = self.is_shared_managed(target.host);
+            let blocked = self.shared_write_blocked(target.host);
             let mut edit = Entry::new(
                 "Edit host…",
-                if managed {
-                    super::shared_hosts::MANAGED_REASON
-                } else {
-                    ""
-                },
+                blocked.as_deref().unwrap_or(""),
                 "",
                 Intent::EditHost(target.host),
             )
             .in_section(2);
-            edit.enabled = !managed;
+            edit.enabled = blocked.is_none();
             entries.push(edit);
         }
         let mut close = Entry::new(
@@ -768,33 +771,25 @@ impl Workspace {
             )
             .in_section(2),
         );
-        let managed = self.is_shared_managed(host);
+        let blocked = self.shared_write_blocked(host);
         let mut edit = Entry::new(
             "Edit host…",
-            if managed {
-                super::shared_hosts::MANAGED_REASON
-            } else {
-                ""
-            },
+            blocked.as_deref().unwrap_or(""),
             "",
             Intent::EditHost(host),
         )
         .in_section(2);
-        edit.enabled = !managed;
+        edit.enabled = blocked.is_none();
         entries.push(edit);
         let mut remove = Entry::new(
             "Remove host…",
-            if managed {
-                super::shared_hosts::MANAGED_REASON
-            } else {
-                ""
-            },
+            blocked.as_deref().unwrap_or(""),
             "",
             Intent::RemoveHost(host),
         )
         .in_section(3)
         .destructive();
-        remove.enabled = self.settings.hosts.len() > 1 && !managed;
+        remove.enabled = self.settings.hosts.len() > 1 && blocked.is_none();
         entries.push(remove);
         entries
     }

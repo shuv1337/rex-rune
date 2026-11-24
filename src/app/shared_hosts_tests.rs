@@ -1,10 +1,11 @@
-//! Headless UI and workspace reconciliation tests for #145 Slice 1 (read-only shared Rex host list).
+//! Headless UI and workspace reconciliation tests for #145 Slices 1 & 2 (shared Rex host list
+//! read-only sync, diagnostics, deduplication, and epoch-scoped `hosts.put` / `hosts.remove`).
 use super::*;
 use crate::app::panel::SettingsSection;
 use rex_rune::{
     connection::{
         HostModel,
-        hosts::SharedHostState,
+        hosts::{SharedHostState, WriteKind, WriteOutcome, WriteResult},
         server_info::{Answer, Process},
     },
     hosts::{SharedHost, SharedHostDiagnostic, SharedHostList},
@@ -86,6 +87,14 @@ fn push_shared_state(
                 ..Process::default()
             });
         }
+    }
+    ws.sync(source_idx, &mut rune::Tx::default());
+}
+
+fn push_shared_write(ws: &mut Workspace, source_idx: usize, result: WriteResult) {
+    {
+        let mut m = ws.hosts[source_idx].connection.model.lock().unwrap();
+        m.shared_writes.push(result);
     }
     ws.sync(source_idx, &mut rune::Tx::default());
 }
@@ -438,23 +447,36 @@ fn toggle_off_unlinks_locally_with_zero_server_commands_and_toggle_on_reconciles
 }
 
 #[test]
-fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
+fn declared_init_lua_host_remains_strictly_read_only_while_local_shell_editing_works() {
     let mut ws = workspace_hosts(2);
     let source_ep = ws.settings.hosts[0].endpoint.clone();
     ws.shared_hosts.source_override = Some(source_ep.clone());
-    let _rx0 = stub_host(&mut ws, 0);
+    let rx0 = stub_host(&mut ws, 0);
     let _rx1 = stub_host(&mut ws, 1);
 
     ws.settings.hosts[1].label = "Studio".into();
     ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
-    ws.settings.hosts[1].shared = Some(SharedLink {
-        id: "host:studio".into(),
-        from: source_ep,
-    });
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h-decl".into(),
+            hosts: vec![host_record(
+                "host:studio",
+                "Studio",
+                &["studio.invalid"],
+                None,
+                Some("init.lua:2"),
+            )],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
     ws.active = 1;
+    rx0.drain();
 
     let mut tx = rune::Tx::default();
-    // Intent::EditHost and Intent::RemoveHost refuse cleanly without opening destructive/edit panels.
+    // Intent::EditHost and Intent::RemoveHost refuse cleanly without opening panels or sending writes.
     ws.perform(Intent::EditHost(1), &mut tx);
     assert!(ws.panel.is_none());
     ws.perform(Intent::RemoveHost(1), &mut tx);
@@ -463,8 +485,9 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
     assert_eq!(
         ws.settings.hosts.len(),
         2,
-        "linked host must not be removed"
+        "declared host must not be removed"
     );
+    assert!(rx0.is_empty());
 
     // Direct edit_host call changing label or endpoint is also refused (shell-only still works).
     ws.edit_host(
@@ -484,7 +507,7 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
     );
     assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("fish"));
 
-    // Sidebar host menu disables Edit host… and Remove host… while keeping Default shell… enabled.
+    // Sidebar host menu disables Edit host… and Remove host… naming init.lua:2 while keeping Default shell… enabled.
     ws.host_menu(1, (100., 100.));
     let menu = ws.entries();
     let shell_row = menu.iter().find(|e| e.label == "Default shell…").unwrap();
@@ -492,11 +515,19 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
     let remove_row = menu.iter().find(|e| e.label == "Remove host…").unwrap();
     assert!(shell_row.enabled);
     assert!(!edit_row.enabled);
-    assert!(edit_row.detail.contains("Managed by rex hosts"));
+    assert!(
+        edit_row
+            .detail
+            .contains("Declared in init.lua:2 (read-only)")
+    );
     assert!(!remove_row.enabled);
-    assert!(remove_row.detail.contains("Managed by rex hosts"));
+    assert!(
+        remove_row
+            .detail
+            .contains("Declared in init.lua:2 (read-only)")
+    );
 
-    // Commands also disables host.edit and host.remove for the linked active host.
+    // Commands also disables host.edit and host.remove for the declared active host.
     ws.picker(false);
     let cmds = ws.entries();
     let cmd_edit = cmds
@@ -512,10 +543,20 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
         .find(|e| e.id.as_deref() == Some("host.shell"))
         .unwrap();
     assert!(!cmd_edit.enabled);
+    assert!(
+        cmd_edit
+            .detail
+            .contains("Declared in init.lua:2 (read-only)")
+    );
     assert!(!cmd_remove.enabled);
+    assert!(
+        cmd_remove
+            .detail
+            .contains("Declared in init.lua:2 (read-only)")
+    );
     assert!(cmd_shell.enabled);
 
-    // Local shell editing still works end-to-end!
+    // Local shell editing still works end-to-end with zero server writes!
     ws.perform(Intent::HostShell(1), &mut tx);
     assert!(matches!(
         ws.panel.as_ref().map(|p| &p.kind),
@@ -524,26 +565,38 @@ fn linked_host_edit_and_remove_are_guarded_while_local_shell_editing_works() {
     ws.panel.as_mut().unwrap().inputs[0].text = "/bin/zsh".into();
     ws.submit(&mut tx);
     assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("/bin/zsh"));
+    assert!(rx0.is_empty());
 }
 
 #[test]
-fn save_ssh_socket_and_stale_edit_form_cannot_mutate_a_linked_shared_host() {
+fn save_ssh_socket_and_stale_edit_form_cannot_mutate_declared_or_newly_linked_host() {
     let mut ws = workspace_hosts(2);
     let source_ep = ws.settings.hosts[0].endpoint.clone();
     ws.shared_hosts.source_override = Some(source_ep.clone());
-    let _rx0 = stub_host(&mut ws, 0);
+    let rx0 = stub_host(&mut ws, 0);
     let _rx1 = stub_host(&mut ws, 1);
 
-    // (a) save_ssh_socket on an offline linked SSH host must not overwrite endpoint or reset
-    // remote_control / reconnect.
+    // (a) save_ssh_socket on a declared init.lua SSH host must not overwrite endpoint or send PutSharedHost.
     let ssh_ep = "ssh://me@studio.invalid".to_owned();
     ws.settings.hosts[1].label = "Studio".into();
     ws.settings.hosts[1].endpoint = ssh_ep.clone();
     ws.settings.hosts[1].remote_control = true;
-    ws.settings.hosts[1].shared = Some(SharedLink {
-        id: "host:studio".into(),
-        from: source_ep.clone(),
-    });
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h-decl-ssh".into(),
+            hosts: vec![host_record(
+                "host:studio",
+                "Studio",
+                &[&ssh_ep],
+                None,
+                Some("init.lua:2"),
+            )],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
     ws.hosts[1].model.connected = false;
     let id_before = ws.hosts[1].id;
     ws.ssh_setup.attachment.insert(
@@ -553,16 +606,18 @@ fn save_ssh_socket_and_stale_edit_form_cannot_mutate_a_linked_shared_host() {
             endpoint: Some("ssh://me@studio.invalid/run/custom.sock".into()),
         },
     );
+    rx0.drain();
     let mut tx = rune::Tx::default();
     ws.save_ssh_socket(&ssh_ep, &mut tx);
     assert_eq!(ws.settings.hosts[1].endpoint, ssh_ep);
     assert!(ws.settings.hosts[1].remote_control);
     assert_eq!(ws.hosts[1].id, id_before);
+    assert!(rx0.is_empty(), "declared host must send zero PutSharedHost");
     assert!(
         ws.notices
             .iter()
-            .any(|n| n.text.contains("managed by rex hosts")),
-        "expected read-only notice, got {:?}",
+            .any(|n| n.text.contains("Declared in init.lua:2 (read-only)")),
+        "expected declared read-only notice, got {:?}",
         ws.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
     );
     assert!(
@@ -605,6 +660,7 @@ fn save_ssh_socket_and_stale_edit_form_cannot_mutate_a_linked_shared_host() {
         panel.inputs[0].text = "Local Override".into();
         panel.inputs[1].text = "https://hijack.invalid".into();
     }
+    rx0.drain();
     ws.submit(&mut tx);
     assert_eq!(ws.settings.hosts[1].label, "Studio From Rex");
     assert_eq!(ws.settings.hosts[1].endpoint, ssh_ep);
@@ -614,6 +670,14 @@ fn save_ssh_socket_and_stale_edit_form_cannot_mutate_a_linked_shared_host() {
         Some("session:keep")
     );
     assert_eq!(ws.hosts[1].id, id_before);
+    assert!(
+        rx0.is_empty(),
+        "stale local EditHost form must not send PutSharedHost after host became linked"
+    );
+    assert!(
+        ws.panel.as_ref().and_then(|p| p.error.as_deref()).is_some(),
+        "stale form must explain why it refused"
+    );
 }
 
 #[test]
@@ -820,5 +884,793 @@ fn settings_card_shows_diagnostics_error_severity_provenance_conflict_failed_sea
     assert!(
         failed_texts.iter().any(|t| t == "Error"),
         "Error chip not shown"
+    );
+}
+
+#[test]
+fn editing_stored_shared_host_preserves_raw_waits_for_server_applies_safety_and_keeps_shell_local()
+{
+    let mut ws = workspace_hosts(2);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+    {
+        let mut m = ws.hosts[0].connection.model.lock().unwrap();
+        m.connection_epoch = 7;
+    }
+
+    let old_ep = "https://studio.invalid".to_owned();
+    ws.settings.hosts[1].label = "Studio".into();
+    ws.settings.hosts[1].endpoint = old_ep.clone();
+    ws.settings.hosts[1].remote_control = true;
+    ws.settings.hosts[1].collapsed = true;
+    ws.settings
+        .sessions
+        .insert(old_ep.clone(), "session:old".into());
+    ws.settings.recent_paths.insert(
+        old_ep.clone(),
+        vec![RecentPath {
+            path: "/srv/studio".into(),
+            directory: true,
+        }],
+    );
+
+    let rich_record = SharedHost::from_value(&json!({
+        "id": "host:studio",
+        "label": "Studio",
+        "endpoints": ["studio.invalid", "ssh://alice@studio.invalid"],
+        "icon": "server",
+        "added_from": "laptop",
+        "host_id": "11111111-2222-3333-4444-555555555555",
+        "custom_extra": {"nested": [1, 2, 3]}
+    }))
+    .unwrap();
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![rich_record],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    ws.active = 1;
+    rx0.drain();
+
+    // Sidebar menu & Commands enable Edit host… and Remove host… for stored shared host.
+    ws.host_menu(1, (100., 100.));
+    let menu = ws.entries();
+    assert!(
+        menu.iter()
+            .find(|e| e.label == "Edit host…")
+            .unwrap()
+            .enabled
+    );
+    assert!(
+        menu.iter()
+            .find(|e| e.label == "Remove host…")
+            .unwrap()
+            .enabled
+    );
+    ws.picker(false);
+    let cmds = ws.entries();
+    assert!(
+        cmds.iter()
+            .find(|e| e.id.as_deref() == Some("host.edit"))
+            .unwrap()
+            .enabled
+    );
+    assert!(
+        cmds.iter()
+            .find(|e| e.id.as_deref() == Some("host.remove"))
+            .unwrap()
+            .enabled
+    );
+
+    let mut tx = rune::Tx::default();
+
+    // 1. Shell-only edit stays local and immediate with ZERO PutSharedHost commands.
+    ws.perform(Intent::EditHost(1), &mut tx);
+    assert!(matches!(
+        ws.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Form(Form::EditHost(1)))
+    ));
+    ws.panel.as_mut().unwrap().inputs[2].text = "/bin/zsh".into();
+    ws.submit(&mut tx);
+    assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("/bin/zsh"));
+    assert!(
+        rx0.is_empty(),
+        "shell-only edit must send zero PutSharedHost"
+    );
+
+    // 2. Label + endpoint + shell edit sends epoch-scoped PutSharedHost with preserved raw fields
+    // and unrelated endpoints, and does NOT mutate local state ahead of server reply.
+    let old_host_id = ws.hosts[1].id;
+    ws.perform(Intent::EditHost(1), &mut tx);
+    {
+        let panel = ws.panel.as_mut().unwrap();
+        panel.inputs[0].text = "Studio Pro".into();
+        panel.inputs[1].text = "https://studio-new.invalid:8443".into();
+        panel.inputs[2].text = "fish".into();
+    }
+    ws.submit(&mut tx);
+    assert_eq!(ws.settings.hosts[1].label, "Studio", "must wait for server");
+    assert_eq!(
+        ws.settings.hosts[1].endpoint, old_ep,
+        "must wait for server"
+    );
+    assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("/bin/zsh"));
+    assert!(ws.settings.hosts[1].remote_control);
+
+    let cmd = rx0.try_recv().expect("PutSharedHost sent");
+    let (req_id, epoch, payload) = match cmd {
+        HostCommand::PutSharedHost { id, epoch, host } => (id, epoch, host),
+        other => panic!(
+            "expected PutSharedHost, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    };
+    assert_eq!(epoch, 7);
+    assert_eq!(payload["id"], "host:studio");
+    assert_eq!(payload["label"], "Studio Pro");
+    assert_eq!(
+        payload["endpoints"],
+        json!([
+            "https://studio-new.invalid:8443",
+            "ssh://alice@studio.invalid"
+        ])
+    );
+    assert_eq!(payload["icon"], "server");
+    assert_eq!(payload["added_from"], "laptop");
+    assert_eq!(payload["host_id"], "11111111-2222-3333-4444-555555555555");
+    assert_eq!(payload["custom_extra"], json!({"nested": [1, 2, 3]}));
+
+    // Concurrent edit while pending is refused cleanly without sending a second write.
+    ws.perform(Intent::EditHost(1), &mut tx);
+    assert!(ws.panel.is_none());
+    assert!(rx0.is_empty());
+
+    // 3. Server failure leaves local row 100% untouched and surfaces notice.
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: req_id,
+            epoch: 7,
+            kind: WriteKind::Put,
+            outcome: WriteOutcome::Failed {
+                code: Some("conflict".into()),
+                message: "the label \"Studio Pro\" is already used".into(),
+            },
+        },
+    );
+    assert_eq!(ws.settings.hosts[1].label, "Studio");
+    assert_eq!(ws.settings.hosts[1].endpoint, old_ep);
+    assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("/bin/zsh"));
+    assert!(ws.settings.hosts[1].remote_control);
+    assert_eq!(ws.hosts[1].id, old_host_id);
+    assert!(
+        ws.notices
+            .iter()
+            .any(|n| n.text.contains("Studio Pro") && n.text.contains("already used"))
+    );
+
+    // 4. Retry edit and deliver server confirmation + refreshed list: applies safety policy once.
+    ws.perform(Intent::EditHost(1), &mut tx);
+    {
+        let panel = ws.panel.as_mut().unwrap();
+        panel.inputs[0].text = "Studio Pro".into();
+        panel.inputs[1].text = "https://studio-new.invalid:8443".into();
+        panel.inputs[2].text = "fish".into();
+    }
+    ws.submit(&mut tx);
+    let req_id2 = match rx0.try_recv().unwrap() {
+        HostCommand::PutSharedHost { id, .. } => id,
+        _ => panic!("expected PutSharedHost"),
+    };
+    let updated_record = SharedHost::from_value(&json!({
+        "id": "host:studio",
+        "label": "Studio Pro",
+        "endpoints": ["https://studio-new.invalid:8443", "ssh://alice@studio.invalid"],
+        "icon": "server",
+        "added_from": "laptop",
+        "host_id": "11111111-2222-3333-4444-555555555555",
+        "custom_extra": {"nested": [1, 2, 3]}
+    }))
+    .unwrap();
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: req_id2,
+            epoch: 7,
+            kind: WriteKind::Put,
+            outcome: WriteOutcome::Put {
+                host: updated_record.clone(),
+                hash: "h2".into(),
+            },
+        },
+    );
+    let new_host_id = ws.hosts[1].id;
+    assert_ne!(new_host_id, old_host_id, "endpoint change must reconnect");
+    assert_eq!(ws.settings.hosts[1].label, "Studio Pro");
+    assert_eq!(
+        ws.settings.hosts[1].endpoint,
+        "https://studio-new.invalid:8443"
+    );
+    assert_eq!(ws.settings.hosts[1].shell.as_deref(), Some("fish"));
+    assert!(ws.settings.hosts[1].collapsed);
+    assert!(!ws.settings.hosts[1].remote_control);
+    assert!(!ws.settings.sessions.contains_key(&old_ep));
+    assert!(!ws.settings.recent_paths.contains_key(&old_ep));
+
+    // Subsequent hosts.list refresh reconciles cleanly as a no-op (no double reconnect!).
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h2".into(),
+            hosts: vec![updated_record],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    assert_eq!(ws.hosts[1].id, new_host_id, "must not double-reconnect");
+}
+
+#[test]
+fn save_ssh_socket_routes_stored_shared_host_through_put_shared_host() {
+    let mut ws = workspace_hosts(2);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+    {
+        ws.hosts[0]
+            .connection
+            .model
+            .lock()
+            .unwrap()
+            .connection_epoch = 3;
+    }
+
+    let ssh_ep = "ssh://me@studio.invalid".to_owned();
+    let proposed = "ssh://me@studio.invalid/run/custom.sock".to_owned();
+    ws.settings.hosts[1].label = "Studio".into();
+    ws.settings.hosts[1].endpoint = ssh_ep.clone();
+    ws.settings.hosts[1].remote_control = true;
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![
+                SharedHost::from_value(&json!({
+                    "id": "host:studio",
+                    "label": "Studio",
+                    "endpoints": [&ssh_ep, "https://fallback.invalid"],
+                    "custom": true
+                }))
+                .unwrap(),
+            ],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    ws.hosts[1].model.connected = false;
+    ws.ssh_setup.attachment.insert(
+        ssh_ep.clone(),
+        setup::Attachment::Review {
+            reason: "custom socket".into(),
+            endpoint: Some(proposed.clone()),
+        },
+    );
+    rx0.drain();
+
+    let mut tx = rune::Tx::default();
+    ws.save_ssh_socket(&ssh_ep, &mut tx);
+    // Must not mutate ahead of reply!
+    assert_eq!(ws.settings.hosts[1].endpoint, ssh_ep);
+    assert!(ws.ssh_setup.attachment.contains_key(&ssh_ep));
+
+    let (req_id, payload) = match rx0.try_recv().expect("PutSharedHost sent") {
+        HostCommand::PutSharedHost { id, epoch, host } => {
+            assert_eq!(epoch, 3);
+            (id, host)
+        }
+        _ => panic!("expected PutSharedHost"),
+    };
+    assert_eq!(
+        payload["endpoints"],
+        json!([&proposed, "https://fallback.invalid"])
+    );
+    assert_eq!(payload["custom"], json!(true));
+
+    let updated = SharedHost::from_value(&json!({
+        "id": "host:studio",
+        "label": "Studio",
+        "endpoints": [&proposed, "https://fallback.invalid"],
+        "custom": true
+    }))
+    .unwrap();
+    push_shared_write(
+        &mut ws,
+        0,
+        WriteResult {
+            id: req_id,
+            epoch: 3,
+            kind: WriteKind::Put,
+            outcome: WriteOutcome::Put {
+                host: updated,
+                hash: "h2".into(),
+            },
+        },
+    );
+    assert_eq!(ws.settings.hosts[1].endpoint, proposed);
+    assert!(!ws.settings.hosts[1].remote_control);
+    assert!(!ws.ssh_setup.attachment.contains_key(&ssh_ep));
+}
+
+#[test]
+fn removing_stored_shared_host_warns_waits_for_server_and_avoids_rule_5_notice() {
+    let mut ws = workspace_hosts(2);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+    {
+        ws.hosts[0]
+            .connection
+            .model
+            .lock()
+            .unwrap()
+            .connection_epoch = 4;
+    }
+
+    let studio_ep = "https://studio.invalid".to_owned();
+    ws.settings.hosts[1].label = "Studio".into();
+    ws.settings.hosts[1].endpoint = studio_ep.clone();
+    ws.settings
+        .sessions
+        .insert(studio_ep.clone(), "session:s1".into());
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![host_record(
+                "host:studio",
+                "Studio",
+                &["studio.invalid"],
+                None,
+                None,
+            )],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    ws.active = 1;
+    rx0.drain();
+
+    // Open RemoveHost from Settings so we also verify Settings stays open after async confirmation!
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::Settings, &mut tx);
+    ws.open_section(SettingsSection::Hosts);
+    ws.perform(Intent::RemoveHost(1), &mut tx);
+    assert!(matches!(
+        ws.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::RemoveHost(1))
+    ));
+    assert!(
+        rx0.is_empty(),
+        "opening dialog must not send RemoveSharedHost"
+    );
+
+    // Render confirmation dialog and check shared-removal warning copy.
+    let mut rt = runtime_at(ws, (640., 480.));
+    settle(&mut rt);
+    let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Rex's shared host list for every client")),
+        "missing shared-removal warning copy: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "Remove from shared list"),
+        "missing shared danger button label: {texts:?}"
+    );
+    let dialog_r = rect(&rt, "dialog");
+    assert!(
+        dialog_r[0] >= 0.
+            && dialog_r[1] >= 0.
+            && dialog_r[0] + dialog_r[2] <= 640.5
+            && dialog_r[1] + dialog_r[3] <= 480.5,
+        "RemoveHost dialog overflows 640x480: {dialog_r:?}"
+    );
+
+    // Confirm removal: sends epoch-scoped RemoveSharedHost and does NOT delete locally yet!
+    click(&mut rt, "confirm-close");
+    assert_eq!(
+        rt.state.settings.hosts.len(),
+        2,
+        "must not delete local row ahead of server confirmation"
+    );
+    let (req_id, epoch, host_id) = match rx0.try_recv().expect("RemoveSharedHost sent") {
+        HostCommand::RemoveSharedHost { id, epoch, host_id } => (id, epoch, host_id),
+        _ => panic!("expected RemoveSharedHost"),
+    };
+    assert_eq!(epoch, 4);
+    assert_eq!(host_id, "host:studio");
+
+    // 1. Server error keeps the row intact and notifies.
+    rt.update(|s, _| {
+        push_shared_write(
+            s,
+            0,
+            WriteResult {
+                id: req_id,
+                epoch: 4,
+                kind: WriteKind::Remove,
+                outcome: WriteOutcome::Failed {
+                    code: Some("conflict".into()),
+                    message: "hosts/everywhere.json is not a JSON object".into(),
+                },
+            },
+        );
+    });
+    assert_eq!(rt.state.settings.hosts.len(), 2);
+    assert!(
+        rt.state
+            .notices
+            .iter()
+            .any(|n| n.text.contains("hosts/everywhere.json"))
+    );
+
+    // 2. Confirm again and deliver server success + refreshed empty list: removes cleanly without
+    // Rule 5's "kept as a local host" notice and keeps Settings open!
+    rt.update(|s, tx| {
+        s.notices.clear();
+        s.perform(Intent::RemoveHost(1), tx);
+        s.submit(tx);
+    });
+    let req_id2 = match rx0.try_recv().expect("second RemoveSharedHost") {
+        HostCommand::RemoveSharedHost { id, .. } => id,
+        _ => panic!("expected RemoveSharedHost"),
+    };
+    rt.update(|s, _| {
+        push_shared_write(
+            s,
+            0,
+            WriteResult {
+                id: req_id2,
+                epoch: 4,
+                kind: WriteKind::Remove,
+                outcome: WriteOutcome::Removed {
+                    host_id: "host:studio".into(),
+                    removed: true,
+                    hash: "h2".into(),
+                },
+            },
+        );
+        push_shared_state(
+            s,
+            0,
+            SharedHostState::Loaded(SharedHostList {
+                hash: "h2".into(),
+                hosts: Vec::new(),
+                diagnostics: Vec::new(),
+            }),
+            None,
+        );
+    });
+    assert_eq!(rt.state.settings.hosts.len(), 1);
+    assert_eq!(rt.state.active, 0);
+    assert!(!rt.state.settings.sessions.contains_key(&studio_ep));
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|p| &p.kind),
+            Some(PanelKind::Settings)
+        ),
+        "Settings should remain open after confirmed shared removal"
+    );
+    assert!(
+        !rt.state
+            .notices
+            .iter()
+            .any(|n| n.text.contains("kept as a local host")),
+        "self-initiated removal must never fire Rule 5's unlink-and-keep notice: {:?}",
+        rt.state.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn add_host_shared_toggle_sends_put_avoids_duplicates_supports_local_opt_out_and_fits_640x480() {
+    let mut ws = workspace_hosts(1);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let rx0 = stub_host(&mut ws, 0);
+    {
+        ws.hosts[0]
+            .connection
+            .model
+            .lock()
+            .unwrap()
+            .connection_epoch = 9;
+    }
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![host_record(
+                "host:existing",
+                "Existing",
+                &["existing.invalid"],
+                None,
+                None,
+            )],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    rx0.drain();
+
+    // Open AddHostManually while source is connected & Loaded -> shared toggle shown & ON.
+    ws.perform(Intent::AddHostManually, &mut rune::Tx::default());
+    assert!(ws.panel.as_ref().unwrap().save_shared);
+
+    let mut rt = runtime_at(ws, (640., 480.));
+    settle(&mut rt);
+    let dialog_r = rect(&rt, "dialog");
+    let switch_r = rect(&rt, "save-shared-host");
+    assert!(
+        dialog_r[0] >= 0.
+            && dialog_r[1] >= 0.
+            && dialog_r[0] + dialog_r[2] <= 640.5
+            && dialog_r[1] + dialog_r[3] <= 480.5,
+        "AddHost dialog with shared toggle overflows 640x480: {dialog_r:?}"
+    );
+    assert!(
+        switch_r[0] >= dialog_r[0] && switch_r[0] + switch_r[2] <= dialog_r[0] + dialog_r[2],
+        "shared switch overflows dialog: {switch_r:?} not in {dialog_r:?}"
+    );
+
+    // Canonical duplicate endpoint is rejected locally with zero PutSharedHost.
+    rt.update(|s, tx| {
+        let p = s.panel.as_mut().unwrap();
+        p.inputs[0].text = "Dup".into();
+        p.inputs[1].text = "HTTPS://EXISTING.INVALID:443/".into();
+        s.submit(tx);
+    });
+    assert_eq!(
+        rt.state.panel.as_ref().unwrap().error.as_deref(),
+        Some("This endpoint is already in the workspace")
+    );
+    assert!(rx0.is_empty());
+
+    // Valid submit with shared toggle ON sends PutSharedHost and does not add locally ahead of reply.
+    rt.update(|s, tx| {
+        let p = s.panel.as_mut().unwrap();
+        p.inputs[0].text = "Lab".into();
+        p.inputs[1].text = "https://lab.invalid".into();
+        s.submit(tx);
+    });
+    assert!(rt.state.panel.is_none());
+    assert_eq!(
+        rt.state.settings.hosts.len(),
+        2,
+        "must not add ahead of reply"
+    );
+    let (req_id, epoch, payload) = match rx0.try_recv().expect("PutSharedHost sent") {
+        HostCommand::PutSharedHost { id, epoch, host } => (id, epoch, host),
+        _ => panic!("expected PutSharedHost"),
+    };
+    assert_eq!(epoch, 9);
+    assert_eq!(payload["label"], "Lab");
+    assert_eq!(payload["endpoints"], json!(["https://lab.invalid"]));
+    assert!(payload.get("id").is_none());
+
+    // Server confirms creation and subsequent hosts.list reconciles with zero duplicate rows.
+    let created = SharedHost::from_value(&json!({
+        "id": "host:lab",
+        "label": "Lab",
+        "endpoints": ["https://lab.invalid"]
+    }))
+    .unwrap();
+    rt.update(|s, _| {
+        push_shared_write(
+            s,
+            0,
+            WriteResult {
+                id: req_id,
+                epoch: 9,
+                kind: WriteKind::Put,
+                outcome: WriteOutcome::Put {
+                    host: created.clone(),
+                    hash: "h2".into(),
+                },
+            },
+        );
+        push_shared_state(
+            s,
+            0,
+            SharedHostState::Loaded(SharedHostList {
+                hash: "h2".into(),
+                hosts: vec![
+                    host_record(
+                        "host:existing",
+                        "Existing",
+                        &["existing.invalid"],
+                        None,
+                        None,
+                    ),
+                    created,
+                ],
+                diagnostics: Vec::new(),
+            }),
+            None,
+        );
+    });
+    assert_eq!(
+        rt.state.settings.hosts.len(),
+        3,
+        "no duplicate row on reconcile"
+    );
+    assert_eq!(rt.state.settings.hosts[2].label, "Lab");
+    assert_eq!(
+        rt.state.settings.hosts[2].shared,
+        Some(SharedLink {
+            id: "host:lab".into(),
+            from: source_ep,
+        })
+    );
+
+    // Turning the switch OFF adds locally immediately with ZERO PutSharedHost commands.
+    rx0.drain();
+    rt.update(|s, tx| {
+        s.perform(Intent::AddHostManually, tx);
+    });
+    settle(&mut rt);
+    click(&mut rt, "save-shared-host");
+    assert!(!rt.state.panel.as_ref().unwrap().save_shared);
+    rt.update(|s, tx| {
+        let p = s.panel.as_mut().unwrap();
+        p.inputs[0].text = "LocalOnly".into();
+        p.inputs[1].text = "https://local-only.invalid".into();
+        s.submit(tx);
+    });
+    assert!(
+        !rx0.try_iter().any(|c| matches!(
+            c,
+            HostCommand::PutSharedHost { .. } | HostCommand::RemoveSharedHost { .. }
+        )),
+        "local-only add must send zero PutSharedHost"
+    );
+    assert_eq!(rt.state.settings.hosts.len(), 4);
+    assert_eq!(rt.state.settings.hosts[3].shared, None);
+}
+
+#[test]
+fn offline_conflict_and_unsupported_sources_refuse_shared_writes_and_stale_open_forms() {
+    let mut ws = workspace_hosts(2);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep.clone());
+    let rx0 = stub_host(&mut ws, 0);
+    let _rx1 = stub_host(&mut ws, 1);
+
+    ws.settings.hosts[1].label = "Studio".into();
+    ws.settings.hosts[1].endpoint = "https://studio.invalid".into();
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h1".into(),
+            hosts: vec![host_record(
+                "host:studio",
+                "Studio",
+                &["studio.invalid"],
+                None,
+                None,
+            )],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+    rx0.drain();
+    let mut tx = rune::Tx::default();
+
+    // Open EditHost while healthy, then source transitions to Conflict before submit -> refused!
+    ws.perform(Intent::EditHost(1), &mut tx);
+    assert!(matches!(
+        ws.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Form(Form::EditHost(1)))
+    ));
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Conflict("broken json".into()),
+        None,
+    );
+    ws.panel.as_mut().unwrap().inputs[0].text = "Renamed".into();
+    ws.submit(&mut tx);
+    assert!(rx0.is_empty());
+    assert_eq!(ws.settings.hosts[1].label, "Studio");
+    assert!(
+        ws.panel
+            .as_ref()
+            .and_then(|p| p.error.as_deref())
+            .is_some_and(|e| e.contains("conflict"))
+    );
+    ws.close_panel(&mut tx);
+
+    // Unsupported and offline states also refuse EditHost and RemoveHost cleanly.
+    for make_unavailable in [
+        (|s: &mut Workspace| push_shared_state(s, 0, SharedHostState::Unsupported, None))
+            as fn(&mut Workspace),
+        |s: &mut Workspace| {
+            s.hosts[0].connection.model.lock().unwrap().connected = false;
+            s.hosts[0].model.connected = false;
+        },
+    ] {
+        make_unavailable(&mut ws);
+        ws.perform(Intent::EditHost(1), &mut tx);
+        assert!(ws.panel.is_none());
+        ws.perform(Intent::RemoveHost(1), &mut tx);
+        assert!(ws.panel.is_none());
+        assert!(rx0.is_empty());
+    }
+}
+
+#[test]
+fn settings_card_distinguishes_skipped_duplicate_chip_from_unconnectable_and_edit_fits_640x480() {
+    let mut ws = workspace_hosts(1);
+    let source_ep = ws.settings.hosts[0].endpoint.clone();
+    ws.shared_hosts.source_override = Some(source_ep);
+    let _rx0 = stub_host(&mut ws, 0);
+
+    push_shared_state(
+        &mut ws,
+        0,
+        SharedHostState::Loaded(SharedHostList {
+            hash: "h-chips".into(),
+            hosts: vec![
+                host_record("host:one", "One", &["dup.invalid"], None, None),
+                host_record("host:two", "TwoDup", &["dup.invalid"], None, None),
+                host_record("host:bad", "BadScheme", &["ftp://only-ftp"], None, None),
+            ],
+            diagnostics: Vec::new(),
+        }),
+        None,
+    );
+
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::Settings, &mut tx);
+    ws.open_section(SettingsSection::Hosts);
+    let mut rt = runtime_at(ws, (640., 480.));
+    settle(&mut rt);
+
+    let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(
+        texts.iter().any(|t| t == "Skipped"),
+        "missing Skipped chip: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "Unconnectable"),
+        "missing Unconnectable chip: {texts:?}"
+    );
+
+    // EditHost dialog for stored shared host also fits at 640x480.
+    rt.update(|s, tx| s.perform(Intent::EditHost(1), tx));
+    settle(&mut rt);
+    let dialog_r = rect(&rt, "dialog");
+    assert!(
+        dialog_r[0] >= 0.
+            && dialog_r[1] >= 0.
+            && dialog_r[0] + dialog_r[2] <= 640.5
+            && dialog_r[1] + dialog_r[3] <= 480.5,
+        "EditHost dialog overflows 640x480: {dialog_r:?}"
     );
 }

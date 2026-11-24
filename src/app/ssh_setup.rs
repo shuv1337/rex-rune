@@ -141,10 +141,33 @@ impl Workspace {
         let saved = self.settings.hosts[host].clone();
         self.close_panel(tx);
         if self.is_shared_managed(host) {
-            self.inform(format!(
-                "{} is managed by rex hosts (read-only). Update its endpoint with rex hosts, or turn off shared host sync in Settings → Remote Hosts.",
-                saved.label
-            ));
+            if let Some(reason) = self.shared_write_blocked(host) {
+                self.inform(format!("{} cannot be updated: {reason}.", saved.label));
+                return;
+            }
+            if self
+                .settings
+                .hosts
+                .iter()
+                .enumerate()
+                .any(|(i, h)| i != host && rex_rune::hosts::same_endpoint(&h.endpoint, &proposed))
+            {
+                self.inform(format!(
+                    "Cannot save {}: that endpoint is already in the workspace.",
+                    proposed
+                ));
+                return;
+            }
+            if let Err(reason) = self.start_shared_edit(
+                host,
+                saved.label,
+                proposed,
+                saved.shell,
+                false,
+                Some(endpoint.to_owned()),
+            ) {
+                self.inform(reason);
+            }
             return;
         }
         self.edit_host(host, saved.label, proposed, saved.shell);
