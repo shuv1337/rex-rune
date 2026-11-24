@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- **NixOS package build and sandbox checks (#151).** Fixed `clippy::byte_char_slices` in `src/platform/fs.rs` under newer nixpkgs Clippy, resolved `ps` via `PATH` in the SSH installer tests, added `pkgs.procps` to `nativeCheckInputs`, and added an `x86_64-linux` Nix flake check job to CI. (Based on fixes by [@nolith](https://github.com/nolith) / Alessio Caiazza.)
+
 - **SSH setup explains when a personal server stops (#147).** Closing the client leaves the server running. The preview and host docs explain Linux systemd logout and lingering, and point to `rex server install` for boot-time startup. The explanation scrolls in small windows while setup status and actions remain visible.
 
 ## 0.10.1 - 2026-11-14

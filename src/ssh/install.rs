@@ -233,7 +233,7 @@ mod tests {
                 break;
             }
             // The orphan may already be dead but not yet reaped by its new parent.
-            let status = Command::new("/bin/ps")
+            let status = Command::new("ps")
                 .args(["-o", "stat=", "-p", &stray.pid.to_string()])
                 .output()
                 .unwrap();
@@ -282,7 +282,7 @@ mod tests {
                 // An orphan can briefly be a zombie; that is not a live process.
                 let deadline = Instant::now() + Duration::from_secs(2);
                 loop {
-                    let status = Command::new("/bin/ps")
+                    let status = Command::new("ps")
                         .args(["-o", "stat=", "-p", &pid.to_string()])
                         .output()
                         .expect("read fixture child status");

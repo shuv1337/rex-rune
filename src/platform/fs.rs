@@ -27,12 +27,12 @@ pub fn append_ssh_key(path: &std::path::Path, record: &str, make_parent: bool) -
         if !meta.is_file() {
             return Err(io::Error::other("not a regular file"));
         }
-        let mut tail = [b'\n'];
+        let mut tail = *b"\n";
         if meta.len() != 0 {
             file.seek(SeekFrom::End(-1))?;
             file.read_exact(&mut tail)?;
         }
-        let newline = if tail == [b'\n'] { "" } else { "\n" };
+        let newline = if tail == *b"\n" { "" } else { "\n" };
         file.write_all(format!("{newline}{record}\n").as_bytes())
     }
     #[cfg(not(unix))]
