@@ -97,7 +97,6 @@ fn auth_problem(stderr: &str) -> bool {
         (lower.contains("permission denied (") && lower.contains("publickey"))
             || lower.contains("too many authentication failures")
             || lower.contains("no more authentication methods to try")
-            || lower.contains("agent refused operation")
     })
 }
 
@@ -368,10 +367,13 @@ impl Target {
     /// directory of this process's own, so another instance (or a probe) forwarding the same
     /// endpoint neither takes this path over nor removes it when it closes.
     pub fn local_socket(&self) -> PathBuf {
+        self.local_socket_in(&tunnels_directory())
+    }
+
+    pub(crate) fn local_socket_in(&self, base: &Path) -> PathBuf {
         let mut hasher = DefaultHasher::new();
         self.endpoint().hash(&mut hasher);
-        tunnels_directory()
-            .join(format!("ssh-{}", std::process::id()))
+        base.join(format!("ssh-{}", std::process::id()))
             .join(format!("{:016x}.sock", hasher.finish()))
     }
 }
@@ -419,17 +421,21 @@ impl Tunnel {
     /// Find the Rex socket on `target`, then forward it to a local socket and wait until the
     /// local end accepts connections.
     pub async fn open(target: &Target, agent: Option<&Path>) -> Result<Tunnel> {
-        Self::open_with(target, std::ffi::OsStr::new("ssh"), agent).await
+        Self::open_with(target, std::ffi::OsStr::new("ssh"), agent, None).await
     }
 
     pub(crate) async fn open_with(
         target: &Target,
         ssh: &std::ffi::OsStr,
         agent: Option<&Path>,
+        tunnel_dir: Option<&Path>,
     ) -> Result<Tunnel> {
         crate::platform::local::require_ssh()?;
         let remote = resolve_with(target, ssh, agent).await?;
-        let local = target.local_socket();
+        let local = match tunnel_dir {
+            Some(dir) => target.local_socket_in(dir),
+            None => target.local_socket(),
+        };
         if let Some(parent) = local.parent() {
             crate::platform::local::prepare_tunnel_directory(parent).await?;
         }
@@ -951,15 +957,18 @@ mod tests {
             "user@box: Permission denied (publickey,keyboard-interactive).",
             "Received disconnect from 10.0.0.1 port 22:2: Too many authentication failures",
             "user@box: No more authentication methods to try.",
-            "sign_and_send_pubkey: signing failed for ED25519 \"key\" from agent: agent refused operation",
+            "sign_and_send_pubkey: signing failed for ED25519 \"key\" from agent: agent refused operation\nuser@box: Permission denied (publickey).",
         ] {
             assert!(auth_problem(stderr), "{stderr:?}");
             assert_eq!(key_problem(stderr), None, "{stderr:?}");
         }
+        // "agent refused operation" alone can be a non-fatal warning before another key succeeds;
+        // if the tunnel later drops for an unrelated reason, it must not be mislabeled AuthFailed.
         for non_auth in [
             "ssh: connect to host box port 22: Connection refused",
             "user@box: Permission denied (password).",
             "Host key verification failed.",
+            "sign_and_send_pubkey: signing failed for ED25519 \"key\" from agent: agent refused operation",
         ] {
             assert!(!auth_problem(non_auth), "{non_auth:?}");
         }

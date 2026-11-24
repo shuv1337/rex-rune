@@ -6,6 +6,7 @@ fn spawn_with_fake_ssh(
     endpoint: &str,
     ssh_program: PathBuf,
     ssh_auth_sock: Option<PathBuf>,
+    tunnel_dir: PathBuf,
 ) -> HostConnection {
     HostConnection::spawn_internal(
         endpoint.into(),
@@ -17,6 +18,7 @@ fn spawn_with_fake_ssh(
             theme: None,
             ssh_auth_sock,
             ssh_program: Some(ssh_program),
+            tunnel_dir: Some(tunnel_dir),
         },
         false,
     )
@@ -140,10 +142,12 @@ printf 'sock /run/rex/server.sock\n'
     std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
 
     // Start with the wrong agent: first attempt fails with AuthFailed and enters 2s backoff.
+    let tunnel_dir = dir.path().join("tunnels");
     let host = spawn_with_fake_ssh(
         "ssh://tester@auth-test-box",
         fake_ssh.clone(),
         Some(bad_sock.clone()),
+        tunnel_dir.clone(),
     );
     wait_for(Duration::from_secs(5), || {
         host.model.lock().unwrap().ssh_problem == Some(crate::ssh::Problem::AuthFailed)
@@ -172,6 +176,12 @@ printf 'sock /run/rex/server.sock\n'
         })
         .unwrap();
     connected(&host).await;
+    assert!(
+        tunnel_dir
+            .join(format!("ssh-{}", std::process::id()))
+            .is_dir(),
+        "tunnel socket must live inside the test's isolated tunnel_dir"
+    );
     assert!(
         wake_started.elapsed() < Duration::from_secs(1),
         "expected immediate auth retry wake, took {:?}",
@@ -248,7 +258,12 @@ async fn ssh_agent_wake_ignores_key_problems_no_server_and_non_ssh_hosts() {
         .unwrap();
         std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        let host = spawn_with_fake_ssh(&format!("ssh://tester@{name}"), fake_ssh, None);
+        let host = spawn_with_fake_ssh(
+            &format!("ssh://tester@{name}"),
+            fake_ssh,
+            None,
+            dir.path().join(format!("tunnels-{name}")),
+        );
         wait_for(Duration::from_secs(5), || {
             host.model.lock().unwrap().ssh_problem.as_ref() == Some(&expected_problem)
         })

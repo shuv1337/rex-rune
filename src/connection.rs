@@ -912,6 +912,8 @@ impl HostConnection {
                 ssh_auth_sock,
                 #[cfg(test)]
                 ssh_program: None,
+                #[cfg(test)]
+                tunnel_dir: None,
             },
             visible,
         )
@@ -1486,6 +1488,8 @@ struct Startup {
     ssh_auth_sock: Option<PathBuf>,
     #[cfg(test)]
     ssh_program: Option<PathBuf>,
+    #[cfg(test)]
+    tunnel_dir: Option<PathBuf>,
 }
 
 async fn run_host(
@@ -1504,6 +1508,8 @@ async fn run_host(
         mut ssh_auth_sock,
         #[cfg(test)]
         ssh_program,
+        #[cfg(test)]
+        tunnel_dir,
     } = startup;
     let mut token: Option<String> = None;
     let mut workers = HashMap::<String, PaneWorker>::new();
@@ -1523,11 +1529,14 @@ async fn run_host(
                     shared.status("Connecting over SSH…", false);
                     let opened = {
                         #[cfg(test)]
-                        if let Some(program) = &ssh_program {
+                        if ssh_program.is_some() || tunnel_dir.is_some() {
                             crate::ssh::Tunnel::open_with(
                                 target,
-                                program.as_os_str(),
+                                ssh_program
+                                    .as_deref()
+                                    .map_or(std::ffi::OsStr::new("ssh"), std::path::Path::as_os_str),
                                 ssh_auth_sock.as_deref(),
+                                tunnel_dir.as_deref(),
                             )
                             .await?
                         } else {
