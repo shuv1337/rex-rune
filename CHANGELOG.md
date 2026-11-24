@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- **Prefer `Mailbox` present mode on Linux Wayland top-level windows (#146).** Native Wayland windows already pace redraws with frame callbacks, so preferring `Mailbox` when the surface advertises it avoids FIFO double-blocking (reported at ~19 fps on KDE Plasma/KWin + Mesa RADV by [@koihia](https://github.com/koihia); not reproduced locally on NVIDIA/Hyprland) and falls back to `AutoVsync` otherwise. X11, macOS, Windows, and Wayland layer-shell overlays keep `AutoVsync` by default, and `RUNE_PRESENT_MODE=fifo|fifo-relaxed|mailbox|immediate|auto` is available as an override validated against surface capabilities.
+
 - **NixOS package build and sandbox checks (#151).** Fixed `clippy::byte_char_slices` in `src/platform/fs.rs` under newer nixpkgs Clippy, resolved `ps` via `PATH` in the SSH installer tests, added `pkgs.procps` to `nativeCheckInputs`, and added an `x86_64-linux` Nix flake check job to CI. (Based on fixes by [@nolith](https://github.com/nolith) / Alessio Caiazza.)
 
 - **SSH setup explains when a personal server stops (#147).** Closing the client leaves the server running. The preview and host docs explain Linux systemd logout and lingering, and point to `rex server install` for boot-time startup. The explanation scrolls in small windows while setup status and actions remain visible.

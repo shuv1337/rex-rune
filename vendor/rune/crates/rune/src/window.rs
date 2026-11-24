@@ -34,6 +34,7 @@ use chrome::{frame_chrome, place_chrome, sync_chrome, titlebar_double_click};
 mod configure;
 pub(crate) use configure::configure;
 mod create;
+pub(crate) mod present;
 mod native;
 use native::Native;
 mod win;
@@ -468,7 +469,6 @@ struct Host<S: 'static> {
     secure_input: crate::input::secure_input::SecureInput,
     ime_allowed: bool,
     comp: Option<Box<dyn Compositor<S>>>,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
     wayland: bool,
     frame_move: Option<stepping::FrameMove>,
     /// The content size a resize request jumps to, so its Resized event lays out like a step

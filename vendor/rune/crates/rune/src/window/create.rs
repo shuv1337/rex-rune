@@ -129,6 +129,7 @@ impl<S: 'static> Host<S> {
         let phys = window.inner_size();
         let (mut config, translucent) = surface_config(&surface, adapter, (phys.width, phys.height), self.rt.srgb_blend())
             .ok_or("the GPU adapter can't present to this window")?;
+        super::present::apply(&mut config, &surface, adapter, self.wayland);
         #[cfg(target_os = "macos")]
         let launch_drawables = LaunchDrawables::cap(&mut config);
         if self.options.transparent {
@@ -314,6 +315,7 @@ impl<S: 'static> Host<S> {
         let size = window.inner_size();
         let (mut config, translucent) = surface_config(&surface, &gpu.adapter, (size.width, size.height), self.rt.srgb_blend())
             .ok_or("the GPU adapter can't present to this window")?;
+        super::present::apply(&mut config, &surface, &gpu.adapter, self.wayland);
         if transparent {
             config.alpha_mode = translucent.unwrap_or(wgpu::CompositeAlphaMode::Opaque);
         }
