@@ -292,7 +292,10 @@ so once this client has declared any theme (remembered as
 empty `set_theme`, Rex's own colours, to each pane this client owns or nobody owns:
 once per pane per connection, when its stream starts, when this client takes it,
 and again after a reconnect. A server without `set_theme` is reported once and the
-choice is kept for other hosts.
+choice is kept for other hosts. Under the same **Colours** card, **Keep program
+backgrounds** (`terminal.keep_program_background`, off by default) keeps a
+pane's own OSC 11 default background instead of substituting the chrome or
+declared theme's background.
 
 ## Terminal display, selection and fonts
 

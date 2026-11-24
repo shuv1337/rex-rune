@@ -360,10 +360,13 @@ fn search_reads_the_rows_the_pages_are_built_from() {
     });
     assert_eq!(
         hits(&rt),
-        [(
-            "Messages from programs".to_owned(),
-            "Notifications".to_owned()
-        )]
+        [
+            ("Keep program backgrounds".to_owned(), "Terminal".to_owned()),
+            (
+                "Messages from programs".to_owned(),
+                "Notifications".to_owned()
+            ),
+        ]
     );
     // Reading the pages leaves the one on screen as it was.
     assert_eq!(rt.state.settings_page(), SettingsSection::Interface);
