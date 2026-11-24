@@ -839,6 +839,8 @@ fn mute_tab_schema_local_targeting_and_shortcuts_titles() {
     let spec = actions::find("client.tab.mute").expect("client.tab.mute");
     let max_id = "w".repeat(128);
     let over_id = "w".repeat(129);
+    let unicode_ok = "é".repeat(128);
+    let unicode_over = "é".repeat(129);
     for good in [
         Value::Null,
         json!({}),
@@ -849,6 +851,7 @@ fn mute_tab_schema_local_targeting_and_shortcuts_titles() {
         json!({"window_id": "a", "session_id": "s"}),
         json!({"window_id": "a", "session_id": "s", "muted": false}),
         json!({"window_id": max_id, "session_id": max_id, "muted": true}),
+        json!({"window_id": unicode_ok, "muted": true}),
     ] {
         assert!(spec.accepts(&good), "expected valid: {good}");
     }
@@ -863,6 +866,7 @@ fn mute_tab_schema_local_targeting_and_shortcuts_titles() {
         json!({"window_id": ""}),
         json!({"window_id": "   "}),
         json!({"window_id": over_id}),
+        json!({"window_id": unicode_over}),
         json!({"window_id": 123}),
         json!({"window_id": "a", "session_id": ""}),
         json!({"window_id": "a", "session_id": "  \t "}),

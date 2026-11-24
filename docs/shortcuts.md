@@ -274,7 +274,9 @@ or the requesting host is off screen. Target lookup is strictly confined to the
 requesting host across both opened and background session views (fetching a listed
 unloaded session's read-only view on demand without selecting or attaching it); an
 unknown session or tab returns `not_found`, and a mismatched envelope `session_id`
-or `block_id` returns `refused`. Muting a tab closes any active desktop
+or `block_id` returns `refused`. Remote calls with only `window_id` match
+already-loaded sessions; supplying `session_id` (in `args` or the request
+envelope) also fetches an unloaded listed session on demand. Muting a tab closes any active desktop
 notification for it. Repeating the same muted state succeeds without rewriting
 `workspace.json` or emitting a duplicate notice; a state change shows a six-second
 in-app notice naming host, requester and tab.

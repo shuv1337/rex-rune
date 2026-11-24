@@ -594,7 +594,16 @@ impl Workspace {
         let activity_selection = self.activity_selection();
         let id = self.hosts[index].id;
         let old_session = self.hosts[index].model.selected.clone();
-        let (mut model, notices, clipboard, bells, client_actions, performs, shared_writes) = {
+        let (
+            mut model,
+            notices,
+            clipboard,
+            bells,
+            client_actions,
+            performs,
+            shared_writes,
+            view_fetches,
+        ) = {
             let mut shared = self.hosts[index]
                 .connection
                 .model
@@ -606,6 +615,7 @@ impl Workspace {
             let client_actions = std::mem::take(&mut shared.client_actions);
             let performs = std::mem::take(&mut shared.performs);
             let shared_writes = std::mem::take(&mut shared.shared_writes);
+            let view_fetches = std::mem::take(&mut shared.view_fetches);
             (
                 shared.clone(),
                 notices,
@@ -614,8 +624,10 @@ impl Workspace {
                 client_actions,
                 performs,
                 shared_writes,
+                view_fetches,
             )
         };
+        model.view_fetches = view_fetches;
         for (block, connection) in &model.terminals {
             let key = (id, block.clone());
             if !self.terminals.contains_key(&key) {

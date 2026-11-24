@@ -673,8 +673,9 @@ impl Spec {
             }
             Handler::MuteTab => {
                 let valid_id = |v: &Value| {
-                    v.as_str()
-                        .is_some_and(|id| !id.trim().is_empty() && id.len() <= 128)
+                    v.as_str().is_some_and(|id| {
+                        !id.trim().is_empty() && id.chars().count() <= 128 && id.len() <= 512
+                    })
                 };
                 object
                     .keys()

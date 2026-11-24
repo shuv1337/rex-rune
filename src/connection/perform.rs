@@ -28,18 +28,27 @@ pub struct Requester {
     #[serde(default)]
     pub principal: Value,
 }
+/// Strip control and bidirectional override characters and cap length for safe UI notices.
+pub fn sanitize_text(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .take(max_chars)
+        .collect()
+}
+
 impl std::fmt::Display for Requester {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name: String = self.info["name"]
-            .as_str()
-            .unwrap_or(&self.client_id)
-            .chars()
-            .filter(|c| {
-                !c.is_control()
-                    && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-            })
-            .take(40)
-            .collect();
+        let name = sanitize_text(self.info["name"].as_str().unwrap_or(&self.client_id), 40);
         let principal = self.principal["display"]
             .as_str()
             .or_else(|| self.principal["login_name"].as_str())

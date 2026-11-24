@@ -7,11 +7,14 @@ use super::{
     workspace::{HostId, Workspace},
 };
 use rex_rune::connection::{
-    HostCommand,
-    perform::{MAX_WAIT, Outcome, Pending},
+    HostCommand, ViewFetchOutcome,
+    perform::{MAX_WAIT, Outcome, Pending, sanitize_text},
 };
 use rune::Tx;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 pub struct Navigation {
     host: HostId,
@@ -36,21 +39,7 @@ enum MuteTarget {
 const TYPING: Duration = Duration::from_millis(1500);
 
 fn sanitize_label(label: &str) -> String {
-    let cleaned: String = label
-        .chars()
-        .filter(|c| {
-            !c.is_control()
-                && !matches!(
-                    c,
-                    '\u{061c}'
-                        | '\u{200e}'
-                        | '\u{200f}'
-                        | '\u{202a}'..='\u{202e}'
-                        | '\u{2066}'..='\u{2069}'
-                )
-        })
-        .take(60)
-        .collect();
+    let cleaned = sanitize_text(label, 60);
     if cleaned.trim().is_empty() {
         "tab".into()
     } else {
@@ -61,6 +50,9 @@ fn sanitize_label(label: &str) -> String {
 impl Workspace {
     pub fn toggle_remote_control(&mut self, host: usize) {
         self.settings.hosts[host].remote_control = !self.settings.hosts[host].remote_control;
+        if !self.settings.hosts[host].remote_control {
+            self.poll_remote_mutes(Instant::now());
+        }
         self.save();
     }
 
@@ -98,16 +90,16 @@ impl Workspace {
         let env_session = request.session_id.as_deref();
         let env_block = request.block_id.as_deref();
         if let Some(session_id) = arg_session {
-            if !model.sessions.iter().any(|s| s.session_id == session_id) {
-                return Err(Outcome::error(
-                    "not_found",
-                    "That session does not exist on this host.",
-                ));
-            }
             if env_session.is_some_and(|id| id != session_id) {
                 return Err(Outcome::error(
                     "refused",
                     "The requested tab does not belong to the request's session; nothing was done.",
+                ));
+            }
+            if !model.sessions.iter().any(|s| s.session_id == session_id) {
+                return Err(Outcome::error(
+                    "not_found",
+                    "That session does not exist on this host.",
                 ));
             }
             if !model.views.contains_key(session_id) {
@@ -336,6 +328,7 @@ impl Workspace {
                         session,
                         deadline,
                     });
+                    tx.wake_after(deadline.saturating_duration_since(Instant::now()));
                 }
                 Err(outcome) => self.remote_reply(host, pending, outcome),
             }
@@ -399,6 +392,14 @@ impl Workspace {
     }
 
     pub(super) fn poll_remote_mutes(&mut self, now: Instant) -> bool {
+        let mut completions = HashMap::new();
+        for host in &mut self.hosts {
+            if !host.model.view_fetches.is_empty() {
+                for (id, outcome) in std::mem::take(&mut host.model.view_fetches) {
+                    completions.insert((host.id, id), outcome);
+                }
+            }
+        }
         if self.remote_mutes.is_empty() {
             return false;
         }
@@ -414,23 +415,22 @@ impl Workspace {
                 changed = true;
                 continue;
             }
+            if !self.settings.hosts[host].remote_control {
+                changed = true;
+                self.remote_reply(
+                    host,
+                    mute.pending,
+                    Outcome::error(
+                        "refused",
+                        "Remote control is off for this host in Rex Rune. The person at that computer can turn it on in Settings → Remote Hosts. Nothing was done.",
+                    ),
+                );
+                continue;
+            }
             let view_loaded = model.views.contains_key(&mute.session);
-            let fetch_done = model
-                .view_fetch_result
-                .filter(|(id, _)| *id == mute.fetch_id);
+            let fetch_done = completions.get(&(mute.host, mute.fetch_id)).copied();
             if view_loaded || fetch_done.is_some() {
                 changed = true;
-                if !self.settings.hosts[host].remote_control {
-                    self.remote_reply(
-                        host,
-                        mute.pending,
-                        Outcome::error(
-                            "refused",
-                            "Remote control is off for this host in Rex Rune. The person at that computer can turn it on in Settings → Remote Hosts. Nothing was done.",
-                        ),
-                    );
-                    continue;
-                }
                 if view_loaded {
                     match self.resolve_remote_mute(host, &mute.pending) {
                         Ok(MuteTarget::Ready(target)) => {
@@ -448,11 +448,12 @@ impl Workspace {
                         }
                         Err(outcome) => self.remote_reply(host, mute.pending, outcome),
                     }
-                } else if !self.hosts[host]
-                    .model
-                    .sessions
-                    .iter()
-                    .any(|s| s.session_id == mute.session)
+                } else if fetch_done == Some(ViewFetchOutcome::NotFound)
+                    || !self.hosts[host]
+                        .model
+                        .sessions
+                        .iter()
+                        .any(|s| s.session_id == mute.session)
                 {
                     self.remote_reply(
                         host,

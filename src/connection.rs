@@ -24,6 +24,9 @@ mod prefetch;
 pub mod server_info;
 mod status_sweep;
 pub mod titles;
+mod view_fetch;
+
+pub use view_fetch::ViewFetchOutcome;
 
 /// The label new tabs get. A tab that still has it shows its program's terminal title.
 pub const DEFAULT_TAB_LABEL: &str = "Shell";
@@ -274,8 +277,8 @@ pub struct HostModel {
     pub selected: Option<String>,
     /// Completion of the latest client navigation request (id, success), not a notice.
     pub navigation_result: Option<(u64, bool)>,
-    /// Completion of an on-demand read-only session view fetch (id, success).
-    pub view_fetch_result: Option<(u64, bool)>,
+    /// Completed on-demand read-only session view fetches, drained once by the UI.
+    pub view_fetches: Vec<(u64, ViewFetchOutcome)>,
     /// Most recent read-only directory reply; only its browser/request may consume it.
     pub directory: Option<Arc<directory::Reply>>,
     pub views: HashMap<String, session::ViewResponse>,
@@ -1038,31 +1041,46 @@ async fn attach(
     Ok(())
 }
 fn apply_view(shared: &Shared, id: &str, view: session::ViewResponse) {
-    shared.update(|m| {
-        if m.views
-            .get(id)
-            .is_some_and(|old| old.revision > view.revision)
-        {
-            return;
+    shared.update(|m| apply_view_to_model(m, id, view));
+}
+
+fn apply_view_to_model(m: &mut HostModel, id: &str, view: session::ViewResponse) {
+    if m.views
+        .get(id)
+        .is_some_and(|old| old.revision > view.revision)
+    {
+        return;
+    }
+    if let Some(label) = &view.label
+        && let Some(s) = m.sessions.iter_mut().find(|s| s.session_id == id)
+    {
+        s.label = label.clone();
+    }
+    for block in view
+        .windows
+        .iter()
+        .flat_map(|w| &w.layers)
+        .flat_map(|l| &l.blocks)
+    {
+        if let Some(connection) = block.block_id.as_ref().and_then(|id| m.terminals.get(id)) {
+            connection.model.lock().expect("terminal model").owner =
+                block.owner.as_deref() == Some(&m.client_id);
         }
-        if let Some(label) = &view.label
-            && let Some(s) = m.sessions.iter_mut().find(|s| s.session_id == id)
-        {
-            s.label = label.clone();
-        }
-        for block in view
-            .windows
-            .iter()
-            .flat_map(|w| &w.layers)
-            .flat_map(|l| &l.blocks)
-        {
-            if let Some(connection) = block.block_id.as_ref().and_then(|id| m.terminals.get(id)) {
-                connection.model.lock().expect("terminal model").owner =
-                    block.owner.as_deref() == Some(&m.client_id);
-            }
-        }
-        m.views.insert(id.into(), view);
-    });
+    }
+    m.views.insert(id.into(), view);
+}
+
+const VIEW_FETCH_CAP: usize = 64;
+
+fn record_view_fetches(
+    m: &mut HostModel,
+    entries: impl IntoIterator<Item = (u64, ViewFetchOutcome)>,
+) {
+    m.view_fetches.extend(entries);
+    if m.view_fetches.len() > VIEW_FETCH_CAP {
+        let extra = m.view_fetches.len() - VIEW_FETCH_CAP;
+        m.view_fetches.drain(..extra);
+    }
 }
 async fn refresh(
     control: &mut Client,
@@ -1564,6 +1582,7 @@ async fn run_host(
     let mut server_reads = server_info::Reader::default();
     let mut hosts_reads = hosts::Reader::default();
     let mut directory_reads = directory::Reader::default();
+    let mut view_fetches = view_fetch::Reader::default();
     // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
     // fresh one, and its end is a disconnect like any other.
     let ssh = crate::ssh::Target::parse(&configured)?;
@@ -1606,6 +1625,7 @@ async fn run_host(
             shared.update(|m| {
                 m.connection_epoch += 1;
                 m.performs.clear();
+                m.view_fetches.clear();
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
@@ -1706,6 +1726,7 @@ async fn run_host(
             directory_reads.abandon(shared, directory::Failure::Disconnected);
             retry = 0;
             prefetch.reset();
+            view_fetches.reset();
             let mut sweep = status_sweep::Reader::default();
             let mut pace = tokio::time::interval(prefetch::PACE);
             pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1813,6 +1834,49 @@ async fn run_host(
                     reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
                     reply = hosts_reads.finished(), if hosts_reads.in_flight() => hosts::record(shared, reply),
                     _ = directory_reads.finished(shared), if directory_reads.in_flight() => {}
+                    fetched = view_fetches.finished(), if view_fetches.in_flight() => {
+                        match fetched {
+                            view_fetch::Event::Reply { session, ids, result: Ok((seq, view)) } => {
+                                let mut placed = false;
+                                shared.update(|m| {
+                                    if !m.sessions.iter().any(|s| s.session_id == session) {
+                                        record_view_fetches(
+                                            m,
+                                            ids.iter().map(|&id| (id, ViewFetchOutcome::NotFound)),
+                                        );
+                                        return;
+                                    }
+                                    if !m.views.contains_key(&session) {
+                                        apply_view_to_model(m, &session, view);
+                                        if m.selected.as_deref() != Some(session.as_str()) {
+                                            m.background_views.insert(session.clone());
+                                        }
+                                        placed = true;
+                                    }
+                                    record_view_fetches(
+                                        m,
+                                        ids.iter().map(|&id| (id, ViewFetchOutcome::Loaded)),
+                                    );
+                                });
+                                if placed {
+                                    state.view_seq.insert(session, seq);
+                                }
+                            }
+                            view_fetch::Event::Reply { ids, result: Err(outcome), .. } => {
+                                shared.update(|m| {
+                                    record_view_fetches(m, ids.into_iter().map(|id| (id, outcome)));
+                                });
+                            }
+                            view_fetch::Event::Expired(ids) => {
+                                shared.update(|m| {
+                                    record_view_fetches(
+                                        m,
+                                        ids.into_iter().map(|id| (id, ViewFetchOutcome::Failed)),
+                                    );
+                                });
+                            }
+                        }
+                    }
                     event = control.next_event() => {
                         busy_since = Some(Instant::now());
                         let event = event?;
@@ -1954,39 +2018,19 @@ async fn run_host(
                                 continue;
                             }
                             if already_loaded {
-                                shared.update(|m| m.view_fetch_result = Some((id, true)));
+                                shared.update(|m| record_view_fetches(m, [(id, ViewFetchOutcome::Loaded)]));
                                 continue;
                             }
-                            if !listed || Instant::now() >= deadline {
-                                shared.update(|m| m.view_fetch_result = Some((id, false)));
+                            if !listed {
+                                shared.update(|m| record_view_fetches(m, [(id, ViewFetchOutcome::NotFound)]));
                                 continue;
                             }
-                            let remaining = deadline.saturating_duration_since(Instant::now());
-                            let result = tokio::time::timeout(
-                                remaining.min(Duration::from_secs(8)),
-                                control.call_with_seq(session::View::new(&session)),
-                            )
-                            .await;
-                            match result {
-                                Ok(Ok(reply)) => {
-                                    state.view_seq.insert(session.clone(), reply.seq);
-                                    apply_view(shared, &session, reply.value);
-                                    shared.update(|m| {
-                                        if m.selected.as_deref() != Some(session.as_str()) {
-                                            m.background_views.insert(session.clone());
-                                        }
-                                        m.view_fetch_result = Some((id, true));
-                                    });
-                                }
-                                Ok(Err(error)) => {
-                                    shared.update(|m| m.view_fetch_result = Some((id, false)));
-                                    if !matches!(error, rexrs::Error::Api(_)) {
-                                        return Err(error.into());
-                                    }
-                                }
-                                Err(_) => {
-                                    shared.update(|m| m.view_fetch_result = Some((id, false)));
-                                }
+                            if Instant::now() >= deadline {
+                                shared.update(|m| record_view_fetches(m, [(id, ViewFetchOutcome::Failed)]));
+                                continue;
+                            }
+                            if !view_fetches.start(&mut control, id, deadline, session).await? {
+                                shared.update(|m| record_view_fetches(m, [(id, ViewFetchOutcome::Failed)]));
                             }
                             continue;
                         }
@@ -2063,6 +2107,7 @@ async fn run_host(
         }
         shared.update(|m| {
             m.performs.clear();
+            m.view_fetches.clear();
             m.ssh_problem = result
                 .as_ref()
                 .err()
