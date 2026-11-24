@@ -1886,6 +1886,7 @@ async fn run_host(
     let mut workers = HashMap::<String, PaneWorker>::new();
     let mut retry = 0;
     let mut prompts_enabled = false;
+    let mut deferred_commands = VecDeque::new();
     let mut prefetch = prefetch::Prefetch::default();
     let mut keymap: Option<Box<keymap::Declaration>> = None;
     let mut server_reads = server_info::Reader::default();
@@ -1968,7 +1969,6 @@ async fn run_host(
             let started = Instant::now();
             shared.update(|m| m.protocol.bootstrap_requests += 1);
             let mut deferred_events = VecDeque::new();
-            let mut deferred_commands = VecDeque::new();
             let result = bootstrap(&mut control, shared, &mut state, boot, &mut deferred_events).await;
             let reply = match result {
                 Ok(reply) => reply,
@@ -2498,6 +2498,7 @@ async fn run_host(
         }.await;
         tunnel = None;
         if matches!(result, Ok(true)) {
+            deferred_commands.clear();
             shared.update(|m| m.prompt_events.clear());
             return Ok(());
         }
@@ -2587,8 +2588,12 @@ async fn run_host(
                 }
             }
         }
-        // Discard input already queued before a failure; never replay it after reconnect.
-        while let Ok(command) = commands.try_recv() {
+        // Settle work buffered by an exclusive action before draining the channel.
+        // Never replay input queued before a failure.
+        while let Some(command) = deferred_commands
+            .pop_front()
+            .or_else(|| commands.try_recv().ok())
+        {
             match command {
                 HostCommand::Shutdown => return Ok(()),
                 HostCommand::Select(id) => preferred = Some(id),

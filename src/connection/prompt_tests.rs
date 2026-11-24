@@ -216,3 +216,70 @@ fn prompt_event_queue_is_bounded_and_keeps_order_and_epoch() {
         (1..=MAX_EVENTS as u64).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn in_flight_reply_survives_the_offer_deadline() {
+    let (wake, _) = flume::bounded(1);
+    let shared = Shared {
+        model: Arc::default(),
+        wake,
+    };
+    let req = payload(json!({"kind":"input", "title":"Answer"}));
+    let prompt = Arc::new(parse(&req, "a", Instant::now() - Duration::from_secs(6)).unwrap());
+    for (wire, expected) in [
+        (
+            json!({"payload":{}}),
+            PromptEventKind::ReplyOutcome {
+                call_id: "a".into(),
+                outcome: ReplyOutcome::Accepted,
+            },
+        ),
+        (
+            json!({"error":{"code":"bad_request","message":"Try again"}}),
+            PromptEventKind::ReplyRejected {
+                call_id: "a".into(),
+                message: "Try again".into(),
+            },
+        ),
+    ] {
+        let (send, response) = oneshot::channel();
+        let mut state = PromptState {
+            live: Some(Live {
+                epoch: 7,
+                prompt: prompt.clone(),
+                reply: Some(InFlight {
+                    response,
+                    deadline: tokio::time::Instant::now() + REPLY_TIMEOUT,
+                }),
+            }),
+        };
+        state.expire(&shared);
+        assert!(shared.model.lock().unwrap().prompt_events.is_empty());
+        assert!(state.live.as_ref().unwrap().reply.is_some());
+        send.send(wire.to_string()).unwrap();
+        let result = state.finished().await;
+        state.record(&shared, result);
+        assert_eq!(
+            shared.model.lock().unwrap().prompt_events.pop_front(),
+            Some(PromptEvent {
+                epoch: 7,
+                kind: expected,
+            })
+        );
+        if let Some(live) = &state.live {
+            assert!(live.reply.is_none());
+            state.expire(&shared);
+            assert_eq!(
+                shared.model.lock().unwrap().prompt_events.pop_front(),
+                Some(PromptEvent {
+                    epoch: 7,
+                    kind: PromptEventKind::Ended {
+                        call_id: "a".into(),
+                        reason: EndReason::Timeout
+                    },
+                })
+            );
+        }
+        assert!(state.live.is_none());
+    }
+}

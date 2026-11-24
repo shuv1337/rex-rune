@@ -259,6 +259,63 @@ async fn action_wait_promotes_on_prompt_and_applies_client_actions_after_reply()
 }
 
 #[tokio::test]
+async fn deferred_commands_get_disconnected_results_instead_of_being_dropped() {
+    let (listener, host) = fixture().await;
+    let (action_seen, wait_for_action) = oneshot::channel();
+    let (drained, wait_for_drain) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut ws, boot) = boot_req(&listener, 21).await;
+        boot_empty(&mut ws, &boot).await;
+        let _unanswered = next(&mut ws, "client.action").await;
+        action_seen.send(()).unwrap();
+        timeout(WAIT, wait_for_drain).await.unwrap().unwrap();
+        ws.close(None).await.unwrap();
+        close(&mut ws).await;
+        // Keep the address valid until the test has checked the old epoch's receipts.
+        listener
+    });
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+    action(&host, "no_prompt");
+    timeout(WAIT, wait_for_action).await.unwrap().unwrap();
+    let open = Arc::new(());
+    command(
+        &host,
+        HostCommand::ListDir(Box::new(directory::Request {
+            id: 71,
+            epoch,
+            session: SESSION.into(),
+            block: "pane".into(),
+            args: rexrs::api::terminal::ListDir::new().path("."),
+            deadline: Instant::now() + REPLY_WAIT,
+            open: Arc::downgrade(&open),
+        })),
+    );
+    command(&host, HostCommand::Visibility(true));
+    // Wait for dequeue, not just enqueue, so a still-buffered channel command
+    // cannot accidentally pass the test through the regular disconnect handler.
+    timeout(WAIT, async {
+        while !host.commands.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let model = host.model.lock().unwrap();
+        assert!(!model.visible);
+        assert!(model.directory.is_none());
+    }
+    drained.send(()).unwrap();
+    let receipt = until(&host, |m| m.directory.clone()).await;
+    assert_eq!((receipt.id, receipt.epoch), (71, epoch));
+    assert_eq!(receipt.result, Err(directory::Failure::Disconnected));
+    until(&host, |m| (!m.connected && m.visible).then_some(())).await;
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn prompt_bad_request_keeps_offer_and_ended_discards_the_right_id() {
     let (listener, host) = fixture().await;
     let (end_now, wait_to_end) = oneshot::channel();
@@ -402,6 +459,15 @@ async fn prompt_unknown_and_busy_refuse_disable_clears_and_drop_surfaces() {
         )
         .await;
         recv_refusal(&mut ws, "first").await;
+        event(
+            &mut ws,
+            "event_dropped",
+            json!({"event_type":"client_prompt_requested","size":100_000}),
+        )
+        .await;
+        // Observing the later refusal proves the earlier drop was processed while off.
+        offer(&mut ws, "disabled", "input", 60_000).await;
+        recv_refusal(&mut ws, "disabled").await;
         disable_seen.send(()).unwrap();
         pass_barrier(&mut ws).await;
         close(&mut ws).await;
@@ -422,8 +488,55 @@ async fn prompt_unknown_and_busy_refuse_disable_clears_and_drop_surfaces() {
     )
     .await;
     timeout(WAIT, wait_for_disable).await.unwrap().unwrap();
+    assert!(host.model.lock().unwrap().prompt_events.is_empty());
     answer(&host, epoch, "first", PromptAnswer::Cancelled);
     barrier(&host);
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn oversized_prompt_reply_is_rejected_locally_and_can_be_shortened() {
+    let (listener, host) = fixture().await;
+    let server = tokio::spawn(async move {
+        let (mut ws, boot) = boot_req(&listener, 21).await;
+        boot_empty(&mut ws, &boot).await;
+        pass_barrier(&mut ws).await;
+        offer(&mut ws, "input", "input", 60_000).await;
+        // The negotiated 65536-byte limit keeps the earlier answer off the wire.
+        let req = recv_answer(&mut ws, "input", json!({"text":"short"})).await;
+        reply(&mut ws, &req, 11, json!({})).await;
+        close(&mut ws).await;
+    });
+    connected(&host).await;
+    command(&host, HostCommand::Prompts(true));
+    barrier(&host);
+    let epoch = requested(&host, "input").await;
+    answer(
+        &host,
+        epoch,
+        "input",
+        PromptAnswer::Text("界".repeat(24_000)),
+    );
+    observed(
+        &host,
+        epoch,
+        PromptEventKind::ReplyRejected {
+            call_id: "input".into(),
+            message: "The answer is too large for this server. Shorten it and try again.".into(),
+        },
+    )
+    .await;
+    answer(&host, epoch, "input", PromptAnswer::Text("short".into()));
+    observed(
+        &host,
+        epoch,
+        PromptEventKind::ReplyOutcome {
+            call_id: "input".into(),
+            outcome: ReplyOutcome::Accepted,
+        },
+    )
+    .await;
     drop(host);
     server.await.unwrap();
 }

@@ -331,7 +331,9 @@ impl PromptState {
         let payload = event.payload;
         let epoch = shared.model.lock().expect("host model").connection_epoch;
         if event.name == "event_dropped" {
-            emit(shared, epoch, PromptEventKind::Dropped);
+            if enabled {
+                emit(shared, epoch, PromptEventKind::Dropped);
+            }
             return Ok(None);
         }
         let Some(call_id) = payload["call_id"].as_str().filter(|s| !s.is_empty()) else {
@@ -410,9 +412,11 @@ impl PromptState {
     }
 
     pub fn expire(&mut self, shared: &Shared) {
+        // The offer deadline stops new answers. A sent answer has its own reply budget.
         if self
-            .deadline()
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .live
+            .as_ref()
+            .is_some_and(|live| live.reply.is_none() && Instant::now() >= live.prompt.deadline)
         {
             self.end(shared, EndReason::Timeout);
         }
@@ -459,20 +463,31 @@ impl PromptState {
         let live = self.live.as_mut().expect("live prompt with reply");
         let epoch = live.epoch;
         let call_id = live.prompt.call_id.clone();
-        let outcome = match result {
-            Ok(_) => ReplyOutcome::Accepted,
+        let rejection = match &result {
             Err(rexrs::Error::Api(rexrs::ApiError::BadRequest { message })) => {
                 log_failure(&call_id, "bad_request");
-                let message =
-                    clean(Some(message), 200).unwrap_or_else(|| "Answer not accepted.".into());
-                live.reply = None;
-                emit(
-                    shared,
-                    epoch,
-                    PromptEventKind::ReplyRejected { call_id, message },
-                );
-                return;
+                Some(
+                    clean(Some(message.clone()), 200)
+                        .unwrap_or_else(|| "Answer not accepted.".into()),
+                )
             }
+            Err(rexrs::Error::RequestTooLarge { .. }) => {
+                log_failure(&call_id, "request_too_large");
+                Some("The answer is too large for this server. Shorten it and try again.".into())
+            }
+            _ => None,
+        };
+        if let Some(message) = rejection {
+            live.reply = None;
+            emit(
+                shared,
+                epoch,
+                PromptEventKind::ReplyRejected { call_id, message },
+            );
+            return;
+        }
+        let outcome = match result {
+            Ok(_) => ReplyOutcome::Accepted,
             Err(rexrs::Error::Api(rexrs::ApiError::NotFound { .. })) => {
                 log_failure(&call_id, "not_found");
                 ReplyOutcome::NotFound

@@ -115,18 +115,22 @@ Summary of schema and protocol changes from revision 14 through revision 21:
      app and existing probes do not opt in. The saved host's `prompts` preference
      defaults to true and only an explicit false is written to disk.
    - The bounded `HostModel.prompt_events` queue carries epoch-tagged offers,
-     ends, rejected answers, reply outcomes and dropped-offer notices. Local
-     expiry closes without sending anything. Disconnect clears the queue and
-     active state; a stale epoch or call ID is never sent.
+     ends, rejected answers, reply outcomes and dropped-offer notices. Drop
+     notices are only delivered while opted in. Local expiry closes an
+     unanswered offer without sending anything; a sent answer gets its own
+     reply budget. Disconnect clears the queue and active state; a stale epoch
+     or call ID is never sent.
    - An accepted reply closes the offer. `bad_request` leaves it offered with a
-     cleaned reason for the next answer. `not_found`, other API failures and the
-     eight-second reply timeout close it without disconnecting. A transport
-     failure disconnects. Answers are never automatically retried or logged.
+     cleaned reason for the next answer. A reply too large for the negotiated
+     message limit stays local and can be shortened. `not_found`, other API
+     failures and the eight-second reply timeout close it without disconnecting.
+     A transport failure disconnects. Answers are never automatically retried or logged.
    - `client.action` is detached. Before a prompt, the worker still defers
      ordinary commands and events behind its 35-second wait. A prompt allows
      ordinary work again and extends the action's wait to at least 35 seconds
      past the prompt deadline. Queued `client_actions` still apply when the
-     response arrives. Disconnect discards any outstanding waits.
+     response arrives. Disconnect discards outstanding action waits but still
+     settles buffered commands through the ordinary disconnect handling.
 4. **`event_dropped` recovery (`src/connection.rs`, `src/connection/status_sweep.rs`):**
    - List-level session drops (`session_created`, `session_moved`,
      `session_label_changed`) re-list sessions via `session.attach_all` (even
