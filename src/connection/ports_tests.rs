@@ -11,9 +11,18 @@ const B_UNHELD: &str = "block:00000000-0000-0000-0000-000000000099";
 const SESSION_OTHER: &str = "session:00000000-0000-0000-0000-000000000002";
 
 fn view_with_blocks(session: &str, revision: u64, blocks: &[&str]) -> session::ViewResponse {
+    view_with_label(session, "work", revision, blocks)
+}
+
+fn view_with_label(
+    session: &str,
+    label: &str,
+    revision: u64,
+    blocks: &[&str],
+) -> session::ViewResponse {
     session::ViewResponse {
         session_id: Some(session.into()),
-        label: Some("work".into()),
+        label: Some(label.into()),
         revision,
         active_window_id: Some("w1".into()),
         windows: vec![session::Window {
@@ -1358,7 +1367,7 @@ async fn foreground_session_eligibility_rejects_background_views_and_cancels_on_
                 "type": "response",
                 "id": fence_view["id"],
                 "seq": 2,
-                "payload": view_with_blocks(SESSION, 1, &[B1, B2, B3, B4])
+                "payload": view_with_label(SESSION, "bg-rejected", 2, &[B1, B2, B3, B4])
             }),
         )
         .await;
@@ -1418,7 +1427,7 @@ async fn foreground_session_eligibility_rejects_background_views_and_cancels_on_
                 "type": "response",
                 "id": post_view["id"],
                 "seq": 4,
-                "payload": view_with_blocks(SESSION_OTHER, 1, &[B5])
+                "payload": view_with_label(SESSION_OTHER, "switched-clean", 2, &[B5])
             }),
         )
         .await;
@@ -1450,7 +1459,7 @@ async fn foreground_session_eligibility_rejects_background_views_and_cancels_on_
     host.commands.send(HostCommand::RefreshSessions).unwrap();
 
     let m2 = wait_model(&host, |m| {
-        m.sessions.iter().any(|s| s.label == "bg-rejected")
+        m.views.get(SESSION).and_then(|v| v.label.as_deref()) == Some("bg-rejected")
     })
     .await;
     assert!(m2.ports.is_empty());
@@ -1476,7 +1485,7 @@ async fn foreground_session_eligibility_rejects_background_views_and_cancels_on_
     assert!(m3.ports_reading.is_empty());
     host.commands.send(HostCommand::RefreshSessions).unwrap();
     let m4 = wait_model(&host, |m| {
-        m.sessions.iter().any(|s| s.label == "switched-clean")
+        m.views.get(SESSION_OTHER).and_then(|v| v.label.as_deref()) == Some("switched-clean")
     })
     .await;
     assert!(m4.ports.is_empty());
@@ -1510,7 +1519,8 @@ async fn api_revision_14_sends_zero_ports_requests() {
         drain_initial_meta(&mut ws, 1, 1).await;
 
         // Deterministic command fence: after WatchPorts + ReadPorts, client sends RefreshSessions.
-        // The very next non-metadata request MUST be session.attach_all, never terminal.ports.
+        // The session.view reply ALSO adds a new block B2 to prove that WatchPorts on API 14 never
+        // registered `watched` and replace_view never inserts B2 into ports_reading!
         let fence_list = recv_skipping_meta(&mut ws, 1).await.unwrap();
         assert_eq!(
             fence_list["method"], "session.attach_all",
@@ -1534,10 +1544,12 @@ async fn api_revision_14_sends_zero_ports_requests() {
                 "type": "response",
                 "id": fence_view["id"],
                 "seq": 2,
-                "payload": view_with_blocks(SESSION, 1, &[B1])
+                "payload": view_with_label(SESSION, "api14-fenced", 2, &[B1, B2])
             }),
         )
         .await;
+        // Answer metadata for newly added B2; assert no com.superlogical.terminal.ports arrives.
+        drain_initial_meta(&mut ws, 1, 2).await;
         done_rx.await.unwrap();
         assert!(recv_skipping_meta(&mut ws, 2).await.is_none());
     });
@@ -1559,11 +1571,17 @@ async fn api_revision_14_sends_zero_ports_requests() {
     host.commands.send(HostCommand::RefreshSessions).unwrap();
 
     let fenced = wait_model(&host, |m| {
-        m.sessions.iter().any(|s| s.label == "api14-fenced")
+        m.views.get(SESSION).and_then(|v| v.label.as_deref()) == Some("api14-fenced")
+            && m.views
+                .get(SESSION)
+                .is_some_and(|v| view_blocks(v).any(|b| b == B2))
     })
     .await;
     assert!(fenced.ports.is_empty());
-    assert!(fenced.ports_reading.is_empty());
+    assert!(
+        fenced.ports_reading.is_empty(),
+        "API 14 WatchPorts + replace_view adding B2 must never populate ports_reading"
+    );
     done_tx.send(()).unwrap();
     drop(host);
     server.await.unwrap();

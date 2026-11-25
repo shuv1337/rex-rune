@@ -315,6 +315,20 @@ pub(super) async fn watch(
         return Ok(());
     };
 
+    if control.welcome().api_revision < PORTS_MIN_API_REVISION {
+        state.ports_reads.clear();
+        let changed = {
+            let mut model = shared.model.lock().expect("host model");
+            let had = !model.ports_reading.is_empty();
+            model.ports_reading.clear();
+            had
+        };
+        if changed {
+            let _ = shared.wake.try_send(());
+        }
+        return Ok(());
+    }
+
     let eligible = {
         let model = shared.model.lock().expect("host model");
         is_eligible_session(&model, &session)
@@ -424,15 +438,16 @@ pub(super) fn apply_event(
 pub(super) fn record_reply(shared: &Shared, state: &mut ControlState, finished: FinishedRead) {
     let mut model = shared.model.lock().expect("host model");
     let mut changed = model.ports_reading.remove(&finished.block);
-    model.ports_read_completions = model.ports_read_completions.saturating_add(1);
     let last_seq = state.ports_seq.get(&finished.block).copied().unwrap_or(0);
 
     match finished.outcome {
         ReplyOutcome::Snapshot { seq, payload } => {
             if seq >= last_seq && has_view_block(&model, &finished.session, &finished.block) {
                 let snapshot = PortSnapshot::parse(&payload);
-                changed |= store_snapshot(&mut model, &finished.block, snapshot);
+                let _ = store_snapshot(&mut model, &finished.block, snapshot);
                 state.ports_seq.insert(finished.block, seq);
+                model.ports_read_completions = model.ports_read_completions.saturating_add(1);
+                changed = true;
             }
         }
         ReplyOutcome::Unsupported { seq } => {

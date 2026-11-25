@@ -4,6 +4,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use rex_rune::{
     connection::{HostCommand, HostConnection, HostModel, wait_for_hosts},
+    platform,
     ports::{PORTS_EVENTS_MIN_API_REVISION, PORTS_MIN_API_REVISION, PortSnapshot, PortsStatus},
     transport,
 };
@@ -29,6 +30,18 @@ fn canonical_socket_path(path: &Path) -> Result<PathBuf> {
         .join(name))
 }
 
+fn resolve_if_possible(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok().or_else(|| {
+        path.parent()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .and_then(|p| path.file_name().map(|n| p.join(n)))
+    })
+}
+
+fn posix_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
 fn validate_private_socket(endpoint: &str) -> Result<PathBuf> {
     let default_endpoint = transport::local_endpoint();
     ensure!(
@@ -44,15 +57,19 @@ fn validate_private_socket(endpoint: &str) -> Result<PathBuf> {
     let canonical = canonical_socket_path(path)?;
     if let Some(default_raw) = default_endpoint.strip_prefix("unix://") {
         let default_path = Path::new(default_raw);
-        let canonical_default = default_path
-            .parent()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-            .and_then(|p| default_path.file_name().map(|n| p.join(n)));
         ensure!(
-            canonical_default.as_deref() != Some(canonical.as_path()),
-            "refusing symlink or path resolving to default per-user Rex socket"
+            canonical != default_path
+                && resolve_if_possible(default_path).as_deref() != Some(canonical.as_path()),
+            "refusing symlink or path resolving to default local Rex socket"
         );
     }
+    let default_socket = platform::local::default_socket();
+    ensure!(
+        path != default_socket.as_path()
+            && canonical != default_socket.as_path()
+            && resolve_if_possible(&default_socket).as_deref() != Some(canonical.as_path()),
+        "refusing symlink or path resolving to default per-user Rex socket"
+    );
     ensure!(
         !matches!(
             canonical.to_str(),
@@ -253,13 +270,34 @@ fn exercise_live(
             epoch,
             session: sid.clone(),
         })?;
-        // Flush command queue with a benign RefreshSessions before inspecting state.
-        host.commands.send(HostCommand::RefreshSessions)?;
-        std::thread::sleep(Duration::from_millis(200));
+        // Flush command queue with a server-acknowledged session.set_label fence before
+        // inspecting state so both WatchPorts and ReadPorts have been processed.
+        let fence_label = format!("{session_label}-fenced");
+        host.commands.send(HostCommand::Request {
+            method: "session.set_label".into(),
+            payload: json!({
+                "session_id": sid,
+                "label": fence_label,
+            }),
+        })?;
+        wait(
+            &host,
+            Duration::from_secs(8),
+            "API < 15 command fence",
+            |m| {
+                m.views
+                    .get(&sid)
+                    .and_then(|v| v.label.as_deref())
+                    .filter(|l| *l == fence_label)
+                    .map(|_| ())
+            },
+        )?;
         let model = host.model.lock().expect("host model");
         ensure!(model.connected, "host disconnected on API {api_revision}");
         ensure!(
-            model.ports.is_empty() && model.ports_reading.is_empty(),
+            model.ports.is_empty()
+                && model.ports_reading.is_empty()
+                && model.ports_read_completions == 0,
             "unexpected ports state on API {api_revision}"
         );
         ensure!(
@@ -296,7 +334,7 @@ fn exercise_live(
         &host,
         &sid,
         &bid,
-        &format!("python3 {}\n", script.display()),
+        &format!("python3 {}\n", posix_quote(script)),
     )?;
     let (bound_port, listener_pid) = wait_port_file(port_file)?;
     emit(
@@ -392,7 +430,7 @@ fn exercise_live(
             &host,
             &sid,
             &bid,
-            &format!("exec python3 {}\n", script.display()),
+            &format!("exec python3 {}\n", posix_quote(script)),
         )?;
         let (exit_port, _) = wait_port_file(port_file)?;
         wait(
