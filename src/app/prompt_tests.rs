@@ -18,8 +18,9 @@ use rex_rune::{
     },
     settings::{ChromeTheme, interface::ToolbarBehavior},
 };
-use rune::{Env, Ime, Key, KeyEvent, Mods, Runtime, Tx};
+use rune::{Env, Ime, Key, KeyEvent, Mods, PhysicalInput, PhysicalKeyCode as Code, Runtime, Tx};
 use std::{
+    collections::VecDeque,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -115,6 +116,18 @@ fn push_prompt_event(ws: &mut Workspace, host: usize, kind: PromptEventKind) {
         .push_back(PromptEvent { epoch, kind });
     let mut tx = Tx::default();
     ws.sync(host, &mut tx);
+}
+
+fn push_prompt_event_at(ws: &mut Workspace, host: usize, kind: PromptEventKind, now: Instant) {
+    let mut tx = Tx::default();
+    ws.sync(host, &mut tx);
+    let epoch = ws.hosts[host].model.connection_epoch;
+    ws.process_prompt_events_at(
+        host,
+        VecDeque::from([PromptEvent { epoch, kind }]),
+        now,
+        &mut tx,
+    );
 }
 
 fn prompt_replies(rx: &flume::Receiver<HostCommand>) -> Vec<(u64, String, PromptAnswer)> {
@@ -255,13 +268,16 @@ fn never_opens_over_local_panels_demotion_preserves_draft_and_settings_returns_v
 fn idle_rule_own_action_exception_submit_guards_and_cancel_cooldown() {
     let (mut ws, rxs) = connected_ws(1);
     let rx = &rxs[0];
+    let base = Instant::now();
 
     // Recent keypress (< 750 ms) without an in-flight action forces prompt to chip.
-    ws.last_keypress = Some(Instant::now());
-    push_prompt_event(
+    ws.last_keypress = Some(base);
+    let t_typing = base + Duration::from_millis(100);
+    push_prompt_event_at(
         &mut ws,
         0,
         PromptEventKind::Requested(input_prompt("typing-1", "While typing")),
+        t_typing,
     );
     assert!(
         !ws.is_prompt_open(),
@@ -276,35 +292,37 @@ fn idle_rule_own_action_exception_submit_guards_and_cancel_cooldown() {
         .lock()
         .unwrap()
         .actions_in_flight = 1;
-    ws.last_keypress = Some(Instant::now());
-    push_prompt_event(
+    ws.last_keypress = Some(t_typing);
+    let t_open = t_typing + Duration::from_millis(50);
+    push_prompt_event_at(
         &mut ws,
         0,
         PromptEventKind::Requested(input_prompt("own-action", "Own action question")),
+        t_open,
     );
     assert!(
         ws.is_prompt_open(),
         "prompt from this client's own in-flight action auto-opens even while typing"
     );
 
-    // Within 300 ms of opening, Enter submit is inert.
+    // Within 300 ms of opening, Enter submit is inert (exact boundary: 299 ms).
     let mut tx = Tx::default();
-    ws.submit_open_prompt(&mut tx, Instant::now(), false);
+    ws.submit_open_prompt(&mut tx, t_open + Duration::from_millis(299), false);
     assert!(
         prompt_replies(rx).is_empty(),
         "submit must be inert for 300 ms after opening"
     );
 
     // Even after 300 ms, Enter key repeat (repeat == true) is ignored.
-    make_submit_ready(&mut ws);
-    ws.submit_open_prompt(&mut tx, Instant::now(), true);
+    let t_ready = t_open + SUBMIT_GUARD;
+    ws.submit_open_prompt(&mut tx, t_ready, true);
     assert!(
         prompt_replies(rx).is_empty(),
         "submit must ignore Enter key repeats"
     );
 
     // Cancelling sends Cancelled and triggers a 10-second per-host cool-down.
-    ws.cancel_open_prompt(Some(&mut tx));
+    ws.cancel_open_prompt_at(Some(&mut tx), t_ready);
     let replies = prompt_replies(rx);
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0].1, "own-action");
@@ -312,11 +330,13 @@ fn idle_rule_own_action_exception_submit_guards_and_cancel_cooldown() {
     assert!(!ws.is_prompt_open());
 
     // Even with idle typing + own action, a new prompt during the 10 s cool-down waits as chip!
-    ws.last_keypress = Some(Instant::now() - IDLE_DELAY - Duration::from_secs(1));
-    push_prompt_event(
+    ws.last_keypress = Some(t_ready);
+    let t_during_cooldown = t_ready + IDLE_DELAY + Duration::from_secs(2);
+    push_prompt_event_at(
         &mut ws,
         0,
         PromptEventKind::Requested(input_prompt("loop-1", "Looping script")),
+        t_during_cooldown,
     );
     assert!(
         !ws.is_prompt_open(),
@@ -325,15 +345,12 @@ fn idle_rule_own_action_exception_submit_guards_and_cancel_cooldown() {
     assert!(ws.has_waiting_prompt());
 
     // Once the 10 s cool-down expires, new prompts can auto-open again.
-    let host_id = ws.hosts[0].id;
-    ws.prompts.cooldowns.insert(
-        host_id,
-        Instant::now() - CANCEL_COOLDOWN - Duration::from_secs(1),
-    );
-    push_prompt_event(
+    let t_after_cooldown = t_ready + CANCEL_COOLDOWN;
+    push_prompt_event_at(
         &mut ws,
         0,
         PromptEventKind::Requested(input_prompt("after-cool", "After cool-down")),
+        t_after_cooldown,
     );
     assert!(ws.is_prompt_open());
 }
@@ -596,43 +613,77 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
             .insert("block:a".into(), conn);
     }
 
-    // Simulate a key pressed BEFORE the prompt opened (so it sits in `ws.forwarded`).
+    // Send an actual pre-modal key press through Rune so `KeyA` sits in `forwarded`.
     let mut rt = runtime_at(ws, (1024., 700.));
     rt.frame(1. / 60.);
-    push_prompt_event(
+    let held_ev = KeyEvent {
+        key: Key::Text("a".into()),
+        mods: Mods::default(),
+    };
+    rt.physical_key_input(
+        PhysicalInput::Key {
+            key: Code::KeyA,
+            mods: Mods::default(),
+            pressed: true,
+            repeat: false,
+        },
+        held_ev.clone(),
+        None,
+    );
+    rt.frame(1. / 60.);
+    assert!(
+        !rt.state.forwarded.is_empty(),
+        "pre-modal press must be recorded in forwarded before opening prompt"
+    );
+
+    // Open prompt (treating the pre-modal press as old enough for auto-open).
+    let now = Instant::now();
+    rt.state.last_keypress = Some(now - IDLE_DELAY - Duration::from_secs(1));
+    push_prompt_event_at(
         &mut rt.state,
         0,
         PromptEventKind::Requested(input_prompt("pty-guard", "No PTY leaks")),
+        now,
     );
     assert!(rt.state.is_prompt_open());
+    assert!(
+        rt.state.forwarded.is_empty(),
+        "opening a prompt modal must clear pre-modal forwarded key identities"
+    );
     rt.frame(1. / 60.);
 
-    // Drain any non-input commands before sending keys/IME/releases.
+    // Drain the pre-modal key press before verifying zero leaks while open and on dismiss.
     let _ = term_rx.try_iter().count();
 
-    // Send ordinary keys, special keys, IME preedit/commit, releases, and direct Term::send.
+    // Route the held key's release through Rune while the prompt modal is open, plus
+    // ordinary keys, special keys, IME preedit/commit, and direct Term::try_send.
+    // Put Enter before Tab so Tab does not focus Cancel and activate it on Enter.
+    rt.physical_key_input(
+        PhysicalInput::Key {
+            key: Code::KeyA,
+            mods: Mods::default(),
+            pressed: false,
+            repeat: false,
+        },
+        held_ev.clone(),
+        None,
+    );
+    rt.frame(1. / 60.);
     for key in [
         Key::Text("a".into()),
         Key::Text("b".into()),
         Key::Backspace,
         Key::Up,
         Key::Down,
-        Key::Tab,
         Key::Enter,
+        Key::Tab,
     ] {
         press(&mut rt, key);
     }
+    assert!(rt.state.is_prompt_open());
     rt.update(|s, tx| {
         crate::app::input::on_ime(s, &Ime::Preedit("nihon".into(), None), tx);
         crate::app::input::on_ime(s, &Ime::Commit("日本".into()), tx);
-        crate::app::input::on_key_up(
-            s,
-            &KeyEvent {
-                key: Key::Text("a".into()),
-                mods: Mods::default(),
-            },
-            tx,
-        );
         // Defense-in-depth: Term::try_send itself refuses PTY input while prompt is open.
         let key = s.term_key("block:a");
         let term = s.terminals.get_mut(&key).unwrap();
@@ -642,25 +693,23 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
         )));
     });
 
-    let leaked: Vec<_> = term_rx
-        .try_iter()
-        .filter(|c| {
-            matches!(
-                c,
-                HostCommand::Terminal {
-                    command: Command::Key(_)
-                        | Command::KeyWithPrefix { .. }
-                        | Command::Paste(_)
-                        | Command::SendKey(_)
-                        | Command::Mouse(_)
-                        | Command::Wheel(_)
-                        | Command::Reset
-                        | Command::Clear,
-                    ..
-                }
-            )
-        })
-        .collect();
+    let pty_leak = |c: &HostCommand| {
+        matches!(
+            c,
+            HostCommand::Terminal {
+                command: Command::Key(_)
+                    | Command::KeyWithPrefix { .. }
+                    | Command::Paste(_)
+                    | Command::SendKey(_)
+                    | Command::Mouse(_)
+                    | Command::Wheel(_)
+                    | Command::Reset
+                    | Command::Clear,
+                ..
+            }
+        )
+    };
+    let leaked: Vec<_> = term_rx.try_iter().filter(pty_leak).collect();
     assert!(
         leaked.is_empty(),
         "zero PTY bytes may leak while prompt is open"
@@ -697,6 +746,39 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
         &perform_replies[0],
         PerformOutcome::Error { code, .. } if *code == "refused"
     ));
+
+    // Dismiss the modal and prove a stale repeat or release of the pre-modal held key
+    // cannot leak to the PTY after close.
+    press(&mut rt, Key::Escape);
+    rt.frame(1. / 60.);
+    assert!(!rt.state.is_prompt_open());
+    rt.physical_key_input(
+        PhysicalInput::Key {
+            key: Code::KeyA,
+            mods: Mods::default(),
+            pressed: true,
+            repeat: true,
+        },
+        held_ev.clone(),
+        None,
+    );
+    rt.physical_key_input(
+        PhysicalInput::Key {
+            key: Code::KeyA,
+            mods: Mods::default(),
+            pressed: false,
+            repeat: false,
+        },
+        held_ev,
+        None,
+    );
+    rt.frame(1. / 60.);
+    let post_close_leaked: Vec<_> = term_rx.try_iter().filter(pty_leak).collect();
+    assert!(
+        post_close_leaked.is_empty(),
+        "stale repeat or release of a pre-modal held key must not leak to PTY (leaked {} commands)",
+        post_close_leaked.len()
+    );
 }
 
 #[test]
@@ -917,12 +999,19 @@ fn lifecycle_notices_char_limit_and_disconnect_or_remove_send_nothing() {
     assert_eq!(ws.prompt_edit().text.chars().count(), MAX_INPUT_CHARS);
     assert!(ws.prompts.open_prompt().unwrap().char_limit_hit);
 
-    // 6. Disconnect clears prompt with notice and sends NOTHING.
+    // 6. Disconnect clears open prompt with open-specific notice and sends NOTHING.
+    ws.notices.clear();
     ws.hosts[0].connection.model.lock().unwrap().connected = false;
     ws.sync(0, &mut Tx::default());
     assert!(!ws.is_prompt_open());
     assert!(prompt_replies(&rxs[0]).is_empty());
-    assert!(ws.notices.iter().any(|n| n.text.contains("disconnected")));
+    assert!(
+        ws.notices.iter().any(|n| !n.sticky
+            && n.text
+                .contains("disconnected while a question was open. Nothing was sent.")),
+        "open-prompt disconnect must report question was open and nothing sent: {:?}",
+        ws.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
 
     // 7. Removing a host clears its prompt and sends NOTHING.
     push_prompt_event(
@@ -934,6 +1023,246 @@ fn lifecycle_notices_char_limit_and_disconnect_or_remove_send_nothing() {
     ws.remove_host(1, &mut Tx::default());
     assert!(!ws.is_prompt_open());
     assert!(prompt_replies(&rxs[1]).is_empty());
+}
+
+#[test]
+fn dialog_accessible_name_is_client_owned_even_with_hostile_script_title() {
+    let (mut ws, _rxs) = connected_ws(1);
+    ws.settings.hosts[0].label = "workstation".into();
+    push_prompt_event(
+        &mut ws,
+        0,
+        PromptEventKind::Requested(input_prompt(
+            "hostile-a11y",
+            "System Password Required: Enter sudo password",
+        )),
+    );
+    let mut rt = runtime_at(ws, (1024., 700.));
+    for _ in 0..10 {
+        rt.frame(1. / 60.);
+    }
+    let dialog_label = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.key.as_deref() == Some("dialog"))
+        .and_then(|e| e.label);
+    assert_eq!(
+        dialog_label.as_deref(),
+        Some("Question from workstation"),
+        "dialog accessible label must be client-owned, never controlled by script title"
+    );
+    let prompt_title = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.key.as_deref() == Some("prompt-title"))
+        .and_then(|e| e.text);
+    assert_eq!(
+        prompt_title.as_deref(),
+        Some("System Password Required: Enter sudo password")
+    );
+}
+
+#[test]
+fn bootstrap_prompt_event_before_connected_is_preserved_until_connected() {
+    let (mut ws, _rxs) = connected_ws(1);
+    {
+        let mut m = ws.hosts[0].connection.model.lock().unwrap();
+        m.connected = false;
+        m.connection_epoch = 2;
+        // Stale epoch-1 event must be discarded while disconnected.
+        m.prompt_events.push_back(PromptEvent {
+            epoch: 1,
+            kind: PromptEventKind::Requested(input_prompt("stale-epoch", "Stale")),
+        });
+        // Current epoch-2 event published during bootstrap before `connected` becomes true.
+        m.prompt_events.push_back(PromptEvent {
+            epoch: 2,
+            kind: PromptEventKind::Requested(input_prompt("boot-2", "Bootstrap offer")),
+        });
+    }
+    // Intervening UI wake while still disconnected must NOT drain or lose the epoch-2 offer.
+    ws.sync(0, &mut Tx::default());
+    assert!(!ws.is_prompt_open());
+    assert!(!ws.has_waiting_prompt());
+    {
+        let m = ws.hosts[0].connection.model.lock().unwrap();
+        assert_eq!(m.prompt_events.len(), 1);
+        assert_eq!(m.prompt_events[0].epoch, 2);
+    }
+
+    // Once bootstrap finishes and `connected` flips to true, the buffered offer opens cleanly.
+    ws.hosts[0].connection.model.lock().unwrap().connected = true;
+    ws.sync(0, &mut Tx::default());
+    assert!(ws.is_prompt_open());
+    assert_eq!(ws.prompts.open_prompt().unwrap().prompt.call_id, "boot-2");
+}
+
+#[test]
+fn sending_prompt_ignores_cancel_reopens_on_reject_and_distinguishes_disconnect_wording() {
+    let (mut ws, rxs) = connected_ws(1);
+    let rx = &rxs[0];
+    ws.settings.hosts[0].label = "buildbox".into();
+
+    push_prompt_event(
+        &mut ws,
+        0,
+        PromptEventKind::Requested(input_prompt("inflight-1", "Confirm version")),
+    );
+    assert!(ws.is_prompt_open());
+    ws.prompt_edit().text = "v2.3.4".into();
+    make_submit_ready(&mut ws);
+
+    let mut rt = runtime_at(ws, (1024., 700.));
+    for _ in 0..10 {
+        rt.frame(1. / 60.);
+    }
+    rt.update(|s, tx| s.submit_open_prompt(tx, Instant::now(), false));
+    assert_eq!(prompt_replies(rx).len(), 1);
+    assert!(rt.state.prompts.open_prompt().unwrap().sending);
+    rt.frame(1. / 60.);
+
+    // While sending == true, Escape and Cancel must be ignored so the entry survives settlement.
+    press(&mut rt, Key::Escape);
+    rt.frame(1. / 60.);
+    assert!(
+        rt.state.is_prompt_open(),
+        "Escape while answer is in flight must keep the entry open"
+    );
+    assert!(prompt_replies(rx).is_empty());
+
+    // Even if a local panel demotes the sending prompt, ReplyRejected reopens with draft intact
+    // once no local panel is open.
+    rt.update(|s, tx| {
+        s.picker(false);
+        s.close_panel(tx);
+    });
+    assert!(!rt.state.is_prompt_open());
+    push_prompt_event(
+        &mut rt.state,
+        0,
+        PromptEventKind::ReplyRejected {
+            call_id: "inflight-1".into(),
+            message: "Tag already exists.".into(),
+        },
+    );
+    assert!(
+        rt.state.is_prompt_open(),
+        "ReplyRejected must reopen a demoted sending prompt when no panel is open"
+    );
+    assert!(!rt.state.prompts.open_prompt().unwrap().sending);
+    assert_eq!(rt.state.prompt_edit().text, "v2.3.4");
+    assert_eq!(
+        rt.state.prompts.open_prompt().unwrap().error.as_deref(),
+        Some("Tag already exists.")
+    );
+
+    // Re-submit and disconnect while sending == true: sticky unconfirmed notice, NOT "Nothing was sent".
+    make_submit_ready(&mut rt.state);
+    rt.update(|s, tx| s.submit_open_prompt(tx, Instant::now(), false));
+    assert_eq!(prompt_replies(rx).len(), 1);
+    rt.state.notices.clear();
+    rt.state.hosts[0].connection.model.lock().unwrap().connected = false;
+    rt.update(|s, tx| s.sync(0, tx));
+    assert!(!rt.state.is_prompt_open());
+    assert!(
+        rt.state.notices.iter().any(|n| n.sticky
+            && n.text
+                .contains("buildbox disconnected before confirming your answer.")),
+        "disconnect while sending must raise sticky unconfirmed notice: {:?}",
+        rt.state
+            .notices
+            .iter()
+            .map(|n| (&n.text, n.sticky))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !rt.state
+            .notices
+            .iter()
+            .any(|n| n.text.contains("Nothing was sent")),
+        "disconnect while sending must not claim nothing was sent"
+    );
+
+    // Reconnect and verify waiting-only disconnect wording ("while a question was waiting").
+    {
+        let mut m = rt.state.hosts[0].connection.model.lock().unwrap();
+        m.connected = true;
+        m.connection_epoch = 2;
+    }
+    rt.update(|s, tx| {
+        s.sync(0, tx);
+        s.picker(false);
+    });
+    push_prompt_event(
+        &mut rt.state,
+        0,
+        PromptEventKind::Requested(input_prompt("wait-disc", "Waiting Q")),
+    );
+    assert!(!rt.state.is_prompt_open());
+    assert!(rt.state.has_waiting_prompt());
+    rt.state.notices.clear();
+    rt.state.hosts[0].connection.model.lock().unwrap().connected = false;
+    rt.update(|s, tx| s.sync(0, tx));
+    assert!(!rt.state.has_waiting_prompt());
+    assert!(
+        rt.state.notices.iter().any(|n| !n.sticky
+            && n.text
+                .contains("disconnected while a question was waiting. Nothing was sent.")),
+        "waiting-only disconnect must say 'was waiting': {:?}",
+        rt.state.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn pick_modal_with_wrapped_error_fits_within_85_percent_cap_at_640x480() {
+    let (mut ws, _rxs) = connected_ws(1);
+    ws.settings.hosts[0].label = "workstation".into();
+    let items: Vec<PromptItem> = (0..8)
+        .map(|i| {
+            pick_item(
+                &format!("item-{i}"),
+                &format!("Cluster node {i}"),
+                Some("us-west-2 production replica"),
+                Some(PromptIcon::Server),
+                Some("healthy"),
+                false,
+            )
+        })
+        .collect();
+    push_prompt_event(
+        &mut ws,
+        0,
+        PromptEventKind::Requested(pick_prompt(
+            "pick-err-640",
+            "Choose a deployment target with a longer two-line prompt title",
+            false,
+            false,
+            items,
+        )),
+    );
+    ws.prompts.open_prompt_mut().unwrap().error = Some(
+        "The selected deployment target is locked by another release pipeline. Pick another replica or retry once the active rollout finishes.".into(),
+    );
+
+    let mut rt = runtime_at(ws, (640., 480.));
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+    let dialog_rect = super::pane_verb_tests::rect(&rt, "dialog");
+    let submit_rect = super::pane_verb_tests::rect(&rt, "prompt-submit");
+    let cancel_rect = super::pane_verb_tests::rect(&rt, "prompt-cancel");
+    assert!(
+        dialog_rect[3] <= 480. * 0.85 + 1.,
+        "pick modal with wrapped error must stay within 85% cap at 640x480: dialog={dialog_rect:?}"
+    );
+    assert!(
+        submit_rect[1] + submit_rect[3] <= dialog_rect[1] + dialog_rect[3] + 0.5,
+        "Submit button must stay inside dialog bounds: dialog={dialog_rect:?} submit={submit_rect:?}"
+    );
+    assert!(
+        cancel_rect[1] + cancel_rect[3] <= dialog_rect[1] + dialog_rect[3] + 0.5,
+        "Cancel button must stay inside dialog bounds: dialog={dialog_rect:?} cancel={cancel_rect:?}"
+    );
 }
 
 #[test]

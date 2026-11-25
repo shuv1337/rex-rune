@@ -493,6 +493,10 @@ impl Workspace {
     /// Open a queued prompt by key. If Settings is open, `open_panel` preserves it in `back`
     /// so answering or cancelling returns cleanly to Settings.
     pub fn open_prompt(&mut self, key: PromptKey, now: Instant) -> bool {
+        let label = self
+            .host_index(key.host)
+            .map(|i| self.settings.hosts[i].label.clone())
+            .unwrap_or_else(|| "host".into());
         let Some(active) = self.prompts.find_mut(&key) else {
             return false;
         };
@@ -500,8 +504,11 @@ impl Workspace {
         active.guard_settled = false;
         active.edit.focused = true;
         active.reveal = true;
-        let title = active.prompt.title.clone();
-        self.open_panel(PanelKind::Prompt(key.clone()), &title, &[]);
+        // Client-owned accessible name: never let a remote script pick the dialog's role label.
+        let accessible_title = format!("Question from {label}");
+        // Clear any pre-modal held-key identities since Rune confines key-up to the modal.
+        self.forwarded.clear();
+        self.open_panel(PanelKind::Prompt(key.clone()), &accessible_title, &[]);
         self.prompts.open = Some(key);
         self.sync_prompt_terminal_guard();
         true
@@ -522,6 +529,16 @@ impl Workspace {
         events: VecDeque<PromptEvent>,
         tx: &mut Tx,
     ) {
+        self.process_prompt_events_at(index, events, Instant::now(), tx);
+    }
+
+    pub(crate) fn process_prompt_events_at(
+        &mut self,
+        index: usize,
+        events: VecDeque<PromptEvent>,
+        now: Instant,
+        tx: &mut Tx,
+    ) {
         self.reconcile_prompts();
         let host_id = self.hosts[index].id;
         let connected = self.hosts[index].model.connected;
@@ -530,16 +547,25 @@ impl Workspace {
 
         // Check if an existing active prompt on this host belongs to a dropped connection or
         // an older epoch. Never send anything on disconnect.
-        let mut disconnected_active = false;
+        let mut disconnected_sending = false;
+        let mut disconnected_open = false;
+        let mut disconnected_waiting = false;
         let mut stale_open = false;
         self.prompts.queue.retain(|p| {
             if p.host != host_id {
                 return true;
             }
             if !connected || p.epoch != epoch {
-                disconnected_active = true;
-                if self.prompts.open.as_ref() == Some(&p.key()) {
+                let is_open = self.prompts.open.as_ref() == Some(&p.key());
+                if is_open {
                     stale_open = true;
+                }
+                if p.sending {
+                    disconnected_sending = true;
+                } else if is_open {
+                    disconnected_open = true;
+                } else {
+                    disconnected_waiting = true;
                 }
                 false
             } else {
@@ -550,9 +576,17 @@ impl Workspace {
             self.prompts.open = None;
             self.close_prompt_panel(Some(tx));
         }
-        if disconnected_active {
+        if disconnected_sending {
+            self.notify(format!(
+                "{label} disconnected before confirming your answer."
+            ));
+        } else if disconnected_open {
             self.inform(format!(
                 "{label}: disconnected while a question was open. Nothing was sent."
+            ));
+        } else if disconnected_waiting {
+            self.inform(format!(
+                "{label}: disconnected while a question was waiting. Nothing was sent."
             ));
         }
 
@@ -561,7 +595,6 @@ impl Workspace {
             return;
         }
 
-        let now = Instant::now();
         for event in events {
             if event.epoch != epoch {
                 continue;
@@ -599,6 +632,10 @@ impl Workspace {
                     if let Some(active) = self.prompts.find_mut(&key) {
                         active.sending = false;
                         active.error = Some(message);
+                        if self.prompts.open.as_ref() != Some(&key) && self.panel.is_none() {
+                            self.open_prompt(key, now);
+                            tx.wake_after(SUBMIT_GUARD);
+                        }
                     }
                 }
                 PromptEventKind::Ended { call_id, reason } => {
@@ -871,18 +908,22 @@ impl Workspace {
     }
 
     pub(crate) fn cancel_open_prompt_at(&mut self, tx: Option<&mut Tx>, now: Instant) {
-        let Some(open_key) = self.prompts.open.take() else {
+        let Some(open_key) = self.prompts.open.clone() else {
             self.close_prompt_panel(tx);
             return;
         };
-        let mut sending = false;
+        // While an answer is in flight, keep the entry alive until server settlement so
+        // `ReplyRejected` can show the inline error and `Failed` can raise its sticky notice.
+        if self.prompts.find(&open_key).is_some_and(|p| p.sending) {
+            return;
+        }
+        self.prompts.open = None;
         let mut found = false;
         self.prompts.queue.retain(|p| {
             if p.host == open_key.host
                 && p.epoch == open_key.epoch
                 && p.prompt.call_id == open_key.call_id
             {
-                sending = p.sending;
                 found = true;
                 false
             } else {
@@ -893,7 +934,6 @@ impl Workspace {
             .cooldowns
             .insert(open_key.host, now + CANCEL_COOLDOWN);
         if found
-            && !sending
             && let Some(host_index) = self.host_index(open_key.host)
             && self.hosts[host_index].model.connected
             && self.hosts[host_index].model.connection_epoch == open_key.epoch
@@ -1088,7 +1128,7 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
     if !host_endpoint.is_empty() {
         attribution_words = attribution_words.help(host_endpoint);
     }
-    let close_x = row()
+    let mut close_x = row()
         .key("prompt-close")
         .role("button")
         .label("Cancel question")
@@ -1102,6 +1142,9 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
         .tab_index(-1)
         .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.cancel_open_prompt(Some(tx)))
         .child(glyph(&CLOSE, 13., rgb(muted())));
+    if active.sending {
+        close_x = close_x.inert().opacity(0.45);
+    }
 
     let attribution = row()
         .key("prompt-attribution")
@@ -1262,11 +1305,16 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
                 );
             }
 
-            // Reserve vertical room for header, filter, footnote, buttons, and gaps so
-            // 640x480 always keeps at least 3 visible rows and 1024x700 shows up to 10.
+            // Reserve vertical room for header, filter, optional 2-line error, footnote, buttons,
+            // and gaps so 640x480 stays inside the 85% height cap even with wrapped errors.
             let chrome_reserve =
-                if compact_h { 228. } else { 246. } + if active.error.is_some() { 24. } else { 0. };
-            let avail_list_h = (max_h - 44. - chrome_reserve).max(row_h * 3.);
+                if compact_h { 228. } else { 246. } + if active.error.is_some() { 50. } else { 0. };
+            let min_rows = if compact_h && active.error.is_some() {
+                2.
+            } else {
+                3.
+            };
+            let avail_list_h = (max_h - 44. - chrome_reserve).max(row_h * min_rows);
             let natural_h = if rows.is_empty() {
                 row_h
             } else {
@@ -1412,7 +1460,9 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
                 .key("prompt-error")
                 .font(ui(13.))
                 .color(rgb(danger()))
-                .wrap(),
+                .wrap()
+                .max_lines(2)
+                .help_when_truncated(error.clone()),
         );
     }
 
@@ -1435,10 +1485,13 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
     let ready = active.submit_ready(now);
     let sending = active.sending;
 
-    let cancel_btn = pill("prompt-cancel", "Cancel", Pill::Neutral, 32., |s, tx| {
+    let mut cancel_btn = pill("prompt-cancel", "Cancel", Pill::Neutral, 32., |s, tx| {
         s.cancel_open_prompt(Some(tx))
     })
     .tab_index(2);
+    if sending {
+        cancel_btn = cancel_btn.disabled(true).opacity(0.45);
+    }
 
     let mut submit_btn = pill(
         "prompt-submit",

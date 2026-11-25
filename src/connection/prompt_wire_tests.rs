@@ -686,3 +686,49 @@ async fn prompt_api_16_ignores_even_unexpected_prompt_events() {
     drop(host);
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn prompt_offer_during_initial_bootstrap_is_accepted_when_spawned_enabled() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let host = HostConnection::spawn_with_prompts(
+        endpoint,
+        None,
+        None,
+        None,
+        false,
+        None,
+        "test-client".into(),
+        None,
+        true,
+    );
+    let server = tokio::spawn(async move {
+        let (mut ws, boot) = boot_req(&listener, 21).await;
+        // Offer arrives during initial bootstrap before the client sends any HostCommand.
+        offer(&mut ws, "boot-offer", "input", 60_000).await;
+        boot_empty(&mut ws, &boot).await;
+        // Next wire request must be our answer, never a `not_supported` refusal.
+        let req = recv_answer(&mut ws, "boot-offer", json!({"text":"ready"})).await;
+        reply(&mut ws, &req, 11, json!({})).await;
+        close(&mut ws).await;
+    });
+    connected(&host).await;
+    let epoch = requested(&host, "boot-offer").await;
+    answer(
+        &host,
+        epoch,
+        "boot-offer",
+        PromptAnswer::Text("ready".into()),
+    );
+    observed(
+        &host,
+        epoch,
+        PromptEventKind::ReplyOutcome {
+            call_id: "boot-offer".into(),
+            outcome: ReplyOutcome::Accepted,
+        },
+    )
+    .await;
+    drop(host);
+    server.await.unwrap();
+}

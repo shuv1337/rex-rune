@@ -1023,6 +1023,31 @@ impl HostConnection {
         label: String,
         ssh_auth_sock: Option<PathBuf>,
     ) -> Self {
+        Self::spawn_with_prompts(
+            endpoint,
+            preferred,
+            create,
+            block,
+            visible,
+            theme,
+            label,
+            ssh_auth_sock,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_prompts(
+        endpoint: String,
+        preferred: Option<String>,
+        create: Option<(String, Option<String>)>,
+        block: Option<String>,
+        visible: bool,
+        theme: Option<SetTheme>,
+        label: String,
+        ssh_auth_sock: Option<PathBuf>,
+        prompts_enabled: bool,
+    ) -> Self {
         Self::spawn_internal(
             endpoint,
             Startup {
@@ -1032,6 +1057,7 @@ impl HostConnection {
                 theme,
                 label,
                 ssh_auth_sock,
+                prompts_enabled,
                 #[cfg(test)]
                 ssh_program: None,
                 #[cfg(test)]
@@ -1856,6 +1882,7 @@ struct Startup {
     block: Option<String>,
     theme: Option<SetTheme>,
     ssh_auth_sock: Option<PathBuf>,
+    prompts_enabled: bool,
     #[cfg(test)]
     ssh_program: Option<PathBuf>,
     #[cfg(test)]
@@ -1876,6 +1903,7 @@ async fn run_host(
         mut theme,
         label,
         mut ssh_auth_sock,
+        mut prompts_enabled,
         #[cfg(test)]
         ssh_program,
         #[cfg(test)]
@@ -1884,7 +1912,6 @@ async fn run_host(
     let mut token: Option<String> = None;
     let mut workers = HashMap::<String, PaneWorker>::new();
     let mut retry = 0;
-    let mut prompts_enabled = false;
     let mut deferred_commands = VecDeque::new();
     let mut prefetch = prefetch::Prefetch::default();
     let mut keymap: Option<Box<keymap::Declaration>> = None;

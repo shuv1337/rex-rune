@@ -427,7 +427,7 @@ impl Workspace {
         } else {
             self.settings.sessions.get(&host.endpoint).cloned()
         };
-        let connection = HostConnection::spawn_with_ssh_agent(
+        let connection = HostConnection::spawn_with_prompts(
             host.endpoint.clone(),
             preferred,
             cli.then(|| self.options.new.clone())
@@ -438,13 +438,13 @@ impl Workspace {
             self.declared_theme(),
             self.settings.client_label(),
             self.ssh_agent_socket(),
+            host.prompts,
         );
         let _ = connection
             .commands
             .send(HostCommand::Keymap(Box::new(self.keymap_declaration())));
         // About and the copied reports name the server; reading it changes nothing there.
         let _ = connection.commands.send(HostCommand::Identify);
-        let _ = connection.commands.send(HostCommand::Prompts(host.prompts));
         if watch_shared {
             let _ = connection.commands.send(HostCommand::WatchSharedHosts);
         }
@@ -621,11 +621,21 @@ impl Workspace {
             let bells = std::mem::take(&mut shared.bells);
             let client_actions = std::mem::take(&mut shared.client_actions);
             let performs = std::mem::take(&mut shared.performs);
-            let prompt_events = std::mem::take(&mut shared.prompt_events);
+            // Bootstrap can publish current-epoch prompt events before `connected` flips to
+            // `true`; keep them buffered until connected so an intervening wake cannot drop them.
+            let prompt_events = if shared.connected {
+                std::mem::take(&mut shared.prompt_events)
+            } else {
+                let epoch = shared.connection_epoch;
+                shared.prompt_events.retain(|e| e.epoch == epoch);
+                std::collections::VecDeque::new()
+            };
             let shared_writes = std::mem::take(&mut shared.shared_writes);
             let view_fetches = std::mem::take(&mut shared.view_fetches);
+            let mut cloned = shared.clone();
+            cloned.prompt_events.clear();
             (
-                shared.clone(),
+                cloned,
                 notices,
                 clipboard,
                 bells,

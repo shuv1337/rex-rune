@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-rune"))
 SNAPSHOT = "/mnt/data/cache/agent-ws/rex-snapshot-2562/bin/rex"
 REX_BIN_PATH = Path(os.environ.get("REX_SERVER_BIN", SNAPSHOT)).resolve(strict=True)
-if REX_BIN_PATH == Path("/usr/bin/rex"):
+if os.path.realpath(REX_BIN_PATH) == os.path.realpath("/usr/bin/rex"):
     raise SystemExit("Refusing to run against /usr/bin/rex; use a private API 21 Rex binary")
 
 DEFAULT_BASE = "/mnt/data/tmp" if Path("/mnt/data/tmp").is_dir() else tempfile.gettempdir()
@@ -226,6 +226,7 @@ rex.action({{
 server = None
 desk = None
 app = None
+rex_do_procs = []
 
 
 def wait(predicate, description, timeout=15):
@@ -263,12 +264,14 @@ def paste_line(sid, block, text):
 
 
 def rex_do_async(action_name):
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [str(REX_BIN_PATH), "--autostart=false", "--server", endpoint, "do", action_name],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+    rex_do_procs.append(proc)
+    return proc
 
 
 def maybe_snap(window, name):
@@ -562,6 +565,11 @@ try:
 
     print("ALL PRIVATE API 21 REX.UI X11 CHECKS PASSED", flush=True)
 finally:
+    for proc in rex_do_procs:
+        if proc.poll() is None:
+            accept.stop_owned(proc)
+        else:
+            proc.wait()
     if desk is not None:
         desk.close()
     if server is not None:
