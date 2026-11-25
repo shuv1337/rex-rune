@@ -342,6 +342,15 @@ def rows(snap, block):
     return snap["snapshots"].get(block, {}).get("records", [])
 
 
+def wait_rows(run, block, matches, description):
+    # A separate wire observer can see the event before the worker applies it.
+    def observed():
+        snapshot = run("snapshot")["snapshots"].get(block)
+        return snapshot if snapshot is not None and matches(snapshot["records"]) else None
+
+    wait(observed, description)
+
+
 def trigger(path, action):
     pending = path.with_suffix(".pending")
     pending.write_text(action)
@@ -372,8 +381,12 @@ def verify_live(probe, fixture):
         assert control.changed(good, "report")[0].get("rule") == "codex"
         cycle = fixture.start_reporter(control, sid, other, "unlisted", "--flag", "value")
         assert control.changed(other, "report")[0].get("untrusted_reason") == "no_rule"
-        assert rows(run("snapshot"), good)[0]["verdict"] == {"trusted": True, "rule": "codex"}
-        assert rows(run("snapshot"), other)[0]["verdict"] == {"trusted": False, "reason": "NoRule"}
+        wait_rows(run, good,
+                  lambda r: [row["verdict"] for row in r] == [{"trusted": True, "rule": "codex"}],
+                  "worker did not receive the trusted codex report")
+        no_rule = {"trusted": False, "reason": "NoRule"}
+        wait_rows(run, other, lambda r: [row["verdict"] for row in r] == [no_rule],
+                  "worker did not receive the untrusted report")
         assert fixture.read_count() == 2, "passive events triggered a read"
         print("PASS [2] passive events deliver trusted and untrusted metadata", flush=True)
 
@@ -396,31 +409,37 @@ def verify_live(probe, fixture):
                 assert snap["connected"] and not snap["snapshots"] and not snap["unsupported"]
             assert fixture.read_count() == before, "pinned worker sent a forbidden read"
         assert control.changed(other, "report")[0]["program"] == "my\u202eprog"
-        assert rows(run("snapshot"), other)[0]["program"] == r"my\u{202E}prog"
+        wait_rows(run, other, lambda r: [row["program"] for row in r] == [r"my\u{202E}prog"],
+                  "worker did not escape the program name")
         print("PASS [3] pinned API 23 sends zero reads and ignores events; API 24 escapes bidi text",
               flush=True)
 
         trigger(cycle, "clear")
         assert control.changed(other, "clear") == []
-        assert rows(run("snapshot"), other) == []
+        wait_rows(run, other, lambda r: not r, "worker did not apply the clear event")
         trigger(cycle, "report")
         control.changed(other, "report")
+        wait_rows(run, other, bool, "worker did not receive the report after clear")
         trigger(cycle, "rejected")
         assert control.changed(other, "rejected") == []
-        assert rows(run("snapshot"), other) == []
+        wait_rows(run, other, lambda r: not r, "worker did not apply the rejected event")
         trigger(cycle, "report")
         control.changed(other, "report")
         fixture.config.write_text('rex.set("resume.trust.unlisted", { command = {"unlisted", "--flag", "value"} })\n')
         assert fixture.read_count() == before
         fixture.reload()
         assert control.changed(other, "rules_changed")[0].get("rule") == "unlisted"
-        assert rows(run("snapshot"), other)[0]["verdict"] == {"trusted": True, "rule": "unlisted"}
+        trusted = {"trusted": True, "rule": "unlisted"}
+        wait_rows(run, other, lambda r: [row["verdict"] for row in r] == [trusted],
+                  "worker did not receive the added trust rule")
         fixture.config.write_text("")
         fixture.reload()
         assert control.changed(other, "rules_changed")[0].get("untrusted_reason") == "no_rule"
+        wait_rows(run, other, lambda r: [row["verdict"] for row in r] == [no_rule],
+                  "worker did not receive the removed trust rule")
         control.write(sid, other, "\x03")
         assert control.changed(other, "owner_exited") == []
-        assert rows(run("snapshot"), other) == []
+        wait_rows(run, other, lambda r: not r, "worker did not apply the owner_exited event")
         print("PASS [4] clear, rejected, rules_changed and owner_exited replace the list", flush=True)
 
         fixture.ancestor(control, sid, other, "report")
