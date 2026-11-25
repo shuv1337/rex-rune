@@ -60,6 +60,12 @@ fn remote_set_is_exact_and_every_denial_is_described() {
         actions::find("client.ports").unwrap().remote(),
         Remote::Never(_)
     ));
+    assert!(matches!(
+        actions::find(actions::FOCUS_HISTORY_REVERSE)
+            .unwrap()
+            .remote(),
+        Remote::Never(_)
+    ));
     let declarations = actions::declarations();
     for action in &declarations {
         if matches!(

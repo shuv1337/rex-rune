@@ -9,6 +9,8 @@ mod directory_tests;
 mod download_tests;
 #[path = "fetch_view_tests.rs"]
 mod fetch_view_tests;
+#[path = "focus_history_tests.rs"]
+mod focus_history_tests;
 #[path = "hosts_tests.rs"]
 mod hosts_tests;
 #[path = "keymap_tests.rs"]

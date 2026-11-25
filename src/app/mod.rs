@@ -16,6 +16,7 @@ mod downloads_view;
 mod find;
 mod floating;
 mod floating_drag;
+mod focus_history;
 mod font_page;
 mod font_picker;
 mod font_size;
@@ -254,11 +255,13 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     let updates_changed = s.poll_updates(now, tx);
     let settings_changed = s.poll_settings(now, tx);
     let prompts_changed = s.poll_prompts(now, tx);
+    let focus_history_changed = s.poll_focus_history(now, tx);
     let mut changed = s.poll_navigation(now, tx)
         || remote_changed
         || updates_changed
         || settings_changed
         || prompts_changed
+        || focus_history_changed
         || activity_changed
         || server_changed;
     if let Some(panel) = &mut s.panel

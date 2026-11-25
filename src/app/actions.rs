@@ -12,6 +12,7 @@ pub const NEXT_GLOBAL: &str = "client.tab.next_global";
 pub const PREVIOUS_GLOBAL: &str = "client.tab.previous_global";
 pub const HISTORY_BACK: &str = "client.history.back";
 pub const HISTORY_FORWARD: &str = "client.history.forward";
+pub const FOCUS_HISTORY_REVERSE: &str = "client.focus_history.reverse";
 pub const DOWNLOAD: &str = "pane.download";
 pub const FULL_SCREEN: &str = "client.full_screen.toggle";
 pub const UNDO_CLOSE: &str = "client.undo_close";
@@ -34,6 +35,7 @@ enum Handler {
     PreviousGlobal,
     Back,
     Forward,
+    FocusHistoryReverse,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -124,6 +126,7 @@ specs! {
     PREVIOUS_GLOBAL => PreviousGlobal,
     HISTORY_BACK => Back,
     HISTORY_FORWARD => Forward,
+    FOCUS_HISTORY_REVERSE => FocusHistoryReverse,
     "client.zoom.in" => ZoomIn,
     "client.zoom.out" => ZoomOut,
     "client.zoom.reset" => ZoomReset,
@@ -297,6 +300,9 @@ impl Spec {
             NextGlobal | PreviousGlobal | Back | Forward => {
                 Remote::Never("Use rex do session.select on the target host instead.")
             }
+            FocusHistoryReverse => {
+                Remote::Never("Only the person at this computer can step through focus history.")
+            }
             Reconnect => Remote::Never("Only the person at this computer can reconnect terminals."),
             SelectAll => {
                 Remote::Never("Only the person at this computer can select terminal text.")
@@ -353,6 +359,7 @@ impl Spec {
                 | Handler::PairDevice
                 | Handler::StopServer
                 | Handler::UndoClose
+                | Handler::FocusHistoryReverse
         )
     }
     pub fn global(&self) -> bool {
@@ -427,6 +434,7 @@ impl Spec {
             Handler::PreviousGlobal => "Previous tab across hosts",
             Handler::Back => "Back in history",
             Handler::Forward => "Forward in history",
+            Handler::FocusHistoryReverse => "Previous focus",
             Handler::ZoomIn => "Increase interface zoom",
             Handler::ZoomOut => "Decrease interface zoom",
             Handler::ZoomReset => "Reset interface zoom",
@@ -520,6 +528,7 @@ impl Spec {
             | Handler::PreviousGlobal
             | Handler::Back
             | Handler::Forward
+            | Handler::FocusHistoryReverse
             | Handler::SwitchSession
             | Handler::Activity
             | Handler::Ports
@@ -582,6 +591,18 @@ impl Spec {
             return Some(
                 json!({"type":"object","properties":{"view":{"type":"string","enum":["priority","session"]}},"additionalProperties":false}),
             );
+        }
+        if matches!(self.handler, Handler::FocusHistoryReverse) {
+            return Some(json!({
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "enum": rex_rune::connection::FocusHistoryScope::ALL_ARGS
+                    }
+                },
+                "additionalProperties": false
+            }));
         }
         if matches!(self.handler, Handler::SelectSession) {
             return Some(
@@ -656,6 +677,13 @@ impl Spec {
                     || object.len() == 1
                         && matches!(args["view"].as_str(), Some("priority" | "session"))
             }
+            Handler::FocusHistoryReverse => {
+                object.is_empty()
+                    || object.len() == 1
+                        && args["scope"].as_str().is_some_and(|s| {
+                            rex_rune::connection::FocusHistoryScope::parse(s).is_some()
+                        })
+            }
             Handler::Split => object.len() == 1 && split_way(args).is_some(),
             Handler::FocusPane => {
                 object.len() == 1
@@ -717,6 +745,9 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
     if s.in_copy_mode() && spec.blocked_in_copy_mode() {
         return true;
     }
+    if !matches!(spec.handler, Handler::FocusHistoryReverse) {
+        s.clear_focus_history_walk();
+    }
     match spec.handler {
         Handler::Compatibility => super::compatibility::run(s, name, args, tx),
         Handler::Palette => s.picker(false),
@@ -738,6 +769,13 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::PreviousGlobal => s.cycle_tab(-1, tx),
         Handler::Back => s.navigate_history(-1, tx),
         Handler::Forward => s.navigate_history(1, tx),
+        Handler::FocusHistoryReverse => {
+            let scope = args["scope"]
+                .as_str()
+                .and_then(rex_rune::connection::FocusHistoryScope::parse)
+                .unwrap_or_default();
+            s.reverse_focus_history(scope, tx);
+        }
         Handler::ZoomIn => s.change_ui_scale(1, tx),
         Handler::ZoomOut => s.change_ui_scale(-1, tx),
         Handler::ZoomReset => s.change_ui_scale(0, tx),
@@ -1044,6 +1082,14 @@ pub fn binding_title(binding: &rexrs::api::client::Binding) -> String {
                 args["view"].as_str().unwrap_or_default()
             )
         }
+        FOCUS_HISTORY_REVERSE => match args["scope"].as_str() {
+            Some("any") => "Previous focus (any)".into(),
+            Some("pane") => "Previous focused pane in tab".into(),
+            Some("tab") => "Previous focused tab".into(),
+            Some("tab_any_session") => "Previous focused tab (any session)".into(),
+            Some("session") => "Previous focused session".into(),
+            _ => title.into(),
+        },
         "pane.split" => format!("Split {}", direction()),
         "pane.focus" => format!("Focus pane {}", direction()),
         "client.tab.move" => format!("Move tab {}", direction()),

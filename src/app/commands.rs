@@ -504,6 +504,32 @@ impl Workspace {
             )
             .detail("Mouse Forward")
             .keywords("navigate"),
+            Command::action(
+                "focus_history.reverse",
+                G,
+                "Previous focus",
+                actions::FOCUS_HISTORY_REVERSE,
+            )
+            .blocked_by(self.focus_history_blocked())
+            .keywords("focus history recent last pane tab session back toggle"),
+            {
+                let blocked = self.focus_history_blocked();
+                let row = Command::new(
+                    "focus_history.session",
+                    G,
+                    "Previous focused session",
+                    Intent::ClientAction(
+                        actions::FOCUS_HISTORY_REVERSE,
+                        json!({"scope": "session"}),
+                    ),
+                )
+                .keywords("focus history recent last back");
+                if blocked.is_some() {
+                    row.blocked_by(blocked)
+                } else {
+                    row.enabled(model.sessions.len() > 1)
+                }
+            },
             Command::action("session.refresh", G, "Refresh sessions", REFRESH_SESSIONS)
                 .enabled(self.hosts.iter().any(|h| h.model.connected))
                 .keywords("reload read list"),
@@ -549,6 +575,21 @@ impl Workspace {
                 "Previous tab across hosts",
                 actions::PREVIOUS_GLOBAL,
             ),
+            {
+                let blocked = self.focus_history_blocked();
+                let row = Command::new(
+                    "focus_history.tab",
+                    G,
+                    "Previous focused tab",
+                    Intent::ClientAction(actions::FOCUS_HISTORY_REVERSE, json!({"scope": "tab"})),
+                )
+                .keywords("focus history recent last back window");
+                if blocked.is_some() {
+                    row.blocked_by(blocked)
+                } else {
+                    row.enabled(in_session && several)
+                }
+            },
         ]);
         if let Some(entries) = self.tab_commands() {
             rows.extend(
@@ -702,17 +743,38 @@ impl Workspace {
                 .section(2),
             );
         }
+        let mut focus_rows = self.focus_commands().into_iter();
+        for id in ["pane.focus.next", "pane.focus.previous"] {
+            if let Some(entry) = focus_rows.next() {
+                rows.push(Command::row(id, G, entry).section(3));
+            }
+        }
+        let several_panes = model
+            .window()
+            .is_some_and(|w| w.layers.iter().flat_map(|l| &l.blocks).count() > 1);
+        let focus_blocked = self.focus_history_blocked();
+        let pane_history = Command::new(
+            "focus_history.pane",
+            G,
+            "Previous focused pane in tab",
+            Intent::ClientAction(actions::FOCUS_HISTORY_REVERSE, json!({"scope": "pane"})),
+        )
+        .keywords("focus history recent last back")
+        .section(3);
+        rows.push(if focus_blocked.is_some() {
+            pane_history.blocked_by(focus_blocked)
+        } else {
+            pane_history.enabled(several_panes)
+        });
         rows.extend(
             [
-                "pane.focus.next",
-                "pane.focus.previous",
                 "pane.focus.left",
                 "pane.focus.right",
                 "pane.focus.up",
                 "pane.focus.down",
             ]
             .into_iter()
-            .zip(self.focus_commands())
+            .zip(focus_rows)
             .map(|(id, entry)| Command::row(id, G, entry).section(3)),
         );
         for action in ["pane.move", "pane.resize"] {

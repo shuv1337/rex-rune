@@ -278,6 +278,44 @@ fn listening_ports_is_local_and_unbound_but_can_be_recorded() {
     assert!(command.enabled);
 }
 
+#[test]
+fn focus_history_is_local_unbound_and_recordable_with_scoped_rows() {
+    let (mut ws, _) = tabbed_workspace("split");
+    ws.hosts[0].model.protocol.api_revision = 21;
+    let action = actions::FOCUS_HISTORY_REVERSE;
+    let spec = actions::find(action).unwrap();
+    assert!(matches!(spec.remote(), Remote::Never(_)));
+    assert!(spec.requires_person());
+    assert!(ws.shortcut_chords(action, &Value::Null).is_empty());
+    let rows: Vec<_> = ws
+        .shortcut_rows()
+        .into_iter()
+        .filter(|row| row.action == action)
+        .collect();
+    assert_eq!(rows.len(), 6);
+    assert!(rows.iter().all(|row| row.keys.is_empty() && row.recordable));
+    for (args, title) in [
+        (Value::Null, "Previous focus"),
+        (json!({"scope": "pane"}), "Previous focused pane in tab"),
+        (json!({"scope": "tab"}), "Previous focused tab"),
+        (json!({"scope": "session"}), "Previous focused session"),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row.args.as_ref().unwrap_or(&Value::Null) == &args)
+            .unwrap();
+        assert_eq!(row.title, title);
+    }
+    ws.picker(false);
+    let command = ws
+        .entries()
+        .into_iter()
+        .find(|row| row.id.as_deref() == Some("focus_history.reverse"))
+        .unwrap();
+    assert_eq!(command.action.shortcut(), Some((action, Value::Null)));
+    assert!(command.enabled);
+}
+
 /// The surfaces that only exist once every part is in: the tab menu with its destructive
 /// group, the sidebar's tab menu, Commands at its Pane and App groups and as a search, the
 /// Pane headers list over Settings, Shortcuts with every action bound, and About. Drawn for

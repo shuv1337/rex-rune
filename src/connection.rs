@@ -19,6 +19,7 @@ pub mod activity;
 pub mod clipboard;
 pub mod directory;
 pub mod downloads;
+pub mod focus_history;
 pub mod hosts;
 pub mod ports;
 mod prefetch;
@@ -27,6 +28,11 @@ mod status_sweep;
 pub mod titles;
 mod view_fetch;
 
+pub use focus_history::{
+    FOCUS_HISTORY_DISCONNECTED, FOCUS_HISTORY_DISCONNECTED_NOTICE, FOCUS_HISTORY_EMPTY_NOTICE,
+    FOCUS_HISTORY_MIN_API_REVISION, FOCUS_HISTORY_REQUIRES_API, FOCUS_HISTORY_UNSUPPORTED_NOTICE,
+    FocusHistoryResult, FocusHistoryScope,
+};
 pub use view_fetch::ViewFetchOutcome;
 
 /// The label new tabs get. A tab that still has it shows its program's terminal title.
@@ -283,6 +289,8 @@ pub struct HostModel {
     pub selected: Option<String>,
     /// Completion of the latest client navigation request (id, success), not a notice.
     pub navigation_result: Option<(u64, bool)>,
+    /// Completion of the latest `focus_history.reverse` request on this connection epoch.
+    pub focus_history_result: Option<FocusHistoryResult>,
     /// Completed on-demand read-only session view fetches, drained once by the UI.
     pub view_fetches: Vec<(u64, ViewFetchOutcome)>,
     /// Most recent read-only directory reply; only its browser/request may consume it.
@@ -536,6 +544,14 @@ pub enum HostCommand {
     UndoClose {
         epoch: u64,
     },
+    /// Step back through server-side focus history on this connection epoch only (API 19+).
+    /// Never replayed across disconnect/reconnect.
+    ReverseFocusHistory {
+        epoch: u64,
+        id: u64,
+        scope: FocusHistoryScope,
+        cursor: Option<u64>,
+    },
     /// A person's confirmed, single attempt on this connection only. Never replayed.
     StopServer {
         epoch: u64,
@@ -706,6 +722,8 @@ struct ControlState {
     bootstrap_seq: u64,
     list_seq: u64,
     view_seq: HashMap<String, u64>,
+    /// Sessions attached on this control connection (via `session.bootstrap` or `session.attach`).
+    attached: HashSet<String>,
     /// Blocks whose title and initial process metadata were asked for.
     queried: HashSet<String>,
     status_queried: HashSet<String>,
@@ -812,6 +830,7 @@ impl ControlState {
 
     fn forget_session(&mut self, id: &str, blocks: impl IntoIterator<Item = String>) {
         self.view_seq.remove(id);
+        self.attached.remove(id);
         self.viewed.remove(id);
         self.urgent_views.retain(|s| s != id);
         if self.view_reading.as_deref() == Some(id) {
@@ -944,6 +963,7 @@ impl Shared {
                 m.keymap_revision += 1;
                 m.ports.clear();
                 m.ports_reading.clear();
+                m.focus_history_result = None;
             }
             for terminal in m.terminals.values() {
                 terminal
@@ -1238,6 +1258,7 @@ async fn attach(
     )
     .await??;
     state.view_seq.insert(id.into(), reply.seq);
+    state.attached.insert(id.into());
     replace_view(shared, state, sweep, id, reply.value.view);
     Ok(())
 }
@@ -1661,6 +1682,7 @@ fn apply_bootstrap(
         state
             .view_seq
             .insert(attached.session.session_id.clone(), reply.seq);
+        state.attached.insert(attached.session.session_id.clone());
         apply_view(shared, &attached.session.session_id, attached.view);
     }
     state.add_tickets(boot.data_tickets, started);
@@ -2138,6 +2160,7 @@ async fn run_host(
                 m.prompt_events.clear();
                 m.actions_in_flight = 0;
                 m.view_fetches.clear();
+                m.focus_history_result = None;
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
@@ -2701,7 +2724,15 @@ async fn run_host(
                             });
                             continue;
                         }
-                        if matches!(command, HostCommand::Select(_) | HostCommand::Navigate { .. } | HostCommand::CreateSession { .. }) { preferred = None; }
+                        if matches!(
+                            command,
+                            HostCommand::Select(_)
+                                | HostCommand::Navigate { .. }
+                                | HostCommand::CreateSession { .. }
+                                | HostCommand::ReverseFocusHistory { .. }
+                        ) {
+                            preferred = None;
+                        }
                         let navigation = match &command { HostCommand::Navigate { id, .. } => Some(*id), _ => None };
                         let outcome = handle_command(command, &mut control, shared, &mut workers, &mut state, &mut sweep, &mut theme).await;
                         ports::reconcile_selected(shared, &mut state);
@@ -2858,6 +2889,13 @@ async fn run_host(
                 HostCommand::UndoClose { .. } => shared.update(|m| {
                     m.notice = Some(UNDO_CLOSE_DISCONNECTED.into());
                 }),
+                HostCommand::ReverseFocusHistory { .. } => {
+                    if in_backoff {
+                        shared.update(|m| {
+                            m.notice = Some(FOCUS_HISTORY_DISCONNECTED_NOTICE.into());
+                        });
+                    }
+                }
                 HostCommand::Claim { .. }
                 | HostCommand::PerformReply { .. }
                 | HostCommand::PromptReply { .. }
@@ -3111,7 +3149,15 @@ async fn handle_command(
         } => {
             let selected = shared.model.lock().expect("host model").selected.clone();
             if selected.as_ref() != Some(&session) {
-                attach(control, shared, state, sweep, &session).await?;
+                if control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION
+                    && state.attached.contains(&session)
+                {
+                    if window.is_none() {
+                        refresh(control, shared, state, sweep, &session).await?;
+                    }
+                } else {
+                    attach(control, shared, state, sweep, &session).await?;
+                }
             }
             if let Some(window) = window {
                 request(
@@ -3129,7 +3175,13 @@ async fn handle_command(
             });
         }
         HostCommand::Select(id) => {
-            attach(control, shared, state, sweep, &id).await?;
+            if control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION
+                && state.attached.contains(&id)
+            {
+                refresh(control, shared, state, sweep, &id).await?;
+            } else {
+                attach(control, shared, state, sweep, &id).await?;
+            }
             shared.update(|m| {
                 m.background_views.remove(&id);
                 m.selected = Some(id);
@@ -3164,6 +3216,14 @@ async fn handle_command(
         }
         HostCommand::UndoClose { epoch } => {
             undo_close(control, shared, state, sweep, epoch).await?
+        }
+        HostCommand::ReverseFocusHistory {
+            epoch,
+            id,
+            scope,
+            cursor,
+        } => {
+            focus_history::reverse(control, shared, state, sweep, epoch, id, scope, cursor).await?
         }
         HostCommand::Close { .. } | HostCommand::Request { .. } => {
             let (method, payload) = match command {

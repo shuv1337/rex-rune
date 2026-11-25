@@ -224,12 +224,60 @@ tab, and session. A shell variable survived each close and was read through
 a fresh data stream after undo. Empty history left the connection up. On
 the private API 13 server, all three closes succeeded without schema errors.
 
+## Focus history (API 19+)
+
+**Previous focus**, **Previous focused pane in tab**, **Previous focused tab**,
+and **Previous focused session** in Commands ask the active host to step back
+through its per-principal focus history via `focus_history.reverse`.
+`client.focus_history.reverse` has no default shortcut, can be bound in
+Settings -> Shortcuts or in a host keymap with an optional `scope` argument
+(`any`, `pane`, `tab`, `tab_any_session`, `session`), and is local-only
+(`Remote::Never`). All four rows are disabled when the host is disconnected or
+negotiates an API revision below 19, and no request is sent below API 19.
+
+Consecutive invocations of the same scope on the same host and connection epoch
+pass the server's returned `cursor` to keep stepping further back through
+history without revisiting earlier panes. Any other input (key, IME, pointer
+click/drag/scroll, find bar, copy mode, panel open, host/epoch change, scope
+change, or another action) clears the walk cursor so the next invocation omits
+`cursor` and toggles between the two most recent focuses. Duplicate triggers
+while a request is already in flight are ignored rather than stacking requests,
+and a `reversed: false` reply clears the walk and shows **No earlier focus in
+history** while keeping the connection healthy.
+
+Each request is connection-epoch scoped and never retried or queued across
+disconnects. When `focus_history.reverse` returns a target in another session,
+the worker refreshes the session list if needed, attaches if not yet attached,
+and switches `HostModel::selected` to the target session with fresh view state.
+On API 19+, switching to an already-attached session via `Select` or `Navigate`
+uses `session.view` (which records focus on the server, unlike `session.attach`)
+so cross-session focus history captures those switches with no extra RPCs.
+Existing local navigation history (`client.history.back` and
+`client.history.forward`) is unchanged.
+
+Mock connection tests (`src/connection/focus_history_tests.rs`) and headless UI
+tests (`src/app/focus_history_tests.rs`, `src/app/command_tests.rs`,
+`src/app/wiring_tests.rs`, `src/app/remote_tests.rs`) cover wire payloads for
+all five scopes, the API 18 gate, `method_not_found`/`revision_too_low`
+degradation without disconnecting, cross-session switching, cursor stepping,
+and all interruption resets. To check against disposable servers:
+
+```sh
+cargo build --locked --no-default-features --example focus_history_probe
+python3 scripts/focus-history-private.py --api21 /path/to/api21/rex --api14 /path/to/api14/rex target/debug/examples/focus_history_probe
+```
+
+On the private API 21 `0.1.0-snapshot.2562` server, the probe verified toggle,
+3-step cursor walking, all scoped filters (`pane`, `tab`, `session`,
+`tab_any_session`), and cross-session `HostModel::selected` switching. Against
+both a pinned API 18 connection on the API 21 server and a real API 14 server
+(`0.1.0-preview.19`), zero `focus_history.reverse` requests were sent and the
+connection remained up.
+
 ## Deferred deliberately
 
 - **`rex.ui` interactive prompt rendering (#144):** deferred to its own UI slice;
   the shipped client still refuses with `not_supported` in the meantime.
-- **Focus history navigation UI (`focus_history.reverse`):** SDK types are
-  generated and tested; UI commands/bindings are deferred.
 - **Listening ports UI and tunnel inspection UI (`com.superlogical.terminal.ports`,
   `com.superlogical.tunnel.info`):** listening-ports Slice 1 (protocol, pure
   model, connection sync, caps, and locality/reach policy) is implemented;

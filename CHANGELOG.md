@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Focus history (Rex Server API 19+).** Step back through server-side focus history across panes, tabs, and sessions via **Previous focus**, **Previous focused pane in tab**, **Previous focused tab**, and **Previous focused session** in Commands (backed by `focus_history.reverse`). Consecutive invocations step further back using the server's cursor; any other input, navigation, or panel resets the walk so the next invocation toggles between the two most recent focuses. `client.focus_history.reverse` is local-only (`Remote::Never`), unbound by default, and supports optional `scope` arguments (`any`, `pane`, `tab`, `tab_any_session`, `session`) in keymaps and Settings -> Shortcuts. Existing local Back/Forward navigation (`client.history.back` / `client.history.forward`) is unchanged.
+
 - **Listening ports (Rex Server API 15+).** Find listening TCP ports in the current session from Commands or the pane menu. Copy an address anywhere, open a local port, or copy an SSH forwarding command without running it.
 
 - **Undo close (Rex Server API 20+).** Choose **Undo close** in Commands to reopen the last eligible pane, tab, or session closed on the active host. Rex Rune brings it back into view and reconnects to its running terminal. The action is local-only and has no default shortcut; assign one in Settings → Shortcuts.

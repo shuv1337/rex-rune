@@ -28,6 +28,8 @@ mod downloads_tests;
 mod find_tests;
 #[path = "floating_tests.rs"]
 mod floating_tests;
+#[path = "focus_history_tests.rs"]
+mod focus_history_tests;
 #[path = "font_settings_tests.rs"]
 mod font_settings_tests;
 #[path = "header_fading_tests.rs"]

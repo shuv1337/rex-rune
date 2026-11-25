@@ -173,6 +173,7 @@ impl Workspace {
 
     /// Enter copy mode on the focused pane. Idempotent when already active on that pane.
     pub fn enter_copy_mode(&mut self, tx: &mut Tx) {
+        self.clear_focus_history_walk();
         let model = self.model();
         if !model.connected {
             self.inform("Copy mode requires a connected terminal.");

@@ -101,6 +101,7 @@ impl Workspace {
         block: &str,
         grip: Grip,
     ) {
+        self.clear_focus_history_walk();
         self.layer_drag = None;
         if !self.can_drag_floating_layers() {
             return;

@@ -38,7 +38,8 @@ client, launcher and icons, never the `rex` server.
   transport and admission rules.
 - **Sessions and tabs.** A host contains sessions; each session's Rex windows
   become tabs. Searchable switcher (`Ctrl K`), optional sidebar, Back/Forward
-  history and a `<tab> - <session> · <host>` window title.
+  history, server-side focus history (API 19+, across panes, tabs and sessions)
+  and a `<tab> - <session> · <host>` window title.
 - **Tab management.** Tabs close behind a confirmation, rename, mute, reorder in
   server order, close others or fill the toolbar; optional generated program and
   directory titles.

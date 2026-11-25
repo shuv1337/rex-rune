@@ -118,6 +118,7 @@ fn header(
         floating_drag::attach_drag(h, host_id, layer_id, id, layers::Grip::Move)
     } else {
         h.on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+            s.clear_focus_history_walk();
             if s.focused_block().as_deref() != Some(id.as_str()) {
                 s.exit_copy_mode();
                 if let Some(t) = s.terminals.get(&s.term_key(&id)) {
@@ -452,6 +453,9 @@ fn pane_card(
                         PointerButton::Middle => "middle",
                         _ => return,
                     };
+                    if d.phase == Phase::Down {
+                        s.clear_focus_history_walk();
+                    }
                     if s.in_copy_mode() {
                         if button == "middle" {
                             if let Some(t) = s.terminals.get_mut(&k2) {
@@ -626,6 +630,7 @@ fn pane_card(
                 // Shift+right-click goes to such a program (sent on release, when Rune reports
                 // it).
                 .on_secondary_press_local(move |s: &mut Workspace, p: PointerEvent, tx: &mut Tx| {
+                    s.clear_focus_history_walk();
                     let cell = s.metrics().cell;
                     let mods = tx.mods();
                     let focused = s.focused_block().as_deref() == Some(k5.1.as_str());
@@ -670,6 +675,7 @@ fn pane_card(
                         lines
                     };
                     if lines != 0. {
+                        s.clear_focus_history_walk();
                         if in_copy {
                             s.copy_mode_scroll(lines as i32);
                         } else if let Some(t) = s.terminals.get_mut(&k3) {

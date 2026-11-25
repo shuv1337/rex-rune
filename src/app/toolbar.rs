@@ -320,7 +320,10 @@ pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
                 &LEFT,
                 "Scroll previous tabs",
                 26.,
-                |s, tx| s.scroll_tabs(-1, tx),
+                |s, tx| {
+                    s.clear_focus_history_walk();
+                    s.scroll_tabs(-1, tx);
+                },
             )
             .live_opacity(&s.tab_fade[0]),
         );
@@ -330,7 +333,8 @@ pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
         track = track
             .child(
                 chrome_button("next-tabs", &RIGHT, "Scroll next tabs", 26., |s, tx| {
-                    s.scroll_tabs(1, tx)
+                    s.clear_focus_history_walk();
+                    s.scroll_tabs(1, tx);
                 })
                 .live_opacity(&s.tab_fade[1]),
             )

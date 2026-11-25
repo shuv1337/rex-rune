@@ -85,6 +85,7 @@ pub struct Workspace {
     pub local_keymap: rex_rune::keymap::Resolved,
     pub keymap_generation: u64,
     pub navigation: super::navigation::History,
+    pub focus_history: super::focus_history::State,
     pub last_keypress: Option<std::time::Instant>,
     pub remote_off_notices: HashSet<HostId>,
     pub remote_navigation: Option<super::remote::Navigation>,
@@ -301,6 +302,7 @@ impl Workspace {
             local_keymap,
             keymap_generation: 0,
             navigation: Default::default(),
+            focus_history: Default::default(),
             last_keypress: None,
             remote_off_notices: HashSet::new(),
             remote_navigation: None,
@@ -480,6 +482,9 @@ impl Workspace {
         if self.copy_mode.as_ref().is_some_and(|s| s.key.0 == id) {
             self.copy_mode = None;
         }
+        if self.focus_history.is_on_host(id) {
+            self.clear_focus_history_walk();
+        }
         self.terminals.retain(|(host, _), _| *host != id);
         self.claimed.retain(|(host, _)| *host != id);
         self.tab_states.retain(|(host, _), _| *host != id);
@@ -508,6 +513,7 @@ impl Workspace {
             return;
         }
         self.leave_install_dialog();
+        self.clear_focus_history_walk();
         self.navigation.cancel();
         if self.ports_target().is_some() {
             self.close_panel(tx);
@@ -579,6 +585,7 @@ impl Workspace {
             let old = std::mem::replace(&mut self.hosts[index], state);
             self.forget_host(old);
             if self.active == index {
+                self.clear_focus_history_walk();
                 self.drag = None;
                 self.layer_drag = None;
             }
@@ -725,6 +732,7 @@ impl Workspace {
             self.revalidate_key_modes();
         }
         self.reconcile_copy_mode();
+        self.reconcile_focus_history(index, tx);
         self.process_prompt_events(index, prompt_events, tx);
         self.announce_keymap_problems(index);
         let now = std::time::Instant::now();
@@ -747,6 +755,8 @@ impl Workspace {
                     "Returned client action skipped: only the person at this computer can show listening ports."
                 } else if queued.action.action == super::actions::UNDO_CLOSE {
                     "Returned client action skipped: only the person at this computer can undo a close."
+                } else if queued.action.action == super::actions::FOCUS_HISTORY_REVERSE {
+                    "Returned client action skipped: only the person at this computer can step through focus history."
                 } else {
                     "Returned client action skipped: a host cannot start a download or open the path browser."
                 });
@@ -1299,6 +1309,7 @@ impl Workspace {
 
     /// Opens the focused terminal's search field, or gives it back the keyboard.
     pub fn open_search(&mut self) {
+        self.clear_focus_history_walk();
         self.cancel_layer_drag();
         if self.in_copy_mode() {
             self.open_copy_mode_search(super::copy_mode::SearchDirection::Forward);
@@ -1349,6 +1360,7 @@ impl Workspace {
     }
 
     pub fn request(&mut self, method: &str, mut payload: Value) {
+        self.clear_focus_history_walk();
         if method.starts_with("session.focus") {
             self.exit_copy_mode();
             self.bindings.sequence.clear();
@@ -1493,6 +1505,19 @@ impl Workspace {
     }
 
     pub fn terminal_command(&mut self, key: &(HostId, String), command: Command) {
+        if matches!(
+            command,
+            Command::Key(_)
+                | Command::KeyWithPrefix { .. }
+                | Command::SendKey(_)
+                | Command::Paste(_)
+                | Command::Mouse(_)
+                | Command::Wheel(_)
+                | Command::Reset
+                | Command::Clear
+        ) {
+            self.clear_focus_history_walk();
+        }
         if let Some(term) = self.terminals.get_mut(key) {
             term.send(command);
         }
@@ -1503,6 +1528,7 @@ impl Workspace {
     }
 
     pub fn activate_host(&mut self, host: usize, tx: &mut Tx) {
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.bindings.sequence.clear();
         self.observe_navigation();
@@ -1563,11 +1589,18 @@ impl Workspace {
     }
 
     pub fn toggle_sidebar(&mut self) {
+        self.clear_focus_history_walk();
         self.sidebar.toggle();
         self.save();
     }
 
     pub fn perform(&mut self, action: Intent, tx: &mut Tx) {
+        if !matches!(
+            action,
+            Intent::ClientAction(super::actions::FOCUS_HISTORY_REVERSE, _)
+        ) {
+            self.clear_focus_history_walk();
+        }
         // Applying a theme goes back to Settings itself; copying a port keeps the list open.
         if !action.opens_followup()
             && !matches!(
@@ -1874,6 +1907,7 @@ impl Workspace {
         if !self.hosts[host].model.connected {
             return;
         }
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.navigation.cancel();
         if self.panel.is_some() {
@@ -2205,6 +2239,7 @@ impl Workspace {
     }
 
     pub(super) fn confirm(&mut self, title: &str, method: &str, payload: Value, description: &str) {
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.cancel_layer_drag();
         let target = self.panel.as_ref().and_then(|p| p.target.clone());
@@ -2262,6 +2297,7 @@ impl Workspace {
     }
 
     pub fn open_panel(&mut self, kind: PanelKind, title: &str, fields: &[(&str, &str, &str)]) {
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.cancel_layer_drag();
         self.leave_install_dialog();

@@ -165,6 +165,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
                     )
                 }
                 actions::Kind::Forward => {
+                    s.clear_focus_history_walk();
                     if sequence || once {
                         // Suppress held-tail repeats after completing the sequence.
                         // forward() still records the press in forwarded, so its release
@@ -175,6 +176,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
                     forward(s, ev, tx, prefix)
                 }
                 actions::Kind::Server { repeats } => {
+                    s.clear_focus_history_walk();
                     s.bindings
                         .consumed
                         .insert(identity, sequence || once || !repeats);
@@ -269,6 +271,7 @@ pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// Keys a terminal's search field takes: Enter selects the next older match and Shift+Enter
 /// the next newer one; Escape closes the search.
 pub fn search_key(s: &mut Workspace, key: &(HostId, String), ev: &KeyEvent, tx: &mut Tx) -> bool {
+    s.clear_focus_history_walk();
     s.last_keypress = Some(std::time::Instant::now());
     if global_key(s, ev, tx) {
         return true;
@@ -401,6 +404,10 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
         Action::Press
     };
     let composes = s.option_composes(tx.alt_keys());
+    let payload = keys::payload(ev, code, base, action);
+    if payload.is_some() {
+        s.clear_focus_history_walk();
+    }
     let Some(term) = s.active_terminal_mut() else {
         return true;
     };
@@ -408,7 +415,7 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
         return true;
     }
     term.clear_selection();
-    if let Some(mut payload) = keys::payload(ev, code, base, action) {
+    if let Some(mut payload) = payload {
         if composes {
             keys::option_composed(&mut payload, ev);
         }
@@ -476,11 +483,17 @@ pub fn on_ime(s: &mut Workspace, ime: &Ime, _: &mut Tx) -> bool {
         return false;
     };
     match ime {
-        Ime::Preedit(text, _) => term.preedit = text.clone(),
+        Ime::Preedit(text, _) => {
+            term.preedit = text.clone();
+            if !text.is_empty() {
+                s.clear_focus_history_walk();
+            }
+        }
         Ime::Commit(text) => {
             term.preedit.clear();
             if term.status().live && !text.is_empty() {
                 term.send(Command::Paste(text.clone()));
+                s.clear_focus_history_walk();
                 s.last_keypress = Some(std::time::Instant::now());
             }
         }
