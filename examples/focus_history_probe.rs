@@ -134,6 +134,7 @@ fn reverse(
         id: req_id,
         scope,
         cursor,
+        deadline: Instant::now() + Duration::from_secs(10),
     })?;
     wait(host, Duration::from_secs(8), "focus_history_result", |m| {
         m.focus_history_result
@@ -427,6 +428,133 @@ fn exercise(endpoint: &str, max_api_revision: u32) -> Result<()> {
             "tab": tab.window_id,
             "session": sess.session_id,
             "tab_any_session": tab_any.window_id,
+        }),
+    );
+
+    // 4. Verify offscreen layout changes and background prefetch NEVER pollute focus history.
+    // Create session C (s3) alongside A (s1) and B (s2).
+    host.commands.send(HostCommand::CreateSession {
+        label: Some("fh-s3".into()),
+        shell: Some("/bin/sh".into()),
+    })?;
+    let (s3, b3) = wait(&host, Duration::from_secs(8), "session 3", |m| {
+        let sid = m.selected.as_deref().filter(|id| *id != s1 && *id != s2)?;
+        let bid = m.focused()?.to_owned();
+        Some((sid.to_owned(), bid))
+    })?;
+
+    // Start a short-lived split pane in A (s1) that exits on its own in ~1.2s, generating
+    // a server-originated block_closed + session_view_changed on A while our client is on C.
+    focus_block(&host, &s1, &b1a)?;
+    let short_layout = json!({
+        "block": {
+            "flavor": "com.superlogical.terminal.shell",
+            "options": {"command": ["/bin/sh", "-c", "sleep 1.2"]}
+        }
+    });
+    let rev_a_before_split = host
+        .model
+        .lock()
+        .expect("host model")
+        .views
+        .get(&s1)
+        .map(|v| v.revision)
+        .unwrap_or(0);
+    request(
+        &host,
+        "session.new_split",
+        json!({
+            "session_id": s1,
+            "anchor_id": b1a,
+            "direction": "horizontal",
+            "side": "after",
+            "layout": short_layout,
+            "focus": true,
+        }),
+    )?;
+    let rev_a_after_split = wait(&host, Duration::from_secs(8), "A split view rev", |m| {
+        m.views
+            .get(&s1)
+            .map(|v| v.revision)
+            .filter(|&r| r > rev_a_before_split)
+    })?;
+
+    // Visit A -> B -> C explicitly so C is current and B is previous.
+    focus_block(&host, &s1, &b1a)?;
+    focus_block(&host, &s2, &b2)?;
+    focus_block(&host, &s3, &b3)?;
+
+    // Wait while staying on C for A's short-lived pane to exit AND for this worker's
+    // offscreen background refresh of A to finish (view revision advances).
+    let rev_a_after_exit = wait(
+        &host,
+        Duration::from_secs(8),
+        "offscreen A view refresh after pane exit",
+        |m| {
+            m.views
+                .get(&s1)
+                .map(|v| v.revision)
+                .filter(|&r| r > rev_a_after_split)
+        },
+    )?;
+    ensure!(
+        host.model.lock().expect("host model").selected.as_deref() == Some(s3.as_str()),
+        "client unexpectedly left C during offscreen A refresh"
+    );
+
+    // Also connect a second HostConnection selecting C and prefetching A and B in the
+    // background, proving Prefetch/status_sweep on API 19+ never pollutes focus history.
+    let observer = HostConnection::spawn_with_max_revision(
+        endpoint.to_owned(),
+        Some(s3.clone()),
+        None,
+        None,
+        false,
+        None,
+        max_api_revision,
+    );
+    wait(&observer, Duration::from_secs(8), "observer on C", |m| {
+        (m.connected && m.selected.as_deref() == Some(s3.as_str())).then_some(())
+    })?;
+    observer
+        .commands
+        .send(HostCommand::PrefetchViews(std::collections::HashSet::from(
+            [s1.clone(), s2.clone()],
+        )))?;
+    wait(
+        &observer,
+        Duration::from_secs(8),
+        "observer prefetched A and B",
+        |m| (m.views.contains_key(&s1) && m.views.contains_key(&s2)).then_some(()),
+    )?;
+    drop(observer);
+
+    // Now reverse from C (Any scope): MUST land on B (s2), NOT A (s1) and NOT C (s3)!
+    let bg_any = reverse(&host, epoch, &mut req_id, FocusHistoryScope::Any, None)?;
+    ensure!(
+        bg_any.reversed && bg_any.session_id.as_deref() == Some(s2.as_str()),
+        "offscreen A refresh/prefetch polluted Any reverse: expected B ({s2}), got {bg_any:?}"
+    );
+    // Restore C and check Session scope too.
+    host.commands.send(HostCommand::Select(s3.clone()))?;
+    wait(&host, Duration::from_secs(8), "reselect C", |m| {
+        (m.selected.as_deref() == Some(s3.as_str())).then_some(())
+    })?;
+    let bg_sess = reverse(&host, epoch, &mut req_id, FocusHistoryScope::Session, None)?;
+    ensure!(
+        bg_sess.reversed && bg_sess.session_id.as_deref() == Some(s2.as_str()),
+        "offscreen A refresh/prefetch polluted Session reverse: expected B ({s2}), got {bg_sess:?}"
+    );
+    emit(
+        "offscreen_verified",
+        json!({
+            "s1": s1,
+            "s2": s2,
+            "s3": s3,
+            "rev_a_after_split": rev_a_after_split,
+            "rev_a_after_exit": rev_a_after_exit,
+            "any_session": bg_any.session_id,
+            "session_scope_session": bg_sess.session_id,
         }),
     );
 

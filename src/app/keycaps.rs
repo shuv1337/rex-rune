@@ -15,7 +15,15 @@ impl Workspace {
     /// The highest effective binding of `action` with `args`, or nothing when it is unbound
     /// (or bound only to a key this client cannot read).
     pub fn shortcut_chords(&self, action: &str, args: &Value) -> Chords {
-        let empty = |args: &Value| args.is_null() || args.as_object().is_some_and(|a| a.is_empty());
+        let empty = |args: &Value| {
+            args.is_null()
+                || args.as_object().is_some_and(|a| {
+                    a.is_empty()
+                        || (action == super::actions::FOCUS_HISTORY_REVERSE
+                            && a.len() == 1
+                            && a.get("scope").and_then(Value::as_str) == Some("any"))
+                })
+        };
         let effective = self.effective_bindings();
         effective
             .iter()

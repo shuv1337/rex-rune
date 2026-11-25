@@ -1505,19 +1505,6 @@ impl Workspace {
     }
 
     pub fn terminal_command(&mut self, key: &(HostId, String), command: Command) {
-        if matches!(
-            command,
-            Command::Key(_)
-                | Command::KeyWithPrefix { .. }
-                | Command::SendKey(_)
-                | Command::Paste(_)
-                | Command::Mouse(_)
-                | Command::Wheel(_)
-                | Command::Reset
-                | Command::Clear
-        ) {
-            self.clear_focus_history_walk();
-        }
         if let Some(term) = self.terminals.get_mut(key) {
             term.send(command);
         }

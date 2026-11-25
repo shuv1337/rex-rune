@@ -292,12 +292,20 @@ fn focus_history_is_local_unbound_and_recordable_with_scoped_rows() {
         .into_iter()
         .filter(|row| row.action == action)
         .collect();
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 5);
     assert!(rows.iter().all(|row| row.keys.is_empty() && row.recordable));
+    assert!(
+        !rows.iter().any(|row| row.title.contains("(any)")),
+        "default any scope must not duplicate Previous focus"
+    );
     for (args, title) in [
         (Value::Null, "Previous focus"),
         (json!({"scope": "pane"}), "Previous focused pane in tab"),
         (json!({"scope": "tab"}), "Previous focused tab"),
+        (
+            json!({"scope": "tab_any_session"}),
+            "Previous focused tab (any session)",
+        ),
         (json!({"scope": "session"}), "Previous focused session"),
     ] {
         let row = rows
@@ -306,6 +314,22 @@ fn focus_history_is_local_unbound_and_recordable_with_scoped_rows() {
             .unwrap();
         assert_eq!(row.title, title);
     }
+    // An explicit {"scope": "any"} override folds onto the single "Previous focus" row.
+    ws.settings.shortcut_file.overrides = Overrides::parse(&json!([
+        {"keys": "ctrl+alt+f9", "action": action, "args": {"scope": "any"}}
+    ]));
+    ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
+    ws.keymap_generation += 1;
+    let bound_rows: Vec<_> = ws
+        .shortcut_rows()
+        .into_iter()
+        .filter(|row| row.action == action)
+        .collect();
+    assert_eq!(bound_rows.len(), 5);
+    let default_row = bound_rows.iter().find(|r| r.args.is_none()).unwrap();
+    assert_eq!(default_row.title, "Previous focus");
+    assert!(!default_row.keys.is_empty());
+    assert!(!ws.shortcut_chords(action, &Value::Null).is_empty());
     ws.picker(false);
     let command = ws
         .entries()
@@ -313,6 +337,7 @@ fn focus_history_is_local_unbound_and_recordable_with_scoped_rows() {
         .find(|row| row.id.as_deref() == Some("focus_history.reverse"))
         .unwrap();
     assert_eq!(command.action.shortcut(), Some((action, Value::Null)));
+    assert_eq!(command.keys, ws.shortcut_chords(action, &Value::Null));
     assert!(command.enabled);
 }
 

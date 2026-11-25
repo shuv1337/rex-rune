@@ -87,7 +87,7 @@ def start_server(rex: Path, root: Path, env: dict[str, str]):
             if proc.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError(f"private server failed to start:\n{log.read_text()}")
             time.sleep(0.05)
-    except Exception:
+    except BaseException:
         stop_server(proc)
         raise
     return proc, endpoint, log
@@ -134,6 +134,7 @@ def verify_api21(probe: Path, rex21: Path):
             toggle = find_event(events, "toggle_verified")
             walk = find_event(events, "walk_verified")
             scopes = find_event(events, "scopes_verified")
+            offscreen = find_event(events, "offscreen_verified")
             assert toggle["first_block"] == topo["b2"], toggle
             assert toggle["second_block"] == topo["b1c"], toggle
             assert walk["visited"] == [topo["b1b"], topo["b1a"], topo["b2"]], walk
@@ -141,8 +142,11 @@ def verify_api21(probe: Path, rex21: Path):
             assert scopes["tab"] == topo["w1b"], scopes
             assert scopes["session"] == topo["s2"], scopes
             assert scopes["tab_any_session"] == topo["w1b"], scopes
+            assert offscreen["rev_a_after_exit"] > offscreen["rev_a_after_split"], offscreen
+            assert offscreen["any_session"] == topo["s2"], offscreen
+            assert offscreen["session_scope_session"] == topo["s2"], offscreen
             print(
-                "PASS [1/3] API 21 live toggle, 3-step cursor walk, all scopes (Pane/Tab/Session/TabAnySession), and cross-session HostModel::selected switching"
+                "PASS [1/3] API 21 live toggle, 3-step cursor walk, all scopes (Pane/Tab/Session/TabAnySession), cross-session HostModel::selected switching, and offscreen A->B->C non-pollution"
             )
 
             # Pinned API 18 on API 21 server: zero focus_history.reverse sent, clean unsupported outcome.

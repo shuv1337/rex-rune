@@ -1004,6 +1004,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
                 return;
             };
             if g.phase == Phase::Down || s.drag.is_none() {
+                s.clear_focus_history_walk();
                 s.layer_drag = None;
                 s.drag = Some(DividerDrag {
                     host: s.active,

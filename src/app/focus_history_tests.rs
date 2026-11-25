@@ -79,6 +79,7 @@ fn next_reverse(
             id,
             scope,
             cursor,
+            ..
         } => Some((epoch, id, scope, cursor)),
         _ => None,
     })
@@ -94,6 +95,7 @@ fn all_reverses(
                 id,
                 scope,
                 cursor,
+                ..
             } => Some((epoch, id, scope, cursor)),
             _ => None,
         })
@@ -350,6 +352,45 @@ fn walk_cursor_resets_on_every_user_interruption() {
         trigger(&mut ws, Value::Null);
         let (epoch, _, _, cur) = next_reverse(&rx0).expect("reverse after reconnect");
         assert_eq!((epoch, cur), (8, None));
+    }
+
+    // 10. Dragging a split divider resets the walk cursor.
+    {
+        let (mut ws, rx0, _) = focus_workspace();
+        seed_cursor(&mut ws, &rx0);
+        let mut rt = runtime(ws);
+        for _ in 0..10 {
+            rt.frame(1. / 60.);
+        }
+        let divider = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref().is_some_and(|k| k.starts_with("divider:")))
+            .expect("split divider element")
+            .rect;
+        let (x, y) = (divider[0] + divider[2] / 2., divider[1] + divider[3] / 2.);
+        rt.pointer_down(x, y);
+        rt.pointer_move(x + 24., y);
+        rt.pointer_up(x + 24., y);
+        rt.frame(1. / 60.);
+        assert!(rt.state.focus_history.walk.is_none());
+        rt.update(|s, tx| {
+            actions::run(s, FOCUS_HISTORY_REVERSE, &Value::Null, tx);
+        });
+        assert_eq!(next_reverse(&rx0).unwrap().3, None);
+    }
+
+    // 11. Dropping files onto a pane resets the walk cursor.
+    {
+        let (mut ws, rx0, _) = focus_workspace();
+        let (term_tx, _) = flume::unbounded();
+        seed_cursor(&mut ws, &rx0);
+        live_terminal(&mut ws, "block:b", &term_tx);
+        live_terminal(&mut ws, "block:c", &term_tx);
+        ws.drop_files("block:c", &[std::path::PathBuf::from("/tmp/example.txt")]);
+        assert!(ws.focus_history.walk.is_none());
+        trigger(&mut ws, Value::Null);
+        assert_eq!(next_reverse(&rx0).unwrap().3, None);
     }
 }
 

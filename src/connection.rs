@@ -30,8 +30,8 @@ mod view_fetch;
 
 pub use focus_history::{
     FOCUS_HISTORY_DISCONNECTED, FOCUS_HISTORY_DISCONNECTED_NOTICE, FOCUS_HISTORY_EMPTY_NOTICE,
-    FOCUS_HISTORY_MIN_API_REVISION, FOCUS_HISTORY_REQUIRES_API, FOCUS_HISTORY_UNSUPPORTED_NOTICE,
-    FocusHistoryResult, FocusHistoryScope,
+    FOCUS_HISTORY_EXPIRED_NOTICE, FOCUS_HISTORY_MIN_API_REVISION, FOCUS_HISTORY_REQUIRES_API,
+    FOCUS_HISTORY_UNSUPPORTED_NOTICE, FocusHistoryResult, FocusHistoryScope,
 };
 pub use view_fetch::ViewFetchOutcome;
 
@@ -545,12 +545,13 @@ pub enum HostCommand {
         epoch: u64,
     },
     /// Step back through server-side focus history on this connection epoch only (API 19+).
-    /// Never replayed across disconnect/reconnect.
+    /// Never replayed across disconnect/reconnect or sent past `deadline`.
     ReverseFocusHistory {
         epoch: u64,
         id: u64,
         scope: FocusHistoryScope,
         cursor: Option<u64>,
+        deadline: Instant,
     },
     /// A person's confirmed, single attempt on this connection only. Never replayed.
     StopServer {
@@ -1353,6 +1354,45 @@ async fn refresh(
     replace_view(shared, state, sweep, id, reply.value);
     Ok(())
 }
+
+/// Read an offscreen session's view via `session.attach` rather than `session.view`.
+/// On API 19+, `session.view` records focus in the server's focus history while
+/// `session.attach` returns the full fresh view without altering focus history.
+async fn refresh_background(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+    id: &str,
+) -> Result<()> {
+    let reply = tokio::time::timeout(
+        Duration::from_secs(8),
+        control.call_with_seq(session::Attach::new(id)),
+    )
+    .await??;
+    state.view_seq.insert(id.into(), reply.seq);
+    state.attached.insert(id.into());
+    replace_view(shared, state, sweep, id, reply.value.view);
+    Ok(())
+}
+
+/// Refresh `id`'s view without polluting server-side focus history when `id` is offscreen
+/// on API 19+.
+async fn refresh_for_event(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+    id: &str,
+) -> Result<()> {
+    let is_background = control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION
+        && shared.model.lock().expect("host model").selected.as_deref() != Some(id);
+    if is_background {
+        refresh_background(control, shared, state, sweep, id).await
+    } else {
+        refresh(control, shared, state, sweep, id).await
+    }
+}
 async fn list(
     control: &mut Client,
     shared: &Shared,
@@ -1846,7 +1886,7 @@ async fn handle_event(
                         forget.push(block);
                     }
                     if should_refresh {
-                        match refresh(control, shared, state, sweep, id).await {
+                        match refresh_for_event(control, shared, state, sweep, id).await {
                             Ok(()) => {
                                 let new_blocks: Vec<String> = shared
                                     .model
@@ -1944,7 +1984,7 @@ async fn handle_event(
                         .as_u64()
                         .is_some_and(|new| new > revision)
                 }) {
-                    refresh(control, shared, state, sweep, id).await?;
+                    refresh_for_event(control, shared, state, sweep, id).await?;
                 } else if revision.is_none() {
                     // The reply on its way may predate this change.
                     if state.view_reading.as_deref() == Some(id) {
@@ -1976,7 +2016,7 @@ async fn handle_event(
                     .views
                     .contains_key(id)
             {
-                refresh(control, shared, state, sweep, id).await?;
+                refresh_for_event(control, shared, state, sweep, id).await?;
             }
         }
         "block_event" => {
@@ -2377,10 +2417,13 @@ async fn run_host(
                             }
                         }
                     }
-                    (id, text) = prefetch.finished(), if !exclusive && prefetch.in_flight() => {
+                    (id, text, attached) = prefetch.finished(), if !exclusive && prefetch.in_flight() => {
                         state.view_reading = None;
                         let stale = std::mem::take(&mut state.view_stale);
-                        if let Some((seq, view)) = prefetch.result(&id, text, Instant::now()) {
+                        if let Some((seq, view)) = prefetch.result(&id, text, attached, Instant::now()) {
+                            if attached {
+                                state.attached.insert(id.clone());
+                            }
                             let placed = {
                                 let m = shared.model.lock().expect("host model");
                                 m.views.contains_key(&id) || !m.sessions.iter().any(|s| s.session_id == id)
@@ -2396,7 +2439,7 @@ async fn run_host(
                                 // Its layout changed while this read was out, and that
                                 // event had no layout to compare with: read it once more.
                                 if stale {
-                                    let _ = refresh(&mut control, shared, &mut state, &mut sweep, &id).await;
+                                    let _ = refresh_for_event(&mut control, shared, &mut state, &mut sweep, &id).await;
                                 }
                             }
                         }
@@ -2414,7 +2457,10 @@ async fn run_host(
                     _ = directory_reads.finished(shared), if !exclusive && directory_reads.in_flight() => {}
                     fetched = view_fetches.finished(), if !exclusive && view_fetches.in_flight() => {
                         match fetched {
-                            view_fetch::Event::Reply { session, ids, result: Ok((seq, view)) } => {
+                            view_fetch::Event::Reply { session, attached, ids, result: Ok((seq, view)) } => {
+                                if attached {
+                                    state.attached.insert(session.clone());
+                                }
                                 if !view_fetches.reading(&session) {
                                     state.fetch_reading.remove(&session);
                                 }
@@ -2443,11 +2489,11 @@ async fn run_host(
                                 if placed {
                                     state.view_seq.insert(session.clone(), seq);
                                     if stale {
-                                        let _ = refresh(&mut control, shared, &mut state, &mut sweep, &session).await;
+                                        let _ = refresh_for_event(&mut control, shared, &mut state, &mut sweep, &session).await;
                                     }
                                 }
                             }
-                            view_fetch::Event::Reply { session, ids, result: Err(outcome) } => {
+                            view_fetch::Event::Reply { session, ids, result: Err(outcome), .. } => {
                                 if !view_fetches.reading(&session) {
                                     state.fetch_reading.remove(&session);
                                     state.fetch_stale.remove(&session);
@@ -2724,6 +2770,12 @@ async fn run_host(
                             });
                             continue;
                         }
+                        if let HostCommand::ReverseFocusHistory { epoch, id, deadline, .. } = &command
+                            && Instant::now() >= *deadline
+                        {
+                            focus_history::expire(shared, *epoch, *id);
+                            continue;
+                        }
                         if matches!(
                             command,
                             HostCommand::Select(_)
@@ -2889,8 +2941,10 @@ async fn run_host(
                 HostCommand::UndoClose { .. } => shared.update(|m| {
                     m.notice = Some(UNDO_CLOSE_DISCONNECTED.into());
                 }),
-                HostCommand::ReverseFocusHistory { .. } => {
-                    if in_backoff {
+                HostCommand::ReverseFocusHistory { epoch, .. } => {
+                    if in_backoff
+                        && epoch == shared.model.lock().expect("host model").connection_epoch
+                    {
                         shared.update(|m| {
                             m.notice = Some(FOCUS_HISTORY_DISCONNECTED_NOTICE.into());
                         });
@@ -3019,7 +3073,7 @@ async fn after_request(
     shared.update(|m| m.notice = None);
     if let Some(id) = session {
         // Destroying a session, or closing its last tab, ends it: nothing to re-read.
-        match refresh(control, shared, state, sweep, id).await {
+        match refresh_for_event(control, shared, state, sweep, id).await {
             Err(error)
                 if matches!(
                     error.downcast_ref::<rexrs::Error>(),
@@ -3148,15 +3202,17 @@ async fn handle_command(
             session, window, ..
         } => {
             let selected = shared.model.lock().expect("host model").selected.clone();
+            let api19 = control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION;
             if selected.as_ref() != Some(&session) {
-                if control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION
-                    && state.attached.contains(&session)
-                {
+                if api19 && state.attached.contains(&session) {
                     if window.is_none() {
                         refresh(control, shared, state, sweep, &session).await?;
                     }
                 } else {
                     attach(control, shared, state, sweep, &session).await?;
+                    if api19 && window.is_none() {
+                        refresh(control, shared, state, sweep, &session).await?;
+                    }
                 }
             }
             if let Some(window) = window {
@@ -3175,12 +3231,14 @@ async fn handle_command(
             });
         }
         HostCommand::Select(id) => {
-            if control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION
-                && state.attached.contains(&id)
-            {
+            let api19 = control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION;
+            if api19 && state.attached.contains(&id) {
                 refresh(control, shared, state, sweep, &id).await?;
             } else {
                 attach(control, shared, state, sweep, &id).await?;
+                if api19 {
+                    refresh(control, shared, state, sweep, &id).await?;
+                }
             }
             shared.update(|m| {
                 m.background_views.remove(&id);
@@ -3222,8 +3280,12 @@ async fn handle_command(
             id,
             scope,
             cursor,
+            deadline,
         } => {
-            focus_history::reverse(control, shared, state, sweep, epoch, id, scope, cursor).await?
+            focus_history::reverse(
+                control, shared, state, sweep, epoch, id, scope, cursor, deadline,
+            )
+            .await?
         }
         HostCommand::Close { .. } | HostCommand::Request { .. } => {
             let (method, payload) = match command {
@@ -3240,15 +3302,15 @@ async fn handle_command(
             };
             let session_id = payload["session_id"].as_str().map(str::to_owned);
             request(control, &method, payload).await?;
-            after_request(
-                control,
-                shared,
-                workers,
-                state,
-                sweep,
-                session_id.as_deref(),
-            )
-            .await?;
+            let after_session = if method == "session.detach" {
+                if let Some(detached) = session_id.as_deref() {
+                    state.attached.remove(detached);
+                }
+                None
+            } else {
+                session_id.as_deref()
+            };
+            after_request(control, shared, workers, state, sweep, after_session).await?;
         }
         HostCommand::NewTerminal {
             method,

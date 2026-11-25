@@ -87,6 +87,10 @@ async fn send_error(ws: &mut WebSocketStream<TcpStream>, req: &Value, code: &str
     .await;
 }
 
+fn future_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(10)
+}
+
 /// Read the next non-metadata request, answering background metadata and status-sweep queries.
 async fn next_non_meta(ws: &mut WebSocketStream<TcpStream>, seq: u64) -> Value {
     loop {
@@ -103,6 +107,15 @@ async fn next_non_meta(ws: &mut WebSocketStream<TcpStream>, seq: u64) -> Value {
             }
             "session.view" if req["payload"]["session_id"] == OTHER => {
                 reply(ws, &req, seq, view_for(OTHER, 1, OTHER_TAB, OTHER_BLOCK)).await;
+            }
+            "session.attach" if req["payload"]["session_id"] == OTHER => {
+                reply(
+                    ws,
+                    &req,
+                    seq,
+                    json!({"client_id": "client:test", "view": view_for(OTHER, 1, OTHER_TAB, OTHER_BLOCK)}),
+                )
+                .await;
             }
             _ => return req,
         }
@@ -146,6 +159,7 @@ async fn focus_history_api18_gate_sends_zero_requests_and_reports_unsupported() 
             id: 7,
             scope: FocusHistoryScope::Any,
             cursor: None,
+            deadline: future_deadline(),
         })
         .unwrap();
     until(&host, |m| {
@@ -170,8 +184,12 @@ async fn focus_history_api18_gate_sends_zero_requests_and_reports_unsupported() 
 }
 
 #[tokio::test]
-async fn focus_history_method_not_found_and_revision_too_low_degrade_without_disconnect() {
-    for (code, status) in [("method_not_found", 404), ("revision_too_low", 400)] {
+async fn focus_history_unsupported_api_errors_degrade_without_disconnect() {
+    for (code, status) in [
+        ("method_not_found", 404),
+        ("revision_too_low", 400),
+        ("not_supported", 501),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -197,6 +215,7 @@ async fn focus_history_method_not_found_and_revision_too_low_degrade_without_dis
                 id: 11,
                 scope: FocusHistoryScope::Any,
                 cursor: None,
+                deadline: future_deadline(),
             })
             .unwrap();
         until(&host, |m| {
@@ -270,12 +289,19 @@ async fn focus_history_emits_exact_wire_payloads_for_all_five_scopes_and_cursor(
                 }),
             )
             .await;
-            // Same-session reverse refreshes the active session view.
+            // Same-session reverse refreshes the target view via session.attach so it never
+            // re-writes server-side focus history.
             let view = next_non_meta(&mut ws, seq).await;
-            assert_eq!(view["method"], "session.view");
+            assert_eq!(view["method"], "session.attach");
             assert_eq!(view["payload"]["session_id"], SESSION);
             seq += 1;
-            reply(&mut ws, &view, seq, view_for(SESSION, seq, TAB_A, BLOCK_B)).await;
+            reply(
+                &mut ws,
+                &view,
+                seq,
+                json!({"client_id": "client:test", "view": view_for(SESSION, seq, TAB_A, BLOCK_B)}),
+            )
+            .await;
         }
         let fence = next_non_meta(&mut ws, seq).await;
         assert_eq!(fence["method"], "test.sentinel");
@@ -293,6 +319,7 @@ async fn focus_history_emits_exact_wire_payloads_for_all_five_scopes_and_cursor(
                 id,
                 scope: *scope,
                 cursor: *cursor,
+                deadline: future_deadline(),
             })
             .unwrap();
         until(&host, |m| {
@@ -332,9 +359,11 @@ async fn focus_history_cross_session_switches_selected_attaches_and_reversed_fal
         welcome(&mut ws, 21).await;
         let req = recv(&mut ws).await;
         assert_eq!(req["method"], "session.bootstrap");
-        reply(&mut ws, &req, 1, boot_two_sessions()).await;
+        let mut initial = serde_json::to_value(boot()).unwrap();
+        initial["selected_session"]["view"] = view_for(SESSION, 1, TAB_A, BLOCK_A);
+        reply(&mut ws, &req, 1, initial).await;
 
-        // 1. Cross-session reverse returns OTHER (not yet attached).
+        // 1. Cross-session reverse returns OTHER (not yet listed or attached).
         let rev1 = next_non_meta(&mut ws, 1).await;
         assert_eq!(rev1["method"], "focus_history.reverse");
         assert_eq!(rev1["payload"], json!({"not_session_id": SESSION}));
@@ -351,32 +380,59 @@ async fn focus_history_cross_session_switches_selected_attaches_and_reversed_fal
             }),
         )
         .await;
-        let att = next_non_meta(&mut ws, 2).await;
+        let list_req = next_non_meta(&mut ws, 2).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req,
+            3,
+            json!({"sessions": [
+                {"session_id": SESSION, "label": "snapshot"},
+                {"session_id": OTHER, "label": "other"}
+            ]}),
+        )
+        .await;
+        // Worker attaches OTHER to show it; read explicitly without swallowing via next_non_meta.
+        let att = loop {
+            let req = recv(&mut ws).await;
+            match req["method"].as_str().unwrap_or("") {
+                "com.superlogical.terminal.program_status" => {
+                    reply(&mut ws, &req, 3, json!({"records": []})).await;
+                }
+                "com.superlogical.terminal.title" => {
+                    reply(&mut ws, &req, 3, json!({"title": ""})).await;
+                }
+                "com.superlogical.terminal.process" => {
+                    reply(&mut ws, &req, 3, json!({})).await;
+                }
+                _ => break req,
+            }
+        };
         assert_eq!(att["method"], "session.attach");
         assert_eq!(att["payload"]["session_id"], OTHER);
         reply(
             &mut ws,
             &att,
-            3,
+            4,
             json!({"client_id": "client:test", "view": view_for(OTHER, 2, OTHER_TAB, OTHER_BLOCK)}),
         )
         .await;
 
         // 2. Switching back to already-attached SESSION via Select uses session.view (records focus).
-        let sel = next_non_meta(&mut ws, 3).await;
+        let sel = next_non_meta(&mut ws, 4).await;
         assert_eq!(sel["method"], "session.view");
         assert_eq!(sel["payload"]["session_id"], SESSION);
-        reply(&mut ws, &sel, 4, view_for(SESSION, 4, TAB_A, BLOCK_A)).await;
+        reply(&mut ws, &sel, 5, view_for(SESSION, 4, TAB_A, BLOCK_A)).await;
 
         // 3. Reversed == false leaves selected session intact and notifies calmly.
-        let rev2 = next_non_meta(&mut ws, 4).await;
+        let rev2 = next_non_meta(&mut ws, 5).await;
         assert_eq!(rev2["method"], "focus_history.reverse");
         assert_eq!(rev2["payload"], json!({}));
-        reply(&mut ws, &rev2, 5, json!({"reversed": false})).await;
+        reply(&mut ws, &rev2, 6, json!({"reversed": false})).await;
 
-        let fence = next_non_meta(&mut ws, 5).await;
+        let fence = next_non_meta(&mut ws, 6).await;
         assert_eq!(fence["method"], "test.sentinel");
-        reply(&mut ws, &fence, 6, json!({})).await;
+        reply(&mut ws, &fence, 7, json!({})).await;
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
@@ -390,6 +446,7 @@ async fn focus_history_cross_session_switches_selected_attaches_and_reversed_fal
             id: 1,
             scope: FocusHistoryScope::Session,
             cursor: None,
+            deadline: future_deadline(),
         })
         .unwrap();
     until(&host, |m| {
@@ -421,6 +478,7 @@ async fn focus_history_cross_session_switches_selected_attaches_and_reversed_fal
             id: 2,
             scope: FocusHistoryScope::Any,
             cursor: None,
+            deadline: future_deadline(),
         })
         .unwrap();
     until(&host, |m| {
@@ -496,6 +554,7 @@ async fn focus_history_stale_epoch_ignored_and_disconnect_clears_without_replay(
             id: 1,
             scope: FocusHistoryScope::Any,
             cursor: None,
+            deadline: future_deadline(),
         })
         .unwrap();
     until(&host, |m| {
@@ -510,6 +569,7 @@ async fn focus_history_stale_epoch_ignored_and_disconnect_clears_without_replay(
             id: 2,
             scope: FocusHistoryScope::Any,
             cursor: None,
+            deadline: future_deadline(),
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(8), in_flight)
@@ -522,6 +582,7 @@ async fn focus_history_stale_epoch_ignored_and_disconnect_clears_without_replay(
             id: 3,
             scope: FocusHistoryScope::Any,
             cursor: Some(5),
+            deadline: future_deadline(),
         })
         .unwrap();
     drop_tx.send(()).unwrap();
@@ -540,6 +601,7 @@ async fn focus_history_stale_epoch_ignored_and_disconnect_clears_without_replay(
             id: 4,
             scope: FocusHistoryScope::Any,
             cursor: None,
+            deadline: future_deadline(),
         })
         .unwrap();
     send_sentinel(&host);
@@ -593,6 +655,7 @@ async fn focus_history_missing_scope_context_sends_no_malformed_request() {
                 id,
                 scope,
                 cursor: None,
+                deadline: future_deadline(),
             })
             .unwrap();
         until(&host, |m| {
@@ -607,6 +670,268 @@ async fn focus_history_missing_scope_context_sends_no_malformed_request() {
             Some(FocusHistoryResult::not_reversed(epoch, id))
         );
     }
+    send_sentinel(&host);
+    tokio::time::timeout(Duration::from_secs(8), server)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(host);
+}
+
+#[tokio::test]
+async fn focus_history_expired_during_exclusive_action_never_sends_rpc() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (action_started_tx, action_started) = tokio::sync::oneshot::channel();
+    let (release_action_tx, release_action) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let req = recv(&mut ws).await;
+        assert_eq!(req["method"], "session.bootstrap");
+        let mut initial = serde_json::to_value(boot()).unwrap();
+        initial["selected_session"]["view"] = view_for(SESSION, 1, TAB_A, BLOCK_A);
+        reply(&mut ws, &req, 1, initial).await;
+
+        let action = next_non_meta(&mut ws, 1).await;
+        assert_eq!(action["method"], "client.action");
+        action_started_tx.send(()).unwrap();
+        release_action.await.unwrap();
+        reply(&mut ws, &action, 2, json!({})).await;
+
+        // After the exclusive action finishes, the expired queued reverse MUST NOT be sent;
+        // the very next non-meta request must be our sentinel.
+        let fence = next_non_meta(&mut ws, 2).await;
+        assert_eq!(
+            fence["method"], "test.sentinel",
+            "expired queued reverse must never send focus_history.reverse, got: {fence}"
+        );
+        reply(&mut ws, &fence, 3, json!({})).await;
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+
+    // Hold an exclusive client.action so subsequent commands queue in deferred_commands.
+    host.commands
+        .send(HostCommand::Action {
+            generation: 1,
+            request: Box::new(rexrs::api::client::Action::new("test.hold")),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(8), action_started)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Queue a reverse with a short deadline, wait past expiry, then release the action.
+    host.commands
+        .send(HostCommand::ReverseFocusHistory {
+            epoch,
+            id: 9,
+            scope: FocusHistoryScope::Any,
+            cursor: None,
+            deadline: Instant::now() + Duration::from_millis(80),
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    release_action_tx.send(()).unwrap();
+
+    until(&host, |m| {
+        m.focus_history_result.as_ref().is_some_and(|r| r.id == 9)
+    })
+    .await;
+    {
+        let m = host.model.lock().unwrap();
+        assert!(m.connected);
+        assert_eq!(m.notice.as_deref(), Some(FOCUS_HISTORY_EXPIRED_NOTICE));
+        assert_eq!(
+            m.focus_history_result,
+            Some(FocusHistoryResult::not_reversed(epoch, 9))
+        );
+    }
+    send_sentinel(&host);
+    tokio::time::timeout(Duration::from_secs(8), server)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(host);
+}
+
+#[tokio::test]
+async fn focus_history_detach_removes_attached_and_select_reattaches_then_records() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let req = recv(&mut ws).await;
+        assert_eq!(req["method"], "session.bootstrap");
+        let mut initial = serde_json::to_value(boot()).unwrap();
+        initial["selected_session"]["view"] = view_for(SESSION, 1, TAB_A, BLOCK_A);
+        reply(&mut ws, &req, 1, initial).await;
+
+        let detach = next_non_meta(&mut ws, 1).await;
+        assert_eq!(detach["method"], "session.detach");
+        assert_eq!(detach["payload"]["session_id"], SESSION);
+        reply(&mut ws, &detach, 2, json!({})).await;
+
+        // Next Select(SESSION) must re-attach via session.attach (not skip straight to
+        // session.view), then follow with session.view on API 19+ to record focus.
+        let att = next_non_meta(&mut ws, 2).await;
+        assert_eq!(att["method"], "session.attach");
+        assert_eq!(att["payload"]["session_id"], SESSION);
+        reply(
+            &mut ws,
+            &att,
+            3,
+            json!({"client_id": "client:test", "view": view_for(SESSION, 2, TAB_A, BLOCK_A)}),
+        )
+        .await;
+        let view = next_non_meta(&mut ws, 3).await;
+        assert_eq!(view["method"], "session.view");
+        assert_eq!(view["payload"]["session_id"], SESSION);
+        reply(&mut ws, &view, 4, view_for(SESSION, 2, TAB_A, BLOCK_A)).await;
+
+        let fence = next_non_meta(&mut ws, 4).await;
+        assert_eq!(fence["method"], "test.sentinel");
+        reply(&mut ws, &fence, 5, json!({})).await;
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+
+    host.commands
+        .send(HostCommand::Request {
+            method: "session.detach".into(),
+            payload: json!({"session_id": SESSION}),
+        })
+        .unwrap();
+    host.commands
+        .send(HostCommand::Select(SESSION.into()))
+        .unwrap();
+    send_sentinel(&host);
+    tokio::time::timeout(Duration::from_secs(8), server)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(host);
+}
+
+#[tokio::test]
+async fn focus_history_offscreen_events_and_prefetch_use_attach_never_session_view() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let req = recv(&mut ws).await;
+        assert_eq!(req["method"], "session.bootstrap");
+        reply(&mut ws, &req, 1, boot_two_sessions()).await;
+
+        let expect_other_attach = |req: &Value, what: &str| {
+            assert_ne!(
+                req["method"], "session.view",
+                "offscreen {what} must never call session.view on API 19+: {req}"
+            );
+            assert_eq!(req["method"], "session.attach", "{what}: {req}");
+            assert_eq!(req["payload"]["session_id"], OTHER, "{what}: {req}");
+        };
+        let next_strict = async |ws: &mut WebSocketStream<TcpStream>, seq: u64| loop {
+            let req = recv(ws).await;
+            match req["method"].as_str().unwrap_or("") {
+                "com.superlogical.terminal.program_status" => {
+                    reply(ws, &req, seq, json!({"records": []})).await;
+                }
+                "com.superlogical.terminal.title" => {
+                    reply(ws, &req, seq, json!({"title": ""})).await;
+                }
+                "com.superlogical.terminal.process" => {
+                    reply(ws, &req, seq, json!({})).await;
+                }
+                _ => return req,
+            }
+        };
+
+        // 1. Background prefetch/status-sweep loads OTHER via session.attach.
+        let pref = next_strict(&mut ws, 1).await;
+        expect_other_attach(&pref, "prefetch");
+        reply(
+            &mut ws,
+            &pref,
+            2,
+            json!({"client_id": "client:test", "view": view_for(OTHER, 1, OTHER_TAB, OTHER_BLOCK)}),
+        )
+        .await;
+
+        // 2. Offscreen session_view_changed refreshes OTHER via session.attach (not session.view).
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 3,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": OTHER,
+                        "event": {"type": "session_view_changed", "payload": {"revision": 2}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let ev1 = next_strict(&mut ws, 3).await;
+        expect_other_attach(&ev1, "session_view_changed");
+        reply(
+            &mut ws,
+            &ev1,
+            4,
+            json!({"client_id": "client:test", "view": view_for(OTHER, 2, OTHER_TAB, OTHER_BLOCK)}),
+        )
+        .await;
+
+        // 3. Offscreen block_closed refreshes OTHER via session.attach (not session.view).
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 5,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": OTHER,
+                        "event": {"type": "block_closed", "payload": {"block_id": OTHER_BLOCK}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let ev2 = next_strict(&mut ws, 5).await;
+        expect_other_attach(&ev2, "block_closed");
+        reply(
+            &mut ws,
+            &ev2,
+            6,
+            json!({"client_id": "client:test", "view": view_for(OTHER, 3, OTHER_TAB, OTHER_BLOCK)}),
+        )
+        .await;
+
+        let fence = next_strict(&mut ws, 6).await;
+        assert_eq!(fence["method"], "test.sentinel");
+        reply(&mut ws, &fence, 7, json!({})).await;
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    until(&host, |m| {
+        m.views.get(OTHER).is_some_and(|v| v.revision >= 3)
+    })
+    .await;
+    assert_eq!(
+        host.model.lock().unwrap().selected.as_deref(),
+        Some(SESSION)
+    );
     send_sentinel(&host);
     tokio::time::timeout(Duration::from_secs(8), server)
         .await

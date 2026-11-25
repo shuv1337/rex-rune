@@ -30,15 +30,24 @@ pub struct Prefetch {
 
 struct InFlight {
     session: String,
+    attached: bool,
     reply: oneshot::Receiver<String>,
     deadline: Instant,
 }
 
 #[derive(Deserialize)]
-struct Response {
+struct ViewReply {
     #[serde(default)]
     seq: u64,
     payload: Option<session::ViewResponse>,
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct AttachReply {
+    #[serde(default)]
+    seq: u64,
+    payload: Option<session::AttachResponse>,
     error: Option<serde_json::Value>,
 }
 
@@ -91,13 +100,26 @@ impl Prefetch {
     }
 
     /// Send `session`'s fetch without waiting for it. Only a failed send is an error.
+    /// On API 19+, use `session.attach` rather than `session.view` because `session.view`
+    /// records the session in server-side focus history while `session.attach` returns the
+    /// full view without recording focus.
     pub async fn start(&mut self, control: &mut Client, session: String) -> rexrs::Result<()> {
-        let reply = control
-            .transport()
-            .detach(session::View::NAME, session::View::new(&session))
-            .await?;
+        let attached =
+            control.welcome().api_revision >= crate::connection::FOCUS_HISTORY_MIN_API_REVISION;
+        let reply = if attached {
+            control
+                .transport()
+                .detach(session::Attach::NAME, session::Attach::new(&session))
+                .await?
+        } else {
+            control
+                .transport()
+                .detach(session::View::NAME, session::View::new(&session))
+                .await?
+        };
         self.in_flight = Some(InFlight {
             session,
+            attached,
             reply,
             deadline: Instant::now() + TIMEOUT,
         });
@@ -106,7 +128,7 @@ impl Prefetch {
 
     /// Wait for the request in flight to answer or time out. Cancel-safe: dropping this
     /// leaves the request in flight.
-    pub async fn finished(&mut self) -> (String, Option<String>) {
+    pub async fn finished(&mut self) -> (String, Option<String>, bool) {
         let Some(f) = &mut self.in_flight else {
             return std::future::pending().await;
         };
@@ -116,7 +138,7 @@ impl Prefetch {
             .ok()
             .and_then(Result::ok);
         let f = self.in_flight.take().expect("a request in flight");
-        (f.session, text)
+        (f.session, text, f.attached)
     }
 
     /// The view and its `seq` from a finished request; a failure schedules a retry instead.
@@ -124,12 +146,18 @@ impl Prefetch {
         &mut self,
         session: &str,
         text: Option<String>,
+        attached: bool,
         now: Instant,
     ) -> Option<(u64, session::ViewResponse)> {
-        let view = text
-            .and_then(|t| serde_json::from_str::<Response>(&t).ok())
-            .filter(|r| r.error.is_none())
-            .and_then(|r| Some((r.seq, r.payload?)));
+        let view = if attached {
+            text.and_then(|t| serde_json::from_str::<AttachReply>(&t).ok())
+                .filter(|r| r.error.is_none())
+                .and_then(|r| Some((r.seq, r.payload?.view)))
+        } else {
+            text.and_then(|t| serde_json::from_str::<ViewReply>(&t).ok())
+                .filter(|r| r.error.is_none())
+                .and_then(|r| Some((r.seq, r.payload?)))
+        };
         if view.is_some() {
             self.failures.remove(session);
         } else {
@@ -177,7 +205,7 @@ mod tests {
         assert_eq!(prefetch.next(&model, now).as_deref(), Some("a"));
         let mut at = now;
         for delay in [1, 5, 30, 30] {
-            assert!(prefetch.result("a", None, at).is_none());
+            assert!(prefetch.result("a", None, false, at).is_none());
             assert_eq!(prefetch.next(&model, at).as_deref(), Some("b"));
             assert_eq!(prefetch.due(&model, at), Some(at), "b is due now");
             let retry = at + Duration::from_secs(delay);
@@ -185,10 +213,17 @@ mod tests {
             at = retry;
         }
         let error = r#"{"type":"response","id":"x","error":{"code":"conflict"}}"#;
-        assert!(prefetch.result("b", Some(error.into()), now).is_none());
+        assert!(
+            prefetch
+                .result("b", Some(error.into()), false, now)
+                .is_none()
+        );
         let view = r#"{"type":"response","id":"x","seq":4,"payload":{"revision":2}}"#;
-        let (seq, view) = prefetch.result("a", Some(view.into()), at).unwrap();
+        let (seq, view) = prefetch.result("a", Some(view.into()), false, at).unwrap();
         assert_eq!((seq, view.revision), (4, 2));
+        let attach = r#"{"type":"response","id":"y","seq":5,"payload":{"client_id":"c","view":{"revision":3}}}"#;
+        let (seq2, view2) = prefetch.result("b", Some(attach.into()), true, at).unwrap();
+        assert_eq!((seq2, view2.revision), (5, 3));
         assert!(!prefetch.failures.contains_key("a"));
         prefetch.set_eligible(HashSet::from(["a".into()]));
         assert!(

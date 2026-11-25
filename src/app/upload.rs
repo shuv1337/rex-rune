@@ -59,6 +59,7 @@ impl Workspace {
         if self.panel.is_some() || self.in_copy_mode() || paths.is_empty() {
             return;
         }
+        self.clear_focus_history_walk();
         if self.focused_block().as_deref() != Some(block)
             && let Some(t) = self.terminals.get(&self.term_key(block))
         {

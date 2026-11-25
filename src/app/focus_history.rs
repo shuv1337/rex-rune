@@ -28,7 +28,7 @@ pub struct Walk {
     pub scope: FocusHistoryScope,
     pub cursor: Option<u64>,
     pub pending_id: Option<u64>,
-    pub pending_since: Option<Instant>,
+    pub pending_deadline: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -90,8 +90,8 @@ impl Workspace {
                 self.focus_history.clear();
             } else if walk.pending_id.is_some() {
                 let expired = walk
-                    .pending_since
-                    .is_some_and(|since| now.saturating_duration_since(since) >= PENDING_TIMEOUT);
+                    .pending_deadline
+                    .is_some_and(|deadline| now >= deadline);
                 if !expired {
                     // Ignore rapid duplicate triggers while a reverse is already in flight so
                     // we never send a second `cursor: None` that would bounce focus back.
@@ -103,13 +103,14 @@ impl Workspace {
 
         let cursor = self.focus_history.walk.as_ref().and_then(|w| w.cursor);
         let id = self.focus_history.next_id();
+        let deadline = now + PENDING_TIMEOUT;
         self.focus_history.walk = Some(Walk {
             host: host_id,
             epoch,
             scope,
             cursor,
             pending_id: Some(id),
-            pending_since: Some(now),
+            pending_deadline: Some(deadline),
         });
         if self.hosts[self.active]
             .connection
@@ -119,6 +120,7 @@ impl Workspace {
                 id,
                 scope,
                 cursor,
+                deadline,
             })
             .is_err()
         {
@@ -161,7 +163,7 @@ impl Workspace {
         if result.reversed {
             if let Some(walk) = &mut self.focus_history.walk {
                 walk.pending_id = None;
-                walk.pending_since = None;
+                walk.pending_deadline = None;
                 walk.cursor = result.cursor;
             }
             if self
@@ -185,10 +187,9 @@ impl Workspace {
         if walk.pending_id.is_none() {
             return false;
         }
-        let Some(since) = walk.pending_since else {
+        let Some(deadline) = walk.pending_deadline else {
             return false;
         };
-        let deadline = since + PENDING_TIMEOUT;
         if now >= deadline {
             self.focus_history.clear();
             return true;

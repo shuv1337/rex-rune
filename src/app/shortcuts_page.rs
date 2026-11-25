@@ -165,8 +165,14 @@ fn bound<'a>(map: &'a Resolved, server: &[InspectResponseAction]) -> Vec<Bound<'
 pub(super) type Identity = (String, String);
 
 pub(super) fn identity(action: &str, args: Option<&Value>) -> Identity {
+    let is_default = |a: &serde_json::Map<String, Value>| {
+        a.is_empty()
+            || (action == actions::FOCUS_HISTORY_REVERSE
+                && a.len() == 1
+                && a.get("scope").and_then(Value::as_str) == Some("any"))
+    };
     let args = args
-        .filter(|args| !args.is_null() && args.as_object().is_none_or(|a| !a.is_empty()))
+        .filter(|args| !args.is_null() && args.as_object().is_none_or(|a| !is_default(a)))
         .map(Value::to_string)
         .unwrap_or_default();
     (action.to_owned(), args)
@@ -261,6 +267,8 @@ fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<P
         };
         if argument.is_some() && spec.accepts(&Value::Null) {
             listed.insert(0, None);
+            let mut seen = std::collections::HashSet::new();
+            listed.retain(|args| seen.insert(identity(spec.name, args.as_ref())));
         }
         if alias {
             listed.retain(|args| {

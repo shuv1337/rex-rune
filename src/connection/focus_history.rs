@@ -1,8 +1,8 @@
 //! Server-side focus history (`focus_history.reverse`, Rex Server API 19+).
-use super::{Client, ControlState, Shared, attach, list, refresh, status_sweep};
+use super::{Client, ControlState, Shared, attach, list, refresh_background, status_sweep};
 use anyhow::Result;
 use rexrs::api::focus_history::Reverse;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Minimum Rex Server API revision that supports `focus_history.reverse`.
 pub const FOCUS_HISTORY_MIN_API_REVISION: u32 = 19;
@@ -11,6 +11,8 @@ pub const FOCUS_HISTORY_UNSUPPORTED_NOTICE: &str =
 pub const FOCUS_HISTORY_EMPTY_NOTICE: &str = "No earlier focus target.";
 pub const FOCUS_HISTORY_DISCONNECTED_NOTICE: &str =
     "Focus history not sent while disconnected. Try again after reconnecting.";
+pub const FOCUS_HISTORY_EXPIRED_NOTICE: &str =
+    "Focus history request timed out; action was not retried.";
 pub const FOCUS_HISTORY_REQUIRES_API: &str = "Requires Rex Server API 19 or later";
 pub const FOCUS_HISTORY_DISCONNECTED: &str = "Connect to the host to use focus history";
 
@@ -121,6 +123,18 @@ fn is_transport_error(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Reject an expired reverse request without sending `focus_history.reverse`.
+/// Silently ignored when the connection epoch has already moved on.
+pub(super) fn expire(shared: &Shared, epoch: u64, id: u64) {
+    shared.update(|m| {
+        if m.connection_epoch != epoch {
+            return;
+        }
+        m.notice = Some(FOCUS_HISTORY_EXPIRED_NOTICE.into());
+        m.focus_history_result = Some(FocusHistoryResult::not_reversed(epoch, id));
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn reverse(
     control: &mut Client,
@@ -131,6 +145,7 @@ pub(super) async fn reverse(
     id: u64,
     scope: FocusHistoryScope,
     cursor: Option<u64>,
+    deadline: Instant,
 ) -> Result<()> {
     let (live_epoch, current_session, current_window) = {
         let m = shared.model.lock().expect("host model");
@@ -143,6 +158,10 @@ pub(super) async fn reverse(
     if epoch != live_epoch {
         return Ok(());
     }
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        expire(shared, epoch, id);
+        return Ok(());
+    };
     if control.welcome().api_revision < FOCUS_HISTORY_MIN_API_REVISION {
         shared.update(|m| {
             m.notice = Some(FOCUS_HISTORY_UNSUPPORTED_NOTICE.into());
@@ -165,7 +184,12 @@ pub(super) async fn reverse(
         }
     };
 
-    let response = match tokio::time::timeout(Duration::from_secs(8), control.call(req)).await {
+    let response = match tokio::time::timeout(
+        remaining.min(Duration::from_secs(8)),
+        control.call(req),
+    )
+    .await
+    {
         Ok(Ok(response)) => response,
         Ok(Err(rexrs::Error::Api(
             rexrs::ApiError::MethodNotFound { .. }
@@ -188,10 +212,7 @@ pub(super) async fn reverse(
         }
         Ok(Err(error)) => return Err(error.into()),
         Err(_) => {
-            shared.update(|m| {
-                m.notice = Some("Focus history request timed out; action was not retried.".into());
-                m.focus_history_result = Some(FocusHistoryResult::not_reversed(epoch, id));
-            });
+            expire(shared, epoch, id);
             return Ok(());
         }
     };
@@ -220,7 +241,9 @@ pub(super) async fn reverse(
             if !state.attached.contains(target) || !has_view {
                 attach(control, shared, state, sweep, target).await?;
             } else {
-                refresh(control, shared, state, sweep, target).await?;
+                // Use session.attach rather than session.view so refreshing the reversed
+                // target's view never re-writes server-side focus history.
+                refresh_background(control, shared, state, sweep, target).await?;
             }
             Ok(())
         }

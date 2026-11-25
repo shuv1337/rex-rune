@@ -1083,7 +1083,6 @@ pub fn binding_title(binding: &rexrs::api::client::Binding) -> String {
             )
         }
         FOCUS_HISTORY_REVERSE => match args["scope"].as_str() {
-            Some("any") => "Previous focus (any)".into(),
             Some("pane") => "Previous focused pane in tab".into(),
             Some("tab") => "Previous focused tab".into(),
             Some("tab_any_session") => "Previous focused tab (any session)".into(),
