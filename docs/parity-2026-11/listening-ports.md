@@ -1,9 +1,8 @@
-# Terminal Listening Ports - Slice 1 (Protocol, Model, Sync, and Reach Policy)
+# Terminal Listening Ports
 
 Slice 1 implements the UI-independent foundation for inspecting listening TCP ports reported by
-Rex Server API 15 (`com.superlogical.terminal.ports`) and API 16 (`ports_changed`). No Rune UI
-changes under `src/app/` are included in this slice; Slice 2 builds the UI surfaces on top of
-these types and connection commands.
+Rex Server API 15 (`com.superlogical.terminal.ports`) and API 16 (`ports_changed`).
+[Slice 2](#slice-2-ui) adds a Rune UI over these types and commands.
 
 ## Scope
 
@@ -151,3 +150,48 @@ Slice 2 can build directly on Slice 1 without touching protocol or worker code:
   - `!snap.is_complete()`: show partial/truncated/capped caveat.
 - Drive row actions exclusively through `ports::HostLocality::from_endpoint`, `ports::open_url`,
   `ports::copy_address`, and `ports::ssh_forward_command`.
+
+## Slice 2 UI
+
+In Commands, choose **Show listening ports…** for the current session. The pane menu's
+**Listening ports…** puts that pane's group first without focusing it. Both paths share the
+`client.ports` shortcut reference in Settings; it is unbound by default and not remotely
+invocable. There is no pane badge and no background read. Results group by tab and pane.
+Type a port number, process, address, tab or pane to filter. Up and Down select a row.
+If an update moves the highlighted port, the selection follows it; if that port disappears,
+Enter does nothing until another port is selected.
+
+| Host attachment | Enter or Copy | Ctrl+Enter (Cmd+Enter on macOS) |
+| --- | --- | --- |
+| Unix socket | Copy the reported bind address and port | Open an HTTP URL in the desktop handler, with wildcard addresses mapped to loopback |
+| SSH | Copy the bind address and port, with a notice naming the host | Copy an `ssh -N -L` command; never run it |
+| Other remote endpoints, including loopback URLs | Copy the bind address and port, with a notice naming the host | No action |
+
+Zoned IPv6 and invalid addresses never open or offer a forwarding command. An invalid
+address copies only the numeric port. A remote-host banner names where the listeners are.
+Locality comes only from the saved endpoint: a manually forwarded Unix socket or a Rex
+server in another network namespace still looks local. Rex Rune does not probe a port,
+check whether it speaks HTTP, or infer which remote sockets are reachable.
+
+Escape, an outside press, a panel change or leaving the session stops the watch. Reconnect
+starts one watch in the new connection epoch if the list is still open on the same session.
+On API 15, reopen the list to refresh; API 16 and later deliver change events. Coverage
+messages distinguish unavailable or disconnected hosts, loading, unsupported terminals,
+empty or filtered lists, partial scans and report limits.
+
+### Verification
+
+Headless coverage lives in `src/app/ports_tests.rs`. Run `ports_local_draw`,
+`ports_remote_ssh_draw` and `ports_empty_api14_draw` individually with `REX_TEST_SNAP_DIR`
+set; repeat with `REX_PORTS_MINIMUM=1` for 640×480. The cases cover the local action buttons
+and keycaps, the SSH banner and partial warning, and the API 14 refusal.
+Visually inspected all six real-font PNGs at 1024×700 and 640×480. Both populated lists
+fit the four fixture rows and footer at minimum size without clipping or overlap.
+
+`scripts/ports-x11.py --api21 <rex>` uses `REX_BIN`, private Rex servers and sshd, real X11
+input, an X11 clipboard, and an opener stub. It checks the exact copied address, local URL,
+and SSH command, and verifies that only the markers before and after the popup reach the
+PTY. The forwarding command is never executed.
+
+Both native cases passed with Rex `0.1.0-snapshot.2562` (API 21). Only the local case invoked
+the opener, exactly once, and both PTYs received exactly the two markers.

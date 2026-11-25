@@ -72,6 +72,7 @@ pub struct Workspace {
     pub active: usize,
     pub terminals: HashMap<(HostId, String), Term>,
     pub panel: Option<Panel>,
+    pub(super) ports_watch: Option<super::ports::Watch>,
     pub notices: Vec<Notice>,
     next_notice: u64,
     zoom_notice: Option<u64>,
@@ -288,6 +289,7 @@ impl Workspace {
             active,
             terminals: HashMap::new(),
             panel: None,
+            ports_watch: None,
             notices: Vec::new(),
             next_notice: 0,
             zoom_notice: None,
@@ -507,6 +509,9 @@ impl Workspace {
         }
         self.leave_install_dialog();
         self.navigation.cancel();
+        if self.ports_target().is_some() {
+            self.close_panel(tx);
+        }
         let state = self.hosts.remove(index);
         self.forget_host(state);
         let host = self.settings.hosts.remove(index);
@@ -708,6 +713,13 @@ impl Workspace {
             );
         }
         self.hosts[index].model = model;
+        if self
+            .ports_target()
+            .is_some_and(|target| !self.ports_in_context(target))
+        {
+            self.close_panel(tx);
+        }
+        self.refresh_ports_watch();
         if index == self.active {
             // The session, keymap revision or connection above is what a mode belongs to.
             self.revalidate_key_modes();
@@ -731,6 +743,8 @@ impl Workspace {
             if super::actions::find(&queued.action.action).is_some_and(|s| s.requires_person()) {
                 self.inform(if queued.action.action == super::server_page::STOP {
                     "Returned client action skipped: only the person at this computer can stop a server."
+                } else if queued.action.action == super::ports::ACTION {
+                    "Returned client action skipped: only the person at this computer can show listening ports."
                 } else if queued.action.action == super::actions::UNDO_CLOSE {
                     "Returned client action skipped: only the person at this computer can undo a close."
                 } else {
@@ -777,6 +791,7 @@ impl Workspace {
         self.track_activity(index);
         self.restore_activity_selection(activity_selection);
         self.restore_row_selection();
+        self.seed_ports_selection();
         self.deliver_program_notices(index, notices);
         self.sync_layer_menu(tx);
         self.sync_layer_drag();
@@ -1507,6 +1522,12 @@ impl Workspace {
     /// back a mode nobody entered again.
     pub fn update_visibility(&mut self) {
         self.revalidate_key_modes();
+        if self
+            .ports_target()
+            .is_some_and(|target| !self.ports_in_context(target))
+        {
+            self.cancel_panel_quiet();
+        }
         for term in self.terminals.values_mut() {
             term.end_selection();
         }
@@ -1547,11 +1568,12 @@ impl Workspace {
     }
 
     pub fn perform(&mut self, action: Intent, tx: &mut Tx) {
-        // Applying a theme goes back to Settings itself.
+        // Applying a theme goes back to Settings itself; copying a port keeps the list open.
         if !action.opens_followup()
             && !matches!(
                 action,
-                Intent::Theme(_)
+                Intent::Port(_)
+                    | Intent::Theme(_)
                     | Intent::Chrome(_)
                     | Intent::SshAgent(_)
                     | Intent::Choose(_)
@@ -1581,6 +1603,7 @@ impl Workspace {
         match action {
             Intent::Select(host, id) => self.select(host, id, tx),
             Intent::ActivityTab(target) => self.choose_activity(target, tx),
+            Intent::Port(key) => self.use_port(&key, false, tx),
             Intent::Tab(id) => {
                 if let Some(session) = self.model().selected.clone() {
                     self.select_window(self.active, session, id, tx);
@@ -1749,6 +1772,7 @@ impl Workspace {
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
+                self.refresh_ports_watch();
                 if self.settings_section == SettingsSection::Notifications {
                     self.notification_command(super::notify::Command::Check);
                     self.sound_request(super::sounds::Request::Check);
@@ -2148,6 +2172,7 @@ impl Workspace {
             | PaneAction::Paste
             | PaneAction::SelectAll
             | PaneAction::CopyId
+            | PaneAction::Ports
             | PaneAction::Clear
             | PaneAction::Reset => self.pane_verb(target, action, tx),
         }
@@ -2206,6 +2231,7 @@ impl Workspace {
                 Box::new(p)
             });
         self.panel = Some(panel);
+        self.refresh_ports_watch();
         self.reconcile_prompts();
     }
 
@@ -2287,8 +2313,13 @@ impl Workspace {
         };
         self.panel = Some(panel);
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
-            self.panel.as_mut().unwrap().selected = first;
+            if self.ports_target().is_some() {
+                self.select_row(first);
+            } else {
+                self.panel.as_mut().unwrap().selected = first;
+            }
         }
+        self.refresh_ports_watch();
         self.reconcile_prompts();
     }
 
@@ -2340,6 +2371,7 @@ impl Workspace {
         self.leave_download_dialog();
         self.bindings.sequence.clear();
         self.panel = None;
+        self.refresh_ports_watch();
         self.reconcile_prompts();
         tx.blur();
     }
@@ -2363,6 +2395,7 @@ impl Workspace {
         } else {
             self.panel = None;
         }
+        self.refresh_ports_watch();
         self.reconcile_prompts();
     }
 
@@ -2381,6 +2414,7 @@ impl Workspace {
                 input.focused = true;
             }
             self.panel = Some(*back);
+            self.refresh_ports_watch();
             self.reconcile_prompts();
         } else {
             self.close_panel(tx);
@@ -2389,6 +2423,13 @@ impl Workspace {
 
     pub fn navigate_panel(&mut self, delta: isize) {
         let entries = self.entries();
+        if self.ports_target().is_some()
+            && let Some((_, id)) = self.panel.as_ref().and_then(|p| p.row.as_ref())
+            && !entries.iter().any(|e| e.id.as_deref() == Some(id))
+        {
+            self.select_row(0);
+            return;
+        }
         let Some(mut selected) = self.panel.as_ref().map(|p| p.selected as isize + delta) else {
             return;
         };
@@ -2474,6 +2515,10 @@ impl Workspace {
     }
 
     pub fn submit(&mut self, tx: &mut Tx) {
+        if self.ports_target().is_some() {
+            self.submit_port(false, tx);
+            return;
+        }
         let Some(panel) = &self.panel else { return };
         let kind = panel.kind.clone();
         let values: Vec<String> = panel

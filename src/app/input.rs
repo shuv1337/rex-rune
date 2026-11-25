@@ -212,6 +212,7 @@ pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.navigate_panel(if ev.key == Key::Up { -1 } else { 1 });
             tx.instant();
         }
+        Key::Enter if ctrl(ev) && s.ports_target().is_some() => s.submit_port(true, tx),
         // Commands: the highlighted command's shortcut, in Settings.
         Key::Enter
             if ctrl(ev)
@@ -438,7 +439,7 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     .identity();
     let consumed = s.bindings.consumed.remove(&identity).is_some();
-    if s.is_prompt_open() {
+    if s.is_prompt_open() || s.ports_target().is_some() {
         s.forwarded.remove(&identity);
         return true;
     }

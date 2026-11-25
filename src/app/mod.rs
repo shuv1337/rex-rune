@@ -39,6 +39,7 @@ mod panel;
 mod panes;
 pub(crate) mod platform;
 mod popups;
+mod ports;
 mod program_icons;
 mod prompts;
 mod recorder;

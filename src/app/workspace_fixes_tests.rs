@@ -238,6 +238,7 @@ fn the_pane_menu_offers_four_sides_in_groups_and_commands_adds_best_fit_and_focu
             "Rename pane…",
             "Copy pane ID",
             "Download file…",
+            "Listening ports…",
             "Clear terminal",
             "Reset terminal",
             "Reconnect terminal",

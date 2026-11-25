@@ -651,6 +651,9 @@ impl Workspace {
         }
         self.stop_install_for_host(index);
         self.navigation.cancel();
+        if self.ports_target().is_some() {
+            self.close_panel(tx);
+        }
         let state = self.hosts.remove(index);
         self.forget_host(state);
         let host = self.settings.hosts.remove(index);

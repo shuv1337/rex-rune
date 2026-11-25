@@ -16,6 +16,7 @@ pub enum Intent {
     Select(usize, String),
     Tab(String),
     ActivityTab(super::notify::NoteTarget),
+    Port(super::ports::PortKey),
     /// A named client action shared with the shortcut dispatcher.
     ClientAction(&'static str, Value),
     Switcher,
@@ -129,6 +130,7 @@ impl Intent {
                 PaneAction::Zoom => ("pane.zoom", Value::Null),
                 PaneAction::Reconnect => ("pane.reconnect", Value::Null),
                 PaneAction::Download => (super::actions::DOWNLOAD, Value::Null),
+                PaneAction::Ports => (super::ports::ACTION, Value::Null),
                 PaneAction::InsertPath => (super::directory::ACTION, Value::Null),
                 PaneAction::GoToDirectory => (super::directory::GO, Value::Null),
                 PaneAction::Close => ("pane.close", Value::Null),
@@ -153,7 +155,7 @@ impl Intent {
             Intent::InsertPath(_)
                 | Intent::Switcher
                 | Intent::ClientAction(
-                    "client.settings" | "session.switch" | super::activity_list::ACTION | super::about::ABOUT | super::recorder::EDIT,
+                    "client.settings" | "session.switch" | super::activity_list::ACTION | super::ports::ACTION | super::about::ABOUT | super::recorder::EDIT,
                     _
                 )
                 | Intent::Shortcuts(super::recorder::Menu::ResetAll)
@@ -203,7 +205,7 @@ impl Intent {
                 | Intent::RemoveHost(_)
                 | Intent::Pane(
                     _,
-                    PaneAction::Rename | PaneAction::Close | PaneAction::Download | PaneAction::InsertPath | PaneAction::GoToDirectory
+                    PaneAction::Rename | PaneAction::Close | PaneAction::Download | PaneAction::Ports | PaneAction::InsertPath | PaneAction::GoToDirectory
                 )
                 | Intent::Session(_, SessionAction::Rename | SessionAction::Close)
         )
@@ -310,6 +312,7 @@ pub enum PaneAction {
     InsertPath,
     /// The same browser over folders only; it types `cd <folder>` without Enter.
     GoToDirectory,
+    Ports,
     /// The pane's selected text to the clipboard.
     Copy,
     /// The clipboard into the pane, as Ctrl Shift V does for the focused one.
@@ -414,6 +417,7 @@ pub enum PanelKind {
     /// `true`: the session switcher; `false`: Commands.
     Picker(bool),
     Activity,
+    Ports(super::ports::Target),
     Hosts(String),
     SwitchHost,
     MovePane,
@@ -557,6 +561,7 @@ impl Panel {
                 | PanelKind::MovePane
                 | PanelKind::Picker(_)
                 | PanelKind::Activity
+                | PanelKind::Ports(_)
                 | PanelKind::Hosts(_)
                 | PanelKind::Pane
                 | PanelKind::Layer
@@ -577,6 +582,7 @@ impl Panel {
 
 pub struct Entry {
     pub activity: Option<super::activity_list::Presentation>,
+    pub port: Option<super::ports::Presentation>,
     /// The row's own identity across a rebuild, where the list has one (`Command.id`): a
     /// host wake that reorders the list finds the same row by this, not by its position.
     pub id: Option<std::borrow::Cow<'static, str>>,
@@ -618,6 +624,7 @@ impl Entry {
     ) -> Self {
         Self {
             activity: None,
+            port: None,
             id: None,
             label: label.into(),
             detail: detail.into(),
@@ -867,6 +874,9 @@ impl Workspace {
         }
         let query = self.query();
         let lower = query.to_lowercase();
+        if let PanelKind::Ports(target) = &panel.kind {
+            return self.ports_entries(target, &lower);
+        }
         if let PanelKind::Fonts(pick) = panel.kind {
             return self.font_entries(pick);
         }
@@ -1084,6 +1094,7 @@ impl Workspace {
                 ("Rename pane…", 2, PaneAction::Rename),
                 ("Copy pane ID", 2, PaneAction::CopyId),
                 ("Download file…", 2, PaneAction::Download),
+                ("Listening ports…", 2, PaneAction::Ports),
                 ("Clear terminal", 3, PaneAction::Clear),
                 ("Reset terminal", 3, PaneAction::Reset),
                 ("Reconnect terminal", 3, PaneAction::Reconnect),

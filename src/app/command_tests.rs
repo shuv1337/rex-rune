@@ -18,6 +18,7 @@ const IDS: &[&str] = &[
     "client.activity",
     "client.activity.priority",
     "client.activity.session",
+    "client.ports",
     "session.new",
     "session.rename",
     "session.next",
@@ -420,17 +421,36 @@ fn a_search_still_finds_sessions_and_tabs_after_the_commands() {
     let groups: Vec<&str> = entries.iter().map(|e| e.group.as_str()).collect();
     assert_eq!(
         groups,
-        ["Commands", "Tabs · test-0 / s-label"],
-        "Pair device matches dev, followed by the tab named dev"
+        ["Commands", "Commands", "Tabs · test-0 / s-label"],
+        "Pair device and listening ports match dev, followed by the tab named dev"
     );
-    assert_eq!(labels(&ws), ["Pair device…", "dev"]);
-    assert!(matches!(&entries[1].action, Intent::Tab(id) if id == "split"));
+    assert_eq!(
+        labels(&ws),
+        ["Pair device…", "Show listening ports…", "dev"]
+    );
+    assert!(matches!(&entries[2].action, Intent::Tab(id) if id == "split"));
 
     // Commands come first when both match.
     search(&mut ws, "server");
     let groups: Vec<String> = ws.entries().into_iter().map(|e| e.group).collect();
-    assert_eq!(groups, ["Commands", "Commands", "Tabs · test-0 / s-label"]);
-    assert_eq!(labels(&ws), ["Stop server…", "Add host…", "server"]);
+    assert_eq!(
+        groups,
+        [
+            "Commands",
+            "Commands",
+            "Commands",
+            "Tabs · test-0 / s-label"
+        ]
+    );
+    assert_eq!(
+        labels(&ws),
+        [
+            "Stop server…",
+            "Show listening ports…",
+            "Add host…",
+            "server"
+        ]
+    );
     std::fs::remove_file(&ws.settings_path).ok();
 }
 

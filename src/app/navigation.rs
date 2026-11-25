@@ -258,6 +258,11 @@ impl Workspace {
             self.navigation.cancel();
             return;
         };
+        if self.ports_target().is_some_and(|target| {
+            target.host != visit.host || target.session.as_deref() != Some(&visit.session)
+        }) {
+            self.close_panel(tx);
+        }
         self.active = host;
         self.drag = None;
         self.layer_drag = None;

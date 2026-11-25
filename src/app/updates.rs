@@ -636,6 +636,8 @@ impl Workspace {
             &[],
         ));
         self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
+        self.refresh_ports_watch();
+        self.sync_panel_terminal_guard();
     }
 
     /// Explicit user-requested check (from Settings → Updates or Commands).

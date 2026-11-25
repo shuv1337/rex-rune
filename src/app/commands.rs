@@ -469,6 +469,13 @@ impl Workspace {
                 Intent::ClientAction(super::activity_list::ACTION, json!({"view":"session"})),
             ),
             Command::action(
+                super::ports::ACTION,
+                G,
+                "Show listening ports…",
+                super::ports::ACTION,
+            )
+            .keywords("port server localhost forward tcp dev"),
+            Command::action(
                 "session.new",
                 G,
                 format!("New session on {host}"),

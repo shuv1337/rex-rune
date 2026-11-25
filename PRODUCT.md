@@ -25,6 +25,8 @@ Shortcuts use built-in defaults (on Control, or on Command on macOS), each host�
 
 SSH attachment uses OpenSSH socket forwarding with strict host-key checking. **Check host key…** shows an unfamiliar fingerprint for explicit confirmation; a changed key is refused. With no default socket and Rex already installed, **Start personal server…** previews a one-time native start (preview.14/API 12 locally and remotely). A non-root Linux login without Rex can instead open **Install Rex on this host…** and review Rex's own installer. Each recognized question needs a separate answer, defaults to No, and closing the live dialog stops the installer. Neither action creates a session or retries a setup failure. Other targets use manual installation.
 
+**Listening ports** inspects TCP listeners reported for the session in front, on demand only (API 15+). The copy notice names the destination machine on remote hosts. Open is offered only for Unix-socket hosts, and the SSH equivalent only copies a forwarding command; Rex Rune never probes the port or runs the command.
+
 ## Out of scope for now
 
 Complete Kitty graphics, distribution packages, and screen-reader support for the terminal itself. Rune's AT-SPI tree is on and names the chrome, but it has not been tried with a screen reader, and the terminal pane exposes only visible text as plain labels (no caret, selection or focus). See the README's Accessibility section and its list of unvalidated areas.

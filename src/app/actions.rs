@@ -39,6 +39,7 @@ enum Handler {
     ZoomReset,
     SwitchSession,
     Activity,
+    Ports,
     PairDevice,
     StopServer,
     SelectSession,
@@ -128,6 +129,7 @@ specs! {
     "client.zoom.reset" => ZoomReset,
     "session.switch" => SwitchSession,
     super::activity_list::ACTION => Activity,
+    super::ports::ACTION => Ports,
     super::pair_device::ACTION => PairDevice,
     super::server_page::STOP => StopServer,
     SELECT_SESSION => SelectSession,
@@ -286,7 +288,7 @@ impl Spec {
                 "Only the person at this computer can choose a file to download; nothing a host sends can start one.",
             ),
             Palette | Settings | Search | SwitchSession | Activity | PairDevice | StopServer
-            | PaneActions | Shortcuts => {
+            | PaneActions | Shortcuts | Ports => {
                 Remote::Never("Only the person at this computer can open dialogs and popups.")
             }
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
@@ -345,6 +347,7 @@ impl Spec {
         matches!(
             self.handler,
             Handler::Download
+                | Handler::Ports
                 | Handler::InsertPath
                 | Handler::GoToDirectory
                 | Handler::PairDevice
@@ -429,6 +432,7 @@ impl Spec {
             Handler::ZoomReset => "Reset interface zoom",
             Handler::SwitchSession => "Switch session",
             Handler::Activity => "Show activity",
+            Handler::Ports => "Show listening ports",
             Handler::PairDevice => "Pair device…",
             Handler::StopServer => "Stop server…",
             Handler::SelectSession => "Show session",
@@ -518,6 +522,7 @@ impl Spec {
             | Handler::Forward
             | Handler::SwitchSession
             | Handler::Activity
+            | Handler::Ports
             | Handler::SelectSession
             | Handler::GotoTab
             | Handler::NextSession
@@ -747,6 +752,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             }
             s.show_activity();
         }
+        Handler::Ports => s.show_ports(s.focused_block()),
         Handler::PairDevice => s.pair_device(),
         Handler::StopServer => s.stop_server(),
         Handler::SelectSession => {

@@ -66,6 +66,11 @@ client, launcher and icons, never the `rex` server.
 - **Downloads.** **Download file…** saves from the terminal's machine (API 13+),
   with progress and partial cleanup, and never overwrites, opens or runs the
   file.
+- **Listening ports.** **Show listening ports…** in Commands lists TCP listeners
+  in this session (API 15+); the pane menu puts that pane first. Enter copies the
+  bind address. Ctrl+Enter (Cmd+Enter on macOS) opens supported ports on Unix-socket
+  hosts or copies an `ssh -L` command for SSH hosts.
+  [Scope and limits](docs/parity-2026-11/listening-ports.md#slice-2-ui).
 - **Fonts and themes.** Chrome palettes, terminal themes declared to the server
   including Ghostty files, installed fonts with a picker and ordered fallbacks,
   bundled IBM Plex Mono and Symbols Nerd Font, font size and live metrics.

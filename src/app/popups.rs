@@ -235,6 +235,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     );
     let commands = matches!(panel.kind, PanelKind::Picker(false));
     let activity = matches!(panel.kind, PanelKind::Activity);
+    let ports = matches!(panel.kind, PanelKind::Ports(_)).then(|| s.ports_coverage());
     // The values of one setting: a short list with the current one checked.
     let values = matches!(panel.kind, PanelKind::Choice(_) | PanelKind::Chromes);
     // Lists that mark the current value keep the check's column on every row, so names align.
@@ -294,7 +295,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     // A machine already added carries a chip, in a column every row of the list keeps.
     let added_column = discover && entries.iter().any(|e| e.current);
     let name_limit = super::discover::name_limit(width, added_column);
-    let row_height = if activity {
+    let row_height = if activity || ports.is_some() {
         44.
     } else if commands {
         30.
@@ -316,6 +317,14 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     } else {
         0.
     };
+    let ports_extra = ports.as_ref().map_or(0., |p| {
+        27. + 24.
+            * [p.remote.is_some(), p.partial, p.limits.is_some(), p.api15]
+                .into_iter()
+                .filter(|show| *show)
+                .count() as f32
+            + if p.locality.is_some() { 29. } else { 0. }
+    });
     let mut list_max = match room {
         Some((below, above)) => (below.max(above) - input_height - 42.).clamp(60., 360.),
         None => (vh
@@ -323,10 +332,11 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
             - 16.
             - input_height
             - directory_extra
+            - ports_extra
             - if activity { 28. } else { 0. }
             - footer_count as f32 * 29.
-            - 56.)
-            .max(60.),
+            - if ports.is_some() { 0. } else { 56. })
+        .max(60.),
     };
     if commands {
         list_max = list_max.min(COMMAND_ROWS * (row_height + 1.));
@@ -339,6 +349,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let mut footer = col().w_full().gap(1.);
     let surface_id = match panel.kind {
         PanelKind::Activity => "activity",
+        PanelKind::Ports(_) => "ports",
         PanelKind::Picker(true) => "switcher",
         PanelKind::Picker(false) => "commands",
         PanelKind::Hosts(_) => "hosts",
@@ -430,7 +441,13 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .as_ref()
                 .filter(|(t, _)| t.host == *host && &t.session == session)
         });
-        let r = if let Some((_, edit)) = renaming {
+        let r = if let Some(port) = &entry.port {
+            let selected = panel
+                .row
+                .as_ref()
+                .is_some_and(|(_, id)| entry.id.as_deref() == Some(id));
+            super::ports::port_row(entry, port, i, selected)
+        } else if let Some((_, edit)) = renaming {
             rename_row(edit, row_height, entry.current, surface_id)
         } else {
             let actions = switcher_session.clone().map(|(host, session)| {
@@ -526,6 +543,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         let empty = match panel.kind {
             PanelKind::Activity if s.query().is_empty() => "Nothing needs you.".into(),
             PanelKind::Activity => "No matching activity.".into(),
+            PanelKind::Ports(_) => ports.as_ref().unwrap().empty.into(),
             PanelKind::Directory(_) => panel
                 .error
                 .clone()
@@ -538,11 +556,16 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
             row()
                 .px(12.)
                 .py(16.)
-                .child(text(empty).font(ui(13.)).color(rgb(muted()))),
+                .child(text(empty).font(ui(13.)).color(rgb(muted())).truncate()),
         );
         y += 52.;
     }
     let content = y;
+    // Let a short Ports list use the available space. Reserve the overflow hint only
+    // when rows actually scroll, so it doesn't displace a row that already fits.
+    if ports.is_some() && content > list_max + 1. {
+        list_max = (list_max - 24.).max(60.);
+    }
     let overflow = content > list_max + 1.;
     let view_h = content.min(list_max);
     let fx = &s.switcher_fx;
@@ -627,7 +650,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     )
     .clip_rounded(12.)
     .transition(pop_in());
-    if matches!(panel.kind, PanelKind::Directory(_)) {
+    if matches!(panel.kind, PanelKind::Directory(_) | PanelKind::Ports(_)) {
         surface = surface.child(
             row().h(26.).px(10.).center_y().child(
                 text(panel.title.clone())
@@ -647,6 +670,13 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
             ),
         );
     } else if titled {
+        let active_descendant = match &ports {
+            Some(_) => panel
+                .row
+                .as_ref()
+                .and_then(|(_, id)| entries.iter().position(|e| e.id.as_deref() == Some(id))),
+            None => Some(panel.selected),
+        };
         let placeholder = panel
             .fields
             .first()
@@ -665,7 +695,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .child(
                     TextInput::new(&panel.inputs[0])
                         .placeholder(placeholder)
-                        .active_descendant(Some(format!("entry:{}", panel.selected)))
+                        .active_descendant(active_descendant.map(|i| format!("entry:{i}")))
                         // A magnifying glass marks search fields only.
                         .leading_icon(if matches!(panel.kind, PanelKind::Directory(_)) {
                             &FOLDER
@@ -692,8 +722,10 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .children(activity.then(|| activity_view(s))),
         );
     }
-    let coverage = s.activity_coverage();
-    if activity && !coverage.is_empty() {
+    if activity
+        && let coverage = s.activity_coverage()
+        && !coverage.is_empty()
+    {
         surface = surface.child(
             row()
                 .h(28.)
@@ -701,6 +733,12 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .center_y()
                 .child(text(coverage).font(ui(11.)).color(rgb(muted())).truncate()),
         );
+    }
+    if let Some(ports) = &ports {
+        surface = surface
+            .children(ports.remote.as_deref().map(super::ports::coverage_line))
+            .children(ports.partial.then(super::ports::partial_line))
+            .children(ports.limits.map(super::ports::coverage_line));
     }
     let mut results = el().w_full().min_h(0.).child(scroller);
     if overflow {
@@ -726,9 +764,13 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
             .child(el().h(1.).mx(8.).my(3.).fill(white(0.07)))
             .child(footer.px(0.).py(0.));
     }
+    if let Some(ports) = &ports {
+        surface = surface.child(super::ports::ports_footer(ports));
+    }
     // Keep the whole surface on screen: an estimate of its height bounds the anchor.
     let estimated = input_height
         + directory_extra
+        + ports_extra
         + view_h
         + if pane { 24. } else { 0. }
         + footer_count as f32 * 29.

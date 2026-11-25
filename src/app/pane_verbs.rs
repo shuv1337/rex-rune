@@ -47,6 +47,10 @@ impl Workspace {
                 term.is_some_and(|t| t.status().live)
             }
             PaneAction::Zoom => self.pane_window(target).is_some_and(pane_header::can_zoom),
+            PaneAction::Ports => {
+                target.host == self.active
+                    && self.model().selected.as_ref() == Some(&target.session)
+            }
             _ => true,
         }
     }
@@ -65,6 +69,11 @@ impl Workspace {
     pub(super) fn pane_verb(&mut self, target: PaneTarget, action: PaneAction, tx: &mut Tx) {
         let key = (self.hosts[target.host].id, target.block.clone());
         match action {
+            PaneAction::Ports => {
+                if self.pane_verb_available(&target, action) {
+                    self.show_ports(Some(target.block));
+                }
+            }
             PaneAction::Copy => {
                 let text = self.terminals.get(&key).and_then(Term::copy_text);
                 if let Some(text) = text.filter(|t| !t.is_empty()) {

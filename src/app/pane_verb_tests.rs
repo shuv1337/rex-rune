@@ -187,6 +187,7 @@ fn the_pane_menu_lists_the_verbs_in_groups_and_marks_what_cannot_run() {
             ("Rename pane…", 2),
             ("Copy pane ID", 2),
             ("Download file…", 2),
+            ("Listening ports…", 2),
             ("Clear terminal", 3),
             ("Reset terminal", 3),
             ("Reconnect terminal", 3),

@@ -251,6 +251,33 @@ fn activity_view_arguments_have_commands_shortcut_rows_and_effective_hints() {
     }));
 }
 
+#[test]
+fn listening_ports_is_local_and_unbound_but_can_be_recorded() {
+    let (mut ws, _) = tabbed_workspace("split");
+    let action = "client.ports";
+    let spec = actions::find(action).unwrap();
+    assert!(
+        matches!(spec.remote(), Remote::Never(reason) if reason.contains("open dialogs and popups"))
+    );
+    assert!(spec.requires_person());
+    assert!(ws.shortcut_chords(action, &Value::Null).is_empty());
+    let reference = ws
+        .shortcut_rows()
+        .into_iter()
+        .find(|row| row.action == action)
+        .unwrap();
+    assert_eq!(reference.title, "Show listening ports");
+    assert!(reference.keys.is_empty());
+    ws.picker(false);
+    let command = ws
+        .entries()
+        .into_iter()
+        .find(|row| row.id.as_deref() == Some(action))
+        .unwrap();
+    assert_eq!(command.action.shortcut(), Some((action, Value::Null)));
+    assert!(command.enabled);
+}
+
 /// The surfaces that only exist once every part is in: the tab menu with its destructive
 /// group, the sidebar's tab menu, Commands at its Pane and App groups and as a search, the
 /// Pane headers list over Settings, Shortcuts with every action bound, and About. Drawn for

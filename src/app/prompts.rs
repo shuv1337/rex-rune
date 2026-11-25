@@ -350,11 +350,11 @@ impl Workspace {
         ) && self.prompts.open_prompt().is_some()
     }
 
-    /// Synchronize the defense-in-depth `prompt_open` flag onto every terminal pane.
-    pub(super) fn sync_prompt_terminal_guard(&mut self) {
-        let open = self.is_prompt_open();
+    /// Keep direct terminal commands inert while a prompt or Ports owns the keyboard.
+    pub(super) fn sync_panel_terminal_guard(&mut self) {
+        let open = self.is_prompt_open() || self.ports_target().is_some();
         for term in self.terminals.values_mut() {
-            term.prompt_open = open;
+            term.panel_blocks_input = open;
         }
     }
 
@@ -375,7 +375,7 @@ impl Workspace {
                 self.close_prompt_panel(None);
             }
         }
-        self.sync_prompt_terminal_guard();
+        self.sync_panel_terminal_guard();
     }
 
     /// Waiting prompts in arrival order (excluding any currently open modal prompt).
@@ -465,7 +465,7 @@ impl Workspace {
             self.prompts.open = None;
             self.close_prompt_panel(tx);
         }
-        self.sync_prompt_terminal_guard();
+        self.sync_panel_terminal_guard();
     }
 
     fn close_prompt_panel(&mut self, tx: Option<&mut Tx>) {
@@ -473,7 +473,7 @@ impl Workspace {
             self.panel.as_ref().map(|p| &p.kind),
             Some(PanelKind::Prompt(_))
         ) {
-            self.sync_prompt_terminal_guard();
+            self.sync_panel_terminal_guard();
             return;
         }
         if let Some(mut back) = self.panel.as_mut().and_then(|p| p.back.take()) {
@@ -487,7 +487,7 @@ impl Workspace {
                 tx.blur();
             }
         }
-        self.sync_prompt_terminal_guard();
+        self.sync_panel_terminal_guard();
     }
 
     /// Open a queued prompt by key. If Settings is open, `open_panel` preserves it in `back`
@@ -510,7 +510,7 @@ impl Workspace {
         self.forwarded.clear();
         self.open_panel(PanelKind::Prompt(key.clone()), &accessible_title, &[]);
         self.prompts.open = Some(key);
-        self.sync_prompt_terminal_guard();
+        self.sync_panel_terminal_guard();
         true
     }
 
@@ -591,7 +591,7 @@ impl Workspace {
         }
 
         if !connected {
-            self.sync_prompt_terminal_guard();
+            self.sync_panel_terminal_guard();
             return;
         }
 
@@ -696,7 +696,7 @@ impl Workspace {
                 }
             }
         }
-        self.sync_prompt_terminal_guard();
+        self.sync_panel_terminal_guard();
     }
 
     fn remove_prompt(&mut self, key: &PromptKey, tx: Option<&mut Tx>) -> bool {
