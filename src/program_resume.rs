@@ -4,15 +4,17 @@ use icu_properties::{
     CodePointMapData, CodePointSetData,
     props::{DefaultIgnorableCodePoint, GeneralCategory},
 };
-use serde::{Deserialize, Serialize, de::SeqAccess};
+use serde::{Deserialize, de::SeqAccess};
 use serde_json::value::RawValue;
-use std::{fmt, time::SystemTime};
+use std::{collections::VecDeque, fmt, time::SystemTime};
 
 pub const MIN_API_REVISION: u32 = 24;
 pub const MAX_RECORDS_PER_BLOCK: usize = 16;
 pub const MAX_RECORDS_PER_HOST: usize = 1024;
 const MAX_NAME: usize = 128;
 const MAX_CWD: usize = 1024;
+const MAX_KEY_OWNER_NAME: usize = 256;
+const MAX_KEY_REPORTED_AT: usize = 64;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResumeSnapshot {
@@ -53,7 +55,7 @@ pub enum Trust {
     Untrusted(Reason),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
     Wrapped,
@@ -94,9 +96,9 @@ impl Reason {
     }
 }
 
-// This envelope is the first typed decode of both an event and a detached reply. Unknown
-// fields are skipped by serde, not captured in a Value or a flatten/untagged map.
-#[derive(Deserialize, Serialize)]
+// The same metadata schema handles events and detached replies. Replies never go
+// through a Value or a flatten/untagged map that could retain launch arguments.
+#[derive(Deserialize)]
 pub(crate) struct WireSnapshot {
     #[serde(deserialize_with = "read_records")]
     records: Records,
@@ -104,15 +106,12 @@ pub(crate) struct WireSnapshot {
     truncated: bool,
 }
 
-#[derive(Serialize)]
-#[serde(transparent)]
 struct Records {
     items: Vec<WireRecord>,
-    #[serde(skip)]
     capped: bool,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct WireRecord {
     owner: WireOwner,
     program: String,
@@ -124,15 +123,11 @@ struct WireRecord {
     trusted: Option<bool>,
     #[serde(default, deserialize_with = "read_optional")]
     rule: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "read_reason",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "read_reason")]
     untrusted_reason: Option<Reason>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct WireOwner {
     pid: u64,
     #[serde(default)]
@@ -170,10 +165,18 @@ fn read_records<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Records, D::Er
 
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Records, A::Error> {
             let mut items = Vec::new();
+            let mut capped = false;
             while let Some(raw) = seq.next_element::<&RawValue>()? {
                 let Ok(record) = serde_json::from_str::<WireRecord>(raw.get()) else {
                     continue;
                 };
+                // Keep the identity raw, but do not keep unbounded text in a key.
+                if record.owner.name.len() > MAX_KEY_OWNER_NAME
+                    || record.reported_at.len() > MAX_KEY_REPORTED_AT
+                {
+                    capped = true;
+                    continue;
+                }
                 if items.len() == MAX_RECORDS_PER_BLOCK {
                     while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
                     return Ok(Records {
@@ -183,10 +186,7 @@ fn read_records<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Records, D::Er
                 }
                 items.push(record);
             }
-            Ok(Records {
-                items,
-                capped: false,
-            })
+            Ok(Records { items, capped })
         }
     }
 
@@ -229,13 +229,6 @@ impl WireSnapshot {
             truncated: self.truncated || self.records.capped,
         }
     }
-
-    /// Strip fields outside the metadata schema before the SDK builds its generic event payload.
-    pub(crate) fn redact_event(raw: &RawValue) -> Option<Self> {
-        let mut wire: Self = serde_json::from_str(raw.get()).ok()?;
-        wire.truncated |= wire.records.capped;
-        Some(wire)
-    }
 }
 
 impl ResumeSnapshot {
@@ -250,11 +243,18 @@ impl ResumeSnapshot {
 /// Expose invisible or misleading code points. Limit the escaped text, keeping both ends
 /// and never cutting a visible escape in half. The limit counts Unicode scalars, not bytes.
 pub fn escape(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     let units = || {
-        text.char_indices().map(|(i, c)| {
+        text.chars().scan(true, |after_escape, c| {
             use GeneralCategory as Cat;
             let category = CodePointMapData::<Cat>::new().get(c);
-            if c == '\\' {
+            let mark = matches!(
+                category,
+                Cat::NonspacingMark | Cat::SpacingMark | Cat::EnclosingMark
+            );
+            let unit = if c == '\\' {
                 Escape::Backslash
             } else if c.is_control()
                 || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
@@ -267,54 +267,77 @@ pub fn escape(text: &str, max: usize) -> String {
                         | Cat::Unassigned
                 )
                 || (c != ' ' && c.is_whitespace())
-                || (i == 0
-                    && matches!(
-                        category,
-                        Cat::NonspacingMark | Cat::SpacingMark | Cat::EnclosingMark
-                    ))
+                || (*after_escape && mark)
                 || c == '\u{2800}'
             // Braille blank is assigned and visibly empty.
             {
                 Escape::Unicode(c)
+            } else if mark {
+                Escape::Mark(c)
             } else {
                 Escape::Plain(c)
-            }
+            };
+            *after_escape = matches!(unit, Escape::Unicode(_) | Escape::Backslash);
+            Some(unit)
         })
     };
-    let take = |iter: &mut dyn Iterator<Item = Escape>, limit| {
-        let mut used = 0;
-        iter.take_while(move |unit| {
-            used += unit.len();
-            used <= limit
-        })
-        .collect::<Vec<_>>()
-    };
+    let prefix_limit = max / 2;
+    let mut prefix_end = 0;
     let mut used = 0;
     let mut out = String::new();
     for unit in units() {
         used += unit.len();
         if used > max {
-            if max == 0 {
-                break;
-            }
-            out.clear();
-            let half = max / 2;
-            for unit in take(&mut units(), half) {
-                unit.push(&mut out);
-            }
+            out.truncate(prefix_end);
             out.push('…');
-            for unit in take(&mut units().rev(), max - half - 1).into_iter().rev() {
-                unit.push(&mut out);
-            }
+            push_tail(&mut out, units(), max - prefix_limit - 1);
             break;
         }
         unit.push(&mut out);
+        if used <= prefix_limit {
+            prefix_end = out.len();
+        }
     }
     out
 }
 
+fn push_tail(out: &mut String, units: impl Iterator<Item = Escape>, limit: usize) {
+    let mut tail: VecDeque<Escape> = VecDeque::new();
+    let mut used = 0;
+    for unit in units {
+        used += unit.len();
+        tail.push_back(unit);
+        while used > limit {
+            used -= tail.pop_front().expect("tail exceeds limit").len();
+        }
+    }
+
+    // A cut can expose marks that previously followed a plain character. Escape
+    // that leading run so it cannot attach to the ellipsis or to a visible escape.
+    let extra_for_mark = |unit: &Escape| match unit {
+        Escape::Mark(c) => Some(Escape::Unicode(*c).len() - 1),
+        _ => None,
+    };
+    let mut extra: usize = tail.iter().map_while(extra_for_mark).sum();
+    while used + extra > limit {
+        let mark = tail.pop_front().expect("tail starts with a mark");
+        extra -= extra_for_mark(&mark).expect("tail starts with a mark");
+        used -= mark.len();
+    }
+    let mut leading = true;
+    for unit in tail {
+        if let (true, Escape::Mark(c)) = (leading, &unit) {
+            Escape::Unicode(*c).push(out);
+        } else {
+            leading = false;
+            unit.push(out);
+        }
+    }
+}
+
 enum Escape {
     Plain(char),
+    Mark(char),
     Unicode(char),
     Backslash,
 }
@@ -322,7 +345,7 @@ enum Escape {
 impl Escape {
     fn len(&self) -> usize {
         match self {
-            Self::Plain(_) => 1,
+            Self::Plain(_) | Self::Mark(_) => 1,
             Self::Backslash => 2,
             Self::Unicode(c) => match *c as u32 {
                 0..=0xffff => 8,
@@ -335,7 +358,7 @@ impl Escape {
     fn push(self, out: &mut String) {
         use fmt::Write;
         match self {
-            Self::Plain(c) => out.push(c),
+            Self::Plain(c) | Self::Mark(c) => out.push(c),
             Self::Backslash => out.push_str("\\\\"),
             Self::Unicode(c) => write!(out, "\\u{{{:04X}}}", c as u32).expect("write to String"),
         }

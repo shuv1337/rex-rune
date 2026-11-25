@@ -29,7 +29,7 @@ pub mod hosts;
 mod input;
 pub mod ports;
 mod prefetch;
-pub(crate) mod program_resume;
+mod program_resume;
 pub mod server_info;
 mod status_sweep;
 mod title_wake;

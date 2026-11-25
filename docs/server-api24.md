@@ -52,7 +52,9 @@ Replies and events are decoded as metadata. The reader does not use the
 generated response type, which describes the whole wire response including
 secret arguments. The client drops those arguments and server error text,
 escapes hostile display text and caps records at 16 per block and 1024 per
-host. It does not evaluate trust rules or execute anything.
+host. It skips records whose raw owner name exceeds 256 bytes or whose
+timestamp exceeds 64 bytes. It does not evaluate trust rules or execute
+anything.
 
 Events apply above a block's last sequence. Reads apply at or above it.
 Dropped events invalidate affected snapshots and only reread an open

@@ -42,8 +42,7 @@ fn snapshot(program: &str) -> Value {
         "owner": {"pid": 12, "name": "shell"},
         "program": program,
         "reported_at": "2026-11-25T22:31:01Z",
-        "chosen": true,
-        "command": [SENTINEL]
+        "chosen": true
     }]})
 }
 
@@ -105,7 +104,6 @@ impl Mock {
     async fn event(&mut self, raw: Value) {
         send(&mut self.ws, raw).await;
         let event = self.control.next_event().await.unwrap();
-        assert!(!format!("{event:?}").contains(SENTINEL));
         handle_event(
             event,
             &mut self.control,
@@ -152,7 +150,11 @@ impl Mock {
         req
     }
 
-    async fn send_response(&mut self, req: &Value, seq: u64, body: Value) {
+    async fn send_response(&mut self, req: &Value, seq: u64, mut body: Value) {
+        // Unlike the event, the read carries launch arguments, even if it arrives late.
+        if let Some(record) = body["records"].get_mut(0) {
+            record["command"] = json!([SENTINEL]);
+        }
         send(
             &mut self.ws,
             json!({"type": "response", "id": req["id"], "seq": seq, "payload": body}),
@@ -256,6 +258,7 @@ async fn events_ignore_layout_floor_and_only_wake_for_changed_records() {
     let mut mock = Mock::new(24, &[B1]).await;
     mock.state.view_seq.insert(SESSION.into(), 99);
     mock.watch(Some(SESSION)).await;
+    mock.wake.try_recv().unwrap();
     let old = mock.request(SESSION, B1).await;
     mock.event(report(3, SESSION, B1, snapshot("first"))).await;
     assert_eq!(mock.label(B1), "first");
@@ -267,7 +270,7 @@ async fn events_ignore_layout_floor_and_only_wake_for_changed_records() {
     mock.send_response(&old, 2, snapshot("old")).await;
     mock.finish().await;
     assert_eq!(mock.label(B1), "first");
-    assert!(mock.wake.try_recv().is_err());
+    mock.wake.try_recv().unwrap(); // The stale reply still clears the reading mark.
     mock.watch(None).await;
     mock.watch(Some(SESSION)).await;
     let tied = mock.request(SESSION, B1).await;
@@ -346,10 +349,12 @@ async fn timeout_does_not_erase_a_newer_event() {
     mock.watch(Some(SESSION)).await;
     let late = mock.request(SESSION, B1).await;
     mock.event(report(2, SESSION, B1, snapshot("live"))).await;
+    mock.wake.try_recv().unwrap();
     tokio::time::advance(Duration::from_secs(8)).await;
     mock.finish().await;
     assert_eq!(mock.label(B1), "live");
     assert!(mock.model().program_resume_reading.is_empty());
+    mock.wake.try_recv().unwrap();
     mock.only_fence().await;
     mock.send_response(&late, 3, snapshot("too late")).await;
     assert_eq!(mock.label(B1), "live");
@@ -364,6 +369,7 @@ async fn unsupported_is_per_connection_without_disconnect_or_further_reads() {
         mock.request(SESSION, B2).await;
         mock.event(report(2, SESSION, B1, snapshot("keep event")))
             .await;
+        mock.wake.try_recv().unwrap();
         send(
             &mut mock.ws,
             json!({"type":"response", "id":unsupported["id"],"seq":1,
@@ -372,6 +378,7 @@ async fn unsupported_is_per_connection_without_disconnect_or_further_reads() {
         .await;
         mock.flush().await;
         mock.finish().await;
+        mock.wake.try_recv().unwrap();
         mock.watch(None).await;
         mock.watch(Some(SESSION)).await;
         mock.only_fence().await;
@@ -380,6 +387,61 @@ async fn unsupported_is_per_connection_without_disconnect_or_further_reads() {
         assert!(model.program_resume_reading.is_empty() && model.notice.is_none());
         assert_eq!(mock.label(B1), "keep event");
     }
+}
+
+#[tokio::test]
+async fn failed_read_wakes_without_a_snapshot() {
+    let mut mock = Mock::new(24, &[B1]).await;
+    mock.watch(Some(SESSION)).await;
+    let failed = mock.request(SESSION, B1).await;
+    mock.wake.try_recv().unwrap();
+    mock.send_response(&failed, 2, json!({"records": "invalid"}))
+        .await;
+    mock.finish().await;
+    mock.wake.try_recv().unwrap();
+    let model = mock.model();
+    assert!(model.program_resume_reading.is_empty());
+    assert!(model.program_resume.is_empty());
+    assert!(!model.program_resume_unsupported);
+}
+
+#[tokio::test]
+async fn identical_and_ineligible_replies_wake_to_clear_reading() {
+    for still_eligible in [true, false] {
+        let mut mock = Mock::new(24, &[B1]).await;
+        mock.event(report(2, SESSION, B1, snapshot("unchanged")))
+            .await;
+        mock.watch(Some(SESSION)).await;
+        let request = mock.request(SESSION, B1).await;
+        mock.wake.try_recv().unwrap();
+        if !still_eligible {
+            mock.shared.model.lock().unwrap().selected = Some(OTHER.into());
+        }
+        mock.send_response(&request, 2, snapshot("unchanged")).await;
+        mock.finish().await;
+        mock.wake.try_recv().unwrap();
+        assert_eq!(mock.label(B1), "unchanged");
+        assert!(mock.model().program_resume_reading.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_named_drop_wakes_when_it_cancels_a_read_without_a_snapshot() {
+    let mut mock = Mock::new(24, &[B1]).await;
+    mock.watch(Some(SESSION)).await;
+    mock.request(SESSION, B1).await;
+    mock.wake.try_recv().unwrap();
+    mock.shared.model.lock().unwrap().selected = Some(OTHER.into());
+    mock.event(
+        json!({"type": "event", "seq": 5, "payload": {"type": "event_dropped",
+        "payload": {"event_type": "block_event", "block_event_name": program_resume::EVENT,
+                    "session_id": SESSION, "block_id": B1}}}),
+    )
+    .await;
+    mock.wake.try_recv().unwrap();
+    assert!(mock.model().program_resume_reading.is_empty());
+    assert!(mock.model().program_resume.is_empty());
+    mock.only_fence().await;
 }
 
 #[tokio::test]

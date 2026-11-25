@@ -112,9 +112,9 @@ fn caps_records_and_escaped_names_without_losing_raw_identity() {
         long[field] = json!(format!("start{}end", "\u{202e}".repeat(130)));
     }
     long["trusted"] = json!(true);
-    long["owner"]["name"] = json!("x".repeat(400));
+    long["owner"]["name"] = json!("x".repeat(240));
     let mut extra = long.clone();
-    extra["owner"]["name"] = json!(format!("{}y{}", "x".repeat(200), "x".repeat(199)));
+    extra["owner"]["name"] = json!(format!("{}y{}", "x".repeat(120), "x".repeat(119)));
     let mut snap = parse([vec![long.clone(), extra], vec![long; 20]].concat());
     assert!(snap.truncated);
     assert_eq!(snap.records.len(), MAX_RECORDS_PER_BLOCK);
@@ -134,6 +134,26 @@ fn caps_records_and_escaped_names_without_losing_raw_identity() {
     }
     snap.apply_host_budget(3);
     assert!(snap.truncated && snap.records.len() == 3);
+}
+
+#[test]
+fn oversized_raw_key_fields_skip_the_record_and_mark_truncation() {
+    let mut limit = record();
+    limit["owner"]["name"] = json!("é".repeat(128));
+    limit["reported_at"] = json!("t".repeat(64));
+    let at_limit = parse(vec![limit.clone()]);
+    assert_eq!(at_limit.records.len(), 1);
+    assert!(!at_limit.truncated);
+
+    let mut oversized_owner = limit.clone();
+    oversized_owner["owner"]["name"] = json!("é".repeat(129));
+    let mut oversized_time = limit.clone();
+    oversized_time["reported_at"] = json!("t".repeat(65));
+    for oversized in [oversized_owner, oversized_time] {
+        let snap = parse(vec![oversized, limit.clone()]);
+        assert_eq!(snap.records, at_limit.records);
+        assert!(snap.truncated);
+    }
 }
 
 #[test]
@@ -157,6 +177,18 @@ fn escape_exposes_invisibles_and_never_splits_an_escape() {
     assert_eq!(escape("abc\\def", 6), "abc…ef");
     assert_eq!(escape("\u{202e}", 1), "…");
     assert_eq!(escape("abc", 0), "");
+}
+
+#[test]
+fn escape_keeps_marks_off_visible_escapes_and_cut_markers() {
+    assert_eq!(escape("\u{200B}\u{0301}", 16), r"\u{200B}\u{0301}");
+    assert_eq!(escape("\\\u{0301}\u{0302}", 18), r"\\\u{0301}\u{0302}");
+    let tail = format!("1234567890paddingA{}z", "\u{0301}".repeat(8));
+    assert_eq!(escape(&tail, 20), r"1234567890…\u{0301}z");
+    assert_eq!(
+        escape("1234567890paddingA\u{0301}12345678", 20),
+        "1234567890…12345678"
+    );
 }
 
 #[test]

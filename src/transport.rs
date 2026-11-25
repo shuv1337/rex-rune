@@ -148,72 +148,10 @@ impl Transport {
 }
 
 #[derive(Deserialize)]
-struct ControlFrame<'a> {
+struct ControlFrame {
     #[serde(rename = "type")]
     kind: String,
     id: Option<String>,
-    #[serde(borrow)]
-    seq: Option<&'a RawValue>,
-    #[serde(borrow)]
-    payload: Option<&'a RawValue>,
-}
-
-/// Keep even an unexpected secret field out of the SDK's generic Event and its Debug.
-fn redact_resume_event(frame: &ControlFrame<'_>) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Event<T> {
-        #[serde(rename = "type")]
-        kind: String,
-        payload: T,
-    }
-    #[derive(Deserialize)]
-    struct Session<'a> {
-        session_id: String,
-        #[serde(borrow)]
-        event: Event<Block<'a>>,
-    }
-    #[derive(Deserialize)]
-    struct Block<'a> {
-        creator_name: String,
-        name: String,
-        block_id: Option<String>,
-        #[serde(borrow)]
-        payload: Option<&'a RawValue>,
-    }
-
-    if frame.kind != "event" {
-        return None;
-    }
-    let event: Event<Session<'_>> = serde_json::from_str(frame.payload?.get()).ok()?;
-    let session = event.payload;
-    let block = session.event.payload;
-    if event.kind != "session_event"
-        || session.event.kind != "block_event"
-        || block.creator_name != crate::connection::activity::TERMINAL
-        || block.name != crate::connection::program_resume::EVENT
-    {
-        return None;
-    }
-    let payload = block
-        .payload
-        .and_then(crate::program_resume::WireSnapshot::redact_event);
-    let seq = frame
-        .seq
-        .and_then(|seq| serde_json::from_str::<u64>(seq.get()).ok())?;
-    Some(
-        serde_json::json!({
-            "type": "event", "seq": seq, "payload": {
-                "type": "session_event", "payload": {
-                    "session_id": session.session_id,
-                    "event": {"type": "block_event", "payload": {
-                        "creator_name": block.creator_name, "name": block.name,
-                        "block_id": block.block_id, "payload": payload
-                    }}
-                }
-            }
-        })
-        .to_string(),
-    )
 }
 
 #[derive(Deserialize)]
@@ -234,6 +172,13 @@ pub(crate) fn detached_result_with_seq<T: serde::de::DeserializeOwned>(
     text: &str,
 ) -> rexrs::Result<rexrs::Reply<T>> {
     #[derive(serde::Deserialize)]
+    struct Response {
+        #[serde(default)]
+        seq: u64,
+        payload: Option<serde_json::Value>,
+        error: Option<Error>,
+    }
+    #[derive(serde::Deserialize)]
     struct Error {
         code: String,
         #[serde(default)]
@@ -241,13 +186,13 @@ pub(crate) fn detached_result_with_seq<T: serde::de::DeserializeOwned>(
         #[serde(default)]
         message: String,
     }
-    let reply: DetachedEnvelope<'_, Error> = serde_json::from_str(text)?;
+    let reply: Response = serde_json::from_str(text)?;
     if let Some(error) = reply.error {
         return Err(rexrs::ApiError::from_wire(&error.code, error.status, error.message).into());
     }
     Ok(rexrs::Reply {
         seq: reply.seq,
-        value: serde_json::from_str(reply.payload.map_or("{}", RawValue::get))?,
+        value: serde_json::from_value(reply.payload.unwrap_or_else(|| serde_json::json!({})))?,
     })
 }
 
@@ -262,21 +207,17 @@ impl rexrs::AsyncTransport for Transport {
         loop {
             match self.socket.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(frame) = serde_json::from_str::<ControlFrame<'_>>(&text) {
-                        if frame.kind == "response"
-                            && let Some(id) =
-                                frame.id.as_deref().filter(|id| id.starts_with("detached:"))
-                        {
-                            // A cancelled or timed-out read still owns its response ID.
-                            // Never hand the late payload to the SDK's generic parser.
-                            if let Some(reply) = self.detached.remove(id) {
-                                let _ = reply.send(text.to_string());
-                            }
-                            continue;
+                    if let Ok(frame) = serde_json::from_str::<ControlFrame>(&text)
+                        && frame.kind == "response"
+                        && let Some(id) =
+                            frame.id.as_deref().filter(|id| id.starts_with("detached:"))
+                    {
+                        // A cancelled or timed-out read still owns its response ID.
+                        // Never hand the late payload to the SDK's generic parser.
+                        if let Some(reply) = self.detached.remove(id) {
+                            let _ = reply.send(text.to_string());
                         }
-                        if let Some(redacted) = redact_resume_event(&frame) {
-                            return Ok(rexrs::transport::Frame::Text(redacted));
-                        }
+                        continue;
                     }
                     return Ok(rexrs::transport::Frame::Text(text.to_string()));
                 }

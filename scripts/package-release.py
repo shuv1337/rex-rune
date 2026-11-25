@@ -190,7 +190,7 @@ def main():
                 "Replaces: rex-linux\nConflicts: rex-linux\nProvides: rex-linux\n"
                 "Homepage: https://github.com/shuv1337/rex-rune\n"
                 "Description: Native Linux client for existing Rex terminal servers\n"
-                " Unofficial Rune-based client. Requires a Rex server with API revisions 10-21.\n"
+                " Unofficial Rune-based client. Requires Rex Server API revision 10 through 24.\n"
             )
             package = dist / f"rex-rune_{version}_{deb_arch}.deb"
             run("dpkg-deb", "--root-owner-group", "--build", str(deb), str(package), env={**os.environ, "SOURCE_DATE_EPOCH": str(epoch)})

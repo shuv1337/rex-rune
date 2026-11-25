@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::{collections::VecDeque, time::Duration};
 use tokio::{sync::oneshot, time::Sleep};
 
-pub(crate) const EVENT: &str = "program_resume_changed";
+pub(super) const EVENT: &str = "program_resume_changed";
 const METHOD: &str = "com.superlogical.terminal.program_resume_records";
 const IN_FLIGHT: usize = 2;
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
@@ -65,14 +65,19 @@ impl Reader {
         }
     }
 
-    fn clear(&mut self, model: &mut HostModel) {
+    fn clear(&mut self, model: &mut HostModel) -> bool {
         *self = Self::default();
+        let changed = !model.program_resume_reading.is_empty();
         model.program_resume_reading.clear();
+        changed
     }
 
-    fn enqueue(&mut self, model: &mut HostModel, session: &str, block: String) {
+    fn enqueue(&mut self, model: &mut HostModel, session: &str, block: String) -> bool {
         if model.program_resume_reading.insert(block.clone()) {
             self.queue.push_back((session.to_owned(), block));
+            true
+        } else {
+            false
         }
     }
 
@@ -81,12 +86,14 @@ impl Reader {
         model: &mut HostModel,
         session: &str,
         added: impl IntoIterator<Item = String>,
-    ) {
+    ) -> bool {
+        let mut changed = false;
         if self.watched.as_deref() == Some(session) && eligible(model, session) {
             for block in added {
-                self.enqueue(model, session, block);
+                changed |= self.enqueue(model, session, block);
             }
         }
+        changed
     }
 
     pub(super) async fn pump(
@@ -104,7 +111,11 @@ impl Reader {
                     || !eligible(&model, &session)
                     || !has_block(&model, &session, &block)
                 {
-                    model.program_resume_reading.remove(&block);
+                    let changed = model.program_resume_reading.remove(&block);
+                    drop(model);
+                    if changed {
+                        shared.wake.notify();
+                    }
                     continue;
                 }
             }
@@ -202,11 +213,14 @@ fn has_block(model: &HostModel, session: &str, block: &str) -> bool {
 }
 
 pub(super) fn reconcile_selected(shared: &Shared, state: &mut ControlState) {
-    if let Some(session) = state.resume_reads.watched.as_deref() {
+    let changed = if let Some(session) = state.resume_reads.watched.as_deref() {
         let mut model = shared.model.lock().expect("host model");
-        if !eligible(&model, session) {
-            state.resume_reads.clear(&mut model);
-        }
+        !eligible(&model, session) && state.resume_reads.clear(&mut model)
+    } else {
+        false
+    };
+    if changed {
+        shared.wake.notify();
     }
 }
 
@@ -219,21 +233,29 @@ pub(super) async fn watch(
     if control.welcome().api_revision < MIN_API_REVISION {
         return Ok(());
     }
-    {
+    let changed = {
         let mut model = shared.model.lock().expect("host model");
-        let Some(session) = session else {
-            state.resume_reads.clear(&mut model);
-            return Ok(());
-        };
-        if state.resume_reads.watched.as_deref() == Some(&session) || !eligible(&model, &session) {
-            return Ok(());
+        if let Some(session) = session {
+            // A watch sent before the selected view arrives is dropped. The UI must resend it
+            // when the view arrives.
+            if state.resume_reads.watched.as_deref() == Some(&session)
+                || !eligible(&model, &session)
+            {
+                return Ok(());
+            }
+            let blocks: Vec<_> = view_blocks(&model.views[&session]).collect();
+            let mut changed = state.resume_reads.clear(&mut model);
+            state.resume_reads.watched = Some(session.clone());
+            changed |= state
+                .resume_reads
+                .enqueue_new_watched_blocks(&mut model, &session, blocks);
+            changed
+        } else {
+            state.resume_reads.clear(&mut model)
         }
-        let blocks: Vec<_> = view_blocks(&model.views[&session]).collect();
-        state.resume_reads.clear(&mut model);
-        state.resume_reads.watched = Some(session.clone());
-        state
-            .resume_reads
-            .enqueue_new_watched_blocks(&mut model, &session, blocks);
+    };
+    if changed {
+        shared.wake.notify();
     }
     state.resume_reads.pump(control, shared).await
 }
@@ -253,7 +275,7 @@ pub(super) fn apply_event(
     if !has_block(&model, session, block) {
         return;
     }
-    // Transport already stripped the event to its typed metadata envelope.
+    // The server sends only metadata in events. Use the same typed parser as for replies.
     let Some(wire) = serde_json::to_string(body)
         .ok()
         .and_then(|text| serde_json::from_str::<WireSnapshot>(&text).ok())
@@ -270,25 +292,23 @@ pub(super) fn apply_event(
 
 pub(super) fn record_reply(shared: &Shared, state: &mut ControlState, finished: FinishedRead) {
     let mut model = shared.model.lock().expect("host model");
-    model.program_resume_reading.remove(&finished.block);
-    if !eligible(&model, &finished.session)
-        || !has_block(&model, &finished.session, &finished.block)
+    let mut changed = model.program_resume_reading.remove(&finished.block);
+    if eligible(&model, &finished.session) && has_block(&model, &finished.session, &finished.block)
     {
-        return;
+        let last = state.resume_seq.get(&finished.block).copied().unwrap_or(0);
+        match finished.outcome {
+            ReplyOutcome::Snapshot { seq, snapshot } if seq >= last => {
+                changed |= store_snapshot(&mut model, &finished.block, snapshot);
+                state.resume_seq.insert(finished.block, seq);
+            }
+            ReplyOutcome::Unsupported => {
+                changed |= !model.program_resume_unsupported;
+                model.program_resume_unsupported = true;
+                changed |= state.resume_reads.clear(&mut model);
+            }
+            _ => {}
+        }
     }
-    let last = state.resume_seq.get(&finished.block).copied().unwrap_or(0);
-    let changed = match finished.outcome {
-        ReplyOutcome::Snapshot { seq, snapshot } if seq >= last => {
-            state.resume_seq.insert(finished.block.clone(), seq);
-            store_snapshot(&mut model, &finished.block, snapshot)
-        }
-        ReplyOutcome::Unsupported => {
-            model.program_resume_unsupported = true;
-            state.resume_reads.clear(&mut model);
-            false
-        }
-        _ => false,
-    };
     drop(model);
     if changed {
         shared.wake.notify();
@@ -342,8 +362,8 @@ pub(super) async fn handle_dropped(
             *last = seq;
             state.resume_reads.cancel_block(&block);
             changed |= model.program_resume.remove(&block).is_some();
-            model.program_resume_reading.remove(&block);
-            state
+            changed |= model.program_resume_reading.remove(&block);
+            changed |= state
                 .resume_reads
                 .enqueue_new_watched_blocks(&mut model, &id, [block]);
         }

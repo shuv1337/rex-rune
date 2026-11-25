@@ -5,7 +5,7 @@ Usage: program-resume-private.py <program_resume_probe> <API-24 rex> [<API-21 re
 Requires Python websockets >= 15, Bash and a C compiler. Build the probe with
 cargo build --locked --no-default-features --example program_resume_probe.
 All state, sockets, report fixtures and logs live under a private directory
-within canonical TMPDIR (default /mnt/data/tmp) and are removed on exit.
+within canonical TMPDIR (or the system temporary directory) and are removed on exit.
 """
 import argparse
 import base64
@@ -377,21 +377,24 @@ def verify_live(probe, fixture):
         assert fixture.read_count() == 2, "passive events triggered a read"
         print("PASS [2] passive events deliver trusted and untrusted metadata", flush=True)
 
-        for revision in (21, 22, 23):
+        for revision in (21, 22):
             with ExitStack() as pinned_stack:
                 pinned_wire = Control(pinned_stack, fixture.sock, revision)
                 pinned_wire.call("session.attach", session_id=sid)
                 pinned_wire.records(sid, other, error="revision_too_low")
-                if revision == 23:
-                    before = fixture.read_count()
-                    with worker(probe, fixture, sid, 23) as (low, pinned):
-                        assert low["api_revision"] == 23
-                        assert not pinned("watch")["reading"]
-                        trigger(cycle, "hostile")
-                        assert pinned_wire.changed(other, "report")[0]["program"] == "my\u202eprog"
-                        snap = pinned("snapshot")
-                        assert snap["connected"] and not snap["snapshots"] and not snap["unsupported"]
-                    assert fixture.read_count() == before, "pinned worker sent a forbidden read"
+        with ExitStack() as pinned_stack:
+            pinned_wire = Control(pinned_stack, fixture.sock, 23)
+            pinned_wire.call("session.attach", session_id=sid)
+            pinned_wire.records(sid, other, error="revision_too_low")
+            before = fixture.read_count()
+            with worker(probe, fixture, sid, 23) as (low, pinned):
+                assert low["api_revision"] == 23
+                assert not pinned("watch")["reading"]
+                trigger(cycle, "hostile")
+                assert pinned_wire.changed(other, "report")[0]["program"] == "my\u202eprog"
+                snap = pinned("snapshot")
+                assert snap["connected"] and not snap["snapshots"] and not snap["unsupported"]
+            assert fixture.read_count() == before, "pinned worker sent a forbidden read"
         assert control.changed(other, "report")[0]["program"] == "my\u202eprog"
         assert rows(run("snapshot"), other)[0]["program"] == r"my\u{202E}prog"
         print("PASS [3] pinned API 23 sends zero reads and ignores events; API 24 escapes bidi text",
@@ -512,9 +515,12 @@ def main():
     parser.add_argument("rex24", type=Path)
     parser.add_argument("rex21", type=Path, nargs="?")
     args = parser.parse_args()
-    base = Path(os.environ.get("TMPDIR", "/mnt/data/tmp")).resolve(strict=True)
-    if not base.is_relative_to("/mnt/data/tmp"):
-        parser.error("use canonical TMPDIR under /mnt/data/tmp")
+    try:
+        base = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()).resolve(strict=True)
+    except OSError:
+        parser.error("the temporary directory must exist")
+    if not base.is_dir():
+        parser.error("the temporary path must be a directory")
     probe = args.probe.resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="rex-resume-", dir=base) as work:
         fixture = Fixture(Path(work), args.rex24.resolve(strict=True))
