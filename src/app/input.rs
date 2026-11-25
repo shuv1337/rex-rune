@@ -328,6 +328,11 @@ pub fn rename_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
 
 pub const TERMINAL_FOCUS: &str = "window";
 
+/// Leave a key passed by the terminal focus handler to the system, not a second dispatch.
+pub fn on_window_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    tx.focused() != Some(TERMINAL_FOCUS) && on_key(s, ev, tx)
+}
+
 pub fn on_physical_input(s: &mut Workspace, event: &rune::PhysicalInput, _: &mut Tx) -> bool {
     use rune::PhysicalInput;
     match event {
@@ -428,7 +433,7 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
     .identity();
     // A repeat reaches the PTY only when its press did: a key held across an automatic
     // copy-mode exit (or popup/dialog close) must never leak repeats to the PTY.
-    if repeat && !s.forwarded.contains(&identity) {
+    if repeat && !s.forwarded.contains_key(&identity) {
         return true;
     }
     if tx.focused().is_some_and(|key| key != TERMINAL_FOCUS) {
@@ -443,7 +448,8 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
     let composes = s.option_choice
         && tx.focused() == Some(TERMINAL_FOCUS)
         && code.is_some()
-        && s.composed_option.take() == code;
+        && s.composed_option.take() == code
+        && keys::is_option_text(ev);
     let payload = keys::payload(ev, code, base, action);
     if payload.is_some() {
         s.clear_focus_history_walk();
@@ -457,7 +463,7 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
     term.clear_selection();
     if let Some(mut payload) = payload {
         if composes {
-            keys::option_composed(&mut payload, ev);
+            keys::option_composed(&mut payload);
         }
         term.send(if prefix.is_empty() {
             Command::Key(payload)
@@ -468,7 +474,9 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
             }
         });
         s.last_keypress = Some(std::time::Instant::now());
-        s.forwarded.insert(identity);
+        if !repeat {
+            s.forwarded.insert(identity, composes);
+        }
     }
     true
 }
@@ -490,13 +498,16 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.forwarded.remove(&identity);
         return true;
     }
-    if !s.forwarded.remove(&identity) {
+    let Some(composed) = s.forwarded.remove(&identity) else {
         return consumed || s.in_copy_mode() || s.panel.is_none();
-    }
+    };
     if let Some(term) = s.active_terminal_mut()
         && term.status().live
-        && let Some(payload) = keys::payload(ev, code, base, Action::Release)
+        && let Some(mut payload) = keys::payload(ev, code, base, Action::Release)
     {
+        if composed {
+            keys::option_composed(&mut payload);
+        }
         term.send(Command::Key(payload));
     }
     true

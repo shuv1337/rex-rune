@@ -79,8 +79,8 @@ pub struct Workspace {
     pub drag: Option<DividerDrag>,
     pub layer_drag: Option<super::floating_drag::LayerDrag>,
     pub copy_mode: Option<super::copy_mode::Session>,
-    /// Keys whose press went to a terminal; only their releases follow.
-    pub forwarded: HashSet<super::bindings::Identity>,
+    /// Keys whose press went to a terminal, and whether Option composed that press.
+    pub forwarded: HashMap<super::bindings::Identity, bool>,
     pub bindings: super::bindings::State,
     pub local_keymap: rex_rune::keymap::Resolved,
     pub keymap_generation: u64,
@@ -300,7 +300,7 @@ impl Workspace {
             drag: None,
             layer_drag: None,
             copy_mode: None,
-            forwarded: HashSet::new(),
+            forwarded: HashMap::new(),
             bindings: Default::default(),
             local_keymap,
             keymap_generation: 0,

@@ -71,10 +71,11 @@ Xvfb/openbox and Rex sockets; no owner's services stopped. Times are Pacific.
    clear exit-on-close, and hold the reference through backend construction.
    All references are released; missing bus/library/schema/symbols return the
    existing `None` preference outcome. No signal disposition is changed.
-7. The separate zbus portal subscription now reports its end once to stderr:
+7. The original local patch made the separate zbus portal subscription report its end once to stderr:
    `Rune: desktop appearance updates unavailable; keeping the current appearance.`
    Its cached colour remains. This is a diagnostic, **not an in-window toast**,
    not notification-service success, and not a claim of automatic portal recovery.
+   The Rune upgrade to `983e33b9` dropped this local log override and kept upstream portal logging.
 8. Regression passes (`regression-after.log`, `native-bv5lywu0/`). Strengthened
    focus coverage to actually minimize/map/refocus the private window between
    checks; it passes again (`regression-focus-after.log`, `native-x6s6fdi0/`).
@@ -212,7 +213,8 @@ its private artifact directory under `~/.cache/agent-ws/rex-issue79/`; completed
   X11 keys produce independently checked PTY files before loss, during each absent
   period, after restart, and on fresh absent startup. Mapped GIO/dconf/GVfs required;
   no notification worker starts. Exactly **one** appearance-degradation diagnostic
-  per process; ordinary SIGTERM remains **-15**. An earlier native guard-only run
+  per process with the original local log override; ordinary SIGTERM remains **-15**.
+  The current fixture does not require that diagnostic. An earlier native guard-only run
   also passed (`native-1`), excluded from these final counts.
 - Independent opt-in notification-worker fixture: **1 passed**, only two fake
   service Notify calls (before/after restart), no replay of the lost note

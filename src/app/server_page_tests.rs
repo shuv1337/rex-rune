@@ -84,7 +84,7 @@ fn prepare(ws: &mut Workspace, size: (f32, f32)) {
 
 fn open(mut ws: Workspace, size: (f32, f32)) -> Runtime<Workspace> {
     prepare(&mut ws, size);
-    let mut rt = Runtime::new(ws, page_view, size, Env::new(true, 1.));
+    let mut rt = crate::app::fonts::test_runtime(ws, page_view, size, Env::new(true, 1.));
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
     rt
@@ -846,7 +846,8 @@ fn pair_largest_symbol_fits_both_sizes_and_keeps_black_white_in_every_theme() {
                 pair_report(&mut ws, 0, "available", &address);
                 prepare(&mut ws, size);
                 ws.pair_device();
-                let mut rt = Runtime::new(ws, page_view, size, Env::new(true, scale));
+                let mut rt =
+                    crate::app::fonts::test_runtime(ws, page_view, size, Env::new(true, scale));
                 settle(&mut rt);
                 assert_eq!(pair_data(&rt.state).symbol.as_ref().unwrap().size(), 57);
                 let code = rect(&rt, "pair-code");

@@ -895,7 +895,7 @@ fn floating_pane_menu_draw() {
     };
     let (w, h, compact, hidden, suffix) = capture_shape();
     let ws = capture_workspace(compact, hidden);
-    let mut rt = Runtime::new(ws, view, (w, h), Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, (w, h), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
     rt.update(|s, _| s.pane_menu("block:f".into(), None));
@@ -912,7 +912,7 @@ fn floating_commands_draw() {
     };
     let (w, h, compact, hidden, suffix) = capture_shape();
     let ws = capture_workspace(compact, hidden);
-    let mut rt = Runtime::new(ws, view, (w, h), Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, (w, h), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
     rt.update(|s, _| {
@@ -941,7 +941,7 @@ fn floating_layer_menu_draw() {
     };
     let (w, h, compact, hidden, suffix) = capture_shape();
     let ws = capture_workspace(compact, hidden);
-    let mut rt = Runtime::new(ws, view, (w, h), Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, (w, h), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
     rt.update(|s, tx| {

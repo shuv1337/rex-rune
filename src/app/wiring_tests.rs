@@ -367,7 +367,7 @@ fn the_merged_surfaces_draw() {
         );
         framed_terminal(&mut ws, "block:c", &sender, b"$ tail -f server.log");
         prepare(&mut ws);
-        let mut rt = Runtime::new(ws, view, (1024., 700.), Env::new(true, 2.));
+        let mut rt = crate::app::fonts::test_runtime(ws, view, (1024., 700.), Env::new(true, 2.));
         rt.on_key = Some(crate::app::input::on_key);
         for _ in 0..90 {
             rt.frame(1. / 60.);

@@ -624,7 +624,7 @@ fn settings_navigation_draws_at_normal_and_minimum_size() {
         let mut ws = workspace_hosts(2);
         ws.settings.ui_scale = scale;
         ws.perform(Intent::Settings, &mut rune::Tx::default());
-        let mut rt = Runtime::new(ws, view, size, Env::new(true, 2.));
+        let mut rt = crate::app::fonts::test_runtime(ws, view, size, Env::new(true, 2.));
         rt.state.logo = Some(logo.clone());
         rt.on_key = Some(crate::app::input::on_key);
         // Each runtime owns a different atlas and set of resident render caches.

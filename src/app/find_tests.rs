@@ -148,7 +148,7 @@ fn help(rt: &Runtime<Workspace>, key: &str) -> String {
 /// One pane, `block:a`, showing `output` in a terminal as wide as the pane.
 fn single(output: impl Fn(usize) -> Vec<u8>) -> (Runtime<Workspace>, Searched) {
     let (mut ws, _host) = tabbed_workspace("single");
-    let cols = columns(&ws);
+    let cols = headless_columns(&ws);
     let pane = Searched::new(&mut ws, "block:a", (cols as u16, 24), &output(cols));
     let mut rt = runtime(ws);
     settle(&mut rt);
@@ -157,8 +157,14 @@ fn single(output: impl Fn(usize) -> Vec<u8>) -> (Runtime<Workspace>, Searched) {
 
 /// The columns a single pane has in a 1024 pt window with the sidebar closed.
 fn columns(ws: &Workspace) -> usize {
-    let cell = term::metrics(ws.settings.font_size).cell;
+    let cell = ws.metrics().cell;
     ((1024. - 2. * ws.settings.pane_padding) / cell.0).floor() as usize
+}
+
+fn headless_columns(ws: &Workspace) -> usize {
+    let _fonts =
+        rune::text::with_fonts(rune_theme_opencode::FONTS, crate::app::fonts::TEST_FAMILIES);
+    columns(ws)
 }
 
 fn two_alphas(_: usize) -> Vec<u8> {
@@ -636,7 +642,7 @@ fn a_split_panes_bar_is_under_its_header_and_inside_its_card() {
     let (mut ws, _host) = tabbed_workspace("split");
     let mut left = Searched::new(&mut ws, "block:b", (40, 10), b"alpha left\r\n$ ");
     let _right = Searched::new(&mut ws, "block:c", (40, 10), b"alpha right\r\n$ ");
-    let mut rt = runtime(ws);
+    let mut rt = runtime_at(ws, (1025.5, 700.));
     settle(&mut rt);
     ctrl_shift(&mut rt, 'f');
     type_text(&mut rt, "alpha");
@@ -654,7 +660,10 @@ fn a_split_panes_bar_is_under_its_header_and_inside_its_card() {
     assert!(bar[1] >= header[1] + header[3], "below the header row");
     let (_, apron) = bar_on_rows(&rt, "block:b");
     assert!((apron[1] - grid[1]).abs() < 0.01, "on the first rows");
-    assert!(apron[0] + apron[2] <= grid[0] + grid[2] + 0.01);
+    assert!(
+        (apron[0] + apron[2] - (grid[0] + grid[2])).abs() < 0.01,
+        "{apron:?} meets the grid's edge {grid:?}"
+    );
     assert!((bar[0] + bar[2] - (grid[0] + grid[2] - find::INSET)).abs() < 0.01);
     assert_eq!(bar[2], find::WIDTH.min(grid[2] - 2. * find::INSET));
     // The match is at the left of the first row, clear of the bar.
@@ -693,9 +702,7 @@ fn a_reconnecting_panes_bar_sits_under_the_floating_strip() {
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
-/// The app's own fonts, for the camera: the terminal's text is then on the grid as in the
-/// app, where a headless runtime sets it in Inter. Loading them changes the cell size for the
-/// whole process, so take the pictures in a run of this test alone.
+/// The app's Plex Mono stack for the camera, instead of the headless system mono slot.
 fn app_fonts() -> rune::text::TextSystem {
     let fonts = crate::app::fonts::load("IBM Plex Mono", &[]);
     rune::text::TextSystem::new(fonts.files, fonts.families)
@@ -707,7 +714,7 @@ fn studio(ws: Workspace, camera: bool) -> Runtime<Workspace> {
     let mut rt = if camera {
         Runtime::with_text(ws, view, size, env, app_fonts())
     } else {
-        Runtime::new(ws, view, size, env)
+        crate::app::fonts::test_runtime(ws, view, size, env)
     };
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
@@ -730,7 +737,11 @@ fn the_find_bar_draws_its_states() {
         }
     };
     let (mut ws, _host) = tabbed_workspace("single");
-    let cols = columns(&ws);
+    let cols = if on {
+        columns(&ws)
+    } else {
+        headless_columns(&ws)
+    };
     let mut output = right_prompt(cols);
     output.extend_from_slice(
         b"ls -la ~/shuv\r\ntotal 24\r\ndrwxr-xr-x  shuv  staff  notes\r\n-rw-r--r--  shuv  staff  \x1b[34mshuv.toml\x1b[0m\r\n$ ",

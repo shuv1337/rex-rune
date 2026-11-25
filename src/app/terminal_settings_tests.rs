@@ -295,11 +295,19 @@ struct Pane {
 
 impl Pane {
     fn new(output: &[u8], prepare: impl FnOnce(&mut Workspace)) -> Self {
+        Self::with_runtime(output, prepare, runtime)
+    }
+
+    fn with_runtime(
+        output: &[u8],
+        prepare: impl FnOnce(&mut Workspace),
+        build: impl FnOnce(Workspace) -> Runtime<Workspace>,
+    ) -> Self {
         let (mut ws, _host) = tabbed_workspace("single");
         prepare(&mut ws);
         let (sender, sent) = flume::unbounded();
         let terminal = framed_terminal(&mut ws, "block:a", &sender, output);
-        let mut rt = runtime(ws);
+        let mut rt = build(ws);
         settle(&mut rt);
         let clipboard = rune::clipboard::memory();
         clipboard.set_text("sentinel");
@@ -319,7 +327,7 @@ impl Pane {
     /// The point `col` cells along the first row, at its middle height.
     fn at(&self, col: f32) -> (f32, f32) {
         let grid = rect(&self.rt, "grid:block:a");
-        let cell = term::metrics(self.rt.state.settings.font_size).cell;
+        let cell = self.rt.state.metrics().cell;
         (grid[0] + cell.0 * col, grid[1] + cell.1 / 2.)
     }
 
@@ -451,6 +459,36 @@ fn copy_on_selection_copies_a_finished_selection_once_its_text_arrives() {
     // sent selection events only, so nothing claimed it or resized it.
     assert!(pane.others.is_empty(), "{:?}", pane.others);
     std::fs::remove_file(&pane.rt.state.settings_path).ok();
+}
+
+#[test]
+fn fractional_cell_widths_preserve_the_pointer_half_for_selection() {
+    use rex_rune::settings::typography::SpacingUnit;
+    for mono in ["IBM Plex Mono", "Inter", "ui-monospace"] {
+        let families = ("Inter", mono);
+        let _fonts = rune::text::with_fonts(rune_theme_opencode::FONTS, families);
+        let mut pane = Pane::with_runtime(
+            b"alpha beta gamma",
+            |ws| {
+                ws.settings.terminal.copy_on_selection = true;
+                ws.settings.terminal.font.spacing_unit = SpacingUnit::Percent;
+                ws.settings.terminal.font.spacing = 1;
+            },
+            |ws| {
+                let text = rune::text::TextSystem::new(rune_theme_opencode::FONTS, families);
+                Runtime::with_text(ws, view, (1024., 700.), Env::new(true, 1.), text)
+            },
+        );
+        let width = pane.rt.state.metrics().cell.0;
+        assert_ne!(
+            width,
+            width.ceil(),
+            "{mono}: fixture needs a fractional width"
+        );
+        pane.drag(0., 4.);
+        pane.worker();
+        assert_eq!(pane.clipboard(), "alpha", "{mono}: {width} pt");
+    }
 }
 
 #[test]
@@ -639,10 +677,12 @@ fn a_character_option_composes_reaches_the_program_without_alt() {
                     ..Mods::default()
                 },
             };
-            let event = KeyEvent {
-                key: key.clone(),
-                mods,
+            let key = if pressed {
+                key.clone()
+            } else {
+                base.map_or_else(|| key.clone(), |c| Key::Text(c.to_string()))
             };
+            let event = KeyEvent { key, mods };
             rt.physical_key_input(input, event, base);
             for _ in 0..3 {
                 rt.frame(1. / 60.);
@@ -652,7 +692,11 @@ fn a_character_option_composes_reaches_the_program_without_alt() {
         assert_eq!(keys.len(), 2, "{text:?} {mods:?} sent {keys:?}");
         let (press, release) = (&keys[0], &keys[1]);
         assert_eq!(release["action"], "release");
-        assert!(!release["consumed_mods"].as_str().unwrap().contains("alt"));
+        assert_eq!(
+            release["consumed_mods"], press["consumed_mods"],
+            "a release as its press"
+        );
+        assert_eq!(release["text"], "", "the release does not type again");
         [&press["text"], &press["mods"], &press["consumed_mods"]]
             .map(|v| v.as_str().unwrap().to_owned())
     };
@@ -709,11 +753,169 @@ fn a_character_option_composes_reaches_the_program_without_alt() {
         !shortcut(&mut rt, Key::Text("F".into()), find),
         "find has the keyboard"
     );
+    let type_option = |rt: &mut Runtime<Workspace>, character: &str| {
+        use rune::{PhysicalInput, PhysicalKeyCode};
+        let text = character.to_owned();
+        // Rune's native editor inserts an Alt-modified text event only on macOS.
+        // Elsewhere feed the resulting character without the editor's Alt shortcut.
+        let editor_mods = if cfg!(target_os = "macos") {
+            option
+        } else {
+            Mods::default()
+        };
+        for pressed in [true, false] {
+            rt.physical_key_input(
+                PhysicalInput::Key {
+                    key: PhysicalKeyCode::KeyB,
+                    mods: option,
+                    pressed,
+                    repeat: false,
+                    text: pressed.then(|| text.clone()),
+                    consumed_mods: if pressed { option } else { Mods::default() },
+                },
+                KeyEvent {
+                    key: Key::Text(text.clone()),
+                    mods: editor_mods,
+                },
+                Some('b'),
+            );
+            rt.frame(1. / 60.);
+        }
+        assert!(sent_keys(&sent).is_empty(), "the field kept Option text");
+    };
+    type_option(&mut rt, "∫");
+    assert_eq!(
+        rt.state
+            .active_terminal()
+            .unwrap()
+            .search
+            .as_ref()
+            .unwrap()
+            .text,
+        "∫"
+    );
     assert!(
         shortcut(&mut rt, Key::Escape, Mods::default()),
         "Escape gives it back"
     );
     assert_eq!(send(&mut rt, Some("b"), option), ["b", "alt", ""]);
+    rt.update(|s, tx| s.perform(Intent::Settings, tx));
+    settle(&mut rt);
+    click(&mut rt, "settings-search");
+    assert!(!has(&rt, "gblock:b/ime"), "Settings has the keyboard");
+    type_option(&mut rt, "∫");
+    assert_eq!(rt.state.settings_nav.search.text, "∫");
+}
+
+#[test]
+fn mac_terminal_focus_keeps_keys_and_option_without_painting_a_window_ring() {
+    use rune::{PhysicalInput, PhysicalKeyCode as Code};
+    let (mut ws, _rx) = tabbed_workspace("single");
+    let (sender, sent) = flume::unbounded();
+    framed_terminal(&mut ws, "block:a", &sender, b"terminal");
+    ws.option_choice = true;
+    ws.settings.terminal.option_key = OptionKey::LeftAlt;
+    let mut rt = crate::app::fonts::test_runtime(
+        ws,
+        |s, cx| {
+            view(s, cx).child(
+                rune::el()
+                    .key("other-control")
+                    .role("navigation")
+                    .size(10., 10.)
+                    .absolute(1., 1.)
+                    .focusable(true),
+            )
+        },
+        (1024., 700.),
+        Env::new(true, 1.),
+    );
+    rt.on_key = Some(crate::app::input::on_window_key);
+    rt.poll = Some(crate::app::poll);
+    rt.set_full_keyboard_access(true);
+    settle(&mut rt);
+    let window = crate::app::input::TERMINAL_FOCUS;
+    assert!(element(&rt, window).focused);
+    let [x, y, w, h] = rect(&rt, window);
+    assert!(element(&rt, "other-control").focusable);
+    let option = Mods {
+        alt: true,
+        ..Mods::default()
+    };
+    let plain = Mods::default();
+    let shifted = Mods {
+        shift: true,
+        ..plain
+    };
+    for (key, mods, expected) in [
+        (Key::Text(" ".into()), plain, "space"),
+        (Key::Tab, plain, "tab"),
+        (Key::Tab, shifted, "tab"),
+        (Key::Function(6), plain, "f6"),
+        (Key::Left, plain, "arrow_left"),
+        (Key::Right, plain, "arrow_right"),
+        (Key::Up, plain, "arrow_up"),
+        (Key::Down, plain, "arrow_down"),
+        (Key::Home, plain, "home"),
+        (Key::End, plain, "end"),
+        (Key::PageUp, plain, "page_up"),
+        (Key::PageDown, plain, "page_down"),
+    ] {
+        rt.key(KeyEvent { key, mods });
+        rt.frame(1. / 60.);
+        let keys = sent_keys(&sent);
+        assert_eq!(keys.len(), 1, "{expected}: {keys:?}");
+        assert_eq!(keys[0]["key"], expected);
+        assert!(element(&rt, window).focused, "{expected} moved focus");
+    }
+    assert!(
+        element(&rt, window).focus_visible,
+        "keyboard navigation requests rings"
+    );
+    assert!(
+        !rt.instances
+            .iter()
+            .any(|q| q.params[0] == 3. && q.rect == [x - 3., y - 3., w + 6., h + 6.]),
+        "the terminal focus target must not paint the default window-sized ring"
+    );
+    rt.physical_input(PhysicalInput::Key {
+        key: Code::AltLeft,
+        mods: option,
+        pressed: true,
+        repeat: false,
+        text: None,
+        consumed_mods: plain,
+    });
+    rt.frame(0.);
+    assert!(rt.state.held_option.left);
+    click(&mut rt, "grid:block:a");
+    assert!(element(&rt, window).focused && rt.state.held_option.left);
+    let _ = sent_keys(&sent);
+    let mods = Mods {
+        shift: true,
+        ..option
+    };
+    rt.physical_key_input(
+        PhysicalInput::Key {
+            key: Code::KeyB,
+            mods,
+            pressed: true,
+            repeat: false,
+            text: Some("B".into()),
+            consumed_mods: mods,
+        },
+        KeyEvent {
+            key: Key::Text("B".into()),
+            mods,
+        },
+        Some('b'),
+    );
+    rt.frame(1. / 60.);
+    let keys = sent_keys(&sent);
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["mods"], "shift+alt");
+    assert_eq!(keys[0]["text"], "B");
+    assert_eq!(keys[0]["consumed_mods"], "shift");
 }
 
 #[test]
@@ -844,7 +1046,10 @@ fn one_option_key_alone_sends_alt_and_the_other_composes() {
             _ => panic!("{key:?} sent {keys:?}"),
         };
         assert_eq!(release["action"], "release");
-        assert!(!release["consumed_mods"].as_str().unwrap().contains("alt"));
+        assert_eq!(
+            release["consumed_mods"], press["consumed_mods"],
+            "a release as its press"
+        );
         let s = |k: &str| press[k].as_str().unwrap().to_owned();
         let composing = press["composing"].as_bool().unwrap();
         Some([
@@ -887,18 +1092,39 @@ fn one_option_key_alone_sends_alt_and_the_other_composes() {
         };
         let big = send(&mut rt, text("B"), Code::KeyB, shifted, true);
         assert_eq!(big, row(["B", "shift+alt", "shift", "false"]), "{choice:?}");
-        option_edge(&mut rt, alt, false, false);
+        let modifiers = |rt: &mut Runtime<Workspace>| {
+            assert_eq!(
+                send(rt, text("x"), Code::KeyX, option(true, false), true),
+                row(["x", "ctrl+alt", "", "false"])
+            );
+            assert_eq!(
+                send(rt, text("x"), Code::KeyX, option(false, true), true),
+                row(["x", "alt+super", "", "false"])
+            );
+            assert_eq!(
+                send(rt, Key::Left, Code::ArrowLeft, plain, false),
+                row(["", "alt", "", "false"])
+            );
+        };
+        modifiers(&mut rt);
+        option_edge(&mut rt, characters, true, true);
+        assert_eq!(
+            send(&mut rt, text("B"), Code::KeyB, shifted, true),
+            row(["B", "shift+alt", "shift", "false"]),
+            "both Options"
+        );
+        option_edge(&mut rt, alt, false, true);
         option_edge(&mut rt, characters, true, true);
         // The other side types what Option composes: ∫ on U.S.
         let composed = send(&mut rt, text("∫"), Code::KeyB, plain, true);
         assert_eq!(composed, row(["∫", "alt", "alt", "false"]), "{choice:?}");
+        modifiers(&mut rt);
         option_edge(&mut rt, characters, false, false);
-        let ctrl = send(&mut rt, text("x"), Code::KeyX, option(true, false), false);
-        assert_eq!(ctrl, row(["x", "ctrl+alt", "", "false"]));
-        let command = send(&mut rt, text("x"), Code::KeyX, option(false, true), false);
-        assert_eq!(command, row(["x", "alt+super", "", "false"]));
-        let arrow = send(&mut rt, Key::Left, Code::ArrowLeft, plain, false);
-        assert_eq!(arrow, row(["", "alt", "", "false"]));
+        assert_eq!(
+            send(&mut rt, text("∫"), Code::KeyB, plain, true),
+            row(["∫", "alt", "alt", "false"]),
+            "no recorded Option side"
+        );
         // Option+E on the composing side is the system's dead key: the window hands it to the
         // input method, which sends no key, so the Alt+E shortcut never sees it, and the pane
         // gets the accented letter it composes with the next key. On the Alt side the window
@@ -1108,9 +1334,7 @@ fn terminal_controls_are_indexed_and_reachable_at_minimum_size() {
     }
 }
 
-/// The app's own fonts, for the camera: the previews are then on the terminal's grid as in
-/// the app, where a headless runtime sets them in Inter. Loading them changes the cell size
-/// for the whole process, so take the pictures in a run of this test alone.
+/// The app's Plex Mono stack for the camera, instead of the headless system mono slot.
 fn app_fonts() -> rune::text::TextSystem {
     let fonts = crate::app::fonts::load("IBM Plex Mono", &[]);
     rune::text::TextSystem::new(fonts.files, fonts.families)
@@ -1127,7 +1351,7 @@ fn studio(ws: Workspace, camera: bool) -> Runtime<Workspace> {
     let mut rt = if camera {
         Runtime::with_text(ws, view, size, env, app_fonts())
     } else {
-        Runtime::new(ws, view, size, env)
+        crate::app::fonts::test_runtime(ws, view, size, env)
     };
     settle(&mut rt);
     rt

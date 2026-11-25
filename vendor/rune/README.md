@@ -6,9 +6,10 @@ expands inherited workspace settings and pins internal dependencies to that
 same revision. All other Rune crates and the eight upstream registry patches
 come from that git revision.
 
-Rex Rune enables `accessibility`, `dbus`, `embedded-fonts`, `metal-backend`,
-`ogg-audio`, `svg`, and `tooling`. The first six cover the upstream defaults
-other than Hunspell, which Rex Rune does not use. `tooling` keeps `--snap`,
+Rex Rune enables `accessibility`, `dbus`, `metal-backend`, `ogg-audio`, `svg`,
+and `tooling`. It does not use Hunspell or Rune's default embedded faces.
+The app supplies the OpenCode theme's fonts; this also keeps `rune-text`
+from expecting sibling Rune assets in Nix's flat vendor tree. `tooling` keeps `--snap`,
 `--script`, and `--tree` available in release builds. Rune's wasm target
 still enables Hunspell, but native builds do not compile `spellbook`.
 
@@ -34,4 +35,4 @@ still enables Hunspell, but native builds do not compile `spellbook`.
   cancels a pending move. macOS still starts a move inside mouse-down, as
   AppKit requires. Touch and native edge resizing use upstream behavior.
   Rune's native secondary-release menu also works on bare X11 and Wayland drag
-  regions: it must not require the caption controls Rune only sets on Windows.
+   regions on Unix outside macOS: only those platforms skip the upstream caption check.

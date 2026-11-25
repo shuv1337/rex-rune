@@ -6,10 +6,14 @@ use rune::{App, AppSpec, Env, Ime, Key, Runtime};
 
 fn ime_runtime(ws: Workspace) -> Runtime<Workspace> {
     let size = (1024., 700.);
-    let mut rt = App::new(AppSpec::new("Rex", size, placeholder, view))
-        .init(move || ws)
-        .on_ime(crate::app::input::on_ime)
-        .headless_runtime(size, Env::new(true, 1.));
+    let mut rt = App::new(AppSpec {
+        fonts: rune_theme_opencode::FONTS,
+        families: crate::app::fonts::TEST_FAMILIES,
+        ..AppSpec::new("Rex", size, placeholder, view)
+    })
+    .init(move || ws)
+    .on_ime(crate::app::input::on_ime)
+    .headless_runtime(size, Env::new(true, 1.));
     rt.on_key = Some(crate::app::input::on_key);
     for _ in 0..4 {
         rt.frame(1. / 60.);

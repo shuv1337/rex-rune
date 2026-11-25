@@ -40,8 +40,7 @@ pub struct FontPick {
 
 /// What the font settings keep beside the saved preferences.
 pub struct FontState {
-    /// The families a picker lists: read the first time one is needed, on a thread of its
-    /// own (`fonts::installed`); None until then.
+    /// The families a picker lists: read on the `rex-fonts` thread; None until then.
     pub catalog: Option<Vec<Family>>,
     /// The catalog's families the open picker lists, in order: those of its scope that
     /// match its search.
@@ -100,8 +99,8 @@ const SCOPE: f32 = 26.;
 const SAMPLE: f32 = 52.;
 
 impl Workspace {
-    /// The families a picker can list, once read. The first call starts reading them, and
-    /// an open picker lists them when they arrive.
+    /// Start loading the families off-thread at launch, or return them once ready.
+    /// An open picker lists them when they arrive.
     pub fn font_catalog(&mut self) -> Option<&[Family]> {
         if self.fonts.catalog.is_none() {
             #[cfg(not(test))]

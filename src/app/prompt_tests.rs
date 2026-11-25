@@ -1406,7 +1406,7 @@ fn capture_scene(
         b"$ rex do deploy_release\r\nWaiting for confirmation on connected clients...",
     );
     setup(&mut ws);
-    let mut rt = Runtime::new(ws, view, size, Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, size, Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     for _ in 0..24 {
         rt.frame(1. / 60.);

@@ -1488,8 +1488,8 @@ fn zoom_in_a_query_keeps_text_and_small_windows_keep_their_layout_floor() {
 }
 
 fn runtime_at(ws: Workspace, size: (f32, f32)) -> Runtime<Workspace> {
-    let mut rt = Runtime::new(ws, view, size, Env::new(true, 1.));
-    rt.on_key = Some(super::input::on_key);
+    let mut rt = super::fonts::test_runtime(ws, view, size, Env::new(true, 1.));
+    rt.on_key = Some(super::input::on_window_key);
     for _ in 0..4 {
         rt.frame(1. / 60.);
     }

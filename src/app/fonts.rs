@@ -124,6 +124,9 @@ pub fn read_installed() -> &'static [Family] {
 /// its own, which calls `ready` when it has: a first scan after boot takes a quarter of a
 /// second on macOS.
 pub fn installed(ready: impl FnOnce() + Send + 'static) -> Option<&'static [Family]> {
+    if let Some(catalog) = CATALOG.get() {
+        return Some(catalog);
+    }
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
         let spawned = std::thread::Builder::new()
@@ -228,6 +231,45 @@ pub fn load(terminal_family: &str, fallbacks: &[String]) -> Fonts {
         terminal,
         stand_in,
     }
+}
+
+/// A non-bundled launch stack must be resolved before the first terminal frame.
+/// Scan on the same named worker as the picker, before starting the UI.
+pub fn launch(terminal_family: &str, fallbacks: &[String]) -> Fonts {
+    if bundled(terminal_family).is_some() && fallbacks.iter().all(|name| bundled(name).is_some()) {
+        return load(terminal_family, fallbacks);
+    }
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("rex-fonts".into())
+            .spawn_scoped(scope, || {
+                read_installed();
+                load(terminal_family, fallbacks)
+            });
+        match worker {
+            Ok(worker) => worker
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(error) => {
+                eprintln!("Could not start the font worker ({error}); reading fonts now.");
+                load(terminal_family, fallbacks)
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+pub const TEST_FAMILIES: (&str, &str) = ("Inter", "ui-monospace");
+
+#[cfg(test)]
+pub fn test_runtime<S: 'static>(
+    state: S,
+    view: fn(&S, &mut rune::Cx<S>) -> rune::El,
+    size: (f32, f32),
+    env: rune::Env,
+) -> rune::Runtime<S> {
+    let text = rune::text::TextSystem::new(rune_theme_opencode::FONTS, TEST_FAMILIES);
+    rune::Runtime::with_text(state, view, size, env, text)
 }
 
 #[cfg(test)]

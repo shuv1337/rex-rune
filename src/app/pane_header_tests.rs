@@ -735,7 +735,7 @@ fn pane_headers_draw_under_each_choice() {
             .model
             .activity
             .insert("block:c".into(), [("".into(), blocked)].into());
-        let mut rt = Runtime::new(ws, view, (1024., 700.), Env::new(true, 2.));
+        let mut rt = crate::app::fonts::test_runtime(ws, view, (1024., 700.), Env::new(true, 2.));
         rt.on_key = Some(crate::app::input::on_key);
         settle(&mut rt);
         rt

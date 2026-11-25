@@ -231,6 +231,8 @@ fn main() {
     rune::set_app_id("dev.shuv.rex-rune.spike");
     rune::App::new(AppSpec {
         poll: Some(poll),
+        fonts: rune_theme_opencode::FONTS,
+        families: rune_theme_opencode::FAMILIES,
         ..AppSpec::new("Rex chrome spike", (800.0, 500.0), Spike::default, view)
     })
     .init(move || Spike {

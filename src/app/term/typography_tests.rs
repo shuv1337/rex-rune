@@ -2,7 +2,7 @@
 //! spacing, the face ordinary text is drawn in, and whether bold and italic are drawn.
 use super::*;
 use rex_rune::settings::typography::{BoldItalic, FontStyle, SpacingUnit, Typography};
-use rune::{Cx, Env, Runtime};
+use rune::{Cx, Env};
 
 fn font(edit: impl FnOnce(&mut Typography)) -> Typography {
     let mut font = Typography::default();
@@ -12,7 +12,7 @@ fn font(edit: impl FnOnce(&mut Typography)) -> Typography {
 
 #[test]
 fn the_default_typography_is_the_cell_it_always_was() {
-    let _families = rune::text::with_families("Inter", "Inter");
+    let _fonts = rune::text::with_fonts(rune_theme_opencode::FONTS, ("Inter", "Inter"));
     for size in [8., 13., 15., 22.5, 48.] {
         let m = metrics_for(size, &Typography::default());
         let plain = metrics(size);
@@ -35,7 +35,7 @@ fn the_default_typography_is_the_cell_it_always_was() {
 
 #[test]
 fn line_height_scales_the_rows_and_keeps_the_text_in_the_middle_of_them() {
-    let _families = rune::text::with_families("Inter", "Inter");
+    let _fonts = rune::text::with_fonts(rune_theme_opencode::FONTS, ("Inter", "Inter"));
     let (plain, tall, short, most) = (
         metrics(15.),
         metrics_for(15., &font(|f| f.line_height = 20)),
@@ -57,7 +57,7 @@ fn line_height_scales_the_rows_and_keeps_the_text_in_the_middle_of_them() {
 
 #[test]
 fn character_spacing_widens_the_cell_and_the_text_runs_alike() {
-    let _families = rune::text::with_families("Inter", "Inter");
+    let _fonts = rune::text::with_fonts(rune_theme_opencode::FONTS, ("Inter", "Inter"));
     // One character repeated: a headless runtime sets the grid in a proportional font.
     const RUNS: [(&str, f32); 3] = [("M", 1.), ("MMMM", 4.), ("MMMMMMMMMMMMMMMMMMMMMMMMM", 25.)];
     let plain = metrics(15.);
@@ -135,25 +135,25 @@ fn the_font_style_is_the_face_of_ordinary_text_and_bold_and_italic_can_be_left_u
 
 struct Rows {
     rows: Vec<Vec<Cell>>,
-    font: Typography,
-    px: f32,
+    metrics: Metrics,
 }
 
 fn rows_view(s: &Rows, _: &mut Cx<Rows>) -> El {
-    let m = Metrics {
-        px: s.px,
-        ..metrics_for(15., &s.font)
-    };
     let mut grid = el().w_full().h_full();
     for (y, cells) in s.rows.iter().enumerate() {
-        grid = grid.child(row_el(cells, y as f32 * m.cell.1, 0, None, &m));
+        grid = grid.child(row_el(
+            cells,
+            y as f32 * s.metrics.cell.1,
+            0,
+            None,
+            &s.metrics,
+        ));
     }
     grid
 }
 
-/// Every rectangle two rows of `text` draw under `font` at two device pixels per point, in
-/// device pixels.
-fn drawn(text: &str, font: Typography, px: f32) -> Vec<[f32; 4]> {
+/// Every rectangle two rows of `text` draw, in device pixels.
+fn drawn(text: &str, metrics: Metrics) -> Vec<[f32; 4]> {
     let cells: Vec<Cell> = text
         .chars()
         .map(|ch| Cell {
@@ -166,15 +166,14 @@ fn drawn(text: &str, font: Typography, px: f32) -> Vec<[f32; 4]> {
             link: None,
         })
         .collect();
-    let mut rt = Runtime::new(
+    let mut rt = crate::app::fonts::test_runtime(
         Rows {
             rows: vec![cells.clone(), cells],
-            font,
-            px,
+            metrics,
         },
         rows_view,
         (600., 200.),
-        Env::new(true, px),
+        Env::new(true, metrics.px),
     );
     rt.frame(1. / 60.);
     rt.instances
@@ -186,16 +185,17 @@ fn drawn(text: &str, font: Typography, px: f32) -> Vec<[f32; 4]> {
 
 #[test]
 fn adjusted_full_blocks_have_no_seams_at_fractional_display_scales() {
+    let _fonts = rune::text::with_fonts(rune_theme_opencode::FONTS, ("Inter", "ui-monospace"));
+    let m = metrics_for(
+        15.,
+        &font(|f| {
+            f.line_height = 20;
+            f.spacing = 20;
+            f.spacing_unit = SpacingUnit::Percent;
+        }),
+    );
     for px in [1., 1.25, 1.5, 2.] {
-        let mut rects = drawn(
-            "████",
-            font(|f| {
-                f.line_height = 20;
-                f.spacing = 20;
-                f.spacing_unit = SpacingUnit::Percent;
-            }),
-            px,
-        );
+        let mut rects = drawn("████", Metrics { px, ..m });
         rects.sort_by(|a, b| a[1].total_cmp(&b[1]).then(a[0].total_cmp(&b[0])));
         assert_eq!(rects.len(), 8);
         for row in rects.chunks(4) {
@@ -215,59 +215,60 @@ fn adjusted_full_blocks_have_no_seams_at_fractional_display_scales() {
 
 #[test]
 fn box_lines_and_blocks_fill_a_taller_and_wider_cell_edge_to_edge() {
-    // 21 pt rows a fifth taller are 26 pt: 52 device pixels at two per point.
-    let ch = 52.;
-    // Two rows of two full blocks, two horizontal lines and a vertical one, drawn at once.
-    let rects = drawn(
-        "██──│",
-        font(|f| {
+    let _fonts = rune::text::with_fonts(rune_theme_opencode::FONTS, ("Inter", "ui-monospace"));
+    let m = metrics_for(
+        15.,
+        &font(|f| {
             f.line_height = 20;
             f.spacing = 2;
         }),
-        2.,
     );
+    for cw in [m.cell.0, 10.875, 11.25] {
+        assert_sprite_edges(Metrics {
+            cell: (cw, m.cell.1),
+            px: 2.,
+            ..m
+        });
+    }
+}
 
+fn assert_sprite_edges(m: Metrics) {
+    let ch = m.cell.1 * m.px;
+    assert_eq!(ch, 52.);
+    let edge = |column: f32| (column * m.cell.0 * m.px).round();
+    let rects = drawn("██──│", m);
     // Full blocks: each is its whole cell, so two columns and two rows of them are one
     // rectangle with no seam, however wide and tall the settings make the cell.
     let mut blocks: Vec<_> = rects.iter().filter(|r| r[3] == ch).collect();
     blocks.sort_by(|a, b| a[1].total_cmp(&b[1]).then(a[0].total_cmp(&b[0])));
     assert_eq!(blocks.len(), 4, "{rects:?}");
-    // The cell's width as drawn, in device pixels.
-    let cw = blocks[1][0];
-    assert!(cw > 4., "{blocks:?}");
     for (block, (col, row)) in blocks.iter().zip([(0., 0.), (1., 0.), (0., 1.), (1., 1.)]) {
         assert_eq!(
-            (block[0], block[1]),
-            (col * cw, row * ch),
-            "{block:?} starts its cell"
+            (block[0], block[0] + block[2], block[1]),
+            (edge(col), edge(col + 1.), row * ch),
+            "{block:?} fills its cell"
         );
     }
-    assert!(
-        blocks[0][0] + blocks[0][2] >= blocks[1][0],
-        "no seam between columns: {blocks:?}"
-    );
 
-    // The horizontal lines of the first row run the width of their two cells, unbroken.
+    // Each horizontal sprite joins two overlapping strokes at its centre. The two
+    // sprites must meet exactly at the independently snapped cell boundary.
     let mut dashes: Vec<_> = rects
         .iter()
         .filter(|r| r[3] <= 4. && r[1] < ch && r[2] > 4.)
         .collect();
     dashes.sort_by(|a, b| a[0].total_cmp(&b[0]));
-    let mut reach = dashes[0][0];
-    for dash in &dashes {
-        assert!(dash[0] <= reach, "a gap before {dash:?} in {dashes:?}");
-        reach = f32::max(reach, dash[0] + dash[2]);
+    assert_eq!(dashes.len(), 4, "{dashes:?}");
+    for (pair, col) in dashes.as_chunks::<2>().0.iter().zip([2., 3.]) {
+        assert_eq!(pair[0][0], edge(col), "{pair:?}");
+        assert!(pair[0][0] + pair[0][2] >= pair[1][0], "{pair:?}");
+        assert_eq!(pair[1][0] + pair[1][2], edge(col + 1.), "{pair:?}");
     }
-    assert!(
-        (dashes[0][0] - 2. * cw).abs() <= 1. && (reach - 4. * cw).abs() <= 1.,
-        "{dashes:?} span columns 2 and 3 of {cw}"
-    );
 
     // The vertical line is one unbroken stroke from the top of the first row to the foot
     // of the second.
     let mut lines: Vec<_> = rects
         .iter()
-        .filter(|r| r[2] <= 4. && r[0] > 4. * cw)
+        .filter(|r| r[2] <= 4. && r[0] > edge(4.))
         .collect();
     lines.sort_by(|a, b| a[1].total_cmp(&b[1]));
     assert!(lines.iter().all(|r| r[0] == lines[0][0]), "one column");

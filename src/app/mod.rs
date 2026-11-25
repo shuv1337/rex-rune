@@ -180,6 +180,12 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         // the tab order and yield to any actual control, especially the find field.
         .tab_index(-1)
         .focusable(s.option_choice && s.panel.is_none())
+        .no_focus_ring()
+        // Take terminal keys before Rune's activation and traversal. This also
+        // makes clicking the grid focus its keyboard-owning ancestor, not blur it.
+        .on_key(|s: &mut Workspace, ev, tx| {
+            tx.focused() == Some(input::TERMINAL_FOCUS) && input::on_key(s, ev, tx)
+        })
         .on_physical_input(input::on_physical_input)
         .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward])
         .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
@@ -362,7 +368,7 @@ pub fn run(
     };
     let size = options.startup_size(&settings);
     let (family, fallbacks) = options.fonts(&settings);
-    let fonts = fonts::load(family, fallbacks);
+    let fonts = fonts::launch(family, fallbacks);
     rune::set_app_id("dev.shuv.rex-rune");
     if let Err(error) = rune::set_app_icon(APP_ICON) {
         eprintln!("Could not load the Rex window icon: {error}");
@@ -378,7 +384,7 @@ pub fn run(
             s.logo = Some(images.load(APP_ICON));
             s.images = Some(images);
         }),
-        on_key: Some(input::on_key),
+        on_key: Some(input::on_window_key),
         poll: Some(poll),
         ..AppSpec::new("Rex", size, placeholder, view)
     });
@@ -395,6 +401,7 @@ pub fn run(
             workspace.stand_in_family = stand_in;
             workspace.restart = restart_request;
             workspace.sounds = sounds;
+            workspace.font_catalog();
             match recovery_notice {
                 Some(StartupNotice::Error(notice)) => workspace.notify(notice),
                 Some(StartupNotice::Info(notice)) => workspace.inform(notice),

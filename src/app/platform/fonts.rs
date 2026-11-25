@@ -27,7 +27,8 @@ fn system_mono_name() -> Option<&'static str> {
 }
 
 pub fn uses_system_mono(name: &str) -> bool {
-    system_mono_name().is_some_and(|system| system.eq_ignore_ascii_case(name))
+    SYSTEM_MONO_NAME.is_some_and(|system| system.eq_ignore_ascii_case(name))
+        && system_mono_name().is_some()
 }
 
 /// The canonical display name and the name Rune should use in the terminal stack.

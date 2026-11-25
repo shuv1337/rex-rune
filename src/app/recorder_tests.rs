@@ -1215,7 +1215,7 @@ fn the_recorder_draws() {
         framed_terminal(&mut ws, "block:b", &sender, b"$ cargo test");
         ws.perform(Intent::Settings, &mut rune::Tx::default());
         ws.open_section(SettingsSection::Shortcuts);
-        let mut rt = Runtime::new(ws, view, size, Env::new(true, 2.));
+        let mut rt = crate::app::fonts::test_runtime(ws, view, size, Env::new(true, 2.));
         rt.on_key = Some(crate::app::input::on_key);
         let mut painter = rune::render::Renderer::new(&gpu.device, rune::render::OFFSCREEN_FORMAT);
         let mut snap = |rt: &mut Runtime<Workspace>, name: &str| {

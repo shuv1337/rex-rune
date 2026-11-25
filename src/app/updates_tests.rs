@@ -196,7 +196,7 @@ fn updater_settings_render_install_states() {
     let mut rt = if camera.is_some() {
         Runtime::with_text(ws, view, size, Env::new(true, 2.), fonts())
     } else {
-        Runtime::new(ws, view, size, Env::new(true, 2.))
+        crate::app::fonts::test_runtime(ws, view, size, Env::new(true, 2.))
     };
     for (name, state) in [
         ("updater-available", Installation::Idle),

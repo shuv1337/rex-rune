@@ -1093,7 +1093,7 @@ fn floating_drag_ghost_draw() {
     if compact {
         ws.toggle_pane_headers();
     }
-    let mut rt = Runtime::new(ws, view, (w, h), Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, (w, h), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
     let hdr = rect_of(&rt, "pane-header:block:f");
@@ -1115,7 +1115,7 @@ fn floating_resize_ghost_draw() {
     };
     let (w, h, compact, hidden, suffix) = capture_shape();
     let ws = capture_workspace(compact, hidden);
-    let mut rt = Runtime::new(ws, view, (w, h), Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, (w, h), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     settle(&mut rt);
     let se = rect_of(&rt, "layer-grip:float-a:se:h");

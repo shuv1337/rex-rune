@@ -362,7 +362,7 @@ pub(crate) fn read_reduced_motion_fallback() -> bool {
     // Optional GNOME GSettings, with schema lookup before constructing settings (missing
     // schemas otherwise abort GLib). No subprocess or required GNOME dependency.
     // SAFETY: `gnome_animations` dynamically resolves GIO symbols, checks every pointer for null,
-    // and releases each GLib object before returning.
+    // and releases the schema and settings before returning. The shared bus reference is kept.
     unsafe { gnome_animations().is_some_and(|enabled| !enabled) }
 }
 
@@ -375,7 +375,7 @@ pub(crate) fn read_double_click_fallback() -> Option<u32> {
         is_kde_desktop(),
         || read_kdeglobals().as_deref().and_then(parse_kdeglobals_double_click_ms),
         // SAFETY: `gnome_double_click_ms` dynamically resolves GIO symbols, checks every pointer
-        // for null, and releases each GLib object before returning.
+        // for null, and releases the schema and settings. The shared bus reference is kept.
         || unsafe { gnome_double_click_ms() },
     )
 }

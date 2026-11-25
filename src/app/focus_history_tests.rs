@@ -232,10 +232,14 @@ fn walk_cursor_resets_on_every_user_interruption() {
         let (term_tx, term_rx) = flume::unbounded();
         seed_cursor(&mut ws, &rx0);
         live_terminal(&mut ws, "block:b", &term_tx);
-        let mut rt = rune::App::new(AppSpec::new("Rex", (1024., 700.), placeholder, view))
-            .init(move || ws)
-            .on_ime(crate::app::input::on_ime)
-            .headless_runtime((1024., 700.), Env::new(true, 1.));
+        let mut rt = rune::App::new(AppSpec {
+            fonts: rune_theme_opencode::FONTS,
+            families: crate::app::fonts::TEST_FAMILIES,
+            ..AppSpec::new("Rex", (1024., 700.), placeholder, view)
+        })
+        .init(move || ws)
+        .on_ime(crate::app::input::on_ime)
+        .headless_runtime((1024., 700.), Env::new(true, 1.));
         rt.on_key = Some(crate::app::input::on_key);
         for _ in 0..4 {
             rt.frame(1. / 60.);

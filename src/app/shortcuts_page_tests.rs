@@ -989,7 +989,7 @@ fn the_shortcuts_page_draws() {
         ws.open_section(SettingsSection::Shortcuts);
         // After Settings opened: opening it reads shortcuts.json again, and there is none.
         set_overrides(&mut ws, overrides);
-        let mut rt = Runtime::new(ws, view, size, Env::new(true, 2.));
+        let mut rt = crate::app::fonts::test_runtime(ws, view, size, Env::new(true, 2.));
         rt.on_key = Some(crate::app::input::on_key);
         settle(&mut rt);
         rt

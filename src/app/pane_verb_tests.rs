@@ -699,7 +699,7 @@ fn the_pane_menu_and_commands_draw_their_groups() {
         b"$ cargo test\r\nrunning 12 tests\r\ntest result: ok",
     );
     framed_terminal(&mut ws, "block:c", &sender, b"$ tail -f server.log");
-    let mut rt = Runtime::new(ws, view, (1024., 700.), Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, (1024., 700.), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     let settle = |rt: &mut Runtime<Workspace>| {
         for _ in 0..90 {

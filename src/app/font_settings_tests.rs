@@ -1002,7 +1002,7 @@ fn the_font_settings_draw_their_picker_and_pages() {
         let mut rt = if on {
             Runtime::with_text(ws, view, size, env, app_fonts())
         } else {
-            Runtime::new(ws, view, size, env)
+            crate::app::fonts::test_runtime(ws, view, size, env)
         };
         rt.on_key = Some(crate::app::input::on_key);
         rt.poll = Some(crate::app::poll);
@@ -1121,7 +1121,7 @@ fn the_adjusted_grid_draws_wide_combining_selection_and_forced_cursor() {
         let mut rt = if on {
             Runtime::with_text(ws, view, size, Env::new(true, 2.), app_fonts())
         } else {
-            Runtime::new(ws, view, size, Env::new(true, 2.))
+            crate::app::fonts::test_runtime(ws, view, size, Env::new(true, 2.))
         };
         rt.on_key = Some(crate::app::input::on_key);
         settle(&mut rt);
@@ -1138,7 +1138,8 @@ fn the_adjusted_grid_draws_wide_combining_selection_and_forced_cursor() {
         let term = &rt.state.terminals[&key];
         assert!(term.has_selection());
         assert_eq!(
-            term.index(from.0, from.1, cell) % term.frame.as_ref().unwrap().cols as usize,
+            term.index(from.0 - grid[0], from.1 - grid[1], cell)
+                % term.frame.as_ref().unwrap().cols as usize,
             2
         );
         let cursor = rect(&rt, "gblock:a/cursor");
@@ -1157,7 +1158,7 @@ fn a_picker_over_settings_stays_under_the_header_and_opens_below_where_six_rows_
     let (mut ws, _host) = tabbed_workspace("single");
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     ws.open_advanced_fonts(&mut rune::Tx::default());
-    let mut rt = Runtime::new(ws, view, (1024., 700.), Env::new(true, 2.));
+    let mut rt = crate::app::fonts::test_runtime(ws, view, (1024., 700.), Env::new(true, 2.));
     rt.on_key = Some(crate::app::input::on_key);
     rt.poll = Some(crate::app::poll);
     settle(&mut rt);

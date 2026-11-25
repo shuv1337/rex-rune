@@ -382,7 +382,9 @@ impl RuntimeCore {
     /// custom titlebar, where its release opens the window menu.
     pub(in crate::runtime) fn secondary_region_down(&mut self, x: f32, y: f32, captured: bool) {
         // X11 and Wayland use bare drag regions without Windows caption controls.
-        let region = !captured && self.primary_target(x, y).is_some_and(|t| self.bare_drag_region(t));
+        let region = !captured
+            && (cfg!(all(unix, not(target_os = "macos"))) || self.host.titlebar.caption.is_some())
+            && self.primary_target(x, y).is_some_and(|t| self.bare_drag_region(t));
         self.host.titlebar.act(Event::SecondaryDown { region });
     }
 

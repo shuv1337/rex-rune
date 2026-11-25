@@ -285,24 +285,30 @@ fn button(key: String, icon: &'static Icon, label: &str, help: String, run: Opti
         .child(glyph(icon, ICON, rgb(muted())).group_color(rgb(ink())))
 }
 
-/// The apron behind `block`'s bar, a child of the pane's card drawn under the bar: the bar's
+/// The apron behind `block`'s bar, in the same layout box as the grid: the bar's
 /// whole rows and columns in `fill`, the terminal's own background. It is terminal area, not
 /// chrome, so it changes corner at once while the bar springs, and a press on it is the
-/// terminal's. `inset` is from the card's left and top edges to the grid.
-pub fn apron(block: &str, t: &Term, pane: Pane, inset: (f32, f32), fill: u32) -> El {
+/// terminal's. Pin the outside edges to the grid even when its layout is fractional.
+pub fn apron(block: &str, t: &Term, pane: Pane, fill: u32) -> El {
     let corner = t.find.corner;
     let [x, y, width, height] = pane.apron(corner);
-    el().key(format!("find-apron:{block}:{corner:?}"))
-        .absolute(inset.0 + x, inset.1 + y)
-        .size(width, height)
-        .fill(rgb(fill))
+    let span = corner.right() || width == pane.size.0;
+    let e = el().key(format!("find-apron:{block}:{corner:?}")).pin(
+        Some(x),
+        Some(y),
+        span.then_some(0.),
+        (!corner.top()).then_some(0.),
+    );
+    // Layout ignores opposing insets when that dimension is explicit.
+    let e = if span { e } else { e.w(width) };
+    let e = if corner.top() { e.h(height) } else { e };
+    e.fill(rgb(fill))
         .inert()
         .motion(STILL)
         .transition(no_presence())
 }
 
-/// The bar over `block`'s terminal, a child of the pane's card. `pane` is the terminal's grid,
-/// and `inset` is from the card's edges to that grid, as (left and right, top, bottom).
+/// The bar over `block`'s terminal, a sibling of the grid.
 pub fn bar(
     s: &Workspace,
     block: &str,
@@ -310,7 +316,6 @@ pub fn bar(
     edit: &TextEdit,
     t: &Term,
     pane: Pane,
-    inset: (f32, f32, f32),
 ) -> El {
     let results = t.frame.as_ref().and_then(|f| f.search.as_ref());
     let total = results.map_or(0, |r| r.total);
@@ -353,20 +358,22 @@ pub fn bar(
     let (k1, k2, k3, k4) = (key.clone(), key.clone(), key.clone(), key.clone());
     let corner = t.find.corner;
     let [_, y, width, _] = pane.bar(corner);
-    let (side, top, bottom) = inset;
     let (above, below) = if corner.top() {
-        (Some(top + y), None)
+        (Some(y), None)
     } else {
-        (None, Some(bottom + (pane.size.1 - y - HEIGHT).max(0.)))
+        (None, Some((pane.size.1 - y - HEIGHT).max(0.)))
     };
     let (left, right) = if corner.right() {
-        (None, Some(side + INSET))
+        (None, Some(INSET))
     } else {
-        (Some(side + INSET), None)
+        (Some(INSET), None)
     };
-    row()
-        .key(format!("search:{block}"))
-        .w(width)
+    let bar = if width < WIDTH {
+        row().pin(Some(INSET), above, Some(INSET), below)
+    } else {
+        row().w(width).pin(left, above, right, below)
+    };
+    bar.key(format!("search:{block}"))
         .h(HEIGHT)
         .pl(2.)
         .pr(5.)
@@ -376,8 +383,8 @@ pub fn bar(
         .fill(rgb(popover()))
         .border(1., white(0.12))
         .box_shadow(shadow(0., 4., 16., black(0.45)))
-        .pin(left, above, right, below)
         // The bar is chrome: it springs to another corner. It comes and goes at once.
+        .animated_changes()
         .motion(SNAPPY)
         .transition(no_presence())
         // A press on the bar is the bar's: it neither reaches the terminal under it nor

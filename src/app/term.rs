@@ -700,6 +700,11 @@ impl Term {
         use rex_rune::terminal::selection::{Geometry, Input, Phase};
         let index = self.index(x, y, cell);
         let cols = usize::from(self.frame.as_ref().map_or(1, |f| f.cols));
+        let cell_width = cell.0.ceil().max(1.) as u32;
+        // Ghostty uses an integer cell width to choose which half of the cell was
+        // hit. Keep the pointer in that same coordinate system, including its
+        // fractional progress across the cell.
+        let x = f64::from(x) * (f64::from(cell_width) / f64::from(cell.0));
         self.selection_revision = self.selection_revision.wrapping_add(1);
         self.copy_wanted = None;
         let input = Input {
@@ -707,10 +712,10 @@ impl Term {
             revision: self.selection_revision,
             phase,
             at: ((index % cols) as u16, (index / cols) as u16),
-            position: (f64::from(x), f64::from(y)),
+            position: (x, f64::from(y)),
             geometry: Geometry {
                 columns: cols as u32,
-                cell_width: cell.0.ceil().max(1.) as u32,
+                cell_width,
                 padding_left: 0,
                 screen_height: self.rect[3].ceil().max(1.) as u32,
             },
@@ -2009,7 +2014,7 @@ mod tests {
     /// The search highlights `term` draws: (first column, row in the pane, selected).
     fn drawn_matches(term: Term) -> Vec<(u32, u32, bool)> {
         let (cw, ch) = clipped_metrics().cell;
-        let mut rt = Runtime::new(
+        let mut rt = crate::app::fonts::test_runtime(
             ClippedState { term },
             clipped_view,
             (600., 200.),
@@ -2218,7 +2223,7 @@ mod tests {
             let marks = link_marks("g", &s.frame, &s.link, 0..2, &m, MIDNIGHT.card);
             el().w_full().h_full().children(marks)
         };
-        let mut rt = Runtime::new(
+        let mut rt = crate::app::fonts::test_runtime(
             LinkState { frame, link },
             view,
             (600., 100.),
@@ -2268,7 +2273,7 @@ mod tests {
             };
             grid("g", term, &clipped_metrics(), look)
         };
-        let mut rt = Runtime::new(term, view, (200., 100.), Env::default());
+        let mut rt = crate::app::fonts::test_runtime(term, view, (200., 100.), Env::default());
         rt.frame(0.);
         let highlight = |alpha| rgb(colors.search_match).alpha(alpha);
         let marks: Vec<_> = rt
@@ -2501,7 +2506,7 @@ mod tests {
                 .motion(crate::app::theme::STILL)
                 .child(grid("g", &s.term, &clipped_metrics(), look))
         };
-        let mut rt = Runtime::new(
+        let mut rt = crate::app::fonts::test_runtime(
             State {
                 term,
                 colors: dark_declared,
@@ -2613,7 +2618,7 @@ mod tests {
         terminal.vt_write(b"abc\x1b[?25l\x1b[3;5H");
 
         // Hidden cursor + look.ime == true: ime_area aligned with cursor cell, no /cursor drawn.
-        let mut rt = Runtime::new(
+        let mut rt = crate::app::fonts::test_runtime(
             ImeState {
                 term: ime_test_term(&terminal, full_rect),
                 ime: true,

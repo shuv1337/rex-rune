@@ -182,18 +182,15 @@ pub fn payload(
     }))
 }
 
-/// Marks Alt consumed in the `payload` of a press when Option composed
-/// its text (∫ for B, @ for L on a German layout), so the program gets that character rather
-/// than Alt with the key. With Control or Command held, Option stays a modifier.
-pub fn option_composed(payload: &mut Value, ev: &KeyEvent) {
-    let held = |name: &str| {
-        payload["mods"]
-            .as_str()
-            .is_some_and(|m| m.split('+').any(|m| m == name))
-    };
-    if !held("alt") || held("ctrl") || held("super") || text(ev).is_empty() {
-        return;
-    }
+/// Option can compose text only when neither Control nor Command is held.
+pub fn is_option_text(ev: &KeyEvent) -> bool {
+    let m = ev.mods;
+    m.alt && !(m.ctrl || m.cmd || m.logo) && matches!(&ev.key, Key::Text(t) if !t.is_empty())
+}
+
+/// Mark Alt consumed on both edges of a key whose press composed a character.
+/// A release still carries no text.
+pub fn option_composed(payload: &mut Value) {
     let consumed = payload["consumed_mods"].as_str().unwrap_or_default();
     payload["consumed_mods"] = json!(if consumed.is_empty() {
         "alt".to_owned()

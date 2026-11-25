@@ -405,9 +405,7 @@ fn pane_card(
                         format!("Terminal {name}")
                     }
                 })
-                .grow(1.)
-                .w_full()
-                .min_h(0.)
+                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
                 // A program that tracks the mouse owns the pointer, as in Ghostty; a link under
                 // Ctrl is the exception.
                 .cursor(if t.link.is_some() {
@@ -725,17 +723,10 @@ fn pane_card(
                     edge + (pad_y - edge).max(0.),
                 )
             };
-            let c = c.child(
-                body.grow(1.)
-                    .min_h(0.)
-                    .pt(top)
-                    .instant_changes()
-                    .motion(STILL)
-                    .child(grid),
-            );
-            // The find bar is the card's, not the grid's: it is chrome over a corner of the
-            // terminal, and springs when it changes corner.
-            match &t.search {
+            // The grid and Find share one layout box, but the bar is not a child
+            // of the grid's pointer target and cannot send mouse input to a program.
+            let content = el().grow(1.).w_full().min_h(0.).child(grid);
+            let content = match &t.search {
                 Some(edit) => {
                     let above = if headed { CARD_HEADER + clear } else { 0. } + lead + top;
                     let pane = find::Pane {
@@ -746,19 +737,20 @@ fn pane_card(
                         cell: m.cell,
                         lowered: find::lowered(s, window, block, t),
                     };
-                    c.child(find::apron(block, t, pane, (side, above), fill))
-                        .child(find::bar(
-                            s,
-                            block,
-                            &key,
-                            edit,
-                            t,
-                            pane,
-                            (side, above, foot),
-                        ))
+                    content
+                        .child(find::apron(block, t, pane, fill))
+                        .child(find::bar(s, block, &key, edit, t, pane))
                 }
-                None => c,
-            }
+                None => content,
+            };
+            c.child(
+                body.grow(1.)
+                    .min_h(0.)
+                    .pt(top)
+                    .instant_changes()
+                    .motion(STILL)
+                    .child(content),
+            )
         }
         None => c.child(
             col().grow(1.).center().child(
