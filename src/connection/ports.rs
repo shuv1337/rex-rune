@@ -54,6 +54,10 @@ impl Reader {
         self.reads.len()
     }
 
+    pub(super) fn can_pump(&self) -> bool {
+        !self.queue.is_empty() && self.reads.len() < IN_FLIGHT
+    }
+
     pub(super) fn watched(&self) -> Option<&str> {
         self.watched.as_deref()
     }
@@ -79,6 +83,14 @@ impl Reader {
         self.watched = None;
         self.queue.clear();
         self.reads.clear();
+    }
+
+    fn all_blocks(&self) -> Vec<String> {
+        self.reads
+            .iter()
+            .map(|r| r.block.clone())
+            .chain(self.queue.iter().map(|(_, b)| b.clone()))
+            .collect()
     }
 
     fn cancel_other_sessions(&mut self, keep_session: &str) -> Vec<String> {
@@ -108,7 +120,27 @@ impl Reader {
         true
     }
 
-    /// Start queued reads up to [`IN_FLIGHT`]. Never sends anything below API 15.
+    /// Queue newly added terminal blocks when the currently watched foreground session's view
+    /// gains blocks (for example, opening a split or undo-restoring a pane while Ports is open).
+    /// Caller must pump queued reads afterward when a slot is free.
+    pub(super) fn enqueue_new_watched_blocks(
+        &mut self,
+        model: &mut HostModel,
+        session: &str,
+        added: impl IntoIterator<Item = String>,
+    ) {
+        if self.watched.as_deref() != Some(session) || !is_eligible_session(model, session) {
+            return;
+        }
+        for block in added {
+            if self.enqueue(session, block.clone()) {
+                model.ports_reading.insert(block);
+            }
+        }
+    }
+
+    /// Start queued reads up to [`IN_FLIGHT`]. Never sends anything below API 15 or for
+    /// ineligible/background sessions.
     pub(super) async fn pump(
         &mut self,
         control: &mut Client,
@@ -125,11 +157,11 @@ impl Reader {
             let Some((session, block)) = self.queue.pop_front() else {
                 break;
             };
-            let present = {
+            let eligible = {
                 let model = shared.model.lock().expect("host model");
-                has_view_block(&model, &session, &block)
+                is_eligible_session(&model, &session) && has_view_block(&model, &session, &block)
             };
-            if !present {
+            if !eligible {
                 clear_reading(shared, std::slice::from_ref(&block));
                 continue;
             }
@@ -181,39 +213,34 @@ impl Reader {
 }
 
 fn decode_reply(text: &str) -> ReplyOutcome {
-    #[derive(serde::Deserialize)]
-    struct WireError {
-        code: String,
-        #[serde(default)]
-        status: u16,
-        #[serde(default)]
-        message: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct Envelope {
-        #[serde(default)]
-        seq: u64,
-        payload: Option<Value>,
-        error: Option<WireError>,
-    }
-    let Ok(envelope) = serde_json::from_str::<Envelope>(text) else {
-        return ReplyOutcome::Failed;
-    };
-    if let Some(error) = envelope.error {
-        let api_error = rexrs::ApiError::from_wire(&error.code, error.status, error.message);
-        return match api_error {
+    match crate::transport::detached_result_with_seq::<Value>(text) {
+        Ok(reply) => ReplyOutcome::Snapshot {
+            seq: reply.seq,
+            payload: reply.value,
+        },
+        Err(rexrs::Error::Api(
             rexrs::ApiError::MethodNotFound { .. }
             | rexrs::ApiError::RevisionTooLow { .. }
-            | rexrs::ApiError::NotSupported { .. } => {
-                ReplyOutcome::Unsupported { seq: envelope.seq }
+            | rexrs::ApiError::NotSupported { .. },
+        )) => {
+            #[derive(serde::Deserialize)]
+            struct SeqOnly {
+                #[serde(default)]
+                seq: u64,
             }
-            _ => ReplyOutcome::Failed,
-        };
+            let seq = serde_json::from_str::<SeqOnly>(text).map_or(0, |s| s.seq);
+            ReplyOutcome::Unsupported { seq }
+        }
+        Err(_) => ReplyOutcome::Failed,
     }
-    ReplyOutcome::Snapshot {
-        seq: envelope.seq,
-        payload: envelope.payload.unwrap_or_else(|| json!({})),
-    }
+}
+
+/// Only the host's currently selected foreground session (not background-prefetched views) is
+/// eligible for on-demand `com.superlogical.terminal.ports` reads.
+fn is_eligible_session(model: &HostModel, session: &str) -> bool {
+    model.selected.as_deref() == Some(session)
+        && !model.background_views.contains(session)
+        && model.views.contains_key(session)
 }
 
 fn has_view_block(model: &HostModel, session: &str, block: &str) -> bool {
@@ -221,6 +248,14 @@ fn has_view_block(model: &HostModel, session: &str, block: &str) -> bool {
         .views
         .get(session)
         .is_some_and(|v| view_blocks(v).any(|b| b == block))
+}
+
+fn find_view_session(model: &HostModel, block: &str) -> Option<String> {
+    model
+        .views
+        .iter()
+        .find(|(_, v)| view_blocks(v).any(|b| b == block))
+        .map(|(sid, _)| sid.clone())
 }
 
 fn clear_reading(shared: &Shared, blocks: &[String]) {
@@ -235,9 +270,31 @@ fn clear_reading(shared: &Shared, blocks: &[String]) {
     }
 }
 
+/// Cancel queued/in-flight reads and drop the watched session when the host switches away from it
+/// (or loses its selected session).
+pub(super) fn reconcile_selected(shared: &Shared, state: &mut ControlState) {
+    let selected = shared.model.lock().expect("host model").selected.clone();
+    let cancelled = match selected.as_deref() {
+        Some(sid) => {
+            if state.ports_reads.watched.as_deref() != Some(sid) {
+                state.ports_reads.watched = None;
+            }
+            state.ports_reads.cancel_other_sessions(sid)
+        }
+        None => {
+            let blocks = state.ports_reads.all_blocks();
+            state.ports_reads.clear();
+            blocks
+        }
+    };
+    if !cancelled.is_empty() {
+        clear_reading(shared, &cancelled);
+    }
+}
+
 /// Set or clear the open/watched ports session. When `Some(session)`, starts on-demand reads for
-/// that session's terminal blocks (API 15+ only). When `None`, cancels all queued and in-flight
-/// port reads.
+/// that session's terminal blocks only if it is the active foreground session (API 15+ only).
+/// When `None`, cancels all queued and in-flight port reads.
 pub(super) async fn watch(
     control: &mut Client,
     shared: &Shared,
@@ -258,6 +315,14 @@ pub(super) async fn watch(
         return Ok(());
     };
 
+    let eligible = {
+        let model = shared.model.lock().expect("host model");
+        is_eligible_session(&model, &session)
+    };
+    if !eligible {
+        return Ok(());
+    }
+
     state.ports_reads.watched = Some(session.clone());
     let cancelled = state.ports_reads.cancel_other_sessions(&session);
     if !cancelled.is_empty() {
@@ -266,8 +331,8 @@ pub(super) async fn watch(
     enqueue_session_blocks(control, shared, state, &session).await
 }
 
-/// Trigger one-shot on-demand reads for all terminal blocks in `session` (API 15+ only) without
-/// changing the watched session.
+/// Trigger one-shot on-demand reads for all terminal blocks in the active foreground `session`
+/// (API 15+ only) without changing the watched session.
 pub(super) async fn read_once(
     control: &mut Client,
     shared: &Shared,
@@ -288,6 +353,9 @@ async fn enqueue_session_blocks(
     }
     let blocks: Vec<String> = {
         let model = shared.model.lock().expect("host model");
+        if !is_eligible_session(&model, session) {
+            return Ok(());
+        }
         model
             .views
             .get(session)
@@ -319,7 +387,7 @@ async fn enqueue_session_blocks(
     state.ports_reads.pump(control, shared).await
 }
 
-/// Apply a passive `ports_changed` block event.
+/// Apply a passive `ports_changed` block event (caller must gate on API 16+).
 ///
 /// Follows the Rex combining rule: an event applies only when `event_seq > ports_seq[block]`
 /// (strictly greater). Only blocks currently present in a held view are stored. Wakes the UI
@@ -356,6 +424,7 @@ pub(super) fn apply_event(
 pub(super) fn record_reply(shared: &Shared, state: &mut ControlState, finished: FinishedRead) {
     let mut model = shared.model.lock().expect("host model");
     let mut changed = model.ports_reading.remove(&finished.block);
+    model.ports_read_completions = model.ports_read_completions.saturating_add(1);
     let last_seq = state.ports_seq.get(&finished.block).copied().unwrap_or(0);
 
     match finished.outcome {
@@ -401,9 +470,10 @@ fn store_snapshot(model: &mut HostModel, block: &str, mut snapshot: PortSnapshot
 
 /// Recover from an `event_dropped` notice that may have dropped `ports_changed` events.
 ///
-/// Drops affected cached snapshots, advances `ports_seq` to at least `drop_seq` so stale
-/// in-flight replies cannot overwrite, cancels affected in-flight reads, and queues re-reads
-/// only for blocks belonging to the currently watched session (on API 15+).
+/// Guards against unheld blocks, mismatched `(session_id, block_id)` pairs, and drops already
+/// superseded by a stored snapshot (`existing_seq >= drop_seq`). Drops stale snapshots, advances
+/// `ports_seq` to at least `drop_seq`, cancels affected in-flight reads, re-reads only blocks in
+/// the currently watched foreground session (API 15+), and pumps any queued reads into freed slots.
 pub(super) async fn handle_dropped(
     control: &mut Client,
     shared: &Shared,
@@ -417,62 +487,77 @@ pub(super) async fn handle_dropped(
     let mut changed = false;
 
     if let Some(block) = block_id {
-        state.ports_reads.cancel_block(block);
-        let entry = state.ports_seq.entry(block.to_owned()).or_insert(0);
-        *entry = (*entry).max(drop_seq);
-
         let mut model = shared.model.lock().expect("host model");
+        // Verify held-view membership and (when provided) session ownership before mutating state.
+        let owner_session = match session_id {
+            Some(sid) => has_view_block(&model, sid, block).then(|| sid.to_owned()),
+            None => find_view_session(&model, block),
+        };
+        let Some(owner_session) = owner_session else {
+            return Ok(());
+        };
+        let existing_seq = state.ports_seq.get(block).copied().unwrap_or(0);
+        if model.ports.contains_key(block) && existing_seq >= drop_seq {
+            return Ok(());
+        }
+        state.ports_reads.cancel_block(block);
+        state
+            .ports_seq
+            .insert(block.to_owned(), existing_seq.max(drop_seq));
         changed |= model.ports.remove(block).is_some();
         changed |= model.ports_reading.remove(block);
-        if let Some(watched_sid) = &watched {
-            let belongs = session_id.is_none_or(|s| s == watched_sid)
-                && has_view_block(&model, watched_sid, block);
-            if belongs {
-                reread.push((watched_sid.clone(), block.to_owned()));
-            }
+        if watched.as_deref() == Some(owner_session.as_str())
+            && is_eligible_session(&model, &owner_session)
+        {
+            reread.push((owner_session, block.to_owned()));
         }
     } else if let Some(sid) = session_id {
-        let was_watched = watched.as_deref() == Some(sid);
-        state.ports_reads.cancel_session(sid);
-        if was_watched {
-            state.ports_reads.watched = Some(sid.to_owned());
-        }
         let mut model = shared.model.lock().expect("host model");
         let blocks: Vec<String> = model
             .views
             .get(sid)
             .map(|v| view_blocks(v).collect())
             .unwrap_or_default();
+        let eligible_watch = watched.as_deref() == Some(sid) && is_eligible_session(&model, sid);
         for block in blocks {
-            let entry = state.ports_seq.entry(block.clone()).or_insert(0);
-            *entry = (*entry).max(drop_seq);
+            let existing_seq = state.ports_seq.get(&block).copied().unwrap_or(0);
+            if model.ports.contains_key(&block) && existing_seq >= drop_seq {
+                continue;
+            }
+            state.ports_reads.cancel_block(&block);
+            state
+                .ports_seq
+                .insert(block.clone(), existing_seq.max(drop_seq));
             changed |= model.ports.remove(&block).is_some();
             changed |= model.ports_reading.remove(&block);
-            if was_watched {
+            if eligible_watch {
                 reread.push((sid.to_owned(), block));
             }
         }
     } else {
-        state.ports_reads.clear();
-        state.ports_reads.watched = watched.clone();
         let mut model = shared.model.lock().expect("host model");
-        let mut all_blocks: HashSet<String> = model.ports.keys().cloned().collect();
-        for view in model.views.values() {
-            all_blocks.extend(view_blocks(view));
-        }
-        for block in all_blocks {
-            let entry = state.ports_seq.entry(block).or_insert(0);
-            *entry = (*entry).max(drop_seq);
-        }
-        changed |= !model.ports.is_empty();
-        changed |= !model.ports_reading.is_empty();
-        model.ports.clear();
-        model.ports_reading.clear();
-        if let Some(watched_sid) = &watched
-            && let Some(view) = model.views.get(watched_sid)
-        {
+        let mut held: Vec<(String, String)> = Vec::new();
+        let mut seen = HashSet::new();
+        for (sid, view) in &model.views {
             for block in view_blocks(view) {
-                reread.push((watched_sid.clone(), block));
+                if seen.insert(block.clone()) {
+                    held.push((sid.clone(), block));
+                }
+            }
+        }
+        for (sid, block) in held {
+            let existing_seq = state.ports_seq.get(&block).copied().unwrap_or(0);
+            if model.ports.contains_key(&block) && existing_seq >= drop_seq {
+                continue;
+            }
+            state.ports_reads.cancel_block(&block);
+            state
+                .ports_seq
+                .insert(block.clone(), existing_seq.max(drop_seq));
+            changed |= model.ports.remove(&block).is_some();
+            changed |= model.ports_reading.remove(&block);
+            if watched.as_deref() == Some(sid.as_str()) && is_eligible_session(&model, &sid) {
+                reread.push((sid, block));
             }
         }
     }
@@ -490,6 +575,10 @@ pub(super) async fn handle_dropped(
                 changed |= model.ports_reading.insert(block);
             }
         }
+    }
+
+    // Pump both newly queued re-reads and any previously queued reads whose slot just freed up.
+    if state.ports_reads.can_pump() {
         state.ports_reads.pump(control, shared).await?;
     }
 

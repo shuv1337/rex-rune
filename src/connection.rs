@@ -341,6 +341,8 @@ pub struct HostModel {
     pub ports: HashMap<String, crate::ports::PortSnapshot>,
     /// Terminal blocks with an on-demand `com.superlogical.terminal.ports` read in flight or queued.
     pub ports_reading: HashSet<String>,
+    /// Monotonic count of completed `com.superlogical.terminal.ports` reads on this connection.
+    pub ports_read_completions: u64,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -940,6 +942,7 @@ impl Shared {
                 m.actions_in_flight = 0;
                 m.keymap = None;
                 m.keymap_revision += 1;
+                m.ports.clear();
                 m.ports_reading.clear();
             }
             for terminal in m.terminals.values() {
@@ -1250,12 +1253,15 @@ fn replace_view(
     view: session::ViewResponse,
 ) {
     shared.update(|m| {
+        let mut added = Vec::new();
         if let Some(old) = m.views.get(id) {
             if old.revision > view.revision {
                 return;
             }
+            let previous: HashSet<_> = view_blocks(old).collect();
             let current: HashSet<_> = view_blocks(&view).collect();
-            let gone: Vec<_> = view_blocks(old).filter(|b| !current.contains(b)).collect();
+            let gone: Vec<_> = previous.difference(&current).cloned().collect();
+            added = current.difference(&previous).cloned().collect();
             for block in gone {
                 // An undoable close removes the block from the view and ends its stream
                 // now, but does not deliver a control block_closed event while it is held.
@@ -1266,6 +1272,9 @@ fn replace_view(
             }
         }
         apply_view_to_model(m, id, view);
+        if !added.is_empty() {
+            state.ports_reads.enqueue_new_watched_blocks(m, id, added);
+        }
     });
 }
 
@@ -1975,10 +1984,12 @@ async fn handle_event(
                 return Ok(());
             }
             if ports::is_ports_changed(&event.payload) {
-                if let (Some(session), Some(block)) = (
-                    event.session_id.as_deref(),
-                    event.payload["block_id"].as_str(),
-                ) {
+                if control.welcome().api_revision >= crate::ports::PORTS_EVENTS_MIN_API_REVISION
+                    && let (Some(session), Some(block)) = (
+                        event.session_id.as_deref(),
+                        event.payload["block_id"].as_str(),
+                    )
+                {
                     ports::apply_event(
                         shared,
                         state,
@@ -2021,6 +2032,10 @@ async fn handle_event(
             }
         }
         _ => {}
+    }
+    ports::reconcile_selected(shared, state);
+    if state.ports_reads.can_pump() {
+        state.ports_reads.pump(control, shared).await?;
     }
     Ok(())
 }
@@ -2145,6 +2160,7 @@ async fn run_host(
                 m.progress.clear();
                 m.ports.clear();
                 m.ports_reading.clear();
+                m.ports_read_completions = 0;
                 m.activity_epoch += 1;
                 m.activity_reading = true;
                 m.activity_incomplete = false;
@@ -2274,6 +2290,9 @@ async fn run_host(
                         continue;
                     }
                     state.performs_since = None;
+                }
+                if !exclusive && state.ports_reads.can_pump() {
+                    state.ports_reads.pump(&mut control, shared).await?;
                 }
                 let next = (!exclusive).then(|| status_sweep::next(shared, &state)).flatten();
                 let out = sweep.in_flight() + usize::from(prefetch.in_flight());
@@ -2685,6 +2704,7 @@ async fn run_host(
                         if matches!(command, HostCommand::Select(_) | HostCommand::Navigate { .. } | HostCommand::CreateSession { .. }) { preferred = None; }
                         let navigation = match &command { HostCommand::Navigate { id, .. } => Some(*id), _ => None };
                         let outcome = handle_command(command, &mut control, shared, &mut workers, &mut state, &mut sweep, &mut theme).await;
+                        ports::reconcile_selected(shared, &mut state);
                         if let Some(id) = navigation {
                             shared.update(|m| m.navigation_result = Some((id, outcome.is_ok())));
                         }

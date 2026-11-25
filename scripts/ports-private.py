@@ -4,7 +4,9 @@
 Build the protocol-only probe first:
     cargo build --locked --no-default-features --example ports_probe
 
-Runs completely isolated private Rex servers under a temporary directory with private
+Pass disposable API 21 and API 14 rex binaries via --api21 / --api14 or the
+REX_API21_BIN / REX_API14_BIN environment variables. Runs completely isolated private
+Rex servers under tempfile.TemporaryDirectory (honoring TMPDIR) with private
 HOME/XDG/state directories and Unix sockets. Never touches the default Rex server,
 installed binaries, or user files.
 """
@@ -15,9 +17,6 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
-
-DEFAULT_API21 = Path("/mnt/data/cache/agent-ws/rex-snapshot-2562/bin/rex")
-DEFAULT_API14 = Path("/mnt/data/cache/agent-ws/issue44-contract/preview/rex")
 
 
 def isolated_env(root: Path) -> dict[str, str]:
@@ -47,40 +46,6 @@ def isolated_env(root: Path) -> dict[str, str]:
     return env
 
 
-def start_server(rex: Path, root: Path, env: dict[str, str]):
-    sock = root / "rex.sock"
-    endpoint = f"unix://{sock}"
-    config = root / "empty.lua"
-    config.touch()
-    log = root / "server.log"
-    out = log.open("w")
-    proc = subprocess.Popen(
-        [
-            str(rex),
-            "server",
-            "run",
-            "--listen",
-            endpoint,
-            "--restore=false",
-            "--config",
-            str(config),
-            "--state-dir",
-            str(root / "rex-state"),
-        ],
-        cwd=root,
-        env=env,
-        stdout=out,
-        stderr=subprocess.STDOUT,
-    )
-    out.close()
-    deadline = time.monotonic() + 10.0
-    while not sock.is_socket():
-        if proc.poll() is not None or time.monotonic() >= deadline:
-            raise RuntimeError(f"private server failed to start:\n{log.read_text()}")
-        time.sleep(0.05)
-    return proc, endpoint, log
-
-
 def stop_server(proc: subprocess.Popen):
     if proc.poll() is None:
         proc.terminate()
@@ -89,6 +54,43 @@ def stop_server(proc: subprocess.Popen):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+def start_server(rex: Path, root: Path, env: dict[str, str]):
+    sock = root / "rex.sock"
+    endpoint = f"unix://{sock}"
+    config = root / "empty.lua"
+    config.touch()
+    log = root / "server.log"
+    with log.open("w") as out:
+        proc = subprocess.Popen(
+            [
+                str(rex),
+                "server",
+                "run",
+                "--listen",
+                endpoint,
+                "--restore=false",
+                "--config",
+                str(config),
+                "--state-dir",
+                str(root / "rex-state"),
+            ],
+            cwd=root,
+            env=env,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+        )
+    try:
+        deadline = time.monotonic() + 10.0
+        while not sock.is_socket():
+            if proc.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError(f"private server failed to start:\n{log.read_text()}")
+            time.sleep(0.05)
+    except Exception:
+        stop_server(proc)
+        raise
+    return proc, endpoint, log
 
 
 def run_probe(probe: Path, args: list[str], cwd: Path, env: dict[str, str]) -> list[dict]:
@@ -135,8 +137,8 @@ def find_event(events: list[dict], name: str) -> dict:
     raise AssertionError(f"missing event {name!r} in {events}")
 
 
-def verify_api21(probe: Path, rex21: Path, tmp_parent: Path | None):
-    with tempfile.TemporaryDirectory(prefix="rex-ports-api21-", dir=tmp_parent) as td:
+def verify_api21(probe: Path, rex21: Path):
+    with tempfile.TemporaryDirectory(prefix="rex-ports-api21-") as td:
         root = Path(td).resolve()
         env = isolated_env(root)
         proc, endpoint, log = start_server(rex21, root, env)
@@ -259,8 +261,8 @@ def verify_api21(probe: Path, rex21: Path, tmp_parent: Path | None):
             stop_server(proc)
 
 
-def verify_api14(probe: Path, rex14: Path, tmp_parent: Path | None):
-    with tempfile.TemporaryDirectory(prefix="rex-ports-api14-", dir=tmp_parent) as td:
+def verify_api14(probe: Path, rex14: Path):
+    with tempfile.TemporaryDirectory(prefix="rex-ports-api14-") as td:
         root = Path(td).resolve()
         env = isolated_env(root)
         proc, endpoint, log = start_server(rex14, root, env)
@@ -300,26 +302,26 @@ def main():
     parser.add_argument(
         "--api21",
         type=Path,
-        default=Path(os.environ.get("REX_SERVER_BIN", str(DEFAULT_API21))),
-        help="path to disposable API 21 rex binary",
+        default=Path(os.environ["REX_API21_BIN"]) if os.environ.get("REX_API21_BIN") else None,
+        help="path to disposable API 21 rex binary (or set REX_API21_BIN)",
     )
     parser.add_argument(
         "--api14",
         type=Path,
-        default=DEFAULT_API14,
-        help="path to disposable API 14 rex binary",
+        default=Path(os.environ["REX_API14_BIN"]) if os.environ.get("REX_API14_BIN") else None,
+        help="path to disposable API 14 rex binary (or set REX_API14_BIN)",
     )
     args = parser.parse_args()
+    if args.api21 is None or args.api14 is None:
+        parser.error("both --api21 (or REX_API21_BIN) and --api14 (or REX_API14_BIN) are required")
     probe = args.probe.resolve(strict=True)
     api21 = args.api21.resolve(strict=True)
     api14 = args.api14.resolve(strict=True)
     for binary in (args.api21.absolute(), args.api14.absolute(), api21, api14):
         if binary == Path("/usr/bin/rex"):
             parser.error("refusing installed /usr/bin/rex; pass disposable binaries only")
-    tmp_parent = Path("/mnt/data/tmp/rex-ports-s1")
-    tmp_parent.mkdir(parents=True, exist_ok=True)
-    verify_api21(probe, api21, tmp_parent)
-    verify_api14(probe, api14, tmp_parent)
+    verify_api21(probe, api21)
+    verify_api14(probe, api14)
 
 
 if __name__ == "__main__":

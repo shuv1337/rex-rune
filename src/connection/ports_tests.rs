@@ -7,6 +7,7 @@ const B2: &str = "block:00000000-0000-0000-0000-000000000002";
 const B3: &str = "block:00000000-0000-0000-0000-000000000003";
 const B4: &str = "block:00000000-0000-0000-0000-000000000004";
 const B5: &str = "block:00000000-0000-0000-0000-000000000005";
+const B_UNHELD: &str = "block:00000000-0000-0000-0000-000000000099";
 const SESSION_OTHER: &str = "session:00000000-0000-0000-0000-000000000002";
 
 fn view_with_blocks(session: &str, revision: u64, blocks: &[&str]) -> session::ViewResponse {
@@ -171,8 +172,8 @@ async fn drain_initial_meta(ws: &mut WebSocketStream<TcpStream>, block_count: us
     }
 }
 
-/// Answer standard metadata queries (`program_status`, `title`, `process`) and background
-/// `session.view` for `SESSION_OTHER` until another request arrives or the socket closes.
+/// Answer standard metadata queries (`program_status`, `title`, `process`) until another request
+/// arrives or the socket closes.
 async fn recv_skipping_meta(ws: &mut WebSocketStream<TcpStream>, seq: u64) -> Option<Value> {
     loop {
         let Some(Ok(frame)) = ws.next().await else {
@@ -190,20 +191,6 @@ async fn recv_skipping_meta(ws: &mut WebSocketStream<TcpStream>, seq: u64) -> Op
                         send(
                             ws,
                             json!({"type": "response", "id": req["id"], "seq": seq, "payload": {}}),
-                        )
-                        .await;
-                    }
-                    Some("session.view")
-                        if req["payload"]["session_id"].as_str() == Some(SESSION_OTHER) =>
-                    {
-                        send(
-                            ws,
-                            json!({
-                                "type": "response",
-                                "id": req["id"],
-                                "seq": seq,
-                                "payload": view_with_blocks(SESSION_OTHER, 1, &[])
-                            }),
                         )
                         .await;
                     }
@@ -406,12 +393,99 @@ async fn seq_combining_view_seq_exemption_and_activity_isolation() {
 }
 
 #[tokio::test]
+async fn api_revision_15_ignores_ports_changed_but_allows_read_ports() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (step1_tx, step1_rx) = tokio::sync::oneshot::channel::<()>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 15).await;
+        let boot_req = recv(&mut ws).await;
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": boot_req["id"],
+                "seq": 1,
+                "payload": boot_with_blocks(&[B1], &[])
+            }),
+        )
+        .await;
+        drain_initial_meta(&mut ws, 1, 1).await;
+
+        // Server sends ports_changed even though negotiated revision is 15.
+        send(
+            &mut ws,
+            ports_changed_event(
+                2,
+                SESSION,
+                B1,
+                ports_payload("ok", &[(3000, "127.0.0.1", 10, "ignored-event")]),
+            ),
+        )
+        .await;
+        send(&mut ws, label_fence(3, "after-rev15-event")).await;
+        step1_rx.await.unwrap();
+
+        // Explicit ReadPorts MUST still work at API 15.
+        let req = recv_skipping_meta(&mut ws, 3).await.unwrap();
+        assert_eq!(req["method"], "com.superlogical.terminal.ports");
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": req["id"],
+                "seq": 3,
+                "payload": ports_payload("ok", &[(4567, "127.0.0.1", 22, "read-15")])
+            }),
+        )
+        .await;
+        done_rx.await.unwrap();
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    let m1 = wait_model(&host, |m| {
+        m.connected && m.sessions.iter().any(|s| s.label == "after-rev15-event")
+    })
+    .await;
+    assert_eq!(m1.protocol.api_revision, 15);
+    assert!(
+        m1.ports.is_empty(),
+        "API 15 must drop passive ports_changed without storing"
+    );
+    assert!(m1.activity.is_empty());
+    assert!(m1.notices.is_empty());
+    step1_tx.send(()).unwrap();
+
+    host.commands
+        .send(HostCommand::ReadPorts {
+            epoch: m1.connection_epoch,
+            session: SESSION.into(),
+        })
+        .unwrap();
+    let m2 = wait_model(&host, |m| {
+        m.ports
+            .get(B1)
+            .and_then(|s| s.ports.first())
+            .is_some_and(|p| p.port == 4567)
+    })
+    .await;
+    assert_eq!(m2.ports[B1].process(Some(22)).unwrap().label, "read-15");
+    done_tx.send(()).unwrap();
+
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn ports_changed_never_marks_urgent_views_or_activity() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 16).await;
+        welcome(&mut ws, 15).await;
         let _ = ws.next().await;
     });
 
@@ -485,7 +559,7 @@ async fn ports_changed_never_marks_urgent_views_or_activity() {
 }
 
 #[tokio::test]
-async fn lifecycle_cleanup_block_closed_undo_close_remove_session_and_reconnect() {
+async fn lifecycle_cleanup_block_closed_undo_close_disconnect_and_remove_session() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (s1_tx, s1_rx) = tokio::sync::oneshot::channel::<()>();
@@ -594,7 +668,6 @@ async fn lifecycle_cleanup_block_closed_undo_close_remove_session_and_reconnect(
             }),
         )
         .await;
-        // Restored B2 triggers query_activity once (3 metadata RPCs).
         drain_initial_meta(&mut ws, 1, 5).await;
         send(
             &mut ws,
@@ -638,7 +711,7 @@ async fn lifecycle_cleanup_block_closed_undo_close_remove_session_and_reconnect(
         .await;
         s4_rx.await.unwrap();
 
-        // 4. Reconnect clears B2's ports snapshot cleanly.
+        // 4. Disconnect must clear m.ports BEFORE reconnect!
         ws.close(None).await.unwrap();
         s5_rx.await.unwrap();
 
@@ -718,12 +791,17 @@ async fn lifecycle_cleanup_block_closed_undo_close_remove_session_and_reconnect(
     let epoch1 = m4.connection_epoch;
     s4_tx.send(()).unwrap();
 
-    // Wait for disconnect, trigger immediate reconnect.
-    wait_model(&host, |m| !m.connected).await;
+    // Wait for disconnect and assert m.ports AND m.ports_reading are ALREADY cleared before reconnect!
+    let disconnected = wait_model(&host, |m| !m.connected).await;
+    assert!(
+        disconnected.ports.is_empty(),
+        "m.ports must clear immediately on disconnect"
+    );
+    assert!(disconnected.ports_reading.is_empty());
     s5_tx.send(()).unwrap();
     host.commands.send(HostCommand::Reconnect).unwrap();
 
-    // Reconnect clears old B2 snapshot and loads epoch 2 with 4002.
+    // Reconnect loads epoch 2 with 4002.
     let m5 = wait_model(&host, |m| {
         m.connected
             && m.connection_epoch > epoch1
@@ -738,6 +816,109 @@ async fn lifecycle_cleanup_block_closed_undo_close_remove_session_and_reconnect(
 
     // session_destroyed clears B2 ports too.
     wait_model(&host, |m| m.sessions.is_empty() && m.ports.is_empty()).await;
+
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_read_pumps_when_in_flight_blocks_disappear_via_replace_view() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 16).await;
+        let boot_req = recv(&mut ws).await;
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": boot_req["id"],
+                "seq": 1,
+                "payload": boot_with_blocks(&[B1, B2, B3, B4], &[])
+            }),
+        )
+        .await;
+        drain_initial_meta(&mut ws, 4, 1).await;
+
+        // First 3 blocks (B1, B2, B3) go in flight while B4 sits in queue.
+        let mut active = HashSet::new();
+        for _ in 0..3 {
+            let req = recv_skipping_meta(&mut ws, 1).await.unwrap();
+            assert_eq!(req["method"], "com.superlogical.terminal.ports");
+            active.insert(req["payload"]["block_id"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(active.len(), 3);
+        assert!(!active.contains(B4));
+
+        // Do NOT answer B1/B2/B3. Instead remove all 3 via session_view_changed -> replace_view
+        // while B4 survives! The cancelled slots MUST immediately pump B4.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 2,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {"type": "session_view_changed", "payload": {"revision": 2}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let view_req = recv_skipping_meta(&mut ws, 2).await.unwrap();
+        assert_eq!(view_req["method"], "session.view");
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": view_req["id"],
+                "seq": 2,
+                "payload": view_with_blocks(SESSION, 2, &[B4])
+            }),
+        )
+        .await;
+
+        let b4_req = recv_skipping_meta(&mut ws, 2).await.unwrap();
+        assert_eq!(b4_req["method"], "com.superlogical.terminal.ports");
+        assert_eq!(b4_req["payload"]["block_id"], B4);
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": b4_req["id"],
+                "seq": 2,
+                "payload": ports_payload("ok", &[(8004, "127.0.0.1", 4, "survivor")])
+            }),
+        )
+        .await;
+        done_rx.await.unwrap();
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    let m0 = wait_model(&host, |m| m.connected).await;
+    host.commands
+        .send(HostCommand::WatchPorts {
+            epoch: m0.connection_epoch,
+            session: Some(SESSION.into()),
+        })
+        .unwrap();
+
+    let m = wait_model(&host, |m| {
+        m.ports
+            .get(B4)
+            .and_then(|s| s.ports.first())
+            .is_some_and(|p| p.port == 8004)
+            && m.ports_reading.is_empty()
+    })
+    .await;
+    assert_eq!(m.ports.len(), 1);
+    assert_eq!(m.ports[B4].process(Some(4)).unwrap().label, "survivor");
+    done_tx.send(()).unwrap();
 
     drop(host);
     server.await.unwrap();
@@ -813,7 +994,6 @@ async fn event_dropped_ports_changed_watched_vs_closed_and_unrelated_names() {
             }),
         )
         .await;
-        // Generic event_dropped re-queries B1 metadata (program_status, title, process).
         drain_initial_meta(&mut ws, 1, 3).await;
         s2_rx.await.unwrap();
 
@@ -863,7 +1043,6 @@ async fn event_dropped_ports_changed_watched_vs_closed_and_unrelated_names() {
             }),
         )
         .await;
-        // Reply to the cancelled first_read with stale seq=6 (must be ignored).
         send(
             &mut ws,
             json!({
@@ -874,7 +1053,6 @@ async fn event_dropped_ports_changed_watched_vs_closed_and_unrelated_names() {
             }),
         )
         .await;
-        // The watched session MUST trigger a fresh re-read (and ZERO session.view!).
         let reread = recv_skipping_meta(&mut ws, 10).await.unwrap();
         assert_eq!(reread["method"], "com.superlogical.terminal.ports");
         assert_ne!(reread["id"], first_read["id"]);
@@ -1003,6 +1181,313 @@ async fn event_dropped_ports_changed_watched_vs_closed_and_unrelated_names() {
 }
 
 #[tokio::test]
+async fn event_dropped_guards_unheld_mismatched_session_and_newer_watermark() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 18).await;
+        let _ = ws.next().await;
+    });
+
+    let mut control = transport::control(&endpoint, None).await.unwrap();
+    let mut model = HostModel {
+        connected: true,
+        selected: Some(SESSION.into()),
+        ..Default::default()
+    };
+    model
+        .views
+        .insert(SESSION.into(), view_with_blocks(SESSION, 1, &[B1]));
+    model.views.insert(
+        SESSION_OTHER.into(),
+        view_with_blocks(SESSION_OTHER, 1, &[B2]),
+    );
+    let (wake_tx, _wake_rx) = flume::bounded(1);
+    let shared = Shared {
+        model: Arc::new(Mutex::new(model)),
+        wake: wake_tx,
+    };
+    let mut state = ControlState::default();
+
+    // Seed B1 with a snapshot at seq = 10.
+    ports::apply_event(
+        &shared,
+        &mut state,
+        SESSION,
+        B1,
+        10,
+        &ports_payload("ok", &[(3000, "127.0.0.1", 10, "kept")]),
+    );
+    assert_eq!(state.ports_seq.get(B1), Some(&10));
+
+    // (a) Targeted event_dropped for an unheld block must NOT insert into ports_seq.
+    ports::handle_dropped(
+        &mut control,
+        &shared,
+        &mut state,
+        Some(SESSION),
+        Some(B_UNHELD),
+        20,
+    )
+    .await
+    .unwrap();
+    assert!(!state.ports_seq.contains_key(B_UNHELD));
+    ports::handle_dropped(&mut control, &shared, &mut state, None, Some(B_UNHELD), 20)
+        .await
+        .unwrap();
+    assert!(!state.ports_seq.contains_key(B_UNHELD));
+
+    // (b) Targeted event_dropped with mismatched session_id (SESSION_OTHER naming B1) must NOT
+    // invalidate SESSION's B1 or advance its watermark.
+    ports::handle_dropped(
+        &mut control,
+        &shared,
+        &mut state,
+        Some(SESSION_OTHER),
+        Some(B1),
+        50,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.ports_seq.get(B1), Some(&10));
+    assert_eq!(shared.model.lock().unwrap().ports[B1].ports[0].port, 3000);
+
+    // (c) Targeted event_dropped with drop_seq <= existing ports_seq (9 and 10 <= 10) must NOT
+    // discard the newer stored snapshot.
+    for stale_drop in [9, 10] {
+        ports::handle_dropped(
+            &mut control,
+            &shared,
+            &mut state,
+            Some(SESSION),
+            Some(B1),
+            stale_drop,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.ports_seq.get(B1), Some(&10));
+        assert_eq!(shared.model.lock().unwrap().ports[B1].ports[0].port, 3000);
+    }
+
+    // Sanity: strictly newer drop_seq (11 > 10) for matching held (SESSION, B1) DOES invalidate.
+    ports::handle_dropped(
+        &mut control,
+        &shared,
+        &mut state,
+        Some(SESSION),
+        Some(B1),
+        11,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.ports_seq.get(B1), Some(&11));
+    assert!(!shared.model.lock().unwrap().ports.contains_key(B1));
+
+    let _ = control.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn foreground_session_eligibility_rejects_background_views_and_cancels_on_switch() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (step1_tx, step1_rx) = tokio::sync::oneshot::channel::<()>();
+    let (step2_tx, step2_rx) = tokio::sync::oneshot::channel::<()>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 16).await;
+        let boot_req = recv(&mut ws).await;
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": boot_req["id"],
+                "seq": 1,
+                "payload": boot_with_blocks(&[B1, B2, B3, B4], &[SESSION_OTHER])
+            }),
+        )
+        .await;
+        drain_initial_meta(&mut ws, 4, 1).await;
+
+        // status_sweep fetches SESSION_OTHER's view into m.views + m.background_views.
+        let bg_view = recv_skipping_meta(&mut ws, 1).await.unwrap();
+        assert_eq!(bg_view["method"], "session.view");
+        assert_eq!(bg_view["payload"]["session_id"], SESSION_OTHER);
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": bg_view["id"],
+                "seq": 1,
+                "payload": view_with_blocks(SESSION_OTHER, 1, &[B5])
+            }),
+        )
+        .await;
+        step1_rx.await.unwrap();
+
+        // (a) Client sends WatchPorts(SESSION_OTHER) + ReadPorts(SESSION_OTHER) + RefreshSessions
+        // fence. ZERO com.superlogical.terminal.ports requests may arrive before session.attach_all!
+        let fence_list = recv_skipping_meta(&mut ws, 1).await.unwrap();
+        assert_eq!(
+            fence_list["method"], "session.attach_all",
+            "background prefetched session must never trigger ports reads"
+        );
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": fence_list["id"],
+                "seq": 2,
+                "payload": {
+                    "sessions": [
+                        {"session_id": SESSION, "label": "bg-rejected"},
+                        {"session_id": SESSION_OTHER, "label": "other"}
+                    ]
+                }
+            }),
+        )
+        .await;
+        let fence_view = recv_skipping_meta(&mut ws, 2).await.unwrap();
+        assert_eq!(fence_view["method"], "session.view");
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": fence_view["id"],
+                "seq": 2,
+                "payload": view_with_blocks(SESSION, 1, &[B1, B2, B3, B4])
+            }),
+        )
+        .await;
+        step2_rx.await.unwrap();
+
+        // (b) Client starts WatchPorts on foreground SESSION (3 in flight, B4 queued), then
+        // immediately switches to SESSION_OTHER via Select(SESSION_OTHER).
+        // Do NOT answer B1..B3; switching sessions MUST cancel them and clear ports_reading.
+        for _ in 0..3 {
+            let req = recv_skipping_meta(&mut ws, 2).await.unwrap();
+            assert_eq!(req["method"], "com.superlogical.terminal.ports");
+            assert_eq!(req["payload"]["session_id"], SESSION);
+        }
+        let attach_other = recv_skipping_meta(&mut ws, 2).await.unwrap();
+        assert_eq!(attach_other["method"], "session.attach");
+        assert_eq!(attach_other["payload"]["session_id"], SESSION_OTHER);
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": attach_other["id"],
+                "seq": 3,
+                "payload": {
+                    "client_id": "client:test",
+                    "view": view_with_blocks(SESSION_OTHER, 1, &[B5])
+                }
+            }),
+        )
+        .await;
+        // Answer metadata for SESSION_OTHER's B5, then expect our deterministic RefreshSessions
+        // fence (proving queued B4 for SESSION was cancelled and never sent!).
+        let post_switch = recv_skipping_meta(&mut ws, 3).await.unwrap();
+        assert_eq!(
+            post_switch["method"], "session.attach_all",
+            "unexpected request after switching away from watched session"
+        );
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": post_switch["id"],
+                "seq": 4,
+                "payload": {
+                    "sessions": [
+                        {"session_id": SESSION, "label": "bg-rejected"},
+                        {"session_id": SESSION_OTHER, "label": "switched-clean"}
+                    ]
+                }
+            }),
+        )
+        .await;
+        let post_view = recv_skipping_meta(&mut ws, 4).await.unwrap();
+        assert_eq!(post_view["method"], "session.view");
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": post_view["id"],
+                "seq": 4,
+                "payload": view_with_blocks(SESSION_OTHER, 1, &[B5])
+            }),
+        )
+        .await;
+        done_rx.await.unwrap();
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    let m1 = wait_model(&host, |m| {
+        m.connected
+            && m.views.contains_key(SESSION_OTHER)
+            && m.background_views.contains(SESSION_OTHER)
+    })
+    .await;
+    step1_tx.send(()).unwrap();
+
+    // Attempt to WatchPorts and ReadPorts on background prefetched SESSION_OTHER + fence.
+    host.commands
+        .send(HostCommand::WatchPorts {
+            epoch: m1.connection_epoch,
+            session: Some(SESSION_OTHER.into()),
+        })
+        .unwrap();
+    host.commands
+        .send(HostCommand::ReadPorts {
+            epoch: m1.connection_epoch,
+            session: SESSION_OTHER.into(),
+        })
+        .unwrap();
+    host.commands.send(HostCommand::RefreshSessions).unwrap();
+
+    let m2 = wait_model(&host, |m| {
+        m.sessions.iter().any(|s| s.label == "bg-rejected")
+    })
+    .await;
+    assert!(m2.ports.is_empty());
+    assert!(m2.ports_reading.is_empty());
+    step2_tx.send(()).unwrap();
+
+    // Start WatchPorts on foreground SESSION (4 blocks: 3 in flight, 1 queued), then switch away.
+    host.commands
+        .send(HostCommand::WatchPorts {
+            epoch: m2.connection_epoch,
+            session: Some(SESSION.into()),
+        })
+        .unwrap();
+    wait_model(&host, |m| m.ports_reading.len() == 4).await;
+    host.commands
+        .send(HostCommand::Select(SESSION_OTHER.into()))
+        .unwrap();
+
+    let m3 = wait_model(&host, |m| {
+        m.selected.as_deref() == Some(SESSION_OTHER) && m.ports_reading.is_empty()
+    })
+    .await;
+    assert!(m3.ports_reading.is_empty());
+    host.commands.send(HostCommand::RefreshSessions).unwrap();
+    let m4 = wait_model(&host, |m| {
+        m.sessions.iter().any(|s| s.label == "switched-clean")
+    })
+    .await;
+    assert!(m4.ports.is_empty());
+    assert!(m4.ports_reading.is_empty());
+    done_tx.send(()).unwrap();
+
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn api_revision_14_sends_zero_ports_requests() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -1022,13 +1507,39 @@ async fn api_revision_14_sends_zero_ports_requests() {
             }),
         )
         .await;
-        // Drain initial metadata and wait for close; any com.superlogical.terminal.ports panics.
-        let next = recv_skipping_meta(&mut ws, 1).await;
-        assert!(
-            next.is_none(),
-            "API 14 must never send com.superlogical.terminal.ports, got: {next:?}"
+        drain_initial_meta(&mut ws, 1, 1).await;
+
+        // Deterministic command fence: after WatchPorts + ReadPorts, client sends RefreshSessions.
+        // The very next non-metadata request MUST be session.attach_all, never terminal.ports.
+        let fence_list = recv_skipping_meta(&mut ws, 1).await.unwrap();
+        assert_eq!(
+            fence_list["method"], "session.attach_all",
+            "API 14 must never send com.superlogical.terminal.ports"
         );
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": fence_list["id"],
+                "seq": 2,
+                "payload": {"sessions": [{"session_id": SESSION, "label": "api14-fenced"}]}
+            }),
+        )
+        .await;
+        let fence_view = recv_skipping_meta(&mut ws, 2).await.unwrap();
+        assert_eq!(fence_view["method"], "session.view");
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": fence_view["id"],
+                "seq": 2,
+                "payload": view_with_blocks(SESSION, 1, &[B1])
+            }),
+        )
+        .await;
         done_rx.await.unwrap();
+        assert!(recv_skipping_meta(&mut ws, 2).await.is_none());
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
@@ -1045,6 +1556,14 @@ async fn api_revision_14_sends_zero_ports_requests() {
             session: SESSION.into(),
         })
         .unwrap();
+    host.commands.send(HostCommand::RefreshSessions).unwrap();
+
+    let fenced = wait_model(&host, |m| {
+        m.sessions.iter().any(|s| s.label == "api14-fenced")
+    })
+    .await;
+    assert!(fenced.ports.is_empty());
+    assert!(fenced.ports_reading.is_empty());
     done_tx.send(()).unwrap();
     drop(host);
     server.await.unwrap();
@@ -1070,6 +1589,7 @@ async fn concurrency_cap_three_in_flight_and_unsupported_error_codes() {
             }),
         )
         .await;
+        drain_initial_meta(&mut ws, 5, 1).await;
 
         // First 3 ports requests arrive concurrently (cap = 3).
         let mut first_three = Vec::new();
@@ -1078,10 +1598,36 @@ async fn concurrency_cap_three_in_flight_and_unsupported_error_codes() {
             assert_eq!(req["method"], "com.superlogical.terminal.ports");
             first_three.push(req);
         }
-        // Assert no 4th request is sent while 3 are in flight.
-        let extra =
-            tokio::time::timeout(Duration::from_millis(80), recv_skipping_meta(&mut ws, 1)).await;
-        assert!(extra.is_err(), "more than 3 port reads in flight at once");
+        // Deterministic fence: RefreshSessions was queued immediately after WatchPorts, so the
+        // 4th request MUST be session.attach_all (proving no 4th ports read started while 3 are
+        // in flight).
+        let fence_list = recv_skipping_meta(&mut ws, 1).await.unwrap();
+        assert_eq!(
+            fence_list["method"], "session.attach_all",
+            "more than 3 port reads in flight at once"
+        );
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": fence_list["id"],
+                "seq": 2,
+                "payload": {"sessions": [{"session_id": SESSION, "label": "work"}]}
+            }),
+        )
+        .await;
+        let fence_view = recv_skipping_meta(&mut ws, 2).await.unwrap();
+        assert_eq!(fence_view["method"], "session.view");
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": fence_view["id"],
+                "seq": 2,
+                "payload": view_with_blocks(SESSION, 1, &[B1, B2, B3, B4, B5])
+            }),
+        )
+        .await;
 
         // Reply to B1 with method_not_found, B2 with revision_too_low, B3 with ok.
         for req in first_three {
@@ -1160,13 +1706,14 @@ async fn concurrency_cap_three_in_flight_and_unsupported_error_codes() {
             session: Some(SESSION.into()),
         })
         .unwrap();
-    // Live epoch reads all 5 blocks respecting concurrency cap 3.
+    // Live epoch reads all 5 blocks respecting concurrency cap 3, followed by deterministic fence.
     host.commands
         .send(HostCommand::WatchPorts {
             epoch: m0.connection_epoch,
             session: Some(SESSION.into()),
         })
         .unwrap();
+    host.commands.send(HostCommand::RefreshSessions).unwrap();
 
     let m = wait_model(&host, |m| m.ports.len() == 5 && m.ports_reading.is_empty()).await;
     assert!(m.connected);

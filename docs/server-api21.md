@@ -333,8 +333,10 @@ exercised against isolated API 21 and API 14 (`0.1.0-preview.19`) servers using
     `ports: []`; subsequent `com.superlogical.terminal.ports` calls also return
     `status: "unsupported"` and `ports: []`.
   - Negotiating API 15 against the API 21 server allows
-    `com.superlogical.terminal.ports`; note that server rev 21 does not filter
-    `ports_changed` block events by negotiated client revision, while genuine
-    API 15 servers lack `ports_changed` and rely on explicit reads.
+    `com.superlogical.terminal.ports`; although server rev 21 still emits
+    `ports_changed` block events to rev 15 connections, Rex Rune gates
+    `ports_changed` application on `api_revision >= 16` (consuming and
+    discarding it below 16 so it never leaks into activity) and relies on
+    explicit reads at API 15.
 - See [listening-ports.md](parity-2026-11/listening-ports.md) for the Slice 1
   architecture, caps, locality/reach security matrix, and Slice 2 handoff.

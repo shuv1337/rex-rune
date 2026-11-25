@@ -341,7 +341,7 @@ fn exhaustive_locality_and_reach_matrix() {
             port: 3000,
             local_open: Some("http://127.0.0.1:3000"),
             copy: "127.0.0.1:3000",
-            ssh_cmd: Some("ssh -N -L 3000:127.0.0.1:3000 alice@devbox"),
+            ssh_cmd: Some("ssh -N -L 3000:127.0.0.1:3000 -- alice@devbox"),
         },
         Row {
             name: "loopback v4 /8",
@@ -349,7 +349,7 @@ fn exhaustive_locality_and_reach_matrix() {
             port: 8080,
             local_open: Some("http://127.0.1.5:8080"),
             copy: "127.0.1.5:8080",
-            ssh_cmd: Some("ssh -N -L 8080:127.0.1.5:8080 alice@devbox"),
+            ssh_cmd: Some("ssh -N -L 8080:127.0.1.5:8080 -- alice@devbox"),
         },
         Row {
             name: "loopback v6",
@@ -357,7 +357,7 @@ fn exhaustive_locality_and_reach_matrix() {
             port: 5173,
             local_open: Some("http://[::1]:5173"),
             copy: "[::1]:5173",
-            ssh_cmd: Some("ssh -N -L 5173:[::1]:5173 alice@devbox"),
+            ssh_cmd: Some("ssh -N -L '5173:[::1]:5173' -- alice@devbox"),
         },
         Row {
             name: "wildcard v4",
@@ -365,7 +365,7 @@ fn exhaustive_locality_and_reach_matrix() {
             port: 8000,
             local_open: Some("http://127.0.0.1:8000"),
             copy: "0.0.0.0:8000",
-            ssh_cmd: Some("ssh -N -L 8000:127.0.0.1:8000 alice@devbox"),
+            ssh_cmd: Some("ssh -N -L 8000:127.0.0.1:8000 -- alice@devbox"),
         },
         Row {
             name: "wildcard v6",
@@ -373,7 +373,7 @@ fn exhaustive_locality_and_reach_matrix() {
             port: 9000,
             local_open: Some("http://[::1]:9000"),
             copy: "[::]:9000",
-            ssh_cmd: Some("ssh -N -L 9000:[::1]:9000 alice@devbox"),
+            ssh_cmd: Some("ssh -N -L '9000:[::1]:9000' -- alice@devbox"),
         },
         Row {
             name: "specific v4",
@@ -381,7 +381,7 @@ fn exhaustive_locality_and_reach_matrix() {
             port: 4000,
             local_open: Some("http://192.168.1.42:4000"),
             copy: "192.168.1.42:4000",
-            ssh_cmd: Some("ssh -N -L 4000:192.168.1.42:4000 alice@devbox"),
+            ssh_cmd: Some("ssh -N -L 4000:192.168.1.42:4000 -- alice@devbox"),
         },
         Row {
             name: "specific v6",
@@ -389,7 +389,7 @@ fn exhaustive_locality_and_reach_matrix() {
             port: 4000,
             local_open: Some("http://[2001:db8::42]:4000"),
             copy: "[2001:db8::42]:4000",
-            ssh_cmd: Some("ssh -N -L 4000:[2001:db8::42]:4000 alice@devbox"),
+            ssh_cmd: Some("ssh -N -L '4000:[2001:db8::42]:4000' -- alice@devbox"),
         },
         Row {
             name: "link-local zoned",
@@ -476,30 +476,30 @@ fn ssh_forward_privileged_ports_custom_port_and_hostile_destination_quoting() {
     // Privileged remote port < 1024 maps to 10000 + port.
     assert_eq!(
         ssh_forward_command("ssh://alice@web:2222/run/rex.sock", &loopback, 80).as_deref(),
-        Some("ssh -N -L 10080:127.0.0.1:80 -p 2222 alice@web")
+        Some("ssh -N -L 10080:127.0.0.1:80 -p 2222 -- alice@web")
     );
     assert_eq!(
         ssh_forward_command("ssh://web", &loopback, 443).as_deref(),
-        Some("ssh -N -L 10443:127.0.0.1:443 web")
+        Some("ssh -N -L 10443:127.0.0.1:443 -- web")
     );
     assert_eq!(
         ssh_forward_command("ssh://web", &loopback, 1023).as_deref(),
-        Some("ssh -N -L 11023:127.0.0.1:1023 web")
+        Some("ssh -N -L 11023:127.0.0.1:1023 -- web")
     );
     assert_eq!(
         ssh_forward_command("ssh://web", &loopback, 1024).as_deref(),
-        Some("ssh -N -L 1024:127.0.0.1:1024 web")
+        Some("ssh -N -L 1024:127.0.0.1:1024 -- web")
     );
 
     // Hostile shell metacharacters in user/host MUST be POSIX single-quoted cleanly.
     let hostile = "ssh://user@host'$(id);rm";
     assert_eq!(
         ssh_forward_command(hostile, &loopback, 8080).as_deref(),
-        Some("ssh -N -L 8080:127.0.0.1:8080 'user@host'\\''$(id);rm'")
+        Some("ssh -N -L 8080:127.0.0.1:8080 -- 'user@host'\\''$(id);rm'")
     );
     let backticks = "ssh://`whoami`@box;touch";
     assert_eq!(
         ssh_forward_command(backticks, &loopback, 3000).as_deref(),
-        Some("ssh -N -L 3000:127.0.0.1:3000 '`whoami`@box;touch'")
+        Some("ssh -N -L 3000:127.0.0.1:3000 -- '`whoami`@box;touch'")
     );
 }

@@ -496,14 +496,19 @@ pub fn ssh_forward_command(endpoint: &str, address: &PortAddress, port: u16) -> 
     } else {
         u32::from(port)
     };
+    let forward_spec = format!("{local_port}:{bind_target}:{port}");
+    // Quote IPv6 bracketed specs so shells such as zsh do not attempt globbing.
+    let forward_arg = if forward_spec.contains(['[', ']']) {
+        format!("'{forward_spec}'")
+    } else {
+        forward_spec
+    };
     let quoted_dest = posix_quote_destination(&destination);
     match target.port {
         Some(ssh_port) => Some(format!(
-            "ssh -N -L {local_port}:{bind_target}:{port} -p {ssh_port} {quoted_dest}"
+            "ssh -N -L {forward_arg} -p {ssh_port} -- {quoted_dest}"
         )),
-        None => Some(format!(
-            "ssh -N -L {local_port}:{bind_target}:{port} {quoted_dest}"
-        )),
+        None => Some(format!("ssh -N -L {forward_arg} -- {quoted_dest}")),
     }
 }
 

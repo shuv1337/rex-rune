@@ -13,6 +13,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn canonical_socket_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() || path.symlink_metadata().is_ok() {
+        return std::fs::canonicalize(path)
+            .with_context(|| format!("canonicalize socket path {}", path.display()));
+    }
+    let parent = path
+        .parent()
+        .context("socket path must have a parent directory")?;
+    let name = path
+        .file_name()
+        .context("socket path must have a file name")?;
+    Ok(std::fs::canonicalize(parent)
+        .with_context(|| format!("canonicalize socket parent {}", parent.display()))?
+        .join(name))
+}
+
 fn validate_private_socket(endpoint: &str) -> Result<PathBuf> {
     let default_endpoint = transport::local_endpoint();
     ensure!(
@@ -23,18 +39,33 @@ fn validate_private_socket(endpoint: &str) -> Result<PathBuf> {
         .strip_prefix("unix://")
         .context("private unix:// endpoint required")?;
     let path = Path::new(raw);
+    ensure!(path.is_absolute(), "absolute unix:// socket path required");
+
+    let canonical = canonical_socket_path(path)?;
+    if let Some(default_raw) = default_endpoint.strip_prefix("unix://") {
+        let default_path = Path::new(default_raw);
+        let canonical_default = default_path
+            .parent()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .and_then(|p| default_path.file_name().map(|n| p.join(n)));
+        ensure!(
+            canonical_default.as_deref() != Some(canonical.as_path()),
+            "refusing symlink or path resolving to default per-user Rex socket"
+        );
+    }
     ensure!(
-        path.is_absolute()
-            && !matches!(raw, "/run/rex/server.sock" | "/var/run/rex/server.sock")
-            && path.file_name().is_some_and(|n| n == "rex.sock")
-            && path
+        !matches!(
+            canonical.to_str(),
+            Some("/run/rex/server.sock" | "/var/run/rex/server.sock")
+        ) && canonical.file_name().is_some_and(|n| n == "rex.sock")
+            && canonical
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with("rex-ports-")),
         "only a private rex-ports-*/rex.sock endpoint is accepted"
     );
-    Ok(path.to_path_buf())
+    Ok(canonical)
 }
 
 fn emit(event: &str, data: Value) {
@@ -287,28 +318,38 @@ fn exercise_live(
             },
         )?;
         emit("port_opened_event", snapshot_json(&opened));
-        // Also exercise explicit ReadPorts while open.
+        // Also exercise explicit ReadPorts while open, fencing on an actual completed reply.
+        let before_reads = host
+            .model
+            .lock()
+            .expect("host model")
+            .ports_read_completions;
         host.commands.send(HostCommand::ReadPorts {
             epoch,
             session: sid.clone(),
         })?;
         let read_open = wait(&host, Duration::from_secs(8), "ReadPorts while open", |m| {
-            (!m.ports_reading.contains(&bid))
+            (m.ports_read_completions > before_reads && !m.ports_reading.contains(&bid))
                 .then(|| m.ports.get(&bid).cloned())
                 .flatten()
                 .filter(|snap| snap.ports.iter().any(|p| p.port == bound_port))
         })?;
         emit("port_opened_read", snapshot_json(&read_open));
     } else {
-        // On pinned API 15, ports_changed never arrives; explicit ReadPorts returns the port.
+        // On pinned API 15, ports_changed is gated off by client; explicit ReadPorts returns the port.
         let deadline = Instant::now() + Duration::from_secs(8);
         let read_open = loop {
+            let before_reads = host
+                .model
+                .lock()
+                .expect("host model")
+                .ports_read_completions;
             host.commands.send(HostCommand::ReadPorts {
                 epoch,
                 session: sid.clone(),
             })?;
             let snap = wait(&host, Duration::from_secs(5), "ReadPorts API 15", |m| {
-                (!m.ports_reading.contains(&bid))
+                (m.ports_read_completions > before_reads && !m.ports_reading.contains(&bid))
                     .then(|| m.ports.get(&bid).cloned())
                     .flatten()
             })?;
@@ -385,9 +426,15 @@ fn exercise_live(
             }),
         );
     } else {
-        // On pinned API 15, verify explicit ReadPorts sees the closed port cleanly.
+        // On pinned API 15, verify passive ports_changed did NOT clear the port before ReadPorts,
+        // then confirm explicit ReadPorts sees the closed port cleanly.
         let deadline = Instant::now() + Duration::from_secs(8);
         let cleared = loop {
+            let before_reads = host
+                .model
+                .lock()
+                .expect("host model")
+                .ports_read_completions;
             host.commands.send(HostCommand::ReadPorts {
                 epoch,
                 session: sid.clone(),
@@ -397,7 +444,7 @@ fn exercise_live(
                 Duration::from_secs(5),
                 "API 15 ReadPorts after close",
                 |m| {
-                    (!m.ports_reading.contains(&bid))
+                    (m.ports_read_completions > before_reads && !m.ports_reading.contains(&bid))
                         .then(|| m.ports.get(&bid).cloned())
                         .flatten()
                 },

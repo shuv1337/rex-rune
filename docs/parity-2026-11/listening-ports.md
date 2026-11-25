@@ -37,32 +37,42 @@ these types and connection commands.
       `blob_read` in Slice 1/2.
 - **Connection sync and lifecycle (`src/connection/ports.rs`, `src/connection.rs`,
   `src/connection/ports_tests.rs`):**
-  - Zero eager reads at attach and zero reads for background sessions.
-  - `HostModel::ports: HashMap<String, PortSnapshot>` and
-    `HostModel::ports_reading: HashSet<String>`.
+  - Zero eager reads at attach and zero reads for background sessions: only the host's
+    selected foreground session (never `background_views` prefetched by `status_sweep`) is
+    eligible for `WatchPorts` or `ReadPorts`, and switching away to another session cancels
+    in-flight/queued reads and drops the watch for the previous session.
+  - `HostModel::ports: HashMap<String, PortSnapshot>`,
+    `HostModel::ports_reading: HashSet<String>`, and `HostModel::ports_read_completions: u64`.
   - Epoch-scoped commands `HostCommand::WatchPorts { epoch, session: Option<String> }` and
     `HostCommand::ReadPorts { epoch, session: String }`, strictly gated on `api_revision >= 15`.
   - Detached `ports::Reader` with max 3 concurrent in-flight reads, 8 s deadline per read, at
-    most one in-flight read per block, and clean `method_not_found` / `revision_too_low` /
-    `not_supported` -> `PortsStatus::Unsupported` handling without disconnecting.
+    most one in-flight read per block, immediate queue pumping whenever lifecycle cancellation
+    frees a slot, and clean `method_not_found` / `revision_too_low` / `not_supported` ->
+    `PortsStatus::Unsupported` handling via shared `transport::detached_result_with_seq`.
   - Rex combining rule (`ControlState::ports_seq`):
     - Reply applies when `reply.seq >= ports_seq[block]` (tie goes to reply).
-    - `ports_changed` event applies when `event.seq > ports_seq[block]` (strictly greater).
-  - Passive `ports_changed` events are intercepted in `block_event` before
-    `activity::parse_block_event` (never touching `urgent_views`, activity, bells, or notices),
-    exempted from `view_seq` in `ControlState::includes` beside `clipboard::is_copy`, stored
-    only for blocks currently in a held view, and wake the UI only when the snapshot or
-    reading state actually changes.
+    - `ports_changed` event applies only when `api_revision >= 16` and
+      `event.seq > ports_seq[block]` (strictly greater); below API 16, `ports_changed` is
+      still intercepted and silently discarded before `activity::parse_block_event`.
+  - Passive `ports_changed` events never touch `urgent_views`, activity, bells, or notices,
+    are exempted from `view_seq` in `ControlState::includes` beside `clipboard::is_copy`,
+    store snapshots only for blocks currently in a held view, and wake the UI only when the
+    snapshot or reading state actually changes.
   - Full lifecycle cleanup across `block_closed`, undoable close (`replace_view` gone blocks),
-    `remove_session`, `session.attach_all` session removal, disconnect (`ports_reading` cleared),
-    and reconnect (`ports`, `ports_reading`, `ports_seq`, watched session, and `ports_reads`
-    reset).
+    `remove_session`, `session.attach_all` session removal, disconnect (`ports` and
+    `ports_reading` cleared immediately so stale addresses/PIDs/paths never linger), and
+    reconnect (`ports`, `ports_reading`, `ports_read_completions`, `ports_seq`, watched
+    session, and `ports_reads` reset). When `replace_view` adds new terminal blocks to the
+    currently watched foreground session, those new blocks are queued and pumped cleanly.
   - Targeted `event_dropped` arm for `event_type == "block_event"` +
-    `block_event_name == Some("ports_changed")`: drops affected snapshot(s), advances
-    `ports_seq` to at least `drop_seq`, cancels affected in-flight reads, and re-reads only if
-    watched without triggering unrelated `session.view` or activity refreshes. Generic drops
-    with missing `event_type` or `block_event` without `block_event_name` also clear/re-read
-    ports if watched, while unrelated specific `block_event_name`s leave ports untouched.
+    `block_event_name == Some("ports_changed")`: verifies held-view membership and matching
+    `session_id` (unheld blocks and mismatched pairs never insert into `ports_seq`), skips
+    invalidation when a stored snapshot already covers `drop_seq` (`ports_seq >= drop_seq`),
+    drops stale snapshots, advances `ports_seq`, cancels affected reads, re-reads only if
+    watched and eligible, and pumps queued reads into freed slots without triggering unrelated
+    `session.view` or activity refreshes. Generic drops with missing `event_type` or
+    `block_event` without `block_event_name` apply the same guarded recovery, while unrelated
+    specific `block_event_name`s leave ports untouched.
 
 ## Locality and Reach Security Matrix
 
@@ -74,20 +84,23 @@ unparsed wire strings.
 
 | Bind address | Local (`unix://`) `open_url` | `Ssh` (`ssh://`) `ssh_forward_command` | `Remote` (`http/s`, `ws/s`) | `copy_address` (all hosts) |
 | --- | --- | --- | --- | --- |
-| `127.0.0.0/8` (loopback v4) | `http://<addr>:<port>` | `ssh -N -L <local>:<addr>:<port> [-p P] <dest>` | `None` (no Open / no `ssh -L`) | `<addr>:<port>` |
-| `::1` (loopback v6) | `http://[::1]:<port>` | `ssh -N -L <local>:[::1]:<port> [-p P] <dest>` | `None` | `[::1]:<port>` |
-| `0.0.0.0` (wildcard v4) | `http://127.0.0.1:<port>` | `ssh -N -L <local>:127.0.0.1:<port> [-p P] <dest>` | `None` | `0.0.0.0:<port>` |
-| `::` (wildcard v6) | `http://[::1]:<port>` | `ssh -N -L <local>:[::1]:<port> [-p P] <dest>` | `None` | `[::]:<port>` |
-| Specific v4 (no zone) | `http://<addr>:<port>` | `ssh -N -L <local>:<addr>:<port> [-p P] <dest>` | `None` | `<addr>:<port>` |
-| Specific v6 (no zone) | `http://[<addr>]:<port>` | `ssh -N -L <local>:[<addr>]:<port> [-p P] <dest>` | `None` | `[<addr>]:<port>` |
+| `127.0.0.0/8` (loopback v4) | `http://<addr>:<port>` | `ssh -N -L <local>:<addr>:<port> [-p P] -- <dest>` | `None` (no Open / no `ssh -L`) | `<addr>:<port>` |
+| `::1` (loopback v6) | `http://[::1]:<port>` | `ssh -N -L '<local>:[::1]:<port>' [-p P] -- <dest>` | `None` | `[::1]:<port>` |
+| `0.0.0.0` (wildcard v4) | `http://127.0.0.1:<port>` | `ssh -N -L <local>:127.0.0.1:<port> [-p P] -- <dest>` | `None` | `0.0.0.0:<port>` |
+| `::` (wildcard v6) | `http://[::1]:<port>` | `ssh -N -L '<local>:[::1]:<port>' [-p P] -- <dest>` | `None` | `[::]:<port>` |
+| Specific v4 (no zone) | `http://<addr>:<port>` | `ssh -N -L <local>:<addr>:<port> [-p P] -- <dest>` | `None` | `<addr>:<port>` |
+| Specific v6 (no zone) | `http://[<addr>]:<port>` | `ssh -N -L '<local>:[<addr>]:<port>' [-p P] -- <dest>` | `None` | `[<addr>]:<port>` |
 | Link-local with `%zone` | `None` (copy only) | `None` (copy only) | `None` (copy only) | `[<addr>%<zone>]:<port>` |
 | Unparsable / invalid zone | `None` (copy port only) | `None` (copy port only) | `None` (copy port only) | `<port>` |
 
 Additional SSH forward rules:
 - Privileged remote ports (`port < 1024`) map to local port `10000 + port` (for example,
   remote port 80 forwards to local port 10080).
-- `ssh::Target::destination()` is always POSIX shell-quoted (`'...'` with `'\''` escaping)
-  when containing shell metacharacters, and control/bidi characters are rejected.
+- Bracketed IPv6 `-L` forwarding specs are single-quoted (`'<local>:[<addr>]:<port>'`) so
+  shells such as zsh do not attempt glob expansion.
+- `--` terminates SSH options before the destination, and `ssh::Target::destination()` is
+  POSIX shell-quoted (`'...'` with `'\''` escaping) when containing shell metacharacters;
+  control and bidi characters are rejected.
 
 ## Live Wire Contract and Verification
 
@@ -114,10 +127,22 @@ Verified against disposable isolated servers via `examples/ports_probe.rs` (buil
 ## Slice 2 UI Handoff
 
 Slice 2 can build directly on Slice 1 without touching protocol or worker code:
-- Send `HostCommand::WatchPorts { epoch, session: Some(sid) }` when opening a session's ports
-  surface and `WatchPorts { epoch, session: None }` when closing it; use `ReadPorts` for an
-  explicit refresh action (especially useful on genuine API 15 servers where `api_revision <
-  PORTS_EVENTS_MIN_API_REVISION`).
+- Send `HostCommand::WatchPorts { epoch, session: Some(sid) }` when opening the foreground
+  session's ports surface and `WatchPorts { epoch, session: None }` when closing it; use
+  `ReadPorts` for an explicit refresh action (especially useful on API 15 servers where
+  `api_revision < PORTS_EVENTS_MIN_API_REVISION` and passive `ports_changed` events are gated
+  off).
+- View-change and reconnect contract:
+  - While `WatchPorts` is active on the selected foreground session, `replace_view`
+    automatically queues and pumps reads for any newly added terminal blocks (for example, a
+    new split or undo-restored pane).
+  - Switching away to another session automatically cancels queued/in-flight reads and clears
+    the old watch; Slice 2 should send a new `WatchPorts` if the surface follows the new
+    foreground session.
+  - Disconnecting clears `HostModel::ports` and `HostModel::ports_reading` immediately and
+    resets the watch; if the Ports surface stays open across a reconnect, Slice 2 must send
+    `WatchPorts { epoch: new_epoch, session: Some(sid) }` once the new `connection_epoch` is
+    connected.
 - Distinguish UI empty/loading/error states directly from `HostModel`:
   - `m.protocol.api_revision < PORTS_MIN_API_REVISION`: API below 15.
   - `m.ports_reading.contains(block)` without a cached snapshot: reading ports.
