@@ -200,7 +200,7 @@ fn prompt_event_queue_is_bounded_and_keeps_order_and_epoch() {
     let (wake, _) = flume::bounded(1);
     let shared = Shared {
         model: Arc::default(),
-        wake,
+        wake: crate::connection::title_wake::HostWake::new(wake),
     };
     for epoch in 0..=MAX_EVENTS as u64 {
         emit(&shared, epoch, PromptEventKind::Dropped);
@@ -222,7 +222,7 @@ async fn in_flight_reply_survives_the_offer_deadline() {
     let (wake, _) = flume::bounded(1);
     let shared = Shared {
         model: Arc::default(),
-        wake,
+        wake: crate::connection::title_wake::HostWake::new(wake),
     };
     let req = payload(json!({"kind":"input", "title":"Answer"}));
     let prompt = Arc::new(parse(&req, "a", Instant::now() - Duration::from_secs(6)).unwrap());

@@ -266,7 +266,7 @@ fn clear_reading(shared: &Shared, blocks: &[String]) {
     }
     drop(model);
     if changed {
-        let _ = shared.wake.try_send(());
+        shared.wake.notify();
     }
 }
 
@@ -310,7 +310,7 @@ pub(super) async fn watch(
             had
         };
         if changed {
-            let _ = shared.wake.try_send(());
+            shared.wake.notify();
         }
         return Ok(());
     };
@@ -324,7 +324,7 @@ pub(super) async fn watch(
             had
         };
         if changed {
-            let _ = shared.wake.try_send(());
+            shared.wake.notify();
         }
         return Ok(());
     }
@@ -395,7 +395,7 @@ async fn enqueue_session_blocks(
             changed
         };
         if changed {
-            let _ = shared.wake.try_send(());
+            shared.wake.notify();
         }
     }
     state.ports_reads.pump(control, shared).await
@@ -427,7 +427,7 @@ pub(super) fn apply_event(
     state.ports_seq.insert(block.to_owned(), event_seq);
     drop(model);
     if changed {
-        let _ = shared.wake.try_send(());
+        shared.wake.notify();
     }
 }
 
@@ -461,7 +461,7 @@ pub(super) fn record_reply(shared: &Shared, state: &mut ControlState, finished: 
 
     drop(model);
     if changed {
-        let _ = shared.wake.try_send(());
+        shared.wake.notify();
     }
 }
 
@@ -598,7 +598,7 @@ pub(super) async fn handle_dropped(
     }
 
     if changed {
-        let _ = shared.wake.try_send(());
+        shared.wake.notify();
     }
     Ok(())
 }

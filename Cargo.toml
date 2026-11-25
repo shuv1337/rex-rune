@@ -78,6 +78,9 @@ ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 url = "2"
 unicode-segmentation = "1"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [profile.dev]
 debug = 1
 

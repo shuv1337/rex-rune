@@ -32,6 +32,8 @@ mod server_info_tests;
 mod ssh_agent_tests;
 #[path = "status_sweep_tests.rs"]
 mod status_sweep_tests;
+#[path = "title_wake_tests.rs"]
+mod title_wake_tests;
 #[path = "undo_close_tests.rs"]
 mod undo_close_tests;
 #[path = "verb_tests.rs"]
@@ -2046,7 +2048,7 @@ async fn copy_mode_worker_round_trip_yank_generation_guard_and_auto_exit() {
     let pane = PaneShared {
         model: model.clone(),
         wake: wake_tx,
-        host_wake: host_wake_tx,
+        host_wake: title_wake::HostWake::new(host_wake_tx),
     };
 
     async fn wait_for(
@@ -2319,7 +2321,7 @@ async fn copy_mode_and_pointer_selection_coordinate_without_clobber_or_orphans()
     let pane = PaneShared {
         model: model.clone(),
         wake: wake_tx,
-        host_wake: host_wake_tx,
+        host_wake: title_wake::HostWake::new(host_wake_tx),
     };
 
     async fn wait_for(
@@ -2548,7 +2550,7 @@ async fn copy_mode_search_to_match_and_steps_settle_when_queued_without_pre_tick
     let pane = PaneShared {
         model: model.clone(),
         wake: wake_tx,
-        host_wake: host_wake_tx,
+        host_wake: title_wake::HostWake::new(host_wake_tx),
     };
 
     async fn wait_for(
@@ -2777,7 +2779,7 @@ async fn search_step_with_copy_mode_off_is_never_dropped_while_unsettled() {
     let pane = PaneShared {
         model: model.clone(),
         wake: wake_tx,
-        host_wake: host_wake_tx,
+        host_wake: title_wake::HostWake::new(host_wake_tx),
     };
 
     async fn wait_for(

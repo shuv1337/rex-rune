@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Animated terminal titles no longer redraw the workspace on every change. Switching tabs or hosts still shows the latest title immediately. [#181](https://github.com/shuv1337/rex-rune/issues/181), reported by @samth.
+
 - **Lua actions no longer stall their own prompt.** The control worker keeps listening for `rex.ui` while `client.action` is pending, so it can decline or answer immediately and still apply the action's eventual response.
 
 ## 0.12.0 - 2026-11-24

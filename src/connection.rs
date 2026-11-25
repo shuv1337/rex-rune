@@ -25,6 +25,7 @@ pub mod ports;
 mod prefetch;
 pub mod server_info;
 mod status_sweep;
+mod title_wake;
 pub mod titles;
 mod view_fetch;
 
@@ -443,11 +444,7 @@ impl HostModel {
                 }
             }
             BlockEvent::Title { text, owner } => {
-                if text.is_empty() {
-                    self.titles.remove(&block);
-                } else {
-                    self.titles.insert(block, (text, owner));
-                }
+                self.set_title(block, text, owner);
             }
             BlockEvent::Notification { title, body } => {
                 // A program spamming notifications can't grow this without bound.
@@ -474,6 +471,18 @@ impl HostModel {
             }
         }
     }
+    fn set_title(&mut self, block: String, text: String, owner: Option<u64>) -> bool {
+        if text.is_empty() {
+            return self.titles.remove(&block).is_some();
+        }
+        let value = (text, owner);
+        if self.titles.get(&block) == Some(&value) {
+            return false;
+        }
+        self.titles.insert(block, value);
+        true
+    }
+
     fn forget_block(&mut self, block: &str) {
         self.activity.remove(block);
         self.status_read.remove(block);
@@ -946,18 +955,19 @@ impl Drop for HostConnection {
 #[derive(Clone)]
 struct Shared {
     model: Arc<Mutex<HostModel>>,
-    wake: flume::Sender<()>,
+    wake: Arc<title_wake::HostWake>,
 }
 impl Shared {
     fn update(&self, change: impl FnOnce(&mut HostModel)) {
         change(&mut self.model.lock().expect("host model"));
-        let _ = self.wake.try_send(());
+        self.wake.notify();
     }
     fn status(&self, status: impl Into<String>, connected: bool) {
         self.update(|m| {
             m.status = status.into();
             m.connected = connected;
             if !connected {
+                self.wake.reset_titles();
                 m.clipboard = None;
                 m.prompt_events.clear();
                 m.actions_in_flight = 0;
@@ -981,7 +991,7 @@ impl Shared {
 struct PaneShared {
     model: Arc<Mutex<Model>>,
     wake: flume::Sender<()>,
-    host_wake: flume::Sender<()>,
+    host_wake: Arc<title_wake::HostWake>,
 }
 impl PaneShared {
     fn update(&self, change: impl FnOnce(&mut Model)) {
@@ -995,7 +1005,7 @@ impl PaneShared {
             m.status = status.into();
             m.connected = connected;
         });
-        let _ = self.host_wake.try_send(());
+        self.host_wake.notify();
     }
 }
 
@@ -1196,7 +1206,7 @@ impl HostConnection {
         let (wake, notifications) = flume::bounded(1);
         let shared = Shared {
             model: model.clone(),
-            wake,
+            wake: title_wake::HostWake::new(wake),
         };
         let sender = commands.clone();
         let alive = HostThread(Arc::as_ptr(&model) as usize);
@@ -1621,7 +1631,7 @@ async fn query_activity(control: &mut Client, shared: &Shared, state: &mut Contr
         let method = format!("{}.title", activity::TERMINAL);
         if let Ok(reply) = request(control, &method, target.clone()).await {
             let title = activity::parse_title(&reply);
-            shared.update(|m| m.apply_block_event(&session, block.clone(), title));
+            shared.block_event(&session, block.clone(), title);
         }
         let method = format!("{}.process", activity::TERMINAL);
         // Best-effort metadata must not hold up attachment or input for the normal
@@ -2107,7 +2117,7 @@ async fn handle_event(
                 let m = shared.model.lock().expect("host model");
                 !m.views.contains_key(id) && m.sessions.iter().any(|s| s.session_id == id)
             };
-            shared.update(|m| m.apply_block_event(id, block, change));
+            shared.block_event(id, block, change);
             // Read-only, and allowed for any session once attach_all is active. The layout
             // read is left to the paced background reader, so it never holds this event up,
             // but it goes to the front: a live report should not wait for the whole pass.
@@ -2405,6 +2415,7 @@ async fn run_host(
                 };
                 tokio::select! {
                     _ = expiry.tick() => {
+                        shared.wake.flush_due();
                         state.prompts.expire(shared);
                         if exclusive { continue; }
                         busy_since = Some(Instant::now());
@@ -3870,7 +3881,7 @@ async fn run_data(
                                 if !m.connected { m.connected = true; m.status = "Live · snapshot restored".into(); transitioned = true; }
                                 if let Some(code) = stream.exit_code { m.status = format!("Process exited · {code}"); }
                             });
-                            if transitioned { let _ = shared.host_wake.try_send(()); }
+                            if transitioned { shared.host_wake.notify(); }
                             dirty = search_pending;
                         } else {
                             dirty = false;

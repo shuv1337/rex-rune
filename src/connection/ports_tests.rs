@@ -519,7 +519,7 @@ async fn ports_changed_never_marks_urgent_views_or_activity() {
     let (wake_tx, _wake_rx) = flume::bounded(1);
     let shared = Shared {
         model: Arc::new(Mutex::new(model)),
-        wake: wake_tx,
+        wake: title_wake::HostWake::new(wake_tx),
     };
     let mut workers = HashMap::new();
     let mut state = ControlState::default();
@@ -1215,7 +1215,7 @@ async fn event_dropped_guards_unheld_mismatched_session_and_newer_watermark() {
     let (wake_tx, _wake_rx) = flume::bounded(1);
     let shared = Shared {
         model: Arc::new(Mutex::new(model)),
-        wake: wake_tx,
+        wake: title_wake::HostWake::new(wake_tx),
     };
     let mut state = ControlState::default();
 
@@ -1766,7 +1766,7 @@ fn host_wide_4096_port_budget_enforced_across_blocks() {
     let (wake_tx, _wake_rx) = flume::bounded(1);
     let shared = Shared {
         model: Arc::new(Mutex::new(model)),
-        wake: wake_tx,
+        wake: title_wake::HostWake::new(wake_tx),
     };
     let mut state = ControlState::default();
 
@@ -1831,7 +1831,7 @@ fn late_reply_for_forgotten_block_is_ignored() {
     let (wake_tx, _wake_rx) = flume::bounded(1);
     let shared = Shared {
         model: Arc::new(Mutex::new(model)),
-        wake: wake_tx,
+        wake: title_wake::HostWake::new(wake_tx),
     };
     let mut state = ControlState::default();
 

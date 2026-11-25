@@ -1413,7 +1413,7 @@ async fn a_failed_data_reference_fails_only_that_transfer() {
     let (wake, _woken) = flume::bounded(1);
     let shared = Shared {
         model: Arc::new(Mutex::new(HostModel::default())),
-        wake,
+        wake: title_wake::HostWake::new(wake),
     };
     let mut downloads = downloads::Downloads::default();
     let id = download::next_id();
