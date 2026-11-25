@@ -1072,6 +1072,11 @@ fn requests(rx: &flume::Receiver<HostCommand>) -> Vec<(String, String, serde_jso
             HostCommand::Request { method, payload } => {
                 Some((method, payload["session_id"].as_str()?.to_owned(), payload))
             }
+            HostCommand::Close { kind, payload } => Some((
+                kind.method().into(),
+                payload["session_id"].as_str()?.to_owned(),
+                payload,
+            )),
             HostCommand::NewTerminal {
                 method,
                 mut payload,

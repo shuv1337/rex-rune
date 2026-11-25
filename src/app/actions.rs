@@ -14,6 +14,7 @@ pub const HISTORY_BACK: &str = "client.history.back";
 pub const HISTORY_FORWARD: &str = "client.history.forward";
 pub const DOWNLOAD: &str = "pane.download";
 pub const FULL_SCREEN: &str = "client.full_screen.toggle";
+pub const UNDO_CLOSE: &str = "client.undo_close";
 
 #[derive(Clone, Copy)]
 enum Handler {
@@ -24,6 +25,7 @@ enum Handler {
     Sidebar,
     FullScreen,
     Close,
+    UndoClose,
     Search,
     NewTab,
     NextTab,
@@ -151,6 +153,7 @@ specs! {
     "client.tab.rename" => RenameTab,
     "session.rename" => RenameSession,
     "pane.close" => ClosePane,
+    UNDO_CLOSE => UndoClose,
     "pane.send_key" => SendKey,
     DOWNLOAD => Download,
     super::directory::ACTION => InsertPath,
@@ -262,6 +265,7 @@ impl Spec {
             NewTab => Remote::Never("Use rex window new instead."),
             Split => Remote::Never("Use rex split instead."),
             Close | ClosePane => Remote::Never("Use rex block close instead."),
+            UndoClose => Remote::Never("Only the person at this computer can undo a close."),
             FloatPane => Remote::Never("Use rex api call session.float_block instead."),
             NewFloatingPane => Remote::Never("Use rex api call session.new_layer instead."),
             MinimizeLayer | RestoreLayer => {
@@ -345,6 +349,7 @@ impl Spec {
                 | Handler::GoToDirectory
                 | Handler::PairDevice
                 | Handler::StopServer
+                | Handler::UndoClose
         )
     }
     pub fn global(&self) -> bool {
@@ -449,6 +454,7 @@ impl Spec {
             Handler::RenameTab => "Rename tab",
             Handler::RenameSession => "Rename session",
             Handler::ClosePane => "Close pane",
+            Handler::UndoClose => "Undo close",
             Handler::SendKey => "Send key",
             Handler::Download => "Download file",
             Handler::InsertPath => "Insert path",
@@ -524,6 +530,7 @@ impl Spec {
             | Handler::RenameTab
             | Handler::RenameSession
             | Handler::ClosePane
+            | Handler::UndoClose
             | Handler::MoveTab
             | Handler::MuteTab
             | Handler::CloseOtherTabs
@@ -715,6 +722,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::Toolbar => s.toggle_toolbar(),
         Handler::FullScreen => tx.toggle_full_screen(),
         Handler::Close => s.close_focused(tx),
+        Handler::UndoClose => s.undo_close(),
         Handler::Search => s.open_search(),
         Handler::FindNext => s.find_step(true),
         Handler::FindPrevious => s.find_step(false),

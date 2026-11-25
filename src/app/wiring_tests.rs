@@ -41,6 +41,7 @@ fn chord(index: usize) -> String {
 /// bound in shortcuts.json to its own sequence.
 fn all_bound() -> Workspace {
     let (mut ws, _host) = tabbed_workspace("split");
+    ws.hosts[0].model.protocol.api_revision = 20;
     let (sender, _sent) = flume::unbounded();
     super::pane_verb_tests::framed_terminal(&mut ws, "block:b", &sender, b"$ ");
     let bindings: Vec<Value> = actions::SPECS

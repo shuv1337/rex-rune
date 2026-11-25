@@ -8,7 +8,7 @@
 //! from the server's layout (`layout::neighbour`, `layout::resized`); nothing is placed here.
 use super::{panel::PaneTarget, workspace::Workspace};
 use rex_rune::{
-    connection::HostCommand,
+    connection::{HostCommand, HumanClose},
     layout::{self, Side},
 };
 use serde_json::{Value, json};
@@ -116,8 +116,8 @@ impl Workspace {
             if open.iter().any(|block| block == id) {
                 self.send(
                     target.host,
-                    HostCommand::Request {
-                        method: "block.close".into(),
+                    HostCommand::Close {
+                        kind: HumanClose::Pane,
                         payload: json!({"session_id": target.session, "block_id": id}),
                     },
                 );

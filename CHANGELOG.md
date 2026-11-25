@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Undo close (Rex Server API 20+).** Choose **Undo close** in Commands to reopen the last eligible pane, tab, or session closed on the active host. Rex Rune brings it back into view and reconnects to its running terminal. The action is local-only and has no default shortcut; assign one in Settings → Shortcuts.
+
 - **Interactive `rex.ui` script prompts (Closes [#144](https://github.com/shuv1337/rex-rune/issues/144)).** Completes `rex.ui` support (API 17+) across both `input` and `pick` (single, multiple, and `allow_other`) prompts. Adds an arrival-ordered prompt queue per host with calm auto-open rules (never clobbering open local dialogs, waiting during active typing unless triggered by this client's own in-flight `client.action`, and respecting a 10-second per-host post-cancel cool-down), demotion draft preservation, and a 300 ms accidental-submit guard plus Enter repeat suppression. Renders an anti-spoofing modal over a persistent dark scrim (clicking outside does nothing; Escape/Cancel ends the prompt) with client-owned `Question from <saved host label>` attribution, medium 15 pt script title, mono action subline, destination footnote, 16 authored 20x20 stroke icons plus generic fallback, 4,096-character input cap, inline `bad_request` rejection errors without losing drafts, and 640x480 minimum-window fit. Adds a `WARNING` waiting toolbar chip (`Question · <host>` / `<N> questions`, floating when the toolbar is hidden), a Commands entry (`Answer question from <host>…`), a per-host **Allow script prompts** switch in Settings -> Remote Hosts (default on, opt-out persisted in `settings::Host.prompts`), and zero-PTY-leak input guards. [Scope, captures, and live X11 checks](docs/parity-2026-11/rex-ui.md).
 
 ### Fixed

@@ -95,6 +95,7 @@ const IDS: &[&str] = &[
     "host.remote_control",
     "host.pair_device",
     "host.reconnect",
+    "client.undo_close",
     "host.collapse_others",
     "host.stop_server",
     "host.remove",
@@ -354,7 +355,8 @@ fn a_search_is_one_list_with_the_best_match_first() {
             "Close other panes…",
             "Close pane…",
             "Close floating layer…",
-            "Close app"
+            "Close app",
+            "Undo close"
         ]
     );
     assert_eq!(ws.panel.as_ref().unwrap().selected, 0);
@@ -373,9 +375,12 @@ fn a_search_is_one_list_with_the_best_match_first() {
             "Close pane…",
             "Close pane or tab…",
             "Close other panes…",
-            "Close floating layer…"
+            "Close floating layer…",
+            "Undo close"
         ]
     );
+    search(&mut ws, "reopen pane");
+    assert_eq!(labels(&ws), ["Undo close"]);
     // Words in any order; each must be found.
     search(&mut ws, "size font");
     assert_eq!(
@@ -606,6 +611,125 @@ fn close_session_asks_first_and_names_the_session() {
     assert!(ws.panel.is_none());
     assert!(!command(&ws, "session.close").entry.enabled);
     std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn undo_close_is_local_unbound_and_available_only_on_the_connected_active_host() {
+    let (mut ws, first, second) = fixture();
+    let action = actions::UNDO_CLOSE;
+    let spec = actions::find(action).unwrap();
+    assert!(matches!(spec.remote(), actions::Remote::Never(_)));
+    assert!(spec.requires_person());
+    assert!(ws.shortcut_chords(action, &Value::Null).is_empty());
+    assert!(
+        ws.shortcut_rows().iter().any(|row| {
+            row.action == action && row.title == "Undo close" && row.keys.is_empty()
+        })
+    );
+    overrides(&mut ws, json!([{"keys":"ctrl+alt+f1","action":action}]));
+    for (connected, revision, reason) in [
+        (false, 21, Some("Connect to the host to undo a close")),
+        (true, 10, Some("Requires Rex Server API 20 or later")),
+        (true, 13, Some("Requires Rex Server API 20 or later")),
+        (true, 19, Some("Requires Rex Server API 20 or later")),
+        (true, 20, None),
+        (true, 21, None),
+    ] {
+        let model = &mut ws.hosts[0].model;
+        model.connected = connected;
+        model.protocol.api_revision = revision;
+        model.connection_epoch = 42;
+        model.selected = None;
+        let row = ws
+            .commands()
+            .into_iter()
+            .find(|row| row.id == action)
+            .unwrap();
+        assert_eq!(row.entry.enabled, reason.is_none());
+        if let Some(reason) = reason {
+            assert_eq!(row.entry.detail, reason);
+            run(&mut ws, action);
+            assert!(first.is_empty());
+            assert_eq!(notices(&ws).last(), Some(&reason));
+        } else {
+            assert_eq!(row.entry.keys, ws.shortcut_chords(action, &Value::Null));
+            choose(&mut ws, action);
+            assert!(matches!(
+                first.try_recv(),
+                Ok(HostCommand::UndoClose { epoch: 42 })
+            ));
+        }
+        assert!(second.is_empty());
+    }
+}
+
+#[test]
+fn undo_close_human_confirmations_mark_pane_tab_and_session_even_on_old_clients() {
+    use rex_rune::connection::HumanClose;
+    for revision in [13, 19, 20, 21] {
+        let (mut ws, rx) = tabbed_workspace("split");
+        ws.hosts[0].model.protocol.api_revision = revision;
+        ws.hosts[0].model.sessions = vec![session("s")];
+        for (action, kind) in [
+            ("pane.close", HumanClose::Pane),
+            ("pane.close_others", HumanClose::Pane),
+            ("client.tab.close", HumanClose::Tab),
+            ("client.tab.close_others", HumanClose::Tab),
+            ("session.close", HumanClose::Session),
+        ] {
+            run(&mut ws, action);
+            assert!(matches!(
+                ws.panel.as_ref().unwrap().kind,
+                PanelKind::Confirm { .. }
+            ));
+            assert!(rx.is_empty(), "asks first");
+            ws.submit(&mut rune::Tx::default());
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Ok(HostCommand::Close { kind: actual, payload })
+                        if actual == kind && payload["session_id"] == "s"
+                            && payload.get("undoable").is_none()
+                ),
+                "{action}: the worker, not the UI, adds the flag from the live revision"
+            );
+        }
+    }
+}
+
+#[test]
+fn undo_close_empty_history_notice_reaches_the_ui_and_returned_actions_cannot_undo() {
+    let (mut ws, first, _second) = fixture();
+    let mut model = ws.hosts[0].model.clone();
+    model.protocol.api_revision = 21;
+    model.connection_epoch = 42;
+    model.notice = Some("Nothing to reopen".into());
+    model
+        .client_actions
+        .push(rex_rune::connection::actions::Queued {
+            generation: ws.keymap_generation,
+            session: model.selected.clone(),
+            block: None,
+            action: serde_json::from_value(json!({"action":actions::UNDO_CLOSE})).unwrap(),
+        });
+    *ws.hosts[0].connection.model.lock().unwrap() = model;
+    ws.sync(0, &mut rune::Tx::default());
+    assert_eq!(ws.model().notice.as_deref(), Some("Nothing to reopen"));
+    assert!(notices(&ws).iter().any(|n| n.contains("only the person")));
+    assert!(
+        !first
+            .try_iter()
+            .any(|c| matches!(c, HostCommand::UndoClose { .. }))
+    );
+    let mut rt = runtime(ws);
+    for _ in 0..10 {
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some("Nothing to reopen"))
+    );
 }
 
 #[test]
@@ -1001,8 +1125,8 @@ fn the_list_shows_about_twenty_rows_and_scrolls_to_the_rest() {
     assert!(!headings(&rt).iter().any(|w| w == "Session · s-label"));
     let short = rect(&rt, "results-scroll");
     assert!(
-        short[3] < 300.,
-        "the seven close rows need no scrolling: {short:?}"
+        short[3] < 340. && rect(&rt, "results")[3] <= short[3] + 1.,
+        "close results fit without scrolling: {short:?}"
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

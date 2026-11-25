@@ -496,7 +496,37 @@ impl HostModel {
     }
 }
 
+pub const UNDO_CLOSE_MIN_API_REVISION: u32 = 20;
+pub const UNDO_CLOSE_REQUIRES_API: &str = "Requires Rex Server API 20 or later";
+pub const UNDO_CLOSE_DISCONNECTED: &str = "Connect to the host to undo a close";
+
+/// Only the close methods that accept `undoable`. Probes and automated requests use `Request`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HumanClose {
+    Pane,
+    Tab,
+    Session,
+}
+
+impl HumanClose {
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::Pane => "block.close",
+            Self::Tab => "session.close_window",
+            Self::Session => "session.destroy",
+        }
+    }
+}
+
 pub enum HostCommand {
+    Close {
+        kind: HumanClose,
+        payload: Value,
+    },
+    /// Undo only on the connection the person asked on, with no replay.
+    UndoClose {
+        epoch: u64,
+    },
     /// A person's confirmed, single attempt on this connection only. Never replayed.
     StopServer {
         epoch: u64,
@@ -1131,6 +1161,7 @@ async fn attach(
     control: &mut Client,
     shared: &Shared,
     state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
     id: &str,
 ) -> Result<()> {
     shared.update(|m| m.protocol.attach_requests += 1);
@@ -1140,11 +1171,38 @@ async fn attach(
     )
     .await??;
     state.view_seq.insert(id.into(), reply.seq);
-    apply_view(shared, id, reply.value.view);
+    replace_view(shared, state, sweep, id, reply.value.view);
     Ok(())
 }
 fn apply_view(shared: &Shared, id: &str, view: session::ViewResponse) {
     shared.update(|m| apply_view_to_model(m, id, view));
+}
+
+fn replace_view(
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+    id: &str,
+    view: session::ViewResponse,
+) {
+    shared.update(|m| {
+        if let Some(old) = m.views.get(id) {
+            if old.revision > view.revision {
+                return;
+            }
+            let current: HashSet<_> = view_blocks(&view).collect();
+            let gone: Vec<_> = view_blocks(old).filter(|b| !current.contains(b)).collect();
+            for block in gone {
+                // An undoable close removes the block from the view and ends its stream
+                // now, but does not deliver a control block_closed event while it is held.
+                // Reconcile drops the worker; clear these reads even for unstreamed blocks.
+                sweep.cancel_block(&block);
+                state.forget_block(&block);
+                m.forget_block(&block);
+            }
+        }
+        apply_view_to_model(m, id, view);
+    });
 }
 
 fn apply_view_to_model(m: &mut HostModel, id: &str, view: session::ViewResponse) {
@@ -1189,6 +1247,7 @@ async fn refresh(
     control: &mut Client,
     shared: &Shared,
     state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
     id: &str,
 ) -> Result<()> {
     let reply = tokio::time::timeout(
@@ -1197,7 +1256,7 @@ async fn refresh(
     )
     .await??;
     state.view_seq.insert(id.into(), reply.seq);
-    apply_view(shared, id, reply.value);
+    replace_view(shared, state, sweep, id, reply.value);
     Ok(())
 }
 async fn list(
@@ -1680,7 +1739,7 @@ async fn handle_event(
                         forget.push(block);
                     }
                     if should_refresh {
-                        match refresh(control, shared, state, id).await {
+                        match refresh(control, shared, state, sweep, id).await {
                             Ok(()) => {
                                 let new_blocks: Vec<String> = shared
                                     .model
@@ -1778,7 +1837,7 @@ async fn handle_event(
                         .as_u64()
                         .is_some_and(|new| new > revision)
                 }) {
-                    refresh(control, shared, state, id).await?;
+                    refresh(control, shared, state, sweep, id).await?;
                 } else if revision.is_none() {
                     // The reply on its way may predate this change.
                     if state.view_reading.as_deref() == Some(id) {
@@ -1810,7 +1869,7 @@ async fn handle_event(
                     .views
                     .contains_key(id)
             {
-                refresh(control, shared, state, id).await?;
+                refresh(control, shared, state, sweep, id).await?;
             }
         }
         "block_event" => {
@@ -2033,11 +2092,11 @@ async fn run_host(
             let mut attached: HashSet<String> = workers.values().map(|w| w.session.clone()).collect();
             if let Some(id) = &selected { attached.insert(id.clone()); }
             for id in attached {
-                if !state.view_seq.contains_key(&id) { attach(&mut control, shared, &mut state, &id).await?; }
+                if !state.view_seq.contains_key(&id) { attach(&mut control, shared, &mut state, &mut sweep, &id).await?; }
             }
             if let (Some(id), Some(block)) = (&selected, initial_block.take()) {
                 request(&mut control, "session.focus_block", json!({"session_id":id,"block_id":block})).await?;
-                refresh(&mut control, shared, &mut state, id).await?;
+                refresh(&mut control, shared, &mut state, &mut sweep, id).await?;
             }
             state.performs_since = busy_since;
             server_reads.reset();
@@ -2193,7 +2252,7 @@ async fn run_host(
                                 // Its layout changed while this read was out, and that
                                 // event had no layout to compare with: read it once more.
                                 if stale {
-                                    let _ = refresh(&mut control, shared, &mut state, &id).await;
+                                    let _ = refresh(&mut control, shared, &mut state, &mut sweep, &id).await;
                                 }
                             }
                         }
@@ -2236,7 +2295,7 @@ async fn run_host(
                                 if placed {
                                     state.view_seq.insert(session.clone(), seq);
                                     if stale {
-                                        let _ = refresh(&mut control, shared, &mut state, &session).await;
+                                        let _ = refresh(&mut control, shared, &mut state, &mut sweep, &session).await;
                                     }
                                 }
                             }
@@ -2658,6 +2717,9 @@ async fn run_host(
                 HostCommand::ResizeLayer { .. } => shared.update(|m| {
                     m.notice = Some(crate::layers::Blocked::NotConnected.sentence());
                 }),
+                HostCommand::UndoClose { .. } => shared.update(|m| {
+                    m.notice = Some(UNDO_CLOSE_DISCONNECTED.into());
+                }),
                 HostCommand::Claim { .. }
                 | HostCommand::PerformReply { .. }
                 | HostCommand::PromptReply { .. }
@@ -2779,7 +2841,7 @@ async fn after_request(
     shared.update(|m| m.notice = None);
     if let Some(id) = session {
         // Destroying a session, or closing its last tab, ends it: nothing to re-read.
-        match refresh(control, shared, state, id).await {
+        match refresh(control, shared, state, sweep, id).await {
             Err(error)
                 if matches!(
                     error.downcast_ref::<rexrs::Error>(),
@@ -2789,6 +2851,73 @@ async fn after_request(
                 remove_session(shared, workers, state, sweep, id)
             }
             result => result?,
+        }
+    }
+    Ok(())
+}
+
+async fn undo_close(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+    epoch: u64,
+) -> Result<()> {
+    if shared.model.lock().expect("host model").connection_epoch != epoch {
+        return Ok(());
+    }
+    if control.welcome().api_revision < UNDO_CLOSE_MIN_API_REVISION {
+        shared.update(|m| m.notice = Some(UNDO_CLOSE_REQUIRES_API.into()));
+        return Ok(());
+    }
+    let reopened = async {
+        let reply = request(control, "client.undo_close", json!({})).await;
+        let reply = match reply {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<rexrs::Error>(),
+                    Some(rexrs::Error::Api(rexrs::ApiError::NotFound { .. }))
+                ) =>
+            {
+                shared.update(|m| m.notice = Some("Nothing to reopen".into()));
+                return Ok(());
+            }
+            result => result?,
+        };
+        let id = reply["session_id"]
+            .as_str()
+            .context("missing reopened session ID")?;
+        let listed = shared
+            .model
+            .lock()
+            .expect("host model")
+            .sessions
+            .iter()
+            .any(|s| s.session_id == id);
+        if !listed {
+            list(control, shared, state, sweep).await?;
+        }
+        let selected = shared.model.lock().expect("host model").selected.as_deref() == Some(id);
+        if selected {
+            refresh(control, shared, state, sweep, id).await?;
+        } else {
+            attach(control, shared, state, sweep, id).await?;
+        }
+        shared.update(|m| {
+            m.background_views.remove(id);
+            m.selected = Some(id.into());
+            m.notice = None;
+        });
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = reopened {
+        shared.update(|m| m.notice = Some(format!("Could not finish Undo close: {error:#}")));
+        if matches!(
+            error.downcast_ref::<rexrs::Error>(),
+            Some(rexrs::Error::Transport(_) | rexrs::Error::Closed { .. })
+        ) {
+            return Err(error);
         }
     }
     Ok(())
@@ -2842,7 +2971,7 @@ async fn handle_command(
         } => {
             let selected = shared.model.lock().expect("host model").selected.clone();
             if selected.as_ref() != Some(&session) {
-                attach(control, shared, state, &session).await?;
+                attach(control, shared, state, sweep, &session).await?;
             }
             if let Some(window) = window {
                 request(
@@ -2851,7 +2980,7 @@ async fn handle_command(
                     json!({"session_id":session,"window_id":window}),
                 )
                 .await?;
-                refresh(control, shared, state, &session).await?;
+                refresh(control, shared, state, sweep, &session).await?;
             }
             shared.update(|m| {
                 m.background_views.remove(&session);
@@ -2860,7 +2989,7 @@ async fn handle_command(
             });
         }
         HostCommand::Select(id) => {
-            attach(control, shared, state, &id).await?;
+            attach(control, shared, state, sweep, &id).await?;
             shared.update(|m| {
                 m.background_views.remove(&id);
                 m.selected = Some(id);
@@ -2886,14 +3015,29 @@ async fn handle_command(
             let created = request(control, "session.create", payload).await?;
             let id = created["session_id"].as_str().context("new session ID")?;
             list(control, shared, state, sweep).await?;
-            attach(control, shared, state, id).await?;
+            attach(control, shared, state, sweep, id).await?;
             shared.update(|m| {
                 m.background_views.remove(id);
                 m.selected = Some(id.into());
                 m.notice = None;
             });
         }
-        HostCommand::Request { method, payload } => {
+        HostCommand::UndoClose { epoch } => {
+            undo_close(control, shared, state, sweep, epoch).await?
+        }
+        HostCommand::Close { .. } | HostCommand::Request { .. } => {
+            let (method, payload) = match command {
+                HostCommand::Close { kind, mut payload } => {
+                    if control.welcome().api_revision >= UNDO_CLOSE_MIN_API_REVISION {
+                        payload["undoable"] = json!(true);
+                    }
+                    (std::borrow::Cow::Borrowed(kind.method()), payload)
+                }
+                HostCommand::Request { method, payload } => {
+                    (std::borrow::Cow::Owned(method), payload)
+                }
+                _ => unreachable!(),
+            };
             let session_id = payload["session_id"].as_str().map(str::to_owned);
             request(control, &method, payload).await?;
             after_request(

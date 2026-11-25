@@ -28,6 +28,8 @@ mod server_info_tests;
 mod ssh_agent_tests;
 #[path = "status_sweep_tests.rs"]
 mod status_sweep_tests;
+#[path = "undo_close_tests.rs"]
+mod undo_close_tests;
 #[path = "verb_tests.rs"]
 mod verb_tests;
 use futures_util::{SinkExt, StreamExt};

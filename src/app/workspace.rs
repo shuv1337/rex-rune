@@ -9,7 +9,9 @@ use super::{
     widgets::ScrollFx,
 };
 use rex_rune::{
-    connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
+    connection::{
+        Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, HumanClose, Options,
+    },
     layout::{Divider, shell_layout},
     settings::{
         ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice, terminal::OptionSides,
@@ -649,7 +651,10 @@ impl Workspace {
         model.view_fetches = view_fetches;
         for (block, connection) in &model.terminals {
             let key = (id, block.clone());
-            if !self.terminals.contains_key(&key) {
+            // An undo can restore the same ID before the UI sees the intervening removal.
+            if self.terminals.get(&key).is_none_or(|term| {
+                !std::sync::Arc::ptr_eq(&term.connection.model, &connection.model)
+            }) {
                 let receiver = connection.wake.clone();
                 let handle = self.handle.clone();
                 let wake_key = key.clone();
@@ -722,10 +727,12 @@ impl Workspace {
             self.keymap_generation,
         );
         for queued in client_actions {
-            // File dialogs need this person's own key or click, whatever a host returns.
+            // These actions need this person's own key or click, whatever a host returns.
             if super::actions::find(&queued.action.action).is_some_and(|s| s.requires_person()) {
                 self.inform(if queued.action.action == super::server_page::STOP {
                     "Returned client action skipped: only the person at this computer can stop a server."
+                } else if queued.action.action == super::actions::UNDO_CLOSE {
+                    "Returned client action skipped: only the person at this computer can undo a close."
                 } else {
                     "Returned client action skipped: a host cannot start a download or open the path browser."
                 });
@@ -2761,11 +2768,19 @@ impl Workspace {
                     return;
                 }
                 if let Some(tab) = tab {
-                    self.confirmed_tab_close(&tab, &method, payload);
+                    self.confirmed_tab_close(&tab, payload);
                     return;
                 }
                 if let Some(session) = session {
-                    self.session_request(&session, &method, payload);
+                    let mut payload = payload;
+                    payload["session_id"] = json!(session.session);
+                    self.send(
+                        session.host,
+                        HostCommand::Close {
+                            kind: HumanClose::Session,
+                            payload,
+                        },
+                    );
                     return;
                 }
                 match target.filter(|_| method == "block.close") {
@@ -2773,7 +2788,25 @@ impl Workspace {
                         self.confirmed_pane_close(&target, &payload);
                     }
                     Some(target) => {
-                        self.send(target.host, HostCommand::Request { method, payload })
+                        self.send(
+                            target.host,
+                            HostCommand::Close {
+                                kind: HumanClose::Pane,
+                                payload,
+                            },
+                        );
+                    }
+                    None if method == "session.close_window" || method == "block.close" => {
+                        if let Some(session) = &self.model().selected {
+                            let mut payload = payload;
+                            payload["session_id"] = json!(session);
+                            let kind = if method == "block.close" {
+                                HumanClose::Pane
+                            } else {
+                                HumanClose::Tab
+                            };
+                            self.send(self.active, HostCommand::Close { kind, payload });
+                        }
                     }
                     None => self.request(&method, payload),
                 }

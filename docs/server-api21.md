@@ -184,13 +184,47 @@ Summary of schema and protocol changes from revision 14 through revision 21:
    - Kept Zoom/Restore pane menu and Commands labels, Zoomed header chips,
      `balanced`, and `beside` accurate across both fields.
 
+## Undo close (API 20+)
+
+**Undo close** in Commands asks the active host to reopen the last eligible
+close from this client. `client.undo_close` has no default shortcut, but can
+be bound in Settings → Shortcuts or in the host's keymap. It is not available
+to remote actions. It is disabled when the host is disconnected or negotiates
+an API revision below 20.
+
+Confirmed human pane, tab, and session closes, including Close other panes
+and Close other tabs, send `undoable: true` only on API 20+. Each pane or tab
+in a bulk close is a separate close. Floating-layer closes and automated
+requests do not use this flag. The server can hold eligible closes for about
+a minute; when the history is empty or expires, Rex Rune shows **Nothing to
+reopen** and stays connected.
+
+The client sends `client.undo_close` with `{}` once on the requested
+connection epoch. It refreshes the selected session or re-lists and attaches
+as needed to show the restored session with the server's focus. A held pane
+is absent from the view and its previous data stream has ended even before a
+control `block_closed` event arrives. The worker clears that pane's once-read
+metadata and discards the old stream. On restoration it reads status, title,
+and process again and opens a fresh stream for the visible pane.
+
+Mock and headless tests cover wire shape, reconnect and revision guards,
+metadata and data recovery, and the Commands and Shortcuts wiring. To check
+running PTYs and both revisions against disposable servers:
+
+```sh
+cargo build --locked --no-default-features --example undo_close_probe
+python3 scripts/undo-close-private.py target/debug/examples/undo_close_probe /path/to/api21/rex /path/to/api13/rex
+```
+
+On the private API 21 `0.1.0-snapshot.2562` server, the probe restored a pane,
+tab, and session. A shell variable survived each close and was read through
+a fresh data stream after undo. Empty history left the connection up. On
+the private API 13 server, all three closes succeeded without schema errors.
+
 ## Deferred deliberately
 
 - **`rex.ui` interactive prompt rendering (#144):** deferred to its own UI slice;
   the shipped client still refuses with `not_supported` in the meantime.
-- **Undo-close UI (`undoable: true` and `client.undo_close`):** Rex Rune keeps
-  its existing explicit close confirmations and omits `undoable`; ID-reuse
-  cleanup ensures external undone closes reconcile cleanly.
 - **Focus history navigation UI (`focus_history.reverse`):** SDK types are
   generated and tested; UI commands/bindings are deferred.
 - **Listening ports and tunnel inspection UI (`com.superlogical.terminal.ports`,

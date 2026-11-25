@@ -10,7 +10,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::{
-    connection::{DEFAULT_TAB_LABEL, HostCommand},
+    connection::{DEFAULT_TAB_LABEL, HostCommand, HumanClose},
     settings::MutedTab,
 };
 use rexrs::api::session;
@@ -553,15 +553,25 @@ impl Workspace {
     /// A confirmed Close tab or Close other tabs. The other tabs close one request each;
     /// one that closed since the question was asked is skipped, and nothing closes when the
     /// tab that was to stay is gone.
-    pub(super) fn confirmed_tab_close(&mut self, target: &TabTarget, method: &str, payload: Value) {
+    pub(super) fn confirmed_tab_close(&mut self, target: &TabTarget, payload: Value) {
+        let close = |s: &mut Self, mut payload: Value| {
+            payload["session_id"] = json!(target.session);
+            s.send(
+                target.host,
+                HostCommand::Close {
+                    kind: HumanClose::Tab,
+                    payload,
+                },
+            );
+        };
         let Some(named) = payload.get("window_ids").and_then(Value::as_array) else {
-            self.tab_request(target, method, payload);
+            close(self, payload);
             return;
         };
         let open = self.tab_order(target).map(|(_, order)| order);
         for id in named.iter().filter_map(Value::as_str) {
             if open.as_ref().is_some_and(|o| o.iter().any(|w| w == id)) {
-                self.tab_request(target, method, json!({"window_id": id}));
+                close(self, json!({"window_id": id}));
             }
         }
     }
