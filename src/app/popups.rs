@@ -459,8 +459,11 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                     surface: surface_id,
                     activity: entry.activity.as_ref(),
                     program: entry.program,
+                    icon: None,
+                    subtitle: None,
                     label: &entry.label,
                     detail: &entry.detail,
+                    detail_max_w: None,
                     tone: entry.tone,
                     keys: &entry.keys,
                     height: if entry.footer { 28. } else { row_height },
@@ -482,6 +485,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                         })
                         .flatten()
                         .map(|columns| (columns, name_limit)),
+                    hover_select: None,
                 },
                 i,
                 move |s: &mut Workspace, tx: &mut Tx| s.perform(action.clone(), tx),

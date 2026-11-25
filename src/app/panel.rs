@@ -94,6 +94,8 @@ pub enum Intent {
     Choose(usize),
     /// A Commands row that is not a named action.
     Command(super::commands::Run),
+    /// Open a waiting `rex.ui` prompt modal (Commands row; never a registered remote action).
+    OpenPrompt(super::prompts::PromptKey),
     /// A row of Settings → Shortcuts' Configuration menu.
     Shortcuts(super::recorder::Menu),
 }
@@ -174,6 +176,7 @@ impl Intent {
                 | Intent::StartSsh(_)
                 | Intent::InstallSsh(_)
                 | Intent::HostKey(_)
+                | Intent::OpenPrompt(_)
                 | Intent::RenameSession
                 | Intent::RenameWindow(_)
                 | Intent::CloseWindow(_)
@@ -465,6 +468,7 @@ pub enum PanelKind {
     /// Download a file from the captured pane's machine; see `downloads.rs`.
     Download(super::downloads::Dialog),
     PairDevice(super::pair_device::Dialog),
+    Prompt(super::prompts::PromptKey),
     Directory(super::directory::Browser),
     /// The Downloads popover: this launch's transfers.
     Downloads,

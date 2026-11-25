@@ -859,6 +859,22 @@ impl Workspace {
                 .detail(name.clone()),
             );
         }
+        for waiting in self.waiting_prompts() {
+            let label = self
+                .host_index(waiting.host)
+                .map(|i| self.settings.hosts[i].label.clone())
+                .unwrap_or_else(|| "host".into());
+            rows.push(
+                Command::new(
+                    format!("host.answer_prompt.{}", waiting.host.0),
+                    G,
+                    format!("Answer question from {label}…"),
+                    Intent::OpenPrompt(waiting.key()),
+                )
+                .keywords("prompt question script rex.ui")
+                .detail(waiting.prompt.title.clone()),
+            );
+        }
         rows.extend([
             Command::action(
                 "host.collapse_others",

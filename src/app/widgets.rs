@@ -175,11 +175,18 @@ pub struct Row<'a> {
     pub activity: Option<&'a super::activity_list::Presentation>,
     /// A session's program, drawn as its tile before the label.
     pub program: Option<&'static ProgramIcon>,
+    /// An optional leading stroke icon in a 15 pt slot (used by `rex.ui` pick rows).
+    pub icon: Option<&'static Icon>,
+    /// An optional second muted line under the label (used by `rex.ui` pick rows).
+    pub subtitle: Option<&'a str>,
     pub key: String,
     /// The surface's own highlight id, so it slides within one list only.
     pub surface: &'a str,
     pub label: &'a str,
     pub detail: &'a str,
+    /// Optional cap on the detail column width; truncates with a tooltip and drops the empty
+    /// chevron column when `followup` is false.
+    pub detail_max_w: Option<f32>,
     /// The detail is an activity word in this colour: it stays beside the row's actions.
     pub tone: Option<u32>,
     /// The row's shortcut, drawn as keycaps in place of the detail text.
@@ -196,6 +203,8 @@ pub struct Row<'a> {
     /// Columns drawn after the label in place of the detail, with the widest the label may
     /// be. The label then keeps its own width up to that, and the columns give way first.
     pub columns: Option<(El, f32)>,
+    /// Optional custom hover selection handler (default updates `s.panel.selected`).
+    pub hover_select: Option<fn(&mut Workspace, usize)>,
 }
 
 /// The width every list row keeps for its follow-up chevron, drawn or not, so the hints of a
@@ -285,10 +294,13 @@ pub fn list_row(
         el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
     });
     if r.enabled {
+        let hover_select = r.hover_select;
         e = e
             .cursor(Cursor::Pointer)
             .on_hover(move |s: &mut Workspace| {
-                if let Some(p) = &mut s.panel {
+                if let Some(select) = hover_select {
+                    select(s, index);
+                } else if let Some(p) = &mut s.panel {
                     // The pointer owns the selection from here, even when it lands on the row
                     // the keyboard already had: its remembered row must not outlive it and
                     // claim a later row at the same index.
@@ -311,6 +323,14 @@ pub fn list_row(
     if let Some(activity) = r.activity {
         e = e.child(program_glyph(activity.icon, 15., rgb(muted())));
     }
+    if let Some(row_icon) = r.icon {
+        e = e.child(el().size(15., 15.).center().child(glyph(
+            row_icon,
+            15.,
+            rgb(if r.selected { ink() } else { muted() }),
+        )));
+    }
+    let has_subtitle = r.subtitle.is_some_and(|s| !s.is_empty());
     let label = text(r.label.to_owned())
         .font(if r.selected { medium(13.) } else { ui(13.) })
         .color(fg)
@@ -324,7 +344,7 @@ pub fn list_row(
                 .child(label.help_when_truncated(r.label.to_owned())),
             Some(columns),
         ),
-        None if r.activity.is_some() => (label.w_full().shrink(), None),
+        None if r.activity.is_some() || has_subtitle => (label.w_full().shrink(), None),
         None => (label.grow(1.).shrink(), None),
     };
     e =
@@ -342,10 +362,23 @@ pub fn list_row(
                         .help_when_truncated(activity.place.clone())
                 }),
             )
+        } else if let Some(subtitle) = r.subtitle.filter(|s| !s.is_empty()) {
+            col().grow(1.).shrink().min_w(0.).child(label).child(
+                text(subtitle.to_owned())
+                    .font(ui(11.))
+                    .color(if r.selected {
+                        rgb(ink()).alpha(0.75)
+                    } else {
+                        rgb(muted())
+                    })
+                    .truncate()
+                    .help_when_truncated(subtitle.to_owned()),
+            )
         } else {
             label
         });
     let has_actions = r.actions.is_some();
+    let show_chevron_col = r.followup || r.detail_max_w.is_none();
     match r.actions.filter(|_| r.selected) {
         Some(actions) => {
             // A hint gives way to the actions; an activity word is news and stays.
@@ -355,8 +388,8 @@ pub fn list_row(
             e.child(actions)
                 .child(el().pin(Some(0.), Some(0.), Some(0.), Some(0.)))
         }
-        None => e
-            .child(match columns {
+        None => {
+            let e = e.child(match columns {
                 Some(columns) => columns,
                 // A word keeps its place when the row's actions come and go: the room
                 // they take, less the chevron column and one gap.
@@ -370,7 +403,13 @@ pub fn list_row(
                         0.
                     })),
                 None if r.keys.is_empty() => {
-                    let state = text(r.detail.to_owned()).font(ui(11.)).color(detail);
+                    let mut state = text(r.detail.to_owned()).font(ui(11.)).color(detail);
+                    if let Some(max_w) = r.detail_max_w {
+                        state = state
+                            .max_w(max_w)
+                            .truncate()
+                            .help_when_truncated(r.detail.to_owned());
+                    }
                     if let Some(time) = r.activity.and_then(|a| a.elapsed.as_ref()) {
                         col().items_end().child(state).child(
                             text(time.text.clone())
@@ -394,12 +433,17 @@ pub fn list_row(
                         .key(hint)
                         .opacity(if r.enabled { 1. } else { 0.5 })
                 }
-            })
-            .child(el().w(CHEVRON_COLUMN).child(if r.followup {
-                glyph(&RIGHT, 13., detail)
+            });
+            if show_chevron_col {
+                e.child(el().w(CHEVRON_COLUMN).child(if r.followup {
+                    glyph(&RIGHT, 13., detail)
+                } else {
+                    el()
+                }))
             } else {
-                el()
-            })),
+                e
+            }
+        }
     }
 }
 

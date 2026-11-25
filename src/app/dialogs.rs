@@ -22,7 +22,13 @@ fn modal(s: &Workspace, viewport: [f32; 2], body: El) -> El {
 
 /// A centered dialog surface over a dark scrim; `surface` sets its own size and padding.
 pub fn modal_frame(s: &Workspace, surface: El) -> El {
-    modal_layer(s, surface, false, 0.)
+    modal_layer_with(s, surface, false, 0., true)
+}
+
+/// Like [`modal_frame`], but clicking the dark scrim outside the dialog does nothing.
+/// Used for `rex.ui` prompts where cancelling ends the prompt on every connected client.
+pub fn modal_frame_persistent(s: &Workspace, surface: El) -> El {
+    modal_layer_with(s, surface, false, 0., false)
 }
 
 /// [`modal_frame`], or with `under` the same layer and dialog drawn but inert, for a list
@@ -31,6 +37,10 @@ pub fn modal_frame(s: &Workspace, surface: El) -> El {
 /// that far below the window's top edge: it is centred in what is left, under the scrim,
 /// which still covers the whole window.
 pub fn modal_layer(s: &Workspace, surface: El, under: bool, top: f32) -> El {
+    modal_layer_with(s, surface, under, top, true)
+}
+
+fn modal_layer_with(s: &Workspace, surface: El, under: bool, top: f32, scrim_dismiss: bool) -> El {
     // Padding, dividers and disabled controls must not pass a press to the dismiss scrim.
     // Children still handle their own input; empty space leaves the keyboard focus alone.
     let name = s
@@ -54,14 +64,20 @@ pub fn modal_layer(s: &Workspace, surface: El, under: bool, top: f32) -> El {
     if !under {
         layer = layer.modal(false, |s: &mut Workspace| s.cancel_panel_quiet());
     }
-    let mut layer = layer.child(
-        el().key("scrim")
-            .pin(Some(0.), Some(0.), Some(0.), Some(0.))
-            // No blur: it would hide the pane a confirmation names, and re-blur every
-            // frame while terminals stream behind it.
-            .fill(black(0.5))
-            .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.cancel_panel(tx)),
-    );
+    let mut scrim = el()
+        .key("scrim")
+        .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+        // No blur: it would hide the pane a confirmation names, and re-blur every
+        // frame while terminals stream behind it.
+        .fill(black(0.5));
+    scrim = if scrim_dismiss {
+        scrim.on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.cancel_panel(tx))
+    } else {
+        scrim
+            .preserve_focus_on_press(true)
+            .on_press(|_: &mut Workspace| {})
+    };
+    let mut layer = layer.child(scrim);
     if let Some(outline) = target_outline(s) {
         layer = layer.child(outline);
     }

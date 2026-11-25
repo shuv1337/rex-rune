@@ -40,6 +40,7 @@ mod panes;
 pub(crate) mod platform;
 mod popups;
 mod program_icons;
+mod prompts;
 mod recorder;
 mod remote;
 mod select_copy;
@@ -172,6 +173,9 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             };
             Some(pair_device::dialog(s, d, viewport, cx.env().scale * scale))
         }
+        Some(panel) if matches!(panel.kind, panel::PanelKind::Prompt(_)) => {
+            Some(prompts::dialog(s, viewport))
+        }
         Some(_) => dialogs::dialog(s, viewport),
         None => None,
     };
@@ -248,10 +252,12 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     }
     let updates_changed = s.poll_updates(now, tx);
     let settings_changed = s.poll_settings(now, tx);
+    let prompts_changed = s.poll_prompts(now, tx);
     let mut changed = s.poll_navigation(now, tx)
         || remote_changed
         || updates_changed
         || settings_changed
+        || prompts_changed
         || activity_changed
         || server_changed;
     if let Some(panel) = &mut s.panel

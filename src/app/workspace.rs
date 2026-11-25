@@ -200,6 +200,8 @@ pub struct Workspace {
     pub restart: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// What this launch's downloads have told the person, and what finished rows may offer.
     pub downloads: super::downloads::Downloads,
+    /// Arrival-ordered `rex.ui` prompt queue and modal drafts (kept outside `Panel`).
+    pub prompts: super::prompts::PromptStore,
 }
 
 #[derive(Default)]
@@ -369,6 +371,7 @@ impl Workspace {
             updates: Default::default(),
             restart: Default::default(),
             downloads: Default::default(),
+            prompts: Default::default(),
         };
         this.init_updates();
         if let Some(error) = theme_error {
@@ -441,6 +444,7 @@ impl Workspace {
             .send(HostCommand::Keymap(Box::new(self.keymap_declaration())));
         // About and the copied reports name the server; reading it changes nothing there.
         let _ = connection.commands.send(HostCommand::Identify);
+        let _ = connection.commands.send(HostCommand::Prompts(host.prompts));
         if watch_shared {
             let _ = connection.commands.send(HostCommand::WatchSharedHosts);
         }
@@ -480,6 +484,7 @@ impl Workspace {
         self.activity_epochs.remove(&id);
         self.shared_hosts.last_reconciled.remove(&id);
         self.shared_hosts.last_host_id.remove(&id);
+        self.forget_host_prompts(id);
     }
 
     /// Stop connecting to saved host `index` and drop it from the workspace. Its server, its
@@ -602,6 +607,7 @@ impl Workspace {
             bells,
             client_actions,
             performs,
+            prompt_events,
             shared_writes,
             view_fetches,
         ) = {
@@ -615,6 +621,7 @@ impl Workspace {
             let bells = std::mem::take(&mut shared.bells);
             let client_actions = std::mem::take(&mut shared.client_actions);
             let performs = std::mem::take(&mut shared.performs);
+            let prompt_events = std::mem::take(&mut shared.prompt_events);
             let shared_writes = std::mem::take(&mut shared.shared_writes);
             let view_fetches = std::mem::take(&mut shared.view_fetches);
             (
@@ -624,6 +631,7 @@ impl Workspace {
                 bells,
                 client_actions,
                 performs,
+                prompt_events,
                 shared_writes,
                 view_fetches,
             )
@@ -690,6 +698,7 @@ impl Workspace {
             self.revalidate_key_modes();
         }
         self.reconcile_copy_mode();
+        self.process_prompt_events(index, prompt_events, tx);
         self.announce_keymap_problems(index);
         let now = std::time::Instant::now();
         self.poll_remote_navigation(now);
@@ -1730,6 +1739,7 @@ impl Workspace {
                 if self.settings_section == SettingsSection::Hosts {
                     self.refresh_ssh_agents(false);
                 }
+                self.reconcile_prompts();
             }
             Intent::Updates => self.open_updates_settings(),
             Intent::About => {
@@ -1810,6 +1820,9 @@ impl Workspace {
             }
             Intent::Retry => self.send(self.active, HostCommand::Reconnect),
             Intent::Command(command) => command.run(self, tx),
+            Intent::OpenPrompt(key) => {
+                self.open_prompt(key, std::time::Instant::now());
+            }
             Intent::Shortcuts(item) => self.shortcut_menu(item, tx),
         }
     }
@@ -1917,6 +1930,7 @@ impl Workspace {
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
         }
+        self.reconcile_prompts();
     }
 
     pub fn pane_menu(&mut self, block: String, anchor: Option<(f32, f32)>) {
@@ -1942,6 +1956,7 @@ impl Workspace {
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
         }
+        self.reconcile_prompts();
     }
 
     /// A sidebar session row's right-click menu, at the pointer (window points).
@@ -1972,6 +1987,7 @@ impl Workspace {
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
         }
+        self.reconcile_prompts();
     }
 
     /// Every session action names its own host and session, never the selected one.
@@ -2173,6 +2189,7 @@ impl Workspace {
                 Box::new(p)
             });
         self.panel = Some(panel);
+        self.reconcile_prompts();
     }
 
     pub fn picker(&mut self, sessions: bool) {
@@ -2222,6 +2239,7 @@ impl Workspace {
                     | PanelKind::StartSsh { .. }
                     | PanelKind::InstallSsh { .. }
                     | PanelKind::PairDevice(_)
+                    | PanelKind::Prompt(_)
                     | PanelKind::Themes
                     | PanelKind::Fonts(_)
                     | PanelKind::Chromes
@@ -2254,6 +2272,7 @@ impl Workspace {
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
         }
+        self.reconcile_prompts();
     }
 
     /// The Settings panel a form or confirmation was opened from, to return to after it,
@@ -2304,11 +2323,16 @@ impl Workspace {
         self.leave_download_dialog();
         self.bindings.sequence.clear();
         self.panel = None;
+        self.reconcile_prompts();
         tx.blur();
     }
 
     /// Escape on a modal: back to the panel it came from, or closed.
     pub fn cancel_panel_quiet(&mut self) {
+        if self.is_prompt_open() {
+            self.cancel_open_prompt(None);
+            return;
+        }
         if self.leave_folder_field() {
             return;
         }
@@ -2322,9 +2346,14 @@ impl Workspace {
         } else {
             self.panel = None;
         }
+        self.reconcile_prompts();
     }
 
     pub fn cancel_panel(&mut self, tx: &mut Tx) {
+        if self.is_prompt_open() {
+            self.cancel_open_prompt(Some(tx));
+            return;
+        }
         if self.leave_folder_field() {
             return;
         }
@@ -2335,6 +2364,7 @@ impl Workspace {
                 input.focused = true;
             }
             self.panel = Some(*back);
+            self.reconcile_prompts();
         } else {
             self.close_panel(tx);
         }

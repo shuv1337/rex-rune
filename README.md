@@ -85,11 +85,7 @@ client, launcher and icons, never the `rex` server.
   recording, with host-defined modes, the innermost active one named in a chip,
   and multi-key sequences. Commands lists actions; Rex action compatibility is
   a focused subset, not Mac parity.
-- **Remote control.** Off by default for every host; eight view-only actions
-  can zoom panes and switch the display to the requesting host, and
-  `client.tab.mute` can mute or unmute a named tab on that host unattended,
-  while none can type, use the clipboard, open dialogs, change interface zoom or
-  act on another host.
+- **Remote control and script prompts.** Remote control is off by default for every host; eight view-only actions can zoom panes and switch the display to the requesting host, and `client.tab.mute` can mute or unmute a named tab on that host unattended, while none can type, use the clipboard, open dialogs, change interface zoom or act on another host. On API 17+ hosts, Lua scripts and actions can ask `rex.ui.input` and `rex.ui.pick` questions in an anti-spoofing modal (or waiting toolbar chip) controlled per host by **Allow script prompts** in Settings -> Remote Hosts.
 - **Settings and maintenance.** Server facts, duration, confirmed **Stop
   server…** and a local **Pair device…** QR dialog that sends no server request;
   Interface, Terminal, Shortcuts, Integrations, Notifications, Remote Hosts,

@@ -86,6 +86,8 @@ impl Waits {
                     pending.promote(deadline);
                 }
                 self.0.push(pending);
+                let in_flight = self.0.len();
+                shared.update(|m| m.actions_in_flight = in_flight);
                 Ok(())
             }
             Err(error) => action_error(shared, error),
@@ -107,6 +109,8 @@ impl Waits {
             Poll::Pending
         })
         .await;
+        let in_flight = self.0.len();
+        shared.update(|m| m.actions_in_flight = in_flight);
         let text = reply
             .ok_or_else(|| anyhow!("Rex client.action timed out; action was not retried"))?
             .map_err(rexrs::Error::transport)?;

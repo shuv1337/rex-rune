@@ -270,6 +270,8 @@ pub struct HostModel {
     pub performs: Vec<perform::Pending>,
     /// Epoch-scoped prompt transitions, oldest first; drain once in the consumer.
     pub prompt_events: VecDeque<prompt::PromptEvent>,
+    /// Number of `client.action` calls currently awaiting a server response on this connection.
+    pub actions_in_flight: usize,
     /// This launch's downloads from the host, oldest first; see [`crate::download`].
     pub downloads: Vec<crate::download::Transfer>,
     pub connection_epoch: u64,
@@ -875,6 +877,7 @@ impl Shared {
             if !connected {
                 m.clipboard = None;
                 m.prompt_events.clear();
+                m.actions_in_flight = 0;
                 m.keymap = None;
                 m.keymap_revision += 1;
             }
@@ -1932,6 +1935,7 @@ async fn run_host(
                 m.connection_epoch += 1;
                 m.performs.clear();
                 m.prompt_events.clear();
+                m.actions_in_flight = 0;
                 m.view_fetches.clear();
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
@@ -2495,7 +2499,10 @@ async fn run_host(
         tunnel = None;
         if matches!(result, Ok(true)) {
             deferred_commands.clear();
-            shared.update(|m| m.prompt_events.clear());
+            shared.update(|m| {
+                m.prompt_events.clear();
+                m.actions_in_flight = 0;
+            });
             return Ok(());
         }
         shared.update(|m| {

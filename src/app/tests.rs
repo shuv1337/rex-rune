@@ -54,6 +54,8 @@ mod pane_verb_tests;
 mod polish_tests;
 #[path = "program_icon_tests.rs"]
 mod program_icon_tests;
+#[path = "prompt_tests.rs"]
+mod prompt_tests;
 #[path = "recorder_tests.rs"]
 mod recorder_tests;
 #[path = "remote_session_tests.rs"]

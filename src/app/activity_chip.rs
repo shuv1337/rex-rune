@@ -45,6 +45,7 @@ impl Workspace {
         if narrow
             && (self.bindings.sequence.depth > 0
                 || self.has_mode_chip()
+                || self.has_waiting_prompt()
                 || super::downloads_view::chip_label(self).is_some())
         {
             return None;

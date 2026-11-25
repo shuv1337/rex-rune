@@ -64,6 +64,7 @@ fn live_chip_shown(s: &Workspace) -> bool {
     s.has_mode_chip()
         || s.settings.terminal.key_sequence_hints
             && s.bindings.pending_label(s.effective_keymap()).is_some()
+        || s.has_waiting_prompt()
         || super::downloads_view::chip_label(s).is_some()
 }
 
@@ -545,12 +546,18 @@ pub fn sequence_chip(s: &Workspace) -> Option<El> {
     ))
 }
 
+/// One chip while a `rex.ui` question waits for the user, styled in `WARNING`.
+pub fn prompt_chip(s: &Workspace) -> Option<El> {
+    super::prompts::chip(s, narrow_bar(s))
+}
+
 /// Only live status chips float when the toolbar is absent, never invisible bar controls.
 pub fn floating_status(s: &Workspace) -> Option<El> {
     let mode = mode_chip(s);
     let sequence = sequence_chip(s);
+    let prompt = prompt_chip(s);
     let download = super::downloads_view::chip_label(s).is_some();
-    if mode.is_none() && sequence.is_none() && !download {
+    if mode.is_none() && sequence.is_none() && prompt.is_none() && !download {
         return None;
     }
     Some(
@@ -558,6 +565,7 @@ pub fn floating_status(s: &Workspace) -> Option<El> {
             .gap(8.)
             .children(mode)
             .children(sequence)
+            .children(prompt)
             .children(download.then(|| download_chip(s))),
     )
 }
@@ -592,6 +600,7 @@ pub fn toolbar(s: &Workspace) -> El {
         })
         .children(mode_chip(s))
         .child(sequence_chip(s).unwrap_or_else(el))
+        .children(prompt_chip(s))
         .children(activity_chip(s))
         .child(download_chip(s))
         // Always at least 48pt of window to drag, outside the tabs.

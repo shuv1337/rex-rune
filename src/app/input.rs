@@ -330,6 +330,9 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     use super::platform::keys::{WindowMenuKey, window_menu_key};
     let window_key = window_menu_key(&ev.key, ev.mods);
     if let Some(panel) = &s.panel {
+        if matches!(panel.kind, PanelKind::Prompt(_)) {
+            return s.prompt_key(ev, tx);
+        }
         if matches!(panel.kind, PanelKind::InstallSsh { .. })
             && ev.key == Key::Enter
             && ev.mods == rune::Mods::default()
@@ -435,6 +438,10 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     .identity();
     let consumed = s.bindings.consumed.remove(&identity).is_some();
+    if s.is_prompt_open() {
+        s.forwarded.remove(&identity);
+        return true;
+    }
     if !s.forwarded.remove(&identity) {
         return consumed || s.in_copy_mode() || s.panel.is_none();
     }
