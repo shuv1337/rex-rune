@@ -13,6 +13,8 @@ mod fetch_view_tests;
 mod focus_history_tests;
 #[path = "hosts_tests.rs"]
 mod hosts_tests;
+#[path = "input_tests.rs"]
+mod input_tests;
 #[path = "keymap_tests.rs"]
 mod keymap_tests;
 #[path = "navigation_tests.rs"]

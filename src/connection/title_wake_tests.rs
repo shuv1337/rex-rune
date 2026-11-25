@@ -118,17 +118,14 @@ async fn title_events_store_immediately_and_only_wake_when_due() {
         }
         assert_eq!(count(), 0);
         match i {
-            0 => handle_command(
-                HostCommand::Visibility(true),
-                &mut control,
+            0 => apply_visibility(
+                true,
+                &endpoint,
                 &shared,
+                &flume::unbounded().0,
                 &mut workers,
                 &mut state,
-                &mut sweep,
-                &mut None,
-            )
-            .await
-            .unwrap(),
+            ),
             1 => replace_view(&shared, &mut state, &mut sweep, SESSION, view("back")),
             _ => {
                 let mut bell = title("back", "", 0);
