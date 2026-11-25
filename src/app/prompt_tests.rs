@@ -626,6 +626,8 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
             mods: Mods::default(),
             pressed: true,
             repeat: false,
+            text: None,
+            consumed_mods: Mods::default(),
         },
         held_ev.clone(),
         None,
@@ -664,6 +666,8 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
             mods: Mods::default(),
             pressed: false,
             repeat: false,
+            text: None,
+            consumed_mods: Mods::default(),
         },
         held_ev.clone(),
         None,
@@ -682,7 +686,7 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
     }
     assert!(rt.state.is_prompt_open());
     rt.update(|s, tx| {
-        crate::app::input::on_ime(s, &Ime::Preedit("nihon".into(), None), tx);
+        crate::app::input::on_ime(s, &Ime::Preedit("nihon".into(), None, vec![]), tx);
         crate::app::input::on_ime(s, &Ime::Commit("日本".into()), tx);
         // Defense-in-depth: Term::try_send itself refuses PTY input while prompt is open.
         let key = s.term_key("block:a");
@@ -758,6 +762,8 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
             mods: Mods::default(),
             pressed: true,
             repeat: true,
+            text: None,
+            consumed_mods: Mods::default(),
         },
         held_ev.clone(),
         None,
@@ -768,6 +774,8 @@ fn zero_pty_leaks_and_remote_performs_refused_while_prompt_is_open() {
             mods: Mods::default(),
             pressed: false,
             repeat: false,
+            text: None,
+            consumed_mods: Mods::default(),
         },
         held_ev,
         None,

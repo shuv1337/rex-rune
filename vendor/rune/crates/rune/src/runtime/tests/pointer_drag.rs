@@ -108,7 +108,7 @@ fn a_stationary_escape_keeps_the_run_of_clicks() {
     let mut rt = click_run_runtime();
     rt.pointer_down(10.0, 10.0);
     rt.physical_key_input(crate::PhysicalInput::Key { key: crate::PhysicalKeyCode::Escape,
-        mods: crate::Mods::default(), pressed: true, repeat: false }, KeyEvent { key: crate::Key::Escape, mods: crate::Mods::default() }, None);
+        mods: crate::Mods::default(), pressed: true, repeat: false, text: None, consumed_mods: Default::default() }, KeyEvent { key: crate::Key::Escape, mods: crate::Mods::default() }, None);
     rt.pointer_up(10.0, 10.0);
     rt.pointer_down(10.0, 10.0);
     rt.frame(0.0);
@@ -139,7 +139,7 @@ fn native_escape_with_a_logical_fallback_cancels_the_drag() {
     rt.pointer_down(10.0, 10.0);
     rt.frame(0.0);
     rt.physical_key_input(crate::PhysicalInput::Key { key: crate::PhysicalKeyCode::Escape,
-        mods: crate::Mods::default(), pressed: true, repeat: false }, KeyEvent { key: crate::Key::Escape, mods: crate::Mods::default() }, None);
+        mods: crate::Mods::default(), pressed: true, repeat: false, text: None, consumed_mods: Default::default() }, KeyEvent { key: crate::Key::Escape, mods: crate::Mods::default() }, None);
     rt.frame(0.0);
     assert_eq!(rt.state, [true]);
     rt.pointer_up(10.0, 10.0);
@@ -241,10 +241,10 @@ fn a_drag_out_that_offers_nothing_stays_a_press() {
 #[test]
 fn a_drag_out_that_offers_nothing_tracks_leaving_the_element() {
     let mut rt = drag_out_rt(false);
-    assert!(rt.press.inside());
+    assert!(rt.pointer.press_inside());
     rt.pointer_move(150.0, 10.0);
     assert!(rt.pointer_captured(), "the press holds on");
-    assert!(!rt.press.inside(), "the move that declined the drag left the element, so it no longer shows pressed");
+    assert!(!rt.pointer.press_inside(), "the move that declined the drag left the element, so it no longer shows pressed");
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn cursor_follows_a_sibling_that_replaces_an_exiting_element_under_a_still_point
     assert_eq!(rt.cursor(), Cursor::Crosshair);
     rt.update(|first: &mut bool, _| *first = false);
     rt.frame(1.0 / 120.0);
-    assert!(rt.nodes.iter().any(|n| n.key.as_deref() == Some("a")), "a is still exiting");
+    assert!(rt.tree.nodes.iter().any(|n| n.key.as_deref() == Some("a")), "a is still exiting");
     assert_eq!(rt.cursor(), Cursor::Hidden, "the sibling under the still pointer takes over");
 }
 
@@ -482,7 +482,7 @@ fn hover_lands_at_once_and_fades_out() {
     }
     let mut rt = Runtime::new((), view, (200.0, 80.0), Env::new(true, 1.0));
     rt.frame(0.0);
-    let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("row")).unwrap().id;
+    let id = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("row")).unwrap().id;
     let hover = |rt: &Runtime<()>| rt.scene.get(id, P_HOVER).unwrap_or(0.0);
     rt.pointer_move(50.0, 20.0);
     rt.frame(1.0 / 120.0);
@@ -510,8 +510,8 @@ fn rows_mounting_above_keep_a_still_pointers_hover() {
     rt.pointer_move(150.0, 60.0);
     rt.frame(1.0 / 120.0);
     let group = |rt: &Runtime<usize>| {
-        let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some("reveal")).unwrap();
-        rt.inh_scratch[i].group
+        let i = rt.tree.nodes.iter().position(|n| n.key.as_deref() == Some("reveal")).unwrap();
+        rt.paint.inh_scratch[i].group
     };
     assert_eq!(group(&rt), 1.0);
     for _ in 0..3 {
@@ -604,4 +604,365 @@ fn a_held_press_hears_its_drag_again_until_released() {
     for _ in 0..30 { rt.frame(1.0 / 60.0); }
     assert_eq!(rt.state.len(), heard, "the release ends it");
     assert_eq!(rt.state.last().map(|e| e.0), Some(Phase::Up));
+}
+
+#[test]
+fn a_modal_opening_mid_drag_ends_the_drag_cancelled() {
+    #[derive(Default)]
+    struct State { modal: bool, open_on_move: bool, drags: Vec<(Phase, bool)>, presses: u32 }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut root = col().w_full().h_full()
+            .child(el().key("knob").size(100.0, 40.0).on_drag(|s: &mut State, d, _| {
+                s.drags.push((d.phase, d.cancelled()));
+                if s.open_on_move && d.phase == Phase::Move { s.modal = true; }
+            }))
+            .child(el().key("btn").size(100.0, 40.0).on_press(|s: &mut State| s.presses += 1));
+        if s.modal {
+            root = root.child(col().key("dialog").size(200.0, 100.0)
+                .child(el().key("ok").size(50.0, 20.0).focusable(true))
+                .modal(true, |s: &mut State| s.modal = false));
+        }
+        root
+    }
+
+    // External state change opens a modal mid-drag.
+    let mut rt = Runtime::new(State::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = rt.find("knob").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 20.0, y);
+    rt.frame(1.0 / 60.0);
+    rt.update(|s: &mut State, _| s.modal = true);
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.pointer_captured(), "opening a modal drops pointer capture");
+    rt.pointer_move(x + 40.0, y);
+    rt.pointer_up(x + 40.0, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.drags, [(Phase::Down, false), (Phase::Move, false), (Phase::Up, true)]);
+
+    // The drag handler itself opens a modal on Move: one cancelled Up, nothing on release.
+    let mut rt = Runtime::new(State { open_on_move: true, ..State::default() }, view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = rt.find("knob").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 20.0, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.modal && !rt.pointer_captured());
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.drags, [(Phase::Down, false), (Phase::Move, false), (Phase::Up, true)]);
+    rt.pointer_up(x + 20.0, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.drags.iter().filter(|d| d.0 == Phase::Up).count(), 1, "release adds nothing");
+
+    // A plain non-drag press still drops without clicking when a modal opens.
+    let mut rt = Runtime::new(State::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (bx, by) = rt.find("btn").unwrap();
+    rt.pointer_down(bx, by);
+    rt.frame(1.0 / 60.0);
+    rt.update(|s: &mut State, _| s.modal = true);
+    rt.frame(1.0 / 60.0);
+    rt.pointer_up(bx, by);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.presses, 0);
+}
+
+#[test]
+fn removing_a_dragged_element_ends_the_drag_cancelled() {
+    #[derive(Clone, Copy)]
+    enum Mode { Instant, Exiting, Ancestor, Inert }
+    struct State { show: bool, show_parent: bool, inert: bool, exit_transition: bool, drags: Vec<(Phase, bool, f32)> }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut root = col().w_full().h_full();
+        if s.show_parent {
+            let mut wrap = col().key("wrap");
+            if s.show {
+                let mut tile = el().key("tile").size(100.0, 60.0)
+                    .on_drag(|s: &mut State, d, _| s.drags.push((d.phase, d.cancelled(), d.dx)));
+                if s.exit_transition { tile = tile.transition(Transition::opacity()); }
+                if s.inert { tile = tile.inert(); }
+                wrap = wrap.child(tile);
+            }
+            root = root.child(wrap);
+        }
+        root
+    }
+
+    for mode in [Mode::Instant, Mode::Exiting, Mode::Ancestor, Mode::Inert] {
+        let init = State { show: true, show_parent: true, inert: false, exit_transition: matches!(mode, Mode::Exiting), drags: Vec::new() };
+        let mut rt = Runtime::new(init, view, (300.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let (x, y) = rt.find("tile").unwrap();
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_move(x + 20.0, y);
+        rt.frame(1.0 / 60.0);
+        rt.update(move |s: &mut State, tx| match mode {
+            Mode::Instant => { s.show = false; tx.instant(); }
+            Mode::Exiting => { s.show = false; }
+            Mode::Ancestor => { s.show_parent = false; }
+            Mode::Inert => { s.inert = true; }
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.pointer_captured(), "losing the drag target drops capture");
+        rt.pointer_move(x + 40.0, y);
+        rt.pointer_up(x + 40.0, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.drags, [(Phase::Down, false, 0.0), (Phase::Move, false, 20.0), (Phase::Up, true, 20.0)]);
+    }
+}
+
+#[test]
+fn a_held_drag_follows_a_keyed_element_across_sibling_path_changes() {
+    #[derive(Default)]
+    struct State { banner: bool, drags: Vec<(Phase, bool, f32)> }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut page = col();
+        if s.banner { page = page.child(el().size(100.0, 20.0)); }
+        page = page.child(col().child(el().key("knob").size(100.0, 40.0).on_drag(|s: &mut State, d, _| {
+            s.drags.push((d.phase, d.cancelled(), d.dx));
+        })));
+        col().w_full().h_full().child(page)
+    }
+    let mut rt = Runtime::new(State::default(), view, (400.0, 400.0), Env::new(true, 1.0));
+    rt.frame(1.0 / 60.0);
+    let (x, y) = rt.find("knob").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 20.0, y);
+    rt.frame(1.0 / 60.0);
+    rt.update(|s: &mut State, _| s.banner = true);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.pointer_captured(), "the drag stays held across the sibling shift");
+    rt.pointer_move(x + 30.0, y);
+    rt.pointer_up(x + 30.0, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.drags, [
+        (Phase::Down, false, 0.0),
+        (Phase::Move, false, 20.0),
+        (Phase::Move, false, 30.0),
+        (Phase::Up, false, 30.0),
+    ]);
+
+    // An unkeyed element displaced by a non-dragging sibling cannot be followed: it cancels.
+    #[derive(Default)]
+    struct Unkeyed { banner: bool, ended: Vec<bool> }
+    fn unkeyed_view(s: &Unkeyed, _: &mut Cx<Unkeyed>) -> El {
+        let mut page = col().w_full().h_full();
+        if s.banner { page = page.child(el().size(100.0, 20.0)); }
+        page.child(el().size(100.0, 40.0).on_drag(|s: &mut Unkeyed, d, _| {
+            if d.phase == Phase::Up { s.ended.push(d.cancelled()); }
+        }))
+    }
+    let mut rt = Runtime::new(Unkeyed::default(), unkeyed_view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(1.0 / 60.0);
+    rt.pointer_down(20.0, 20.0);
+    rt.pointer_move(30.0, 20.0);
+    rt.frame(1.0 / 60.0);
+    rt.update(|s: &mut Unkeyed, _| s.banner = true);
+    rt.frame(1.0 / 60.0);
+    rt.pointer_up(40.0, 20.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.ended, [true], "displaced unkeyed drag ends cancelled");
+
+    // Removing one of two duplicate-keyed elements must not transfer the drag onto the other.
+    #[derive(Default)]
+    struct Dup { show_first: bool, first_ended: Vec<bool>, second_ended: Vec<bool> }
+    fn dup_view(s: &Dup, _: &mut Cx<Dup>) -> El {
+        let first = if s.show_first {
+            col().child(el().key("dup").size(100.0, 40.0).on_drag(|s: &mut Dup, d, _| {
+                if d.phase == Phase::Up { s.first_ended.push(d.cancelled()); }
+            }))
+        } else {
+            el().size(100.0, 40.0)
+        };
+        let second = col().child(el().key("dup").size(100.0, 40.0).on_drag(|s: &mut Dup, d, _| {
+            if d.phase == Phase::Up { s.second_ended.push(d.cancelled()); }
+        }));
+        col().w_full().h_full().child(first).child(second)
+    }
+    let mut rt = Runtime::new(Dup { show_first: true, ..Dup::default() }, dup_view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(1.0 / 60.0);
+    rt.pointer_down(20.0, 20.0);
+    rt.pointer_move(30.0, 20.0);
+    rt.frame(1.0 / 60.0);
+    rt.update(|s: &mut Dup, _| s.show_first = false);
+    rt.frame(1.0 / 60.0);
+    rt.pointer_up(40.0, 20.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.first_ended, [true], "removed first knob ends cancelled");
+    assert!(rt.state.second_ended.is_empty(), "existing second knob must not inherit the drag");
+}
+
+#[test]
+fn a_drag_past_slop_suppresses_on_press_while_clicks_and_plain_buttons_still_press() {
+    #[derive(Default)]
+    struct S { drags: Vec<(Phase, bool)>, drag_presses: u32, plain_presses: u32 }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        col().size(200.0, 200.0)
+            .child(el().key("row").size(100.0, 40.0)
+                .on_drag(|s: &mut S, d, _| s.drags.push((d.phase, d.cancelled())))
+                .on_press(|s: &mut S| s.drag_presses += 1))
+            .child(el().key("btn").size(100.0, 40.0)
+                .on_press(|s: &mut S| s.plain_presses += 1))
+    }
+    let mut rt = Runtime::new(S::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+
+    // Drag 20 pt and return to the start inside the row: Up fires, on_press does not.
+    rt.pointer_down(10.0, 10.0);
+    rt.pointer_move(30.0, 10.0);
+    rt.pointer_move(10.0, 10.0);
+    rt.pointer_up(10.0, 10.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.drags.last(), Some(&(Phase::Up, false)));
+    assert_eq!(rt.state.drag_presses, 0, "a drag returning inside its element must not fire on_press");
+
+    // Drag past slop and release elsewhere inside the row: still no on_press.
+    rt.pointer_down(10.0, 10.0);
+    rt.pointer_move(15.0, 10.0);
+    rt.pointer_up(15.0, 10.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.drags.last(), Some(&(Phase::Up, false)));
+    assert_eq!(rt.state.drag_presses, 0, "dragging past CLICK_SLOP suppresses on_press");
+
+    // Click within slop (including on the slop boundary) still fires on_press.
+    rt.pointer_down(10.0, 10.0);
+    rt.pointer_move(13.0, 12.0);
+    rt.pointer_up(13.0, 12.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.drag_presses, 1, "a press within slop fires on_press");
+
+    rt.pointer_down(10.0, 10.0);
+    rt.pointer_move(10.0 + CLICK_SLOP, 10.0 + CLICK_SLOP);
+    rt.pointer_up(10.0 + CLICK_SLOP, 10.0 + CLICK_SLOP);
+    rt.frame(0.0);
+    assert_eq!(rt.state.drag_presses, 2, "at the slop boundary it is still a press");
+
+    // A plain button without on_drag still presses after moving 20 pt inside it.
+    rt.pointer_down(10.0, 50.0);
+    rt.pointer_move(30.0, 50.0);
+    rt.pointer_up(30.0, 50.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.plain_presses, 1, "a plain on_press button still fires after moving inside it");
+}
+
+#[test]
+fn tx_cancel_pointer_from_on_drag_ends_capture_without_reentrancy_and_ignores_later_moves() {
+    #[derive(Default)]
+    struct S {
+        phases: Vec<(Phase, bool)>,
+        hovers: Vec<bool>,
+        in_handler: bool,
+        reentered: bool,
+        cancel_on_move: bool,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        col().w_full().h_full().child(
+            el().key("tile").size(100.0, 60.0)
+                .on_hover_change(|s: &mut S, inside, _| s.hovers.push(inside))
+                .on_drag(|s: &mut S, d: &mut Drag, tx| {
+                    if s.in_handler { s.reentered = true; }
+                    s.in_handler = true;
+                    s.phases.push((d.phase, d.cancelled()));
+                    if s.cancel_on_move && d.phase == Phase::Move && d.dx >= 10.0 {
+                        s.cancel_on_move = false;
+                        tx.cancel_pointer();
+                    }
+                    s.in_handler = false;
+                }),
+        )
+    }
+    let mut rt = Runtime::new(S { cancel_on_move: true, ..S::default() }, view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = rt.find("tile").unwrap();
+
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 12.0, y);
+    // A second move already queued in the same frame must not fire after cancel_pointer.
+    rt.pointer_move(x + 24.0, y);
+    rt.frame(0.0);
+
+    assert!(!rt.state.reentered, "cancel_pointer must run after the calling handler returns");
+    assert!(!rt.pressing(), "capture cleared after tx.cancel_pointer");
+    assert_eq!(rt.pointer(), None, "hover cleared as pointer_leave");
+    assert!(!rt.has_pending_input(), "cancelled Up and hover leave already drained in this frame");
+    assert_eq!(rt.state.phases, [(Phase::Down, false), (Phase::Move, false), (Phase::Up, true)]);
+    assert_eq!(rt.state.hovers, [true, false]);
+
+    // Compositor leave and pointer returning with no button held must not fire on_drag.
+    rt.pointer_leave();
+    rt.pointer_move(x + 40.0, y + 20.0);
+    rt.pointer_up(x + 40.0, y + 20.0);
+    rt.frame(0.0);
+    assert!(!rt.pressing());
+    assert_eq!(rt.state.phases, [(Phase::Down, false), (Phase::Move, false), (Phase::Up, true)]);
+}
+
+#[test]
+fn tx_cancel_pointer_from_update_and_poll_and_runtime_cancel_pointer() {
+    #[derive(Default)]
+    struct S {
+        phases: Vec<(Phase, bool)>,
+        presses: u32,
+        cancel_in_poll: bool,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        col().w_full().h_full()
+            .child(el().key("tile").size(100.0, 60.0)
+                .on_drag(|s: &mut S, d: &mut Drag, _| s.phases.push((d.phase, d.cancelled()))))
+            .child(el().key("btn").size(100.0, 40.0)
+                .on_press(|s: &mut S| s.presses += 1))
+    }
+    let mut rt = Runtime::new(S::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.poll = Some(|s, _, tx| {
+        if std::mem::take(&mut s.cancel_in_poll) {
+            tx.cancel_pointer();
+        }
+        false
+    });
+    rt.frame(0.0);
+
+    // 1. Calling tx.cancel_pointer when idle schedules no work.
+    assert!(!rt.update_if(|_, tx| { tx.cancel_pointer(); false }));
+    assert!(!rt.has_pending_input());
+
+    // 2. Calling tx.cancel_pointer from update_if while dragging ends capture and marks stale.
+    let (x, y) = rt.find("tile").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 12.0, y);
+    rt.frame(0.0);
+    assert!(rt.pressing());
+    assert!(rt.update_if(|_, tx| { tx.cancel_pointer(); false }));
+    assert!(!rt.pressing());
+    assert_eq!(rt.pointer(), None);
+    rt.pointer_move(x + 40.0, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.phases, [(Phase::Down, false), (Phase::Move, false), (Phase::Up, true)]);
+
+    // 3. Calling tx.cancel_pointer from poll ends an active drag in that same frame.
+    rt.state.phases.clear();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.frame(0.0);
+    assert!(rt.pressing());
+    rt.state.cancel_in_poll = true;
+    rt.pointer_move(x + 20.0, y);
+    rt.frame(0.016);
+    assert!(!rt.pressing());
+    assert_eq!(rt.state.phases, [(Phase::Down, false), (Phase::Up, true)]);
+
+    // 4. Direct Runtime::cancel_pointer cancels a plain press so releasing does not click.
+    let (bx, by) = rt.find("btn").unwrap();
+    rt.pointer_move(bx, by);
+    rt.pointer_down(bx, by);
+    assert!(rt.pressing());
+    rt.cancel_pointer();
+    assert!(!rt.pressing());
+    assert_eq!(rt.pointer(), None);
+    rt.pointer_up(bx, by);
+    rt.frame(0.0);
+    assert_eq!(rt.state.presses, 0);
 }

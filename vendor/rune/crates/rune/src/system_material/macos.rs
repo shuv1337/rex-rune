@@ -8,12 +8,14 @@
 //! frame, corner radius and alpha inside it, so the WindowServer composites the material, the
 //! shadow around it and the content on top from the same commit.
 
-use super::{assign, MaterialDraw, Mode, PresentFlag, SystemMaterial, MAX_NATIVE_MATERIALS};
+#![allow(unsafe_code)]
+
+use super::{assign, visual_effect_config, MaterialDraw, Mode, PresentFlag, SystemMaterial, MAX_NATIVE_MATERIALS_CAP};
 use rune_motion::NodeId;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_video::rc::Retained;
-use objc2_video::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
-use objc2_video::{msg_send, sel};
+use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{msg_send, sel};
 use std::{cell::Cell, rc::Rc};
 
 /// The host view: flipped, so frames come straight from Rune's top-left points, and never hit,
@@ -36,11 +38,11 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect { origin: CGPoint { x, y }, size: CGSize { width: w, height: h } }
 }
 
-struct Slot {
-    view: Retained<AnyObject>,
-    material: SystemMaterial,
+pub(super) struct Slot {
+    pub(super) view: Retained<AnyObject>,
+    pub(super) material: SystemMaterial,
     /// `NSGlassEffectView`, which rounds itself; the effect views round their layer.
-    glass: bool,
+    pub(super) glass: bool,
     /// The element it showed last, which keeps it while it stays mounted.
     owner: Option<NodeId>,
     /// Frame, corner radius and curve last set, and the alpha (`None` once hidden).
@@ -102,8 +104,7 @@ impl Materials {
         if on && self.live_end.is_none()
             && let (Some(win), Some(metal)) = (crate::platform::macos::ns_window(window), metal_layer(surface))
         {
-            let win = unsafe { &*objc2::rc::Retained::as_ptr(&win).cast::<AnyObject>() };
-            self.live_end = watch_live_end(win, &metal, self.flag.clone());
+            self.live_end = watch_live_end(&win, &metal, self.flag.clone());
         }
         if let Some(on) = self.update_flag(|f| f.live(on)) { crate::platform::macos::present_with_transaction(surface, on); }
     }
@@ -122,7 +123,7 @@ impl Materials {
         if self.active || !found || !transparent || self.mode == Mode::Off { return false; }
         let Some(view) = crate::platform::macos::content_view(window) else { return false };
         // SAFETY: winit's content view outlives this retain, which only adds a reference.
-        let Some(view) = (unsafe { Retained::retain(objc2::rc::Retained::as_ptr(&view).cast::<AnyObject>().cast_mut()) }) else { return false };
+        let Some(view) = (unsafe { Retained::retain(Retained::as_ptr(&view).cast::<AnyObject>().cast_mut()) }) else { return false };
         let Some(metal) = metal_layer(surface) else { return false };
         if self.mode != Mode::Unsynced && let Some(on) = self.update_flag(|f| f.materials(true)) {
             crate::platform::macos::present_with_transaction(surface, on);
@@ -157,7 +158,7 @@ impl Materials {
     }
 
     fn sync(&mut self, draws: &[MaterialDraw], scale: f32) {
-        let draws = &draws[..draws.len().min(MAX_NATIVE_MATERIALS)];
+        let draws = &draws[..draws.len().min(MAX_NATIVE_MATERIALS_CAP)];
         if draws.is_empty() && self.slots.iter().all(|s| s.shown.is_none()) { return; }
         let Some(host) = self.host() else { return };
         let mode = self.mode;
@@ -280,8 +281,8 @@ impl Drop for Materials {
 /// no event for `windowDidEndLiveResize:`, so an idle window draws no frame after mouse-up.
 pub(super) fn watch_live_end(window: &AnyObject, layer: &Retained<AnyObject>, flag: Rc<Cell<PresentFlag>>) -> Option<Retained<AnyObject>> {
     let center = AnyClass::get(c"NSNotificationCenter")?;
-    let weak = objc2_video::rc::Weak::from_retained(layer);
-    let block = block2_metal::RcBlock::new(move |_: *mut AnyObject| {
+    let weak = objc2::rc::Weak::from_retained(layer);
+    let block = block2::RcBlock::new(move |_: *mut AnyObject| {
         let mut f = flag.get();
         let change = f.live(false);
         flag.set(f);
@@ -290,7 +291,7 @@ pub(super) fn watch_live_end(window: &AnyObject, layer: &Retained<AnyObject>, fl
             unsafe { let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::new(on)]; }
         }
     });
-    let name = objc2_foundation_video::NSString::from_str("NSWindowDidEndLiveResizeNotification");
+    let name = objc2_foundation::NSString::from_str("NSWindowDidEndLiveResizeNotification");
     // SAFETY: main thread; `Materials::drop` removes the returned observer token.
     unsafe {
         let center: Retained<AnyObject> = msg_send![center, defaultCenter];
@@ -310,17 +311,14 @@ pub(super) fn unwatch_live_end(token: &AnyObject) {
 
 impl Mode {
     /// The material actually shown: `Glass` falls back to the popover effect view before
-    /// macOS 26 and in legacy mode.
-    fn resolve(self, material: SystemMaterial) -> SystemMaterial {
-        match material {
-            SystemMaterial::Glass if self == Mode::Legacy || AnyClass::get(c"NSGlassEffectView").is_none() => SystemMaterial::Popover,
-            other => other,
-        }
+    /// macOS 26 and in legacy mode; `Popover` and `Sidebar` stay as requested.
+    pub(super) fn resolve(self, material: SystemMaterial) -> SystemMaterial {
+        self.resolve_with(material, AnyClass::get(c"NSGlassEffectView").is_some())
     }
 }
 
 /// A transparent material view in `host`.
-fn make_view(material: SystemMaterial, host: &AnyObject) -> Option<Slot> {
+pub(super) fn make_view(material: SystemMaterial, host: &AnyObject) -> Option<Slot> {
     let glass = material == SystemMaterial::Glass;
     let class = AnyClass::get(if glass { c"NSGlassEffectView" } else { c"NSVisualEffectView" })?;
     // SAFETY: AppKit initializers and setters on the main thread; the view is retained by its slot.
@@ -333,10 +331,10 @@ fn make_view(material: SystemMaterial, host: &AnyObject) -> Option<Slot> {
             // NSGlassEffectViewStyleRegular.
             let _: () = msg_send![&*view, setStyle: 0isize];
         } else {
-            // NSVisualEffectMaterialPopover, behind window, always active.
-            let _: () = msg_send![&*view, setMaterial: 6isize];
-            let _: () = msg_send![&*view, setBlendingMode: 0isize];
-            let _: () = msg_send![&*view, setState: 1isize];
+            let (ve_material, blending, state) = visual_effect_config(material);
+            let _: () = msg_send![&*view, setMaterial: ve_material];
+            let _: () = msg_send![&*view, setBlendingMode: blending];
+            let _: () = msg_send![&*view, setState: state];
             let layer: *mut AnyObject = msg_send![&*view, layer];
             if let Some(layer) = layer.as_ref() { let _: () = msg_send![layer, setMasksToBounds: true]; }
         }
@@ -351,5 +349,5 @@ fn make_view(material: SystemMaterial, host: &AnyObject) -> Option<Slot> {
 
 /// The surface's CAMetalLayer, when it is one on Metal.
 fn metal_layer(surface: &wgpu::Surface<'_>) -> Option<Retained<AnyObject>> {
-    crate::gpu::with_layer(surface, |layer| objc2_video::Message::retain(layer))
+    crate::gpu::with_layer(surface, |layer| objc2::Message::retain(layer))
 }

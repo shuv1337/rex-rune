@@ -392,7 +392,7 @@ fn a_press_spells_the_chord_that_finds_it_on_any_layout() {
         // And it reads back as the same chord from a file.
         assert_eq!(Chord::parse(spelled).unwrap(), chord);
     }
-    // A modifier going down, a dead key and a key with nothing to call it are no chord.
+    // A modifier going down and a key with nothing to call it are no chord.
     for (key, code) in [
         (
             Key::Modifier {
@@ -401,7 +401,6 @@ fn a_press_spells_the_chord_that_finds_it_on_any_layout() {
             },
             Some(Code::ControlLeft),
         ),
-        (Key::Dead(Some('´')), Some(Code::Equal)),
         (Key::Insert, None),
     ] {
         let event = KeyEvent {

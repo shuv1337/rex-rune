@@ -2,7 +2,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use zeroize::Zeroizing;
-use super::sanitize_html;
+
+use crate::edit::Wiped;
+use super::{WebFile, sanitize_html};
 
 /// What a copy puts on the clipboard, or what a paste found there: plain text, and optionally
 /// HTML, RTF, an image and files. Debug output never includes its contents.
@@ -23,26 +25,30 @@ use super::sanitize_html;
 /// in a web view as is. `rtf` is passed through untouched.
 #[derive(Clone, Default)]
 pub struct ClipboardContent {
-    pub(super) text: Zeroizing<String>,
-    html: Option<Zeroizing<String>>,
-    rtf: Option<Zeroizing<String>>,
+    // Wiped as they go, eight bytes a write: a 1.7 MB paste's text is gone in a tenth of a
+    // millisecond, where `Zeroizing`'s byte at a time took most of one in the paste's frame.
+    pub(super) text: Wiped,
+    html: Option<Wiped>,
+    rtf: Option<Wiped>,
     image: Option<ClipboardImage>,
     files: Vec<PathBuf>,
+    web_files: Vec<WebFile>,
     pub(super) own_pills: bool,
 }
 impl PartialEq for ClipboardContent {
     fn eq(&self, other: &Self) -> bool {
         self.text == other.text && self.html == other.html && self.rtf == other.rtf && self.image == other.image && self.files == other.files
+            && self.web_files == other.web_files
     }
 }
 impl Eq for ClipboardContent {}
 impl ClipboardContent {
     /// Plain text, the form every app can paste. Empty when only other forms carry content.
-    pub fn new(text: impl Into<String>) -> Self { Self { text: Zeroizing::new(text.into()), ..Self::default() } }
+    pub fn new(text: impl Into<String>) -> Self { Self { text: Wiped(text.into()), ..Self::default() } }
     /// Adds an HTML form (a fragment or a document), for apps that paste formatted text.
-    pub fn with_html(mut self, html: impl Into<String>) -> Self { self.html = Some(Zeroizing::new(html.into())); self }
+    pub fn with_html(mut self, html: impl Into<String>) -> Self { self.html = Some(Wiped(html.into())); self }
     /// Adds an RTF form, for apps that read RTF but not HTML.
-    pub fn with_rtf(mut self, rtf: impl Into<String>) -> Self { self.rtf = Some(Zeroizing::new(rtf.into())); self }
+    pub fn with_rtf(mut self, rtf: impl Into<String>) -> Self { self.rtf = Some(Wiped(rtf.into())); self }
     /// Adds an image. macOS writes it as PNG and TIFF beside the other forms; Windows and Linux
     /// write it alone (see [`Tx::copy_rich`](crate::Tx::copy_rich)); the web as PNG.
     pub fn with_image(mut self, image: ClipboardImage) -> Self { self.image = Some(image); self }
@@ -58,16 +64,42 @@ impl ClipboardContent {
     pub fn image(&self) -> Option<&ClipboardImage> { self.image.as_ref() }
     /// The files on the clipboard. Like the image, only pastes to a hook carry them.
     pub fn files(&self) -> &[PathBuf] { &self.files }
+    /// The browser files a paste or drop on the web offered the focused field, at most
+    /// [`MAX_WEB_FILES`](super::MAX_WEB_FILES), with no paths and no bytes read: call
+    /// `WebFile::read` (wasm32) for the ones the app takes. Like the image, only hooks hear them (a
+    /// field's `on_input_paste` or a root `on_paste_content`; never a password field). Some
+    /// files come twice: a pasted or dropped PNG is also the [`image`](Self::image), and the
+    /// contents of a dropped text file of at most 1 MiB are also the [`text`](Self::text).
+    /// Always empty on native platforms.
+    pub fn web_files(&self) -> &[WebFile] { &self.web_files }
+    #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+    pub(crate) fn with_web_files(mut self, files: Vec<WebFile>) -> Self { self.web_files.extend(files); self }
     /// HTML, RTF, an image or files beside the text.
-    pub fn is_rich(&self) -> bool { self.html.is_some() || self.rtf.is_some() || self.image.is_some() || !self.files.is_empty() }
+    pub fn is_rich(&self) -> bool {
+        self.html.is_some() || self.rtf.is_some() || self.image.is_some() || !self.files.is_empty() || !self.web_files.is_empty()
+    }
     /// No text and no other form.
     pub fn is_empty(&self) -> bool { self.text.is_empty() && !self.is_rich() }
     /// Content from another app: its HTML sanitised.
     pub(crate) fn untrusted(mut self) -> Self {
-        if let Some(html) = &mut self.html { *html = Zeroizing::new(sanitize_html(html)); }
+        if let Some(html) = &mut self.html { *html = Wiped(sanitize_html(html)); }
         self
     }
-    pub(crate) fn has_own_pills(&self) -> bool { self.own_pills }
+    /// Whether this clipboard read carries `<span data-pill="…">` HTML that this app itself
+    /// wrote on its last copy, verified against the clipboard revision and plain-text
+    /// fingerprint. Returns `false` for HTML written by another application or after the
+    /// clipboard has changed, so an [`El::on_input_paste`](crate::El::on_input_paste) hook can
+    /// tell its own rich pill copy apart from external HTML.
+    ///
+    /// ```
+    /// # use rune::clipboard::ClipboardContent;
+    /// let external = ClipboardContent::new("@ada")
+    ///     .with_html(r#"<span data-pill="u:1">@ada</span>"#);
+    /// assert!(!external.has_own_pills());
+    /// ```
+    pub fn has_own_pills(&self) -> bool { self.own_pills }
+    /// Marks clipboard content as carrying this app's verified pill copy (used on wasm32).
+    pub(crate) fn mark_own_pills(&mut self) { self.own_pills = true; }
     /// Text, HTML and RTF only, for a rich text target: no image or files to decode or list.
     /// None when the image or files were all it had, so a paste of them alone changes nothing;
     /// genuinely empty text stays.
@@ -75,6 +107,7 @@ impl ClipboardContent {
         let had = !self.is_empty();
         self.image = None;
         self.files.clear();
+        self.web_files.clear();
         (!had || !self.is_empty()).then_some(self)
     }
     /// Plain consumers (a field without an `on_input_paste`, a text `on_paste`) take it: it
@@ -89,7 +122,7 @@ impl From<&str> for ClipboardContent {
     fn from(text: &str) -> Self { Self::new(text) }
 }
 impl From<Zeroizing<String>> for ClipboardContent {
-    fn from(text: Zeroizing<String>) -> Self { Self { text, ..Self::default() } }
+    fn from(mut text: Zeroizing<String>) -> Self { Self { text: Wiped(std::mem::take(&mut *text)), ..Self::default() } }
 }
 impl std::fmt::Debug for ClipboardContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -99,6 +132,7 @@ impl std::fmt::Debug for ClipboardContent {
             .field("rtf", &self.rtf.as_ref().map(|r| r.len()))
             .field("image", &self.image)
             .field("files", &self.files.len())
+            .field("web_files", &self.web_files.len())
             .finish()
     }
 }
@@ -146,7 +180,7 @@ impl ClipboardImage {
     /// Decodes the PNG to 8-bit RGBA, for clipboards that take pixels.
     #[cfg(any(target_os = "windows", all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))))]
     pub(crate) fn to_rgba(&self) -> Option<image::RgbaImage> {
-        image::load_from_memory_with_format(&self.png, image::ImageFormat::Png).ok().map(|i| i.into_rgba8())
+        crate::image::png_rgba8(&self.png).ok()
     }
     /// The PNG file's bytes, ready to save, upload or decode.
     pub fn png(&self) -> &[u8] { &self.png }

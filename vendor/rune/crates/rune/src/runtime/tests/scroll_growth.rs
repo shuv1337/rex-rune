@@ -19,7 +19,7 @@ fn growth_rows_grow_and_sticky_scroll_lands_at_bottom() {
     assert!((last.rect[1] + last.rect[3] - 300.0).abs() < 0.05, "{:?}", last.rect);
     // A new row grows from 0 and the end stays pinned.
     rt.state = 11;
-    rt.dirty = true;
+    rt.commit.dirty = true;
     rt.frame(1.0 / 60.0);
     assert!(rt.animating);
     let r10 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap();
@@ -221,8 +221,8 @@ fn a_window_resize_lands_rewrapped_rows_under_a_pinned_tail() {
         end("viewport") - end("last")
     };
     let rest = gap(&rt);
-    let first = rt.nodes.iter().find(|n| n.key.as_deref() == Some("first")).unwrap().id;
-    let before = rt.grows[&first].h;
+    let first = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("first")).unwrap().id;
+    let before = rt.motion.grows[&first].h;
     // One step a frame, as a person drags the corner.
     for w in (420..600).rev().step_by(6) {
         rt.set_viewport((w as f32, 300.0), 2.0);
@@ -233,9 +233,9 @@ fn a_window_resize_lands_rewrapped_rows_under_a_pinned_tail() {
         let (a, b) = (rect("first"), rect("last"));
         assert!(a[1] + a[3] <= b[1] + 0.5, "at width {w} the first row runs into the last: {a:?} {b:?}");
     }
-    assert!(rt.grows[&first].h > before + 1.0, "the first row rewrapped taller");
-    let measured = rt.nodes.iter().find(|n| n.id == first).unwrap().local.h;
-    assert_eq!(rt.grows[&first].h, measured, "and its slot landed with it");
+    assert!(rt.motion.grows[&first].h > before + 1.0, "the first row rewrapped taller");
+    let measured = rt.tree.nodes.iter().find(|n| n.id == first).unwrap().local.h;
+    assert_eq!(rt.motion.grows[&first].h, measured, "and its slot landed with it");
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn reading(hz: f64) -> Runtime<usize> {
     rt.frame(1.0 / hz);
     rt.wheel(100.0, 100.0, 200.0);
     for _ in 0..30 { rt.frame(1.0 / hz); }
-    assert_eq!(rt.scrolls.values().next().unwrap().offset, 1500.0, "reading 200 pt above the end");
+    assert_eq!(rt.scroll.scrolls.values().next().unwrap().offset, 1500.0, "reading 200 pt above the end");
     rt
 }
 
@@ -286,7 +286,7 @@ fn reading(hz: f64) -> Runtime<usize> {
 /// instead of picking up the collapse's speed in a frame.
 #[test]
 fn content_shrinking_under_a_reader_eases_to_its_new_end() {
-    let scroll = |rt: &Runtime<usize>| rt.scrolls.values().next().map(|st| (st.offset, st.max)).unwrap();
+    let scroll = |rt: &Runtime<usize>| rt.scroll.scrolls.values().next().map(|st| (st.offset, st.max)).unwrap();
     // (rows left, frame rate, largest first step and frame-to-frame change, as parts of the peak speed)
     for (left, hz, onset, step) in [(15usize, 120.0, 0.3, 0.4), (5, 120.0, 0.3, 0.4), (15, 60.0, 0.4, 0.55)] {
         let mut rt = reading(hz);
@@ -318,11 +318,11 @@ fn a_hand_scroll_mid_shrink_keeps_the_viewport() {
     let mut rt = reading(120.0);
     rt.update(|n, _| *n = 15);
     for _ in 0..6 { rt.frame(1.0 / 120.0); }
-    assert!(rt.scrolls.values().next().unwrap().glide().is_some(), "the collapse glides");
+    assert!(rt.scroll.scrolls.values().next().unwrap().glide().is_some(), "the collapse glides");
     rt.wheel(100.0, 100.0, 10.0);
     for f in 0..120 {
         rt.frame(1.0 / 120.0);
-        assert!(rt.scrolls.values().next().unwrap().glide().is_none(), "frame {f}: no glide takes the viewport back from the hand");
+        assert!(rt.scroll.scrolls.values().next().unwrap().glide().is_none(), "frame {f}: no glide takes the viewport back from the hand");
     }
 }
 
@@ -333,26 +333,26 @@ fn a_shrink_glide_follows_the_end_as_it_moves() {
     let mut rt = reading(120.0);
     rt.update(|n, _| *n = 15);
     for _ in 0..8 { rt.frame(1.0 / 120.0); }
-    let v = rt.scrolls.values().next().unwrap().glide().unwrap();
+    let v = rt.scroll.scrolls.values().next().unwrap().glide().unwrap();
     assert!(v.abs() > 1.0, "gliding at {v}");
     rt.update(|n, _| *n = 10);
     rt.frame(1.0 / 120.0);
-    let st = rt.scrolls.values().next().unwrap();
+    let st = rt.scroll.scrolls.values().next().unwrap();
     assert_eq!(st.glide_to(), Some(700.0), "the glide aims at the newer end");
     assert!(st.glide().unwrap().abs() >= v.abs() * 0.5, "and keeps its speed: {:?} from {v}", st.glide());
     for _ in 0..120 { rt.frame(1.0 / 120.0); }
-    assert!((rt.scrolls.values().next().unwrap().offset - 700.0).abs() < 0.01, "lands on the newer end");
+    assert!((rt.scroll.scrolls.values().next().unwrap().offset - 700.0).abs() < 0.01, "lands on the newer end");
 
     let mut rt = reading(120.0);
     rt.update(|n, _| *n = 15);
     for _ in 0..8 { rt.frame(1.0 / 120.0); }
     rt.update(|n, _| *n = 20);
     rt.frame(1.0 / 120.0);
-    let st = rt.scrolls.values().next().unwrap();
+    let st = rt.scroll.scrolls.values().next().unwrap();
     assert!(st.glide().is_none(), "rows coming back past the offset end the glide");
     let at = st.offset;
     for _ in 0..60 { rt.frame(1.0 / 120.0); }
-    assert_eq!(rt.scrolls.values().next().unwrap().offset, at, "and the viewport stays where it was");
+    assert_eq!(rt.scroll.scrolls.values().next().unwrap().offset, at, "and the viewport stays where it was");
 }
 
 /// A row kept on screen owns its viewport through a collapse: no shrink glide pulls it away.
@@ -364,7 +364,7 @@ fn a_kept_row_holds_its_viewport_through_a_shrink() {
     rt.update(|n, tx| { *n = 17; tx.keep_on_screen("r15"); });
     for f in 0..20 {
         rt.frame(1.0 / 120.0);
-        assert!(rt.scrolls.values().next().unwrap().glide().is_none(), "frame {f}: no shrink glide on a kept viewport");
+        assert!(rt.scroll.scrolls.values().next().unwrap().glide().is_none(), "frame {f}: no shrink glide on a kept viewport");
         assert!((top(&rt) - was).abs() < 0.5, "frame {f}: the kept row holds its place");
     }
 }
@@ -375,14 +375,14 @@ fn a_glide_whose_end_shrinks_past_it_lands_there() {
     let mut rt = reading(120.0);
     rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 1000.0));
     for _ in 0..6 { rt.frame(1.0 / 120.0); }
-    assert!(rt.scrolls.values().next().unwrap().glide().is_some_and(|v| v.abs() > 100.0), "gliding up");
+    assert!(rt.scroll.scrolls.values().next().unwrap().glide().is_some_and(|v| v.abs() > 100.0), "gliding up");
     rt.update(|n, tx| { *n = 12; tx.instant(); });
     let mut low = f64::MAX;
     for _ in 0..60 {
         rt.frame(1.0 / 120.0);
-        low = low.min(rt.scrolls.values().next().unwrap().offset);
+        low = low.min(rt.scroll.scrolls.values().next().unwrap().offset);
     }
-    let st = rt.scrolls.values().next().unwrap();
+    let st = rt.scroll.scrolls.values().next().unwrap();
     assert_eq!((st.offset, st.max), (900.0, 900.0));
     assert!(low >= 900.0 - 1e-6, "never dips below the end: {low}");
 }
@@ -396,15 +396,15 @@ fn a_reader_landed_on_a_shrunk_end_follows_rows_arriving_in_its_tail() {
     rt.update(|n, _| *n = 15);
     for f in 0.. {
         rt.frame(1.0 / 120.0);
-        let st = rt.scrolls.values().next().unwrap();
+        let st = rt.scroll.scrolls.values().next().unwrap();
         if st.glide().is_none() && st.max - 1200.0 < 0.5 { break; }
         assert!(f < 240, "the glide lands and the rows near the end");
     }
-    assert!(rt.stacks.values().next().unwrap().moving, "the rows are still settling");
-    assert!(rt.scrolls.values().next().unwrap().pinned(), "the reader sticks to the end");
+    assert!(rt.motion.stacks.values().next().unwrap().moving, "the rows are still settling");
+    assert!(rt.scroll.scrolls.values().next().unwrap().pinned(), "the reader sticks to the end");
     rt.update(|n, _| *n = 20);
     for _ in 0..120 { rt.frame(1.0 / 120.0); }
-    let st = rt.scrolls.values().next().unwrap();
+    let st = rt.scroll.scrolls.values().next().unwrap();
     assert_eq!((st.offset, st.max), (1700.0, 1700.0), "and follows the rows that come back");
 }
 
@@ -440,11 +440,11 @@ fn a_reader_stuck_in_the_collapse_tail_never_steps_up() {
     let top = |rt: &Runtime<usize>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap().rect[1];
     let mut rt = reading(120.0);
     rt.update(|n, _| *n = 15);
-    let (mut offset, mut y) = (rt.scrolls.values().next().unwrap().offset, top(&rt));
+    let (mut offset, mut y) = (rt.scroll.scrolls.values().next().unwrap().offset, top(&rt));
     let mut stuck_in_tail = false;
     for f in 0..240 {
         rt.frame(1.0 / 120.0);
-        let st = rt.scrolls.values().next().unwrap();
+        let st = rt.scroll.scrolls.values().next().unwrap();
         stuck_in_tail |= st.pinned() && st.max > 1200.0;
         assert!(st.offset <= offset, "frame {f}: the offset steps up from {offset} to {}", st.offset);
         let now = top(&rt);
@@ -488,7 +488,7 @@ fn a_landed_glide_over_a_collapsing_tall_row_stays_near() {
     let mut rt = far_reading(10, 3000.0, 2800.0);
     rt.update(|s, _| s.1 = 0.0);
     for _ in 0..360 { rt.frame(1.0 / 120.0); }
-    assert_eq!(rt.scrolls.values().next().unwrap().offset, 700.0, "the glide lands on the new end");
+    assert_eq!(rt.scroll.scrolls.values().next().unwrap().offset, 700.0, "the glide lands on the new end");
     assert_eq!(rt.state.2, [false], "a tall row collapsing under a landed glide stays near");
 }
 
@@ -500,13 +500,209 @@ fn rows_regrowing_under_a_shrink_glide_stay_near() {
     rt.update(|s, _| s.0 = 5);
     for f in 0.. {
         rt.frame(1.0 / 120.0);
-        let st = rt.scrolls.values().next().unwrap();
+        let st = rt.scroll.scrolls.values().next().unwrap();
         assert!(st.glide().is_some() && f < 120, "the glide passes 850");
         if st.offset < 850.0 { break; }
     }
     rt.update(|s, _| s.0 = 12);
     rt.frame(1.0 / 120.0);
-    assert!(rt.scrolls.values().next().unwrap().glide().is_none(), "rows coming back past the offset end the glide");
+    assert!(rt.scroll.scrolls.values().next().unwrap().glide().is_none(), "rows coming back past the offset end the glide");
     for _ in 0..240 { rt.frame(1.0 / 120.0); }
     assert_eq!(rt.state.2, [false], "the regrown end is near, while the rows still collapse to it");
+}
+
+/// Prepending rows above a virtual list mid-glide shifts the running glide's target along with
+/// the scroll offset, so the glide lands on the row it aimed for without overshooting.
+#[test]
+fn virtual_list_prepend_mid_glide_shifts_glide_target() {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    struct List { front: usize }
+    fn view(s: &List, _: &mut Cx<List>) -> El {
+        let count = s.front + 40;
+        let rows = col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(
+            count,
+            40.0,
+            |s: &List, i| {
+                if i < s.front { format!("p{i}").into() } else { format!("r{}", i - s.front).into() }
+            },
+            |_: &List, _| el().w_full().h(40.0),
+        );
+        col().size(200.0, 200.0).child(
+            col().key("scroll").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(rows),
+        )
+    }
+    let mut rt = Runtime::new(List { front: 0 }, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 800.0));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.scroll.scrolls.values().next().unwrap().offset, 800.0);
+
+    // Glide up toward r10 (currently at 400 pt).
+    rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 400.0));
+    for _ in 0..5 { rt.frame(1.0 / 60.0); }
+    let st = rt.scroll.scrolls.values().next().unwrap();
+    assert!(st.glide().is_some() && st.offset > 400.0 && st.offset < 800.0, "mid-glide: {:?}", st.offset);
+
+    // Prepend 10 rows (400 pt) above the viewport mid-glide; r10 moves from 400 pt to 800 pt.
+    rt.update(|s, _| s.front = 10);
+    rt.frame(1.0 / 60.0);
+    let st = rt.scroll.scrolls.values().next().unwrap();
+    assert_eq!(st.glide_to(), Some(800.0), "glide target shifts with the anchor");
+
+    let mut low = f64::MAX;
+    for _ in 0..240 {
+        rt.frame(1.0 / 60.0);
+        let st = rt.scroll.scrolls.values().next().unwrap();
+        low = low.min(st.offset);
+        if st.glide().is_none() { break; }
+    }
+    let st = rt.scroll.scrolls.values().next().unwrap();
+    assert!(st.glide().is_none(), "glide settled");
+    assert!((st.offset - 800.0).abs() < 0.05, "landed on shifted target: {}", st.offset);
+    assert!(low >= 800.0 - 0.1, "never overshot past the shifted target: {low}");
+    let r10 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap();
+    assert!(r10.rect[1].abs() < 0.5, "r10 sits at the top of the viewport: {:?}", r10.rect);
+}
+
+/// Measuring taller-than-estimated rows above a virtual list mid-glide shifts the running glide's
+/// target along with the anchor, so the glide still lands on the row it aimed for.
+#[test]
+fn virtual_list_measure_above_mid_glide_shifts_glide_target() {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let rows = col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(
+            80,
+            20.0,
+            |_: &(), i| format!("r{i}").into(),
+            |_: &(), i| el().w_full().h(if i < 25 { 50.0 } else { 20.0 }),
+        );
+        col().size(200.0, 200.0).child(
+            col().key("scroll").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: true }).child(rows),
+        )
+    }
+    let mut rt = Runtime::new((), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    // Opens pinned at the bottom: rows 0..25 are unmounted and still at the 20 pt estimate.
+    assert_eq!(rt.scroll.scrolls.values().next().unwrap().offset, 1400.0);
+
+    // Glide up toward r30 (estimated at 600 pt). As the glide enters overscan of rows < 25,
+    // those rows measure 50 pt instead of 20 pt and push r30 down.
+    rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 600.0));
+    for _ in 0..240 {
+        rt.frame(1.0 / 60.0);
+        if rt.scroll.scrolls.values().next().unwrap().glide().is_none() { break; }
+    }
+    let st = rt.scroll.scrolls.values().next().unwrap();
+    assert!(st.glide().is_none(), "glide settled");
+    assert!(st.offset > 600.0, "rows above measured taller and shifted the target: {}", st.offset);
+    let r30 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r30")).unwrap();
+    assert!(r30.rect[1].abs() < 0.5, "r30 sits at the top of the viewport: {:?}", r30.rect);
+}
+
+/// Resizing a viewport whose virtual-row estimate follows the width keeps the top visible row
+/// anchored even when hundreds of rows above the viewport were never measured.
+#[test]
+fn virtual_rows_estimate_change_on_resize_keeps_anchor_over_unmeasured_rows() {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    fn view(_: &(), cx: &mut Cx<()>) -> El {
+        let w = cx.layout_size("scroll").map_or(1280.0, |s| s[0]);
+        let h = w / 10.0;
+        let rows = col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(
+            600,
+            h,
+            |_: &(), i| format!("r{i}").into(),
+            move |_: &(), _| el().w_full().h(h),
+        );
+        col().w_full().h_full().child(
+            col().key("scroll").w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(rows),
+        )
+    }
+    let mut rt = Runtime::new((), view, (1280.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 300.0 * 128.0));
+    rt.frame(1.0 / 60.0);
+    let r300_y = |rt: &Runtime<()>| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r300")).map(|e| e.rect[1])
+    };
+    assert!(r300_y(&rt).is_some_and(|y| y.abs() < 0.5), "r300 starts at top: {:?}", r300_y(&rt));
+
+    rt.set_viewport((1240.0, 400.0), 1.0);
+    for _ in 0..4 { rt.frame(1.0 / 60.0); }
+    assert!(r300_y(&rt).is_some_and(|y| y.abs() < 0.5), "narrower resize keeps r300 at top: {:?}", r300_y(&rt));
+
+    rt.set_viewport((1320.0, 400.0), 1.0);
+    for _ in 0..4 { rt.frame(1.0 / 60.0); }
+    assert!(r300_y(&rt).is_some_and(|y| y.abs() < 0.5), "wider resize keeps r300 at top: {:?}", r300_y(&rt));
+}
+
+/// Changing a virtual list's row-height estimate alongside a key change (`virtual_rows_version`
+/// bumped) or alone keeps the surviving anchor row at the same viewport position over unmeasured
+/// rows above it.
+#[test]
+fn virtual_rows_estimate_and_key_change_keeps_surviving_anchor_over_unmeasured_rows() {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    struct List { keys: Vec<usize>, version: u64, estimate: f32 }
+    fn view(s: &List, _: &mut Cx<List>) -> El {
+        let rows = col().key("rows").w_full().growth(GrowthSpec::default())
+            .virtual_rows(
+                s.keys.len(),
+                s.estimate,
+                |s: &List, i| format!("r{}", s.keys[i]).into(),
+                |_: &List, _| el().w_full().h(80.0),
+            )
+            .virtual_rows_version(s.version);
+        col().size(400.0, 300.0).child(
+            col().key("scroll").size(400.0, 300.0).scroll(ScrollSpec { stick_bottom: false }).child(rows),
+        )
+    }
+    let mut rt = Runtime::new(
+        List { keys: (0..600).collect(), version: 0, estimate: 80.0 },
+        view,
+        (400.0, 300.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 300.0 * 80.0));
+    rt.frame(1.0 / 60.0);
+    let y_of = |rt: &Runtime<List>, key: &str| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect[1])
+    };
+    assert!(y_of(&rt, "r300").is_some_and(|y| y.abs() < 0.5), "r300 starts at top: {:?}", y_of(&rt, "r300"));
+    assert!(y_of(&rt, "r301").is_some_and(|y| (y - 80.0).abs() < 0.5), "r301 starts at 80: {:?}", y_of(&rt, "r301"));
+
+    // Remove r300 (so r301 is the surviving anchor), bump version, and shrink the estimate at once.
+    rt.update(|s, tx| {
+        s.keys.remove(300);
+        s.version += 1;
+        s.estimate = 75.0;
+        tx.instant();
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(
+        y_of(&rt, "r301").is_some_and(|y| (y - 80.0).abs() < 0.5),
+        "r301 stays at 80 after key + estimate change: {:?}",
+        y_of(&rt, "r301"),
+    );
+
+    // Prepend unmeasured rows above, bump version, and grow the estimate at once.
+    rt.update(|s, _| {
+        for k in 1000..1005 { s.keys.insert(0, k); }
+        s.version += 1;
+        s.estimate = 90.0;
+    });
+    for _ in 0..4 { rt.frame(1.0 / 60.0); }
+    assert!(
+        y_of(&rt, "r301").is_some_and(|y| (y - 80.0).abs() < 0.5),
+        "r301 stays at 80 after prepend + estimate change: {:?}",
+        y_of(&rt, "r301"),
+    );
+
+    // Change only the estimate (keys unchanged) in the opposite direction.
+    rt.update(|s, _| s.estimate = 70.0);
+    for _ in 0..4 { rt.frame(1.0 / 60.0); }
+    assert!(
+        y_of(&rt, "r301").is_some_and(|y| (y - 80.0).abs() < 0.5),
+        "r301 stays at 80 after estimate-only change: {:?}",
+        y_of(&rt, "r301"),
+    );
 }

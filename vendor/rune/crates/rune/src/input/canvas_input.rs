@@ -36,6 +36,9 @@ pub struct WheelEvent {
     /// Point-precise deltas (a trackpad or a free-spinning wheel), rather than the line steps of
     /// a notched mouse wheel, which an app may want to smooth.
     pub precise: bool,
+    /// Whole notches of a mouse wheel on a platform whose browsers ease them (macOS, Windows,
+    /// and Linux): an unclaimed delta eases there as Chromium's does (`Runtime::set_wheel_glide`).
+    pub notch: bool,
 }
 
 impl WheelEvent {
@@ -46,6 +49,7 @@ impl WheelEvent {
     pub fn mods(mut self, mods: Mods) -> Self { self.mods = mods; self }
     pub fn phase(mut self, phase: GesturePhase) -> Self { self.phase = phase; self }
     pub fn precise(mut self, precise: bool) -> Self { self.precise = precise; self }
+    pub fn notch(mut self, notch: bool) -> Self { self.notch = notch; self }
 }
 
 /// A pinch an [`El::on_magnify`] handler sees.
@@ -59,6 +63,11 @@ pub struct MagnifyEvent {
     pub x: f32,
     pub y: f32,
     pub phase: GesturePhase,
+    /// It came from Ctrl + wheel (a mouse wheel, or a two-finger scroll with Ctrl held), not a
+    /// pinch gesture. For line-delta wheel notches, `delta` is `1.2^ticks - 1` (+0.2 per forward
+    /// notch, independent of OS scroll-lines settings, matching Chromium); for pixel-precise
+    /// deltas, `delta` is `dy / 200`.
+    pub wheel: bool,
 }
 
 impl MagnifyEvent {
@@ -87,7 +96,9 @@ impl RotateEvent {
 }
 
 /// A mouse button. Only `Primary` reaches `on_press` and `on_drag` unless an element opts in to
-/// others with [`El::pointer_buttons`]; `Secondary` always goes to `on_secondary_press`.
+/// others with [`El::pointer_buttons`]. `Secondary` opens `on_secondary_press` on a click within
+/// the 4 pt click slop, and also drives `on_drag` when opted in with [`El::pointer_buttons`].
+/// Non-primary, non-secondary buttons also bubble through [`El::on_button`].
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PointerButton {
@@ -102,14 +113,15 @@ pub enum PointerButton {
 }
 
 impl PointerButton {
-    /// Its bit in [`CanvasInput::buttons`]; none for the primary and secondary buttons.
+    /// Its bit in [`CanvasInput::buttons`]; none for the primary button.
     pub(crate) fn bit(self) -> u8 {
         match self {
-            Self::Primary | Self::Secondary => 0,
+            Self::Primary => 0,
             Self::Middle => 1,
             Self::Back => 2,
             Self::Forward => 4,
             Self::Other(_) => 8,
+            Self::Secondary => 16,
         }
     }
 }
@@ -118,6 +130,7 @@ type WheelFn = Rc<dyn Fn(crate::states::States<'_>, WheelEvent, &mut Tx) -> bool
 type MagnifyFn = Rc<dyn Fn(crate::states::States<'_>, MagnifyEvent, &mut Tx) -> bool>;
 type RotateFn = Rc<dyn Fn(crate::states::States<'_>, RotateEvent, &mut Tx) -> bool>;
 type SmartMagnifyFn = Rc<dyn Fn(crate::states::States<'_>, f32, f32, &mut Tx) -> bool>;
+type ButtonFn = Rc<dyn Fn(crate::states::States<'_>, PointerButton, &mut Tx) -> bool>;
 
 /// An element's canvas handlers, boxed: few elements have any.
 #[derive(Clone, Default)]
@@ -126,13 +139,20 @@ pub(crate) struct CanvasInput {
     pub magnify: Option<MagnifyFn>,
     pub rotate: Option<RotateFn>,
     pub smart_magnify: Option<SmartMagnifyFn>,
+    pub button: Option<ButtonFn>,
     /// [`PointerButton::bit`]s of the buttons besides the primary that press and drag it.
     pub buttons: u8,
 }
 
 impl CanvasInput {
-    /// It takes a gesture, so it hit-tests like an element with a press handler.
+    /// It takes a gesture or extra mouse button, so it registers a hit rect for gesture chaining.
     pub(crate) fn takes_gestures(&self) -> bool {
+        self.takes_pointer_gestures() || self.button.is_some()
+    }
+
+    /// Wheel or trackpad gestures that need pointer events on the canvas (excluding `on_button`,
+    /// which does not interfere with primary presses or web page text selection).
+    pub(crate) fn takes_pointer_gestures(&self) -> bool {
         self.wheel.is_some() || self.magnify.is_some() || self.rotate.is_some() || self.smart_magnify.is_some()
     }
 }
@@ -147,11 +167,12 @@ impl El {
     }
 
     /// Wheel and trackpad scrolls over this element, before any scroll view around or under
-    /// the pointer moves: return true to take the delta, false to let it scroll as usual. The
-    /// innermost handler under the pointer hears it first, up to and including the nearest
-    /// scroll view. Once a handler takes a gesture's first delta it gets the rest of that
-    /// gesture, its momentum included, wherever the pointer goes, as a scroll view keeps the
-    /// axis it locked to.
+    /// the pointer moves: return true to take the delta, false to pass it on to outer
+    /// handlers and let it scroll as usual. The innermost handler under the pointer hears it
+    /// first, bubbling through every ancestor past scroll views as a DOM `wheel` event does.
+    /// Once a handler takes a gesture's delta it gets the rest of that gesture, its momentum
+    /// included, wherever the pointer goes, until it declines or the gesture ends (or modifiers
+    /// change on an unphased wheel).
     ///
     /// A canvas pans with plain deltas and zooms with ⌘ (`mods.cmd`) or pinch
     /// ([`El::on_magnify`]). Off macOS a trackpad pinch arrives as a Ctrl + wheel, which goes
@@ -162,9 +183,9 @@ impl El {
     }
 
     /// Trackpad pinches over this element: return true to take one. The innermost handler
-    /// under the pointer hears it first. macOS reports pinches; on Windows, Linux and the web
-    /// a pinch (and Ctrl + mouse wheel) comes as a Ctrl + wheel delta, turned into a delta of
-    /// `-dy / 200` per point.
+    /// under the pointer hears it first. macOS reports pinches; Ctrl + wheel also reaches
+    /// `on_magnify` (with `MagnifyEvent::wheel == true`), using `1.2^ticks - 1` for line-delta
+    /// notches and `dy / 200` for pixel-precise deltas.
     pub fn on_magnify<S: 'static>(mut self, f: impl Fn(&mut S, MagnifyEvent, &mut Tx) -> bool + 'static) -> Self {
         self.canvas_input().magnify = Some(Rc::new(move |s, e, tx| f(state::<S>(s), e, tx)));
         self
@@ -184,11 +205,51 @@ impl El {
     }
 
     /// Mouse buttons besides the primary that press and drag this element: its `on_press` and
-    /// `on_drag` hear them too, and [`Tx::button`] says which. A middle-button drag pans a
-    /// canvas this way. The secondary button keeps opening `on_secondary_press`.
+    /// `on_drag` hear `Middle`, `Back`, `Forward` and `Other`, and [`Tx::button`] says which.
+    /// Including [`PointerButton::Secondary`] lets a right-button drag drive `on_drag` (with
+    /// [`Tx::button`] returning `Secondary`): a right-click that stays within the 4 pt click slop
+    /// still opens `on_secondary_press` (on this element or a child), while a right-drag past the
+    /// slop suppresses context menus and does not invoke `on_press`.
+    ///
+    /// ```no_run
+    /// # use rune::{Drag, El, PointerButton, el};
+    /// # struct Canvas { pan: [f32; 2] }
+    /// let _: El = el()
+    ///     .pointer_buttons([PointerButton::Secondary])
+    ///     .on_drag(|c: &mut Canvas, d: &mut Drag, tx| {
+    ///         if tx.button() == PointerButton::Secondary {
+    ///             c.pan = [d.dx, d.dy];
+    ///         }
+    ///     });
+    /// ```
     pub fn pointer_buttons(mut self, buttons: impl IntoIterator<Item = PointerButton>) -> Self {
         let bits = buttons.into_iter().fold(0, |bits, b| bits | b.bit());
         self.canvas_input().buttons |= bits;
+        self
+    }
+
+    /// Extra mouse buttons (`Middle`, `Back`, `Forward`, `Other(n)`) pressed over this element,
+    /// without making the element a primary press target: return `true` to consume the button, or
+    /// `false` to bubble it to outer `on_button` handlers up to the root or open modal.
+    ///
+    /// Runs on button down when no element under the pointer claimed the button via
+    /// [`El::pointer_buttons`], a middle-clicked link, or [`El::on_middle_press`]. For
+    /// [`PointerButton::Middle`], platform autoscroll starts only if every handler returns `false`.
+    /// Primary and secondary buttons never reach `on_button`, and registering it does not affect
+    /// primary clicks, empty-click focus blur, titlebar double-clicks, press cursors, or text
+    /// selection.
+    ///
+    /// ```no_run
+    /// # use rune::{El, PointerButton, el};
+    /// # struct App { page: i32 }
+    /// let _: El = el().on_button(|app: &mut App, button, _| match button {
+    ///     PointerButton::Back => { app.page -= 1; true }
+    ///     PointerButton::Forward => { app.page += 1; true }
+    ///     _ => false,
+    /// });
+    /// ```
+    pub fn on_button<S: 'static>(mut self, f: impl Fn(&mut S, PointerButton, &mut Tx) -> bool + 'static) -> Self {
+        self.canvas_input().button = Some(Rc::new(move |s, b, tx| f(state::<S>(s), b, tx)));
         self
     }
 
@@ -206,6 +267,9 @@ impl El {
 impl Tx {
     /// In `on_press` and `on_drag`, the button that drove it, which is
     /// [`PointerButton::Primary`] unless the element opted in to others with
-    /// [`El::pointer_buttons`]. Other handlers see `Primary`.
+    /// [`El::pointer_buttons`] (including `Secondary` for `on_drag`); in `on_link`, `Middle` for
+    /// a middle click on the link; in [`El::on_middle_press`], `Middle`; in [`El::on_button`],
+    /// the extra button that was pressed; in [`El::on_any_press`], the button that went down.
+    /// Other handlers see `Primary`.
     pub fn button(&self) -> PointerButton { self.button }
 }

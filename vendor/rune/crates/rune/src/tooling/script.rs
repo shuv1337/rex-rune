@@ -33,8 +33,21 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
             out.push(Ev { t, kind: Kind::Reopen, pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
+        if e["close_request"].as_bool() == Some(true) {
+            out.push(Ev { t, kind: Kind::CloseRequest, pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
         if let Some(url) = e["open_url"].as_str() {
             out.push(Ev { t, kind: Kind::OpenUrl(url.into()), pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
+        if let Some(files) = e.get("open_files") {
+            let paths: Vec<std::path::PathBuf> = files.as_array()
+                .unwrap_or_else(|| die("open_files needs an array of path strings, like [\"a.txt\"]"))
+                .iter()
+                .map(|p| p.as_str().unwrap_or_else(|| die("open_files entries must be strings")).into())
+                .collect();
+            out.push(Ev { t, kind: Kind::OpenFiles(paths), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         if let Some(chord) = e["physical"].as_str() {
@@ -42,13 +55,40 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
             let repeat = e["repeat"].as_bool().unwrap_or(false);
             for pressed in [true, false] {
                 out.push(Ev { t, kind: Kind::Physical(crate::PhysicalInput::Key {
-                    key: chord.physical_key(), mods: chord.modifiers(), pressed, repeat: repeat && pressed,
+                    key: chord.physical_key(), mods: chord.modifiers(), pressed, repeat: repeat && pressed, text: None, consumed_mods: Default::default(),
                 }), pos: Pos::Rel(0.0, 0.0) });
             }
             // Then the modifiers come up, as on a real keyboard, so nothing stays held.
             if chord.modifiers() != Mods::default() {
                 out.push(Ev { t, kind: Kind::Physical(crate::PhysicalInput::Modifiers(Mods::default())), pos: Pos::Rel(0.0, 0.0) });
             }
+            continue;
+        }
+        // `{"modifier": "ShiftRight", "down": true, "mods": "ctrl+shift"}`: one modifier key going
+        // down or up on its own, with the flags after it (Ctrl+Right Shift's direction chord).
+        if let Some(name) = e["modifier"].as_str() {
+            use crate::PhysicalKeyCode as Code;
+            let key = match name {
+                "ShiftLeft" => Code::ShiftLeft,
+                "ShiftRight" => Code::ShiftRight,
+                "ControlLeft" => Code::ControlLeft,
+                "ControlRight" => Code::ControlRight,
+                "AltLeft" => Code::AltLeft,
+                "AltRight" => Code::AltRight,
+                other => die(&format!("unknown modifier key {other:?}")),
+            };
+            let mut mods = Mods::default();
+            for part in e["mods"].as_str().unwrap_or("").split('+').filter(|p| !p.is_empty()) {
+                match part {
+                    "shift" => mods.shift = true,
+                    "ctrl" | "control" => { mods.ctrl = true; if !cfg!(target_os = "macos") { mods.cmd = true; } }
+                    "alt" => mods.alt = true,
+                    other => die(&format!("unknown modifier {other:?} in mods")),
+                }
+            }
+            let pressed = e["down"].as_bool().unwrap_or(true);
+            out.push(Ev { t, kind: Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed, repeat: false, text: None, consumed_mods: Default::default() }), pos: Pos::Rel(0.0, 0.0) });
+            out.push(Ev { t, kind: Kind::Physical(crate::PhysicalInput::Modifiers(mods)), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         // `{"hold": "alt"}` holds modifiers down until `{"hold": ""}` lets them go, as the window
@@ -168,14 +208,7 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
             "key" | "key-up" => {
                 let name = e["name"].as_str().unwrap_or("");
                 let mods = script_mods(&e);
-                let key = if let Some(dead) = e["dead"].as_str() {
-                    let mut chars = dead.chars();
-                    let accent = chars.next();
-                    if chars.next().is_some() {
-                        die("dead must be one character or empty");
-                    }
-                    Key::Dead(accent)
-                } else if mods.cmd && name.len() == 1 {
+                let key = if mods.cmd && name.len() == 1 {
                     Key::Command(name.chars().next().unwrap().to_ascii_lowercase())
                 } else {
                     key_named(name).unwrap_or_else(|| die(&format!("unknown key {name}")))
@@ -185,12 +218,11 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
                 if let Some(code) = e["code"].as_str() {
                     let code = code.parse::<crate::Shortcut>().unwrap_or_else(|e| die(&e.to_string())).physical_key();
                     let base = script_key_base(&e, name, mods);
-                    let alt = script_alt_keys(&e);
-                    let press = |pressed| crate::PhysicalInput::Key { key: code, mods, pressed, repeat: repeat && pressed };
+                    let press = |pressed| crate::PhysicalInput::Key { key: code, mods, pressed, repeat: repeat && pressed, text: None, consumed_mods: Default::default() };
                     if ty == "key-up" {
-                        out.push(Ev { t, kind: Kind::PhysicalKey(press(false), KeyEvent { key, mods }, base, alt), pos: Pos::Rel(0.0, 0.0) });
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(false), KeyEvent { key, mods }, base), pos: Pos::Rel(0.0, 0.0) });
                     } else {
-                        out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }, base, alt), pos: Pos::Rel(0.0, 0.0) });
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }, base), pos: Pos::Rel(0.0, 0.0) });
                         out.push(Ev { t, kind: Kind::Physical(press(false)), pos: Pos::Rel(0.0, 0.0) });
                     }
                     continue;
@@ -203,7 +235,7 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
                 let d = |k: &str| e[k].as_f64().unwrap_or(0.0) as f32;
                 gesture_at(&mut out, &pos);
                 let ev = crate::WheelEvent::new(d("dx"), d("dy")).mods(script_mods(&e)).phase(script_phase(&e))
-                    .precise(e["precise"].as_bool().unwrap_or(true));
+                    .precise(e["precise"].as_bool().unwrap_or(true)).notch(e["notch"].as_bool().unwrap_or(false));
                 out.push(Ev { t, kind: Kind::WheelEvent(ev), pos });
             }
             "magnify" => {
@@ -221,8 +253,37 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::SmartMagnify, pos });
             }
             "paste" => out.push(Ev { t, kind: Kind::Paste(paste_content(&e)), pos: Pos::Rel(0.0, 0.0) }),
+            // What an input method composes (`preedit`, its caret or selection as a byte range in
+            // `cursor`), commits, or takes back to convert again (`select`, a byte range of the
+            // field's text), as the platform's IME hands it to the focused field or caret.
+            "ime" => {
+                let ime = match (e["commit"].as_str(), e["preedit"].as_str()) {
+                    _ if e["select"].is_array() => {
+                        let at = |i: usize| e["select"][i].as_u64().unwrap_or(0) as usize;
+                        crate::Ime::Select(at(0)..at(1))
+                    }
+                    (Some(text), _) => crate::Ime::Commit(text.to_owned()),
+                    (None, Some(text)) => {
+                        let at = |i: usize| e["cursor"][i].as_u64().map(|n| n as usize);
+                        // `clauses`: `[[start, end], [start, end, true]]`, byte ranges, `true` for the one being converted.
+                        let clauses = e["clauses"].as_array().into_iter().flatten().filter_map(|c| {
+                            let (a, b) = (c[0].as_u64()? as usize, c[1].as_u64()? as usize);
+                            let clause = crate::Clause::new(a..b);
+                            Some(if c[2].as_bool() == Some(true) { clause.target() } else { clause })
+                        }).collect();
+                        crate::Ime::Preedit(text.to_owned(), at(0).zip(at(1)), clauses)
+                    }
+                    (None, None) => die("an ime event needs a \"commit\", a \"preedit\" (\"\" ends a composition) or a \"select\""),
+                };
+                out.push(Ev { t, kind: Kind::Ime(ime), pos: Pos::Rel(0.0, 0.0) });
+            }
             "scroll" => eased_input::swipe(&mut out, &e, t, pos),
             "resize" => eased_input::resize(&mut out, &e, t),
+            "pointer-motion" => {
+                let dx = e["dx"].as_f64().unwrap_or(0.0) as f32;
+                let dy = e["dy"].as_f64().unwrap_or(0.0) as f32;
+                out.push(Ev { t, kind: Kind::PointerMotion(dx, dy), pos: Pos::Rel(0.0, 0.0) });
+            }
             "fling" => {
                 let v = |k: &str| e[k].as_f64().unwrap_or(0.0) as f32;
                 out.push(Ev { t, kind: Kind::Fling(v("vx"), v("v")), pos });
@@ -232,9 +293,21 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::PopupMenu(Some(id.into())), pos: Pos::Rel(0.0, 0.0) });
             }
             "menu-cancel" => out.push(Ev { t, kind: Kind::PopupMenu(None), pos: Pos::Rel(0.0, 0.0) }),
-            "file-dialog" => {
-                let path = e["path"].as_str().unwrap_or_else(|| die("file-dialog needs a \"path\" (file-dialog-cancel cancels)"));
-                out.push(Ev { t, kind: Kind::FileDialog(Some(path.into())), pos: Pos::Rel(0.0, 0.0) });
+            "file-dialog" => match (e.get("path"), e.get("paths")) {
+                (Some(_), Some(_)) => die("file-dialog takes either \"path\" or \"paths\", not both"),
+                (Some(p), None) => {
+                    let path = p.as_str().unwrap_or_else(|| die("file-dialog \"path\" must be a string"));
+                    out.push(Ev { t, kind: Kind::FileDialog(Some(path.into())), pos: Pos::Rel(0.0, 0.0) });
+                }
+                (None, Some(ps)) => {
+                    let paths: Vec<std::path::PathBuf> = ps.as_array()
+                        .unwrap_or_else(|| die("file-dialog \"paths\" must be an array of strings"))
+                        .iter()
+                        .map(|p| p.as_str().unwrap_or_else(|| die("file-dialog \"paths\" entries must be strings")).into())
+                        .collect();
+                    out.push(Ev { t, kind: Kind::FileDialogFiles(paths), pos: Pos::Rel(0.0, 0.0) });
+                }
+                (None, None) => die("file-dialog needs a \"path\" or \"paths\" (file-dialog-cancel cancels)"),
             }
             "file-dialog-cancel" => out.push(Ev { t, kind: Kind::FileDialog(None), pos: Pos::Rel(0.0, 0.0) }),
             "mark" => {
@@ -248,7 +321,7 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
     out
 }
 
-/// `{"drag_files": {"paths": […], "at": [x, y]}}` (or `"key": …` for an element's centre) moves a
+/// `{"drag_files": {"paths": […], "at": [x, y]}}` (or `"key": …` for the centre of an element's shown part) moves a
 /// file drag from another app over the window; `{"drag_files": "leave"}` takes it away.
 /// `{"drop_files": {…, "hover": s}}` drags the files there for `s` seconds (default 0), then
 /// drops them. Whether `e` was one.

@@ -79,13 +79,21 @@ impl El {
     pub fn help_above(self) -> Self {
         self.help_side(crate::Side::Top)
     }
-    /// Shows this element's [`El::help`] tooltip on `side` of it, as a web page's `placement`
-    /// does: under it ([`HelpLook::gap`](crate::HelpLook::gap)'s first gap clear, the default),
-    /// or above it, or left or right of it (its second gap clear), on the opposite side when
-    /// there's no room on `side`. A tooltip under or above it is centred across it; one left or
-    /// right of it, centred down it (`placement="right"`). Each stays inside the window.
+    /// Keeps the tooltip showing whatever the pointer does while `open` is true, as a
+    /// `Tooltip forceOpen` does: a Copy button's "Copied" for a moment after the press, even
+    /// though a press hides a tooltip. Only one shows at a time; with several, the first drawn.
+    pub fn help_open(mut self, open: bool) -> Self {
+        if open || !self.cold.is_empty() { self.cold_mut().help_open = open; }
+        self
+    }
+    /// Shows this element's [`El::help`] tooltip on `side` of it, overriding
+    /// [`HelpLook::side`](crate::HelpLook::side), as a web page's `placement` does: under it
+    /// ([`HelpLook::gap`](crate::HelpLook::gap)'s first gap clear, the default), or above it, or
+    /// left or right of it (its second gap clear), on the opposite side when there's no room on
+    /// `side`. A tooltip under or above it is centred across it; one left or right of it, centred
+    /// down it (`placement="right"`). Each stays inside the window.
     pub fn help_side(mut self, side: crate::Side) -> Self {
-        self.cold_mut().help_side = (side != crate::Side::Bottom).then_some(side);
+        self.cold_mut().help_side = Some(side);
         self
     }
 }

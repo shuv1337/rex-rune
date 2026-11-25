@@ -9,7 +9,7 @@
 //! moves the panes under it: no terminal is resized.
 use super::{theme::*, workspace::Workspace};
 use rex_rune::settings::interface::ToolbarBehavior;
-use rune::{Edge, El, SpringPair, Transition, Tx, el};
+use rune::{Edge, El, PointerEvent, SpringPair, Transition, Tx, el};
 use std::time::Duration;
 
 /// Floats the toolbar where it has no row, until it is run again.
@@ -31,6 +31,15 @@ pub struct Reveal {
     pub hover: bool,
     /// Reveal toolbar is on.
     pub pinned: bool,
+    /// A pointer enter or leave waiting for its delay to elapse, in Rune clock seconds.
+    deadline: Option<f64>,
+}
+
+impl Reveal {
+    pub fn clear_hover(&mut self) {
+        self.hover = false;
+        self.deadline = None;
+    }
 }
 
 /// How the toolbar is drawn now.
@@ -146,27 +155,53 @@ pub fn floating(s: &Workspace, toolbar: El) -> El {
         )
 }
 
-/// The band along the window's top edge that brings an On hover toolbar out, and keeps it
-/// while the pointer is on the toolbar. It takes no presses: until the toolbar shows, what
-/// is under the band works as everywhere else.
-pub fn band(s: &Workspace) -> El {
-    // The title strip is the edge where there is one, so a pointer resting on it brings the
-    // toolbar out over it.
-    let height = if placement(s) == Placement::Floating || shows_title_strip(s) {
+/// Observe the window's edge without inserting a hit target above the pane. The pane
+/// must still receive selection, context menus and mouse reports before the toolbar opens.
+pub fn pointer(s: &mut Workspace, point: PointerEvent, tx: &mut Tx) {
+    // A keyboard-pinned toolbar does not acquire a hover hold just because the
+    // pointer is on a control. Unpinning it should put it away.
+    let height = if s.toolbar_reveal.hover || shows_title_strip(s) {
         bar_height(s)
     } else {
         EDGE
     };
-    el().key("toolbar-band")
-        .pin(Some(0.), Some(0.), Some(0.), None)
-        .h(height)
-        .on_hover_change(|s: &mut Workspace, inside: bool, _: &mut Tx| {
-            s.toolbar_reveal.hover = inside;
-            if inside {
-                s.reveal_tab_again = true;
-            }
-        })
-        .hover_delays(REVEAL_AFTER, HIDE_AFTER)
+    let y = point.y / s.ui_scale();
+    track(&mut s.toolbar_reveal, (0. ..height).contains(&y), tx);
+}
+
+pub fn window_hover(s: &mut Workspace, inside: bool, tx: &mut Tx) {
+    if !inside {
+        track(&mut s.toolbar_reveal, false, tx);
+    }
+}
+
+pub fn pointer_press(s: &mut Workspace, _: rune::PointerButton, _: PointerEvent, tx: &mut Tx) {
+    if !s.toolbar_reveal.hover {
+        s.toolbar_reveal.deadline = None;
+    }
+    tx.live_only();
+}
+
+fn track(reveal: &mut Reveal, inside: bool, tx: &mut Tx) {
+    if reveal.hover == inside {
+        reveal.deadline = None;
+    } else if reveal.deadline.is_none() {
+        let delay = if inside { REVEAL_AFTER } else { HIDE_AFTER };
+        reveal.deadline = Some(tx.clock() + delay.as_secs_f64());
+        tx.wake_after(delay);
+    }
+    tx.live_only();
+}
+
+pub fn poll(s: &mut Workspace, clock: f64) -> bool {
+    let reveal = &mut s.toolbar_reveal;
+    if reveal.deadline.is_some_and(|deadline| deadline <= clock) {
+        reveal.deadline = None;
+        reveal.hover = !reveal.hover;
+        s.reveal_tab_again |= reveal.hover;
+        return true;
+    }
+    false
 }
 
 /// With no toolbar row, pending-sequence and receiving-download chips float at the top left.

@@ -83,6 +83,24 @@ impl Hold {
         }
     }
 
+    /// Whether any click the monitor saw is still waiting for winit.
+    pub(super) fn queued(&self) -> bool {
+        match self {
+            Self::Free { ups, .. } => !ups.is_empty(),
+            Self::Pressed { clicks, .. } | Self::Releasing { clicks, .. } | Self::Rebound { clicks, .. } => !clicks.is_empty(),
+        }
+    }
+
+    /// Whether the button is known to be up for the press the runtime holds: a sample read it
+    /// rise, or the monitor saw an Up that winit hasn't delivered yet.
+    pub(super) fn button_up(&self) -> bool {
+        match self {
+            Self::Free { ups, .. } => !ups.is_empty(),
+            Self::Releasing { .. } | Self::Rebound { .. } => true,
+            Self::Pressed { clicks, .. } => clicks.front().is_some_and(|click| !click.down),
+        }
+    }
+
     /// Where the press the runtime holds let go, if that's known: its own queued Up, the point a
     /// queued press carries for it, or where the button rose.
     fn lost_point(&self) -> Option<Point> {

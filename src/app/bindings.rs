@@ -134,7 +134,7 @@ pub fn chord_of(input: Input<'_>) -> Option<Chord> {
 
 /// [`chord_of`] where shortcuts are on Command (a Mac) or on Control.
 pub fn chord_of_on(input: Input<'_>, command: bool) -> Option<Chord> {
-    if matches!(input.event.key, Key::Modifier { .. } | Key::Dead(_)) {
+    if matches!(input.event.key, Key::Modifier { .. }) {
         return None;
     }
     let m = input.event.mods;

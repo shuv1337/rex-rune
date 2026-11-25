@@ -177,12 +177,12 @@ pub fn payload(
         "consumed_mods": if consumed { "shift" } else { "" },
         "text": text,
         "unshifted_codepoint": unshifted,
-        "composing": matches!(ev.key, Key::Dead(_)),
+        "composing": false,
         "action": action,
     }))
 }
 
-/// Marks Alt consumed in the `payload` of `ev`, a press or its release, when Option composed
+/// Marks Alt consumed in the `payload` of a press when Option composed
 /// its text (∫ for B, @ for L on a German layout), so the program gets that character rather
 /// than Alt with the key. With Control or Command held, Option stays a modifier.
 pub fn option_composed(payload: &mut Value, ev: &KeyEvent) {

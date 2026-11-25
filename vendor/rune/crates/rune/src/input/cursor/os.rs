@@ -16,16 +16,19 @@
 //! no frame. On web the canvas's CSS names the PNG itself (`cursor/web.rs`).
 
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::time::Instant;
 
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{CursorIcon, CustomCursor, Window};
+use winit::window::{CursorIcon, Window};
 
 use crate::el::Cursor;
 
 /// How often an image cursor is set again while it holds the pointer and nothing redraws.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const REASSERT: Duration = Duration::from_millis(50);
 
 pub(crate) struct OsCursor {
@@ -33,12 +36,11 @@ pub(crate) struct OsCursor {
     /// The scale an image cursor was last made at: a window moving to a display with another
     /// scale makes it again.
     scale: f32,
-    transparent: CustomCursor,
 }
 
 impl OsCursor {
-    pub(crate) fn new(event_loop: &ActiveEventLoop) -> Self {
-        OsCursor { applied: (false, Cursor::Default), scale: 0.0, transparent: transparent(event_loop) }
+    pub(crate) fn new() -> Self {
+        OsCursor { applied: (false, Cursor::Default), scale: 0.0 }
     }
 
     /// Applies `want` while the host is `active` (the pointer is over its window or its hit
@@ -47,7 +49,7 @@ impl OsCursor {
     /// the pointer.
     pub(crate) fn apply(&mut self, window: &Arc<Window>, want: Cursor, active: bool) {
         let scale = image_scale(window);
-        let rescaled = active && matches!(want, Cursor::Image(_)) && std::mem::replace(&mut self.scale, scale) != scale;
+        let rescaled = active && os_image(want).is_some() && std::mem::replace(&mut self.scale, scale) != scale;
         let Some(next) = next(&mut self.applied, want, active).or(rescaled.then_some(want)) else {
             self.reassert();
             return;
@@ -56,15 +58,25 @@ impl OsCursor {
         let Some(next) = crate::platform::macos::cursor::window_cursor(window, next) else { return };
         #[cfg(not(target_os = "macos"))]
         images::forget(window);
+        clear::forget(window);
         match next {
-            Cursor::Hidden => window.set_cursor(self.transparent.clone()),
+            Cursor::Hidden => clear::set(window),
             #[cfg(not(target_os = "macos"))]
             Cursor::Image(image) => images::set(window, image, scale),
-            other => window.set_cursor(icon(other)),
+            other => {
+                // A shape Windows has no system cursor for draws Chromium's picture of it.
+                #[cfg(windows)]
+                if let Some(image) = os_image(other) {
+                    images::set(window, image, scale);
+                    return;
+                }
+                window.set_cursor(icon(other))
+            }
         }
     }
 
     /// When to set the image cursor again: while one holds the pointer, on macOS.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn reassert_at(&self, now: Instant) -> Option<Instant> {
         (cfg!(target_os = "macos") && holds_image(self.applied)).then(|| now + REASSERT)
     }
@@ -76,23 +88,58 @@ impl OsCursor {
     }
 }
 
-/// A 1×1 clear cursor. On web it is made once per page and kept: winit makes a custom cursor
-/// asynchronously, and dropping one before it's ready leaves the browser calling a freed
+/// The 1×1 clear cursor `Cursor::Hidden` sets, one per thread, made the first time a window
+/// hides the cursor, before the loop sleeps (`make_pending`): making it takes ~1,000 µs, too
+/// long for every window's creation. On web it is kept for the page's life: winit makes a custom
+/// cursor asynchronously, and dropping one before it's ready leaves the browser calling a freed
 /// closure, as a web app unmounted just after it mounts would.
-fn transparent(event_loop: &ActiveEventLoop) -> CustomCursor {
-    let make = || {
-        let source = CustomCursor::from_rgba(vec![0u8; 4], 1, 1, 0, 0).expect("a 1x1 cursor image is valid");
-        event_loop.create_custom_cursor(source)
-    };
-    #[cfg(target_arch = "wasm32")]
-    {
-        thread_local! { static CLEAR: std::cell::OnceCell<CustomCursor> = const { std::cell::OnceCell::new() }; }
-        CLEAR.with(|clear| clear.get_or_init(make).clone())
+mod clear {
+    use std::cell::{OnceCell, RefCell};
+    use std::sync::{Arc, Weak};
+
+    use winit::event_loop::ActiveEventLoop;
+    use winit::window::{CustomCursor, Window};
+
+    thread_local! {
+        static CLEAR: OnceCell<CustomCursor> = const { OnceCell::new() };
+        static PENDING: RefCell<Vec<Weak<Window>>> = const { RefCell::new(Vec::new()) };
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    make()
+
+    pub(super) fn set(window: &Arc<Window>) {
+        match CLEAR.with(|c| c.get().cloned()) {
+            Some(clear) => window.set_cursor(clear),
+            None => PENDING.with(|p| p.borrow_mut().push(Arc::downgrade(window))),
+        }
+    }
+
+    /// Drops a hide `window` asked for and no longer wants.
+    pub(super) fn forget(window: &Arc<Window>) {
+        PENDING.with(|p| p.borrow_mut().retain(|w| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(window))));
+    }
+
+    pub(super) fn make_pending(event_loop: &ActiveEventLoop) {
+        let waiting = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
+        if waiting.is_empty() { return; }
+        let clear = CLEAR.with(|c| c.get_or_init(|| {
+            let source = CustomCursor::from_rgba(vec![0u8; 4], 1, 1, 0, 0).expect("a 1x1 cursor image is valid");
+            event_loop.create_custom_cursor(source)
+        }).clone());
+        for window in waiting.iter().filter_map(Weak::upgrade) { window.set_cursor(clear.clone()); }
+    }
 }
 
+/// The image the OS cursor for `c` is made from, if it's one: an app's, or one the OS lacks.
+fn os_image(c: Cursor) -> Option<crate::cursor::CursorImage> {
+    match c {
+        Cursor::Image(image) => Some(image),
+        #[cfg(windows)]
+        other => crate::cursor::windows_image(other),
+        #[cfg(not(windows))]
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn holds_image(applied: (bool, Cursor)) -> bool {
     matches!(applied, (true, Cursor::Image(_)))
 }
@@ -106,8 +153,7 @@ fn image_scale(window: &Window) -> f32 {
 pub(crate) fn make_pending(event_loop: &ActiveEventLoop) {
     #[cfg(not(target_os = "macos"))]
     images::make_pending(event_loop);
-    #[cfg(target_os = "macos")]
-    let _ = event_loop;
+    clear::make_pending(event_loop);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -180,19 +226,16 @@ fn icon(c: Cursor) -> CursorIcon {
         Cursor::Move => CursorIcon::Move,
         Cursor::ResizeColumn => CursorIcon::ColResize,
         Cursor::ResizeRow => CursorIcon::RowResize,
-        Cursor::ResizeEdge(edge) => match edge {
-            crate::WindowEdge::North => CursorIcon::NResize,
-            crate::WindowEdge::South => CursorIcon::SResize,
-            crate::WindowEdge::East => CursorIcon::EResize,
-            crate::WindowEdge::West => CursorIcon::WResize,
-            crate::WindowEdge::NorthEast => CursorIcon::NeResize,
-            crate::WindowEdge::NorthWest => CursorIcon::NwResize,
-            crate::WindowEdge::SouthEast => CursorIcon::SeResize,
-            crate::WindowEdge::SouthWest => CursorIcon::SwResize,
-        },
+        Cursor::ResizeEw => CursorIcon::EwResize,
+        Cursor::ResizeNs => CursorIcon::NsResize,
+        Cursor::ResizeNwse => CursorIcon::NwseResize,
+        Cursor::ResizeNesw => CursorIcon::NeswResize,
         Cursor::Crosshair => CursorIcon::Crosshair,
+        Cursor::Cell => CursorIcon::Cell,
         Cursor::ZoomIn => CursorIcon::ZoomIn,
         Cursor::ZoomOut => CursorIcon::ZoomOut,
+        Cursor::Help => CursorIcon::Help,
+        Cursor::Progress => CursorIcon::Progress,
     }
 }
 
@@ -225,5 +268,112 @@ mod tests {
         assert!(!holds_image(applied), "not once the pointer leaves");
         next(&mut applied, Cursor::Crosshair, true);
         assert!(!holds_image(applied), "nor for a system shape, which the window's cursor rects keep");
+    }
+
+    #[test]
+    fn every_cursor_variant_maps_explicitly_for_macos() {
+        use crate::cursor::{MacCursor, mac_cursor};
+        static PNG: [u8; 4] = [1, 2, 3, 4];
+        let image = crate::cursor::CursorImage::png(&PNG, [0.0, 0.0]);
+        let pairs = [
+            (Cursor::Default, MacCursor::Arrow),
+            (Cursor::Pointer, MacCursor::PointingHand),
+            (Cursor::Text, MacCursor::IBeam),
+            (Cursor::Grab, MacCursor::OpenHand),
+            (Cursor::Grabbing, MacCursor::ClosedHand),
+            (Cursor::NotAllowed, MacCursor::NotAllowed),
+            (Cursor::ResizeColumn, MacCursor::ResizeLeftRight),
+            (Cursor::ResizeRow, MacCursor::ResizeUpDown),
+            (Cursor::ResizeEw, MacCursor::ResizeEw),
+            (Cursor::ResizeNs, MacCursor::ResizeNs),
+            (Cursor::ResizeNwse, MacCursor::ResizeNwse),
+            (Cursor::ResizeNesw, MacCursor::ResizeNesw),
+            (Cursor::Crosshair, MacCursor::Crosshair),
+            (Cursor::ZoomIn, MacCursor::ZoomIn),
+            (Cursor::ZoomOut, MacCursor::ZoomOut),
+            (Cursor::Help, MacCursor::Help),
+            (Cursor::Progress, MacCursor::Progress),
+            (Cursor::Hidden, MacCursor::Transparent),
+            (Cursor::Move, MacCursor::MoveImage),
+            (Cursor::Cell, MacCursor::CellImage),
+            (Cursor::Image(image), MacCursor::Custom(image)),
+        ];
+        for (cursor, expected) in pairs {
+            assert_eq!(mac_cursor(cursor), expected);
+        }
+    }
+
+    #[test]
+    fn resize_cursors_map_to_winit_and_css_names() {
+        let pairs = [
+            (Cursor::ResizeColumn, CursorIcon::ColResize, "col-resize"),
+            (Cursor::ResizeRow, CursorIcon::RowResize, "row-resize"),
+            (Cursor::ResizeEw, CursorIcon::EwResize, "ew-resize"),
+            (Cursor::ResizeNs, CursorIcon::NsResize, "ns-resize"),
+            (Cursor::ResizeNwse, CursorIcon::NwseResize, "nwse-resize"),
+            (Cursor::ResizeNesw, CursorIcon::NeswResize, "nesw-resize"),
+        ];
+        for (cursor, expected_icon, expected_css) in pairs {
+            let mapped = icon(cursor);
+            assert_eq!(mapped, expected_icon);
+            assert_eq!(mapped.name(), expected_css);
+        }
+    }
+
+    #[test]
+    fn resize_cursors_resolve_inherit_hold_during_drag_and_respect_inert() {
+        use crate::{Cx, El, Env, Runtime, col, el};
+
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col().size(200.0, 200.0)
+                .child(el().key("ew").size(200.0, 30.0).hit().cursor(Cursor::ResizeEw)
+                    .child(el().key("ew-child").size(100.0, 30.0)))
+                .child(el().key("ns").size(200.0, 30.0).hit().cursor(Cursor::ResizeNs))
+                .child(el().key("nwse").size(200.0, 30.0).cursor(Cursor::ResizeNwse)
+                    .on_press(|_: &mut ()| {}))
+                .child(el().key("nesw").size(200.0, 30.0).hit().cursor(Cursor::ResizeNesw))
+                .child(el().key("inert-handle").size(200.0, 30.0).hit().inert().cursor(Cursor::ResizeNwse))
+                .child(el().key("plain").size(200.0, 50.0))
+        }
+
+        let mut rt = Runtime::new((), view, (200.0, 200.0), Env::new(false, 1.0));
+        rt.frame(0.0);
+
+        // Inherited by child inside a resize handle.
+        rt.pointer_move(50.0, 15.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeEw, "child inherits parent ResizeEw");
+        rt.pointer_move(150.0, 15.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeEw);
+
+        // Vertical and diagonal handles.
+        rt.pointer_move(100.0, 45.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeNs);
+        rt.pointer_move(100.0, 75.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeNwse);
+        rt.pointer_move(100.0, 105.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeNesw);
+
+        // Inert handle does not claim a cursor.
+        rt.pointer_move(100.0, 135.0);
+        assert_eq!(rt.cursor(), Cursor::Default, "inert resize handle must not set cursor");
+
+        // Plain element without a cursor stays Default.
+        rt.pointer_move(100.0, 175.0);
+        assert_eq!(rt.cursor(), Cursor::Default);
+
+        // Held press/drag keeps the handle's resize cursor even outside its bounds.
+        rt.pointer_move(100.0, 75.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeNwse);
+        rt.pointer_down(100.0, 75.0);
+        rt.pointer_move(100.0, 175.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeNwse, "held press keeps ResizeNwse");
+        rt.pointer_up(100.0, 175.0);
+        assert_eq!(rt.cursor(), Cursor::Default, "release over plain area returns Default");
+
+        // Leaving the viewport clears back to Default.
+        rt.pointer_move(100.0, 105.0);
+        assert_eq!(rt.cursor(), Cursor::ResizeNesw);
+        rt.pointer_leave();
+        assert_eq!(rt.cursor(), Cursor::Default);
     }
 }

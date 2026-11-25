@@ -216,6 +216,7 @@ impl El {
         let cold = self.vis.cold_mut();
         cold.pixels = Some(pixels.clone());
         cold.pixels_fit = None;
+        cold.pixels_wrap = None;
         self
     }
     /// Shows `pixels` at its own aspect ratio, centred: `Fit` letterboxes the whole image inside
@@ -224,6 +225,101 @@ impl El {
         let cold = self.vis.cold_mut();
         cold.pixels = Some(pixels.clone());
         cold.pixels_fit = Some(fit);
+        cold.pixels_wrap = None;
+        self
+    }
+    /// Places `pixels` at `rect` (`[x, y, w, h]` in points from the element's top-left, allowed
+    /// to reach outside the element) and fills the rest of the element by `wrap`:
+    /// [`PixelsWrap::Repeat`](crate::PixelsWrap::Repeat) tiles copies side by side,
+    /// [`PixelsWrap::Mirror`](crate::PixelsWrap::Mirror) reflects alternating tiles across each
+    /// edge, and [`PixelsWrap::Extend`](crate::PixelsWrap::Extend) extends the outermost edge
+    /// texels to the element's bounds.
+    ///
+    /// Matches Skia `SkTileMode::{kRepeat, kMirror, kClamp}` and wgpu
+    /// `AddressMode::{Repeat, MirrorRepeat, ClampToEdge}`. Clipped to the element's corner
+    /// radius and combines with [`Self::pixels_tint`] and [`Self::image_filter`]. Unlike
+    /// [`Self::pixels`], a wrapped image does not supply an intrinsic aspect ratio during layout.
+    /// A zero, negative, or non-finite width or height in `rect` draws nothing.
+    ///
+    /// ```
+    /// use rune::{Pixels, PixelsWrap, el};
+    ///
+    /// let photo = Pixels::new();
+    /// let backdrop = el()
+    ///     .size(320.0, 180.0)
+    ///     .pixels_wrap(&photo, [80.0, 10.0, 160.0, 160.0], PixelsWrap::Mirror);
+    /// # let _ = backdrop;
+    /// ```
+    pub fn pixels_wrap(
+        mut self,
+        pixels: &crate::pixels::Pixels,
+        rect: [f32; 4],
+        wrap: crate::PixelsWrap,
+    ) -> Self {
+        let cold = self.vis.cold_mut();
+        cold.pixels = Some(pixels.clone());
+        cold.pixels_fit = None;
+        cold.pixels_wrap = Some((rect, wrap));
+        self
+    }
+    /// Repeats `pixels` across the element from its top-left at `tile` (`[w, h]` points per
+    /// copy), clipping edge tiles to the element's bounds and corner radius.
+    ///
+    /// Equivalent to `self.pixels_wrap(pixels, [0.0, 0.0, tile[0], tile[1]], PixelsWrap::Repeat)`.
+    /// Matches CSS `background-repeat: repeat; background-size: <w> <h>; background-position: 0 0`.
+    /// Combines with [`Self::pixels_tint`] and [`Self::image_filter`], and does not supply an
+    /// intrinsic aspect ratio during layout.
+    ///
+    /// ```
+    /// use rune::{Pixels, el};
+    ///
+    /// let motif = Pixels::new();
+    /// let panel = el().size(240.0, 120.0).pixels_tile(&motif, [44.0, 92.0]);
+    /// # let _ = panel;
+    /// ```
+    pub fn pixels_tile(self, pixels: &crate::pixels::Pixels, tile: [f32; 2]) -> Self {
+        self.pixels_wrap(pixels, [0.0, 0.0, tile[0], tile[1]], crate::PixelsWrap::Repeat)
+    }
+    /// Draws this element's [`Self::pixels`] / [`Self::pixels_fit`] / [`Self::pixels_wrap`] /
+    /// [`Self::pixels_tile`] image as an alpha mask tinted in `color`, ignoring the image's own
+    /// RGB channels and multiplying `color.a` with the image's alpha (and the element's opacity
+    /// and corner-radius coverage).
+    ///
+    /// Matches CSS `mask-image` + `background-color`, SwiftUI `.renderingMode(.template)`,
+    /// AppKit `NSImage.isTemplate`, GTK symbolic icons, and [`Self::icon_one_color`] for icons
+    /// or sprite overlays loaded at run time. `Color::TRANSPARENT` draws nothing.
+    ///
+    /// ```
+    /// use rune::{Color, Pixels, SurfaceFit, el};
+    ///
+    /// let icon = Pixels::new();
+    /// let tinted = el()
+    ///     .size(24.0, 24.0)
+    ///     .pixels_fit(&icon, SurfaceFit::Fit)
+    ///     .pixels_tint(Color::WHITE.alpha(0.6));
+    /// # let _ = tinted;
+    /// ```
+    pub fn pixels_tint(mut self, color: Color) -> Self {
+        self.vis.cold_mut().pixels_tint = Some(color);
+        self
+    }
+    /// Chooses how this element's [`Self::pixels`] / [`Self::pixels_fit`] / [`Self::pixels_wrap`] /
+    /// [`Self::pixels_tile`] image is sampled when scaled: [`ImageFilter::Linear`](crate::ImageFilter::Linear) (default, bilinear with
+    /// prefiltered mips) or [`ImageFilter::Nearest`](crate::ImageFilter::Nearest)
+    /// (nearest-neighbour from mip level 0, matching CSS `image-rendering: pixelated` and
+    /// `wgpu::FilterMode::Nearest`).
+    ///
+    /// ```
+    /// use rune::{ImageFilter, Pixels, el};
+    ///
+    /// let sprite = Pixels::new();
+    /// let crisp = el().size(64.0, 64.0).pixels(&sprite).image_filter(ImageFilter::Nearest);
+    /// # let _ = crisp;
+    /// ```
+    pub fn image_filter(mut self, filter: crate::ImageFilter) -> Self {
+        if filter != crate::ImageFilter::Linear || !self.vis.cold.is_empty() {
+            self.vis.cold_mut().image_filter = filter;
+        }
         self
     }
     /// A ring `offset` points outside the border box (CSS `outline` + `outline-offset`). Width
@@ -343,8 +439,53 @@ impl El {
         self.vis.set_press(c);
         self
     }
+    /// Replacement fill colour while hovered, like CSS `:hover { background-color }`.
+    /// `Color::TRANSPARENT` is a real override; active fill gradients fade out as it applies.
+    /// ```
+    /// use rune::{Color, el};
+    /// let b = el().fill(Color::TRANSPARENT).hover_fill(Color::WHITE.alpha(0.12));
+    /// # let _ = b;
+    /// ```
+    pub fn hover_fill(mut self, c: Color) -> Self {
+        self.vis.cold_mut().hover_fill = Some(c);
+        self
+    }
+    /// Replacement fill colour while pressed, like CSS `:active { background-color }`.
+    /// Overrides [`Self::hover_fill`] while held; `Color::TRANSPARENT` is a real override.
+    /// ```
+    /// use rune::{Color, el};
+    /// let b = el().fill(Color::BLACK).press_fill(Color::WHITE.alpha(0.2));
+    /// # let _ = b;
+    /// ```
+    pub fn press_fill(mut self, c: Color) -> Self {
+        self.vis.cold_mut().press_fill = Some(c);
+        self
+    }
+    /// Replacement border colour while hovered, like CSS `:hover { border-color }`.
+    /// Applies when the element has a non-zero border width; `Color::TRANSPARENT` hides it.
+    /// ```
+    /// use rune::{Color, el};
+    /// let b = el().border(1.0, Color::BLACK).hover_border(Color::WHITE);
+    /// # let _ = b;
+    /// ```
+    pub fn hover_border(mut self, c: Color) -> Self {
+        self.vis.cold_mut().hover_border = Some(c);
+        self
+    }
+    /// Replacement border colour while pressed, like CSS `:active { border-color }`.
+    /// Overrides [`Self::hover_border`] while held; `Color::TRANSPARENT` hides it.
+    /// ```
+    /// use rune::{Color, el};
+    /// let b = el().border(1.0, Color::BLACK).press_border(Color::WHITE);
+    /// # let _ = b;
+    /// ```
+    pub fn press_border(mut self, c: Color) -> Self {
+        self.vis.cold_mut().press_border = Some(c);
+        self
+    }
     /// Shrink to `scale` about the centre while a press on this element is held, as iOS tiles
-    /// and buttons do (0.96 to 0.97), springing back on release or when the pointer leaves.
+    /// and buttons do (0.96 to 0.97), springing back on release or when the pointer leaves
+    /// (override the down/up curves with [`Self::press_motion`]).
     /// Put it on the element with `on_press`. Layout and hit testing keep the resting size, and
     /// Reduce Motion turns it off. `1.0` (or anything not positive) removes it.
     pub fn press_scale(mut self, scale: f32) -> Self {
@@ -354,10 +495,36 @@ impl El {
         }
         self
     }
-    /// Draw this element and everything in it `k` times its size about its centre, like
-    /// SwiftUI's `scaleEffect`: fills, borders, text, icons and images all scale, and text
-    /// rasterizes at the scaled size once it rests. Layout keeps the unscaled size, so siblings
-    /// don't move; hit testing follows the scaled rect. A change springs on the element's layout
+    /// Translate this element and its subtree by `(x, y)` points while a press on it is held
+    /// (like a tactile button or keycap sinking into its lip, matching CSS
+    /// `:active { transform: translate(x, y) }`), springing back to `(0.0, 0.0)` on release or when
+    /// the pointer leaves (override the down/up curves with [`Self::press_motion`]).
+    ///
+    /// Put it on the element with `on_press`. Layout and hit testing keep the resting rect, and
+    /// Reduce Motion turns it off. `(0.0, 0.0)` or non-finite inputs remove it.
+    ///
+    /// ```
+    /// use rune::el;
+    ///
+    /// let keycap = el().size(80.0, 32.0).press_offset(0.0, 1.5);
+    /// # let _ = keycap;
+    /// ```
+    pub fn press_offset(mut self, x: f32, y: f32) -> Self {
+        let off = (x.is_finite() && y.is_finite() && (x != 0.0 || y != 0.0)).then_some([x, y]);
+        if off.is_some() || !self.handlers.is_empty() {
+            self.handlers.press_offset = off;
+        }
+        self
+    }
+    /// Draw this element and everything in it `k` times its size about its
+    /// [`origin`](Self::origin) (default centre `(0.5, 0.5)`), like SwiftUI's `scaleEffect`:
+    /// fills, borders, text, icons and images all scale, and text rasterizes at the scaled size
+    /// once it rests. Layout keeps the unscaled size, so siblings don't move; hit testing follows
+    /// the drawn rect in paint order. Scaling does not clip to the parent: put
+    /// [`Self::clip_soft`] (e.g. `.clip_soft(0.0)`) or [`Self::clip_rounded`] on an unscaled
+    /// parent viewport wrapping this element—not on the scaled element itself, whose own clip
+    /// scales with its drawn rect—or the scaled subtree will paint over siblings and take their
+    /// presses. A change springs on the element's layout
     /// spring (or [`Self::scale_motion`]); under Reduce Motion, and in an instant transaction, it
     /// lands at once. Multiplies with transitions, `live_scale` and `press_scale`. Anything not
     /// finite or below zero is `1.0`.
@@ -393,7 +560,7 @@ impl El {
     /// The point this element scales and rotates about, in units of its own size: `(0.5, 0.5)`
     /// (the default) is its centre, `(0.5, 1.0)` the middle of its bottom edge, which stays put
     /// while a keycap sinks. Like SwiftUI's `anchor:`. [`Self::scale`], [`Self::rotate`],
-    /// `live_scale`, `press_scale` and a transition's scale all pivot here once it's set;
+    /// `live_scale`, `live_rotation`, `press_scale` and a transition's scale all pivot here once it's set;
     /// [`Self::offset`] ignores it. Values outside 0..1 pivot outside the element; anything not
     /// finite is the centre.
     pub fn origin(mut self, x: f32, y: f32) -> Self {
@@ -474,24 +641,60 @@ impl El {
     /// radii cut an anti-aliased edge. Room for a badge over an avatar's corner:
     /// `.cutout_circle([16.0, 0.0], 4.0, 5.0)` under a 6 point dot at the corner. The subtree
     /// draws in an isolated layer, whose composite cuts the hole; hit testing ignores it.
+    /// Replaces any circular cutouts already on this element; use [`Self::cutout_circles`] to
+    /// punch several holes.
     pub fn cutout_circle(mut self, center: [f32; 2], inner: f32, outer: f32) -> Self {
         let inner = inner.max(0.0);
-        self.vis.cold_mut().cutout = Some([center[0], center[1], inner, outer.max(inner)]);
+        let cutouts = &mut self.vis.cold_mut().cutouts;
+        cutouts.clear();
+        cutouts.push([center[0], center[1], inner, outer.max(inner)]);
+        self
+    }
+    /// Punch several round holes through this element and everything it and its descendants draw,
+    /// intersecting their alpha masks as CSS `mask-image` layers with `mask-composite: intersect`
+    /// do. Each `(center, inner, outer)` tuple follows [`Self::cutout_circle`]; non-finite
+    /// entries are skipped. Calling this more than once appends to earlier cutouts on this
+    /// element (including one set by [`Self::cutout_circle`]); each additional hole adds one
+    /// nested isolated layer pass. Hit testing ignores cutouts.
+    ///
+    /// ```no_run
+    /// # use rune::{Color, el};
+    /// let ticket = el().size(200.0, 80.0).fill(Color::WHITE).cutout_circles([
+    ///     ([0.0, 40.0], 7.0, 8.0),
+    ///     ([200.0, 40.0], 7.0, 8.0),
+    /// ]);
+    /// ```
+    pub fn cutout_circles(mut self, circles: impl IntoIterator<Item = ([f32; 2], f32, f32)>) -> Self {
+        let mut iter = circles
+            .into_iter()
+            .filter(|&(c, inner, outer)| {
+                c[0].is_finite() && c[1].is_finite() && inner.is_finite() && outer.is_finite()
+            })
+            .peekable();
+        if iter.peek().is_some() {
+            let cutouts = &mut self.vis.cold_mut().cutouts;
+            for (center, inner, outer) in iter {
+                let inner = inner.max(0.0);
+                cutouts.push([center[0], center[1], inner, outer.max(inner)]);
+            }
+        }
         self
     }
     /// Soft clip with a fade width per side (left, top, right, bottom).
     pub fn clip_fade(mut self, left: f32, top: f32, right: f32, bottom: f32) -> Self {
-        self.set_clip([left, top, right, bottom].map(|w| w.max(0.0)));
+        self.set_clip([left, top, right, bottom].map(|w| w.clamp(0.0, 65504.0)));
         self
     }
     /// [`Self::clip_fade`] with linear ramps: alpha falls in proportion to distance, from whole
     /// `width` in from each side to nothing at it, rather than easing at both ends. A mask that
     /// runs straight into an edge, such as a transcript fading into the top of a composer.
     pub fn clip_fade_linear(mut self, left: f32, top: f32, right: f32, bottom: f32) -> Self {
-        self.set_clip([left, top, right, bottom].map(|w| -w.max(0.0)));
+        self.set_clip([left, top, right, bottom].map(|w| -w.clamp(0.0, 65504.0)));
         self
     }
-    /// Track hover for descendants' `group_*` styles (see [`Visual::hover_group`]).
+    /// Track hover for descendants' `group_*` styles (see `Visual::hover_group`). Keyboard
+    /// focus on the group or inside it lights it too, as CSS `:is(:hover, :has(:focus-visible))`
+    /// does, so controls it reveals show when Tab reaches them.
     pub fn hover_group(mut self) -> Self {
         self.vis_flags.set(VisualFlags::HOVER_GROUP, true);
         self
@@ -504,18 +707,41 @@ impl El {
         self.vis.cold_mut().hover_share = Some(key.into());
         self
     }
-    /// [`Self::hover_group`] that also counts as hovered while keyboard focus is on it or
-    /// anywhere inside it, as CSS `:is(:hover, :has(:focus-visible))` does: a tab whose close
-    /// button and hover wash show when Tab reaches it, as under the pointer.
-    pub fn hover_group_focus(mut self) -> Self {
-        self.vis_flags.set(VisualFlags::HOVER_GROUP, true);
-        self.vis.cold_mut().hover_focus = true;
-        self
+    /// [`Self::hover_group`], which follows keyboard focus as well now.
+    #[doc(hidden)]
+    pub fn hover_group_focus(self) -> Self {
+        self.hover_group()
     }
     /// Curves for this element's hover track: `enter` when the pointer arrives, `exit` when it
     /// leaves (e.g. a delayed reveal).
     pub fn hover_motion(mut self, enter: impl Into<Anim>, exit: impl Into<Anim>) -> Self {
         self.vis.cold_mut().hover_motion = Some(Rc::new((enter.into(), exit.into())));
+        self
+    }
+    /// Curves for this element's press tracks ([`Self::press`], [`Self::press_fill`],
+    /// [`Self::press_border`], [`Self::press_color`], [`Self::press_scale`] and
+    /// [`Self::press_offset`]): `down` while a press is held and `up` on release or leave.
+    ///
+    /// When unset, press highlights and colour use `tok::motion::INSTANT` down / `SNAPPY` up,
+    /// and `press_scale` / `press_offset` use `INSTANT` down / `POP` up. Under Reduce Motion,
+    /// `press_scale` and `press_offset` stay off and press highlight curves reduce as opacity
+    /// tracks do ([`Anim::INSTANT`] stays
+    /// instant).
+    ///
+    /// ```
+    /// use rune::{Color, Curve, Easing, el};
+    ///
+    /// let btn = el()
+    ///     .press(Color::WHITE.alpha(0.12))
+    ///     .press_scale(0.97)
+    ///     .press_motion(
+    ///         Curve::tween(0.12, Easing::EASE_OUT),
+    ///         Curve::tween(0.16, Easing::EASE_OUT),
+    ///     );
+    /// # let _ = btn;
+    /// ```
+    pub fn press_motion(mut self, down: impl Into<Anim>, up: impl Into<Anim>) -> Self {
+        self.vis.cold_mut().press_motion = Some(Rc::new((down.into(), up.into())));
         self
     }
     /// Default hover curves for this element and everything below it: any hover track (an
@@ -542,6 +768,13 @@ impl El {
     /// Text or icon colour while the nearest ancestor group is hovered.
     pub fn group_color(mut self, c: Color) -> Self {
         self.vis.cold_mut().group_color = Some(c);
+        self
+    }
+    /// While a press on this element is held, the text and icons in it (its own included) draw
+    /// in `c`, on the same track as a [`Self::press`] overlay, with or without one: a ghost
+    /// button whose icon brightens under the press, as CSS `:active { color }` does.
+    pub fn press_color(mut self, c: Color) -> Self {
+        self.vis.cold_mut().press_color = Some(c);
         self
     }
     /// Hovering this element shows only its own hover: while the pointer is on it, the

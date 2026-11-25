@@ -1,5 +1,5 @@
 use super::*;
-use crate::render::{Gpu, Instance, KIND_RECT, LayerSpec, NO_CLIP, OFFSCREEN_FORMAT, Offscreen};
+use crate::render::{Gpu, Instance, KIND_RECT, LayerSpec, NO_CLIP, OFFSCREEN_FORMAT_LINEAR, Offscreen};
 use bytemuck::Zeroable;
 
 fn step(health: &mut Health, seq: &mut Seq, event: Event) -> Vec<Effect> {
@@ -61,11 +61,11 @@ fn group(spec: LayerSpec) -> Vec<Instance> {
 
 /// Draws three frames of `instances` with `feature`'s pipelines built broken, and checks that no
 /// frame set an invalid pipeline; the pixel at the group's centre.
-fn draw_refusing(feature: Feature, instances: &[Instance]) -> (Renderer, [u8; 4]) {
-    let gpu = Gpu::headless_wgpu();
-    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+fn draw_refusing(feature: Feature, instances: &[Instance]) -> Option<(Renderer, [u8; 4])> {
+    let gpu = Gpu::test_headless_wgpu()?;
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT_LINEAR);
     renderer.breakers.refuse = Some(feature);
-    let target = Offscreen::new(&gpu.device, 32, 16);
+    let target = Offscreen::with_format(&gpu.device, 32, 16, OFFSCREEN_FORMAT_LINEAR);
     let mut atlas = crate::text::TextSystem::default().atlas;
     let mut out = Vec::new();
     for _ in 0..3 {
@@ -81,14 +81,14 @@ fn draw_refusing(feature: Feature, instances: &[Instance]) -> (Renderer, [u8; 4]
     }
     assert!(!matches!(renderer.breakers.health(feature), Health::Working | Health::Untried));
     let at = (8 * 32 + 16) * 4;
-    (renderer, [out[at], out[at + 1], out[at + 2], out[at + 3]])
+    Some((renderer, [out[at], out[at + 1], out[at + 2], out[at + 3]]))
 }
 
 /// A half-faded group whose layer pipeline the device refused draws its contents straight into
 /// the frame, at full opacity, rather than leaving the frame blank.
 #[test]
 fn a_refused_layer_pipeline_draws_the_group_in_its_parent() {
-    let (renderer, pixel) = draw_refusing(Feature::Isolation, &group(LayerSpec { opacity: 0.5, ..Default::default() }));
+    let Some((renderer, pixel)) = draw_refusing(Feature::Isolation, &group(LayerSpec { opacity: 0.5, ..Default::default() })) else { return };
     assert_eq!(pixel, [255; 4]);
     assert_eq!(renderer.layer_stats().targets, 0);
     assert!(!renderer.extra.iter().any(|(f, _)| *f == FORMAT), "the refused pipeline isn't kept");
@@ -96,7 +96,7 @@ fn a_refused_layer_pipeline_draws_the_group_in_its_parent() {
 
 #[test]
 fn a_refused_plus_lighter_pipeline_draws_source_over() {
-    let (renderer, pixel) = draw_refusing(Feature::PlusLighter, &group(LayerSpec { opacity: 0.5, blend: Blend::PlusLighter, ..Default::default() }));
+    let Some((renderer, pixel)) = draw_refusing(Feature::PlusLighter, &group(LayerSpec { opacity: 0.5, blend: Blend::PlusLighter, ..Default::default() })) else { return };
     let want = [188, 188, 188, 128];
     assert!(pixel.iter().zip(want).all(|(&a, b)| a.abs_diff(b) <= 1), "half white, isolated, source-over: {pixel:?}");
     assert!(renderer.layers.additive.is_none());
@@ -104,6 +104,62 @@ fn a_refused_plus_lighter_pipeline_draws_source_over() {
 
 #[test]
 fn a_refused_blur_pipeline_draws_unblurred() {
-    let (_, pixel) = draw_refusing(Feature::LayerBlur, &group(LayerSpec { blur: 4.0, ..Default::default() }));
+    let Some((_, pixel)) = draw_refusing(Feature::LayerBlur, &group(LayerSpec { blur: 4.0, ..Default::default() })) else { return };
     assert_eq!(pixel, [255; 4]);
+}
+
+#[test]
+fn needed_layer_features_detects_visible_isolation_plus_lighter_and_blur_only() {
+    use crate::render::layers::needed_layer_features;
+    let bounds = [0.0, 0.0, 32.0, 32.0];
+    assert_eq!(needed_layer_features(&[rect(bounds)]), (false, false, false));
+    // Plain opaque unclipped layer does not isolate.
+    assert_eq!(needed_layer_features(&group(LayerSpec::default())), (false, false, false));
+    // Hidden (opacity 0) layers and their descendants do not request feature pipelines.
+    let hidden_blur = vec![
+        Instance::begin_layer(bounds, NO_CLIP, LayerSpec { opacity: 0.0, ..Default::default() }),
+        Instance::begin_layer(bounds, NO_CLIP, LayerSpec { blur: 4.0, blend: Blend::PlusLighter, ..Default::default() }),
+        rect(bounds),
+        Instance::end_layer(),
+        Instance::end_layer(),
+    ];
+    assert_eq!(needed_layer_features(&hidden_blur), (false, false, false));
+    // Visible translucent, additive, and blurred layers request their exact features.
+    assert_eq!(needed_layer_features(&group(LayerSpec { opacity: 0.5, ..Default::default() })), (true, false, false));
+    assert_eq!(needed_layer_features(&group(LayerSpec { blend: Blend::PlusLighter, ..Default::default() })), (true, true, false));
+    assert_eq!(needed_layer_features(&group(LayerSpec { blur: 4.0, ..Default::default() })), (true, false, true));
+    // Clipped layer isolates.
+    let clipped = vec![Instance::begin_layer(bounds, [0.0, 0.0, 16.0, 16.0], LayerSpec::default()), rect(bounds), Instance::end_layer()];
+    assert_eq!(needed_layer_features(&clipped), (true, false, false));
+}
+
+#[test]
+fn poll_breaker_checks_settles_async_answer_without_encoding_a_frame() {
+    let Some(gpu) = Gpu::test_headless_wgpu() else { return };
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT_LINEAR);
+    let answer = Answer::default();
+    let _ = renderer.breakers.step(Feature::Isolation, Event::Built(Verdict::Later(answer.clone())));
+    assert!(renderer.checking_gpu());
+    assert!(!renderer.poll_breaker_checks(&gpu.device));
+    assert!(renderer.checking_gpu());
+
+    *answer.lock().unwrap() = Some(None);
+    assert!(renderer.poll_breaker_checks(&gpu.device));
+    assert!(!renderer.checking_gpu());
+    assert!(renderer.breakers.health(Feature::Isolation).working());
+    assert!(!renderer.poll_breaker_checks(&gpu.device));
+}
+
+#[test]
+fn precheck_layer_features_builds_needed_feature_without_encoding_a_frame() {
+    let Some(gpu) = Gpu::test_headless_wgpu() else { return };
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT_LINEAR);
+    assert!(matches!(renderer.breakers.health(Feature::Isolation), Health::Untried));
+    // Plain rects leave layer features untried.
+    renderer.precheck_layer_features(&gpu.device, &[rect([0.0, 0.0, 16.0, 16.0])]);
+    assert!(matches!(renderer.breakers.health(Feature::Isolation), Health::Untried));
+    // A translucent layer prechecks Isolation without submitting a GPU frame.
+    renderer.precheck_layer_features(&gpu.device, &group(LayerSpec { opacity: 0.5, ..Default::default() }));
+    assert!(renderer.breakers.health(Feature::Isolation).working());
+    assert!(matches!(renderer.breakers.health(Feature::LayerBlur), Health::Untried));
 }

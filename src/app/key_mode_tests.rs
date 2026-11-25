@@ -83,6 +83,8 @@ fn ctrl(rt: &mut Runtime<Workspace>, code: Code, character: char) {
             mods: ev.mods,
             pressed: true,
             repeat: false,
+            text: None,
+            consumed_mods: Mods::default(),
         },
         ev,
         None,

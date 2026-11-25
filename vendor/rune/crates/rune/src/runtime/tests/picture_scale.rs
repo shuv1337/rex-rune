@@ -16,14 +16,15 @@ fn text_inside_a_scale_draws_at_that_size() {
         };
         col().size(300.0, 200.0).child(card)
     }
-    // Device px: the glyphs' bounding box, and whether all of them sample their atlas 1:1.
+    // Device px: the glyphs' bounding box, and whether all of them sample their atlas 1:1
+    // (neither filtered atlas masks nor moving outline glyphs).
     fn glyphs(rt: &Runtime<State>) -> ([f32; 4], bool) {
         let gs: Vec<_> = rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).collect();
         assert!(gs.len() >= 10, "the label draws its glyphs");
         let b = gs.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, q| {
             [b[0].min(q.rect[0]), b[1].min(q.rect[1]), b[2].max(q.rect[0] + q.rect[2]), b[3].max(q.rect[1] + q.rect[3])]
         });
-        (b, gs.iter().all(|q| q.uv[2] == 0.0))
+        (b, gs.iter().all(|q| q.uv[2] == 0.0 && q.radii[3] == 0.0))
     }
     let run = |k: f32, how: How| {
         let mut rt = Runtime::new(State { k, how, pressed: 0 }, view, (300.0, 200.0), Env::new(true, 2.0));
@@ -39,7 +40,9 @@ fn text_inside_a_scale_draws_at_that_size() {
         let rt = run(0.5, how);
         let (half, crisp) = glyphs(&rt);
         let (hw, hh) = (half[2] - half[0], half[3] - half[1]);
-        assert!((hw / w - 0.5).abs() < 0.03 && (hh / h - 0.5).abs() < 0.06, "glyphs draw at half size: {hw}x{hh} vs {w}x{h}");
+        // Windfoil mask quads include a fixed 3–4 px vertical apron (1 px either side plus the
+        // y-glide row) that does not shrink with scale, so at 0.5x `hh` sits ~2 px above `h / 2`.
+        assert!((hw / w - 0.5).abs() < 0.03 && (hh - h * 0.5).abs() <= 2.5, "glyphs draw at half size: {hw}x{hh} vs {w}x{h}");
         for axis in 0..2 {
             let want = c[axis] + (rest[axis] - c[axis]) * 0.5;
             assert!((half[axis] - want).abs() < 1.5, "about the card's centre: {} vs {want}", half[axis]);
@@ -147,7 +150,7 @@ fn a_changing_static_scale_keeps_the_glyph_atlas_bounded() {
             .child(el().key("card").size(200.0, 80.0).scale(s.k).scale_motion(rune_motion::Curve::Instant)
                 .child(crate::el::text("Hamburgefonstiv")))
     }
-    let crisp = |rt: &Runtime<State>| rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).all(|q| q.uv[2] == 0.0);
+    let crisp = |rt: &Runtime<State>| rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).all(|q| q.uv[2] == 0.0 && q.radii[3] == 0.0);
     let mut rt = Runtime::new(State { k: 1.0 }, view, (300.0, 200.0), Env::new(true, 2.0));
     rt.frame(0.0);
     let rest = rt.text.atlas.glyph_entries();
@@ -183,7 +186,7 @@ fn a_held_press_scale_keeps_its_hover_and_a_scroll_cancels_it() {
     }
     let mut rt = Runtime::new(State { pressed: Vec::new() }, view, (200.0, 200.0), Env::new(true, 2.0));
     rt.frame(0.0);
-    let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("b0")).unwrap().id;
+    let id = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("b0")).unwrap().id;
     // Held at its right edge, which the shrunk row no longer covers: still hovered.
     rt.pointer_move(199.0, 20.0);
     rt.pointer_down(199.0, 20.0);
@@ -241,7 +244,7 @@ fn press_scale_shrinks_while_held_and_springs_back() {
     assert_eq!(held.target, rest.target, "layout keeps the resting size");
     assert!((held.rect[0] - 2.0).abs() < 0.05 && (held.rect[2] - 96.0).abs() < 0.05, "shrinks about its centre: {:?}", held.rect);
     assert!((info(&rt, "dot").scale - 0.96).abs() < 1e-4, "children shrink with it");
-    assert!(rt.press.inside(), "a press near the edge stays inside the resting rect");
+    assert!(rt.pointer.press_inside(), "a press near the edge stays inside the resting rect");
     rt.pointer_move(150.0, 50.0);
     settle(&mut rt);
     assert!((info(&rt, "tile").scale - 1.0).abs() < 1e-4, "leaving springs back");
@@ -272,6 +275,149 @@ fn press_scale_shrinks_while_held_and_springs_back() {
     reduced.pointer_down(50.0, 50.0);
     settle(&mut reduced);
     assert_eq!(info(&reduced, "tile").scale, 1.0, "Reduce Motion turns press scale off");
+}
+#[test]
+fn press_offset_shifts_subtree_keeps_rest_hits_cancels_on_scroll_and_respects_reduced_motion() {
+    struct State {
+        pressed: u32,
+        reduced: bool,
+        inert: bool,
+        off: [f32; 2],
+        custom: bool,
+    }
+    fn view(s: &State, cx: &mut Cx<State>) -> El {
+        cx.reduced_motion(s.reduced);
+        let mut btn = crate::memo("keycap", 0u32, || {
+            el().size(100.0, 40.0).fill(Color::WHITE)
+                .on_press(|s: &mut State| s.pressed += 1)
+                .child(el().key("label").absolute(10.0, 10.0).size(40.0, 20.0).fill(Color::BLACK))
+        })
+        .press_offset(s.off[0], s.off[1]);
+        if s.custom {
+            btn = btn.press_motion(rune_motion::Curve::linear(0.1), rune_motion::Curve::linear(0.2));
+        }
+        if s.inert {
+            btn = btn.inert();
+        }
+        let cached = el().key("cached").absolute(0.0, 60.0).size(100.0, 40.0).cache()
+            .child(el().key("cbtn").size(100.0, 40.0).fill(Color::WHITE)
+                .press_offset(0.0, 2.0)
+                .press_motion(rune_motion::Anim::INSTANT, rune_motion::Anim::INSTANT)
+                .on_press(|s: &mut State| s.pressed += 1));
+        col().size(200.0, 200.0).child(btn).child(cached)
+    }
+    let info = |rt: &Runtime<State>, key: &str| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap()
+    };
+    let settle = |rt: &mut Runtime<State>| for _ in 0..90 { rt.frame(1.0 / 120.0); };
+
+    // 1. Shifts element + child while held, keeps layout target and resting hit rect, springs back.
+    let mut rt = Runtime::new(State { pressed: 0, reduced: false, inert: false, off: [1.0, 4.0], custom: false }, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let rest = info(&rt, "keycap");
+    let rest_child = info(&rt, "label");
+    let commits = rt.stats.commits;
+    // Press 1 pt from the top edge: shifting down by 4 pt moves drawn rect below y=1, but hit rect stays resting.
+    rt.pointer_move(50.0, 1.0);
+    rt.pointer_down(50.0, 1.0);
+    settle(&mut rt);
+    let held = info(&rt, "keycap");
+    let held_child = info(&rt, "label");
+    assert_eq!(rt.stats.commits, commits, "press_offset runs with zero commits");
+    assert_eq!(held.target, rest.target, "layout keeps the resting rect");
+    assert!((held.rect[0] - (rest.rect[0] + 1.0)).abs() < 0.05 && (held.rect[1] - (rest.rect[1] + 4.0)).abs() < 0.05, "element shifts while held: {:?}", held.rect);
+    assert!((held_child.rect[0] - (rest_child.rect[0] + 1.0)).abs() < 0.05 && (held_child.rect[1] - (rest_child.rect[1] + 4.0)).abs() < 0.05, "subtree shifts with it: {:?}", held_child.rect);
+    assert!(rt.pointer.press_inside(), "hit rect stays at rest so a top-edge press stays inside");
+    // Leaving springs back to rest; re-entering shifts again.
+    rt.pointer_move(180.0, 180.0);
+    settle(&mut rt);
+    assert!((info(&rt, "keycap").rect[1] - rest.rect[1]).abs() < 0.05);
+    rt.pointer_move(50.0, 1.0);
+    settle(&mut rt);
+    assert!((info(&rt, "keycap").rect[1] - (rest.rect[1] + 4.0)).abs() < 0.05);
+    rt.pointer_up(50.0, 1.0);
+    rt.frame(1.0 / 120.0);
+    assert_eq!(rt.state.pressed, 1);
+    settle(&mut rt);
+    assert!((info(&rt, "keycap").rect[1] - rest.rect[1]).abs() < 0.05);
+    assert!(!rt.animating, "idle window sleeps once press_offset settles");
+
+    // 2. Memo reuse invalidates when press_offset changes, and (0, 0) / NaN removes it.
+    rt.update(|s, _| { s.off = [0.0, 8.0]; s.custom = true; });
+    rt.frame(0.0);
+    rt.pointer_move(50.0, 20.0);
+    rt.pointer_down(50.0, 20.0);
+    rt.frame(0.0);
+    rt.frame(0.05);
+    let mid_down = info(&rt, "keycap").rect[1] - rest.rect[1];
+    assert!((mid_down - 4.0).abs() < 0.5, "press_motion linear 0.1s down midpoint ~4.0, got {mid_down}");
+    rt.frame(0.1);
+    assert!((info(&rt, "keycap").rect[1] - (rest.rect[1] + 8.0)).abs() < 0.05);
+    rt.pointer_up(50.0, 20.0);
+    rt.frame(0.0);
+    rt.frame(0.1);
+    let mid_up = info(&rt, "keycap").rect[1] - rest.rect[1];
+    assert!((mid_up - 4.0).abs() < 0.5, "press_motion linear 0.2s up midpoint ~4.0, got {mid_up}");
+    rt.frame(0.15);
+    assert!((info(&rt, "keycap").rect[1] - rest.rect[1]).abs() < 0.05);
+    for off in [[0.0, 0.0], [f32::NAN, 2.0], [2.0, f32::INFINITY]] {
+        rt.update(|s, _| s.off = off);
+        rt.frame(0.0);
+        rt.pointer_down(50.0, 20.0);
+        settle(&mut rt);
+        assert_eq!(info(&rt, "keycap").rect[1], rest.rect[1], "non-finite or zero press_offset {off:?} is a no-op");
+        rt.pointer_up(50.0, 20.0);
+        settle(&mut rt);
+    }
+
+    // 3. Cached subtree invalidates when instant press_offset changes.
+    let cache_sig = |rt: &Runtime<State>| -> [u32; 4] {
+        rt.instances.iter()
+            .find(|i| i.params[1] == crate::render::KIND_LAYER && i.params[3] == 1.0)
+            .expect("cached layer marker")
+            .uv.map(f32::to_bits)
+    };
+    let sig_rest = cache_sig(&rt);
+    rt.pointer_move(50.0, 80.0);
+    rt.pointer_down(50.0, 80.0);
+    rt.frame(1.0 / 120.0);
+    assert_ne!(cache_sig(&rt), sig_rest, ".cache() invalidates on instant press_offset");
+    rt.pointer_up(50.0, 80.0);
+    rt.frame(1.0 / 120.0);
+
+    // 4. Inert and Reduce Motion both disable press_offset.
+    rt.update(|s, _| { s.off = [0.0, 4.0]; s.inert = true; });
+    rt.frame(0.0);
+    rt.pointer_move(50.0, 20.0);
+    rt.pointer_down(50.0, 20.0);
+    settle(&mut rt);
+    assert_eq!(info(&rt, "keycap").rect[1], rest.rect[1], "inert element ignores press_offset");
+    rt.pointer_up(50.0, 20.0);
+    rt.update(|s, _| { s.inert = false; s.reduced = true; });
+    rt.frame(0.0);
+    rt.pointer_move(50.0, 20.0);
+    rt.pointer_down(50.0, 20.0);
+    settle(&mut rt);
+    assert_eq!(info(&rt, "keycap").rect[1], rest.rect[1], "Reduce Motion turns press_offset off");
+    rt.pointer_up(50.0, 20.0);
+
+    // 5. Scrolling under a held press cancels press_offset.
+    fn scroll_view(_: &(), _: &mut Cx<()>) -> El {
+        let list = col().key("list").w_full().children((0..10).map(|i| {
+            el().key(format!("b{i}")).size(200.0, 40.0).press_offset(0.0, 3.0).on_press(|_: &mut ()| {})
+        }));
+        col().size(200.0, 200.0).child(col().key("scroll").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(list))
+    }
+    let mut srt = Runtime::new((), scroll_view, (200.0, 200.0), Env::new(true, 1.0));
+    srt.frame(0.0);
+    let id = srt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("b0")).unwrap().id;
+    srt.pointer_move(100.0, 20.0);
+    srt.pointer_down(100.0, 20.0);
+    for _ in 0..30 { srt.frame(1.0 / 120.0); }
+    assert!((srt.scene.get(id, P_PRESS_OY).unwrap_or(0.0) - 3.0).abs() < 0.05);
+    srt.wheel(100.0, 100.0, -120.0);
+    for _ in 0..60 { srt.frame(1.0 / 120.0); }
+    assert!(srt.scene.get(id, P_PRESS_OY).unwrap_or(0.0).abs() < 0.05, "scroll cancels press_offset");
 }
 
 /// A picture with one side set takes the other from its image, as SwiftUI's
@@ -315,9 +461,9 @@ fn a_picture_with_one_side_sizes_the_other_from_its_image() {
     px.set(2, 4, vec![255; 4 * 2 * 4]);
     rt.frame(1.0 / 120.0);
     assert_eq!(size(&rt, "w"), [120.0, 240.0], "a stream that changes shape relays out");
-    let commits = rt.commits;
+    let commits = rt.commit.commits;
     for _ in 0..4 { rt.frame(1.0 / 120.0); }
-    assert_eq!(rt.commits, commits, "an unchanged image costs no commits");
+    assert_eq!(rt.commit.commits, commits, "an unchanged image costs no commits");
 
     // The image lands on a frame that also re-runs the view (`Pixels::set`, then the
     // handle's `update`, or a hover that frame): it still appears at its size.

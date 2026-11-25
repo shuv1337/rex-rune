@@ -12,7 +12,7 @@ use rex_rune::{
     layers::{self, Grip},
     settings::{PaneDensity, PaneHeader},
 };
-use rune::{Cursor, WindowEdge};
+use rune::Cursor;
 
 #[derive(Debug, PartialEq)]
 struct ResizeCmd {
@@ -384,73 +384,73 @@ fn all_eight_resize_grips_set_edge_cursors_and_send_expected_bounds() {
         (
             "layer-grip:floating:n",
             Grip::North,
-            WindowEdge::North,
+            Cursor::ResizeNs,
             (10.0_f32, -40.0_f32),
         ),
         (
             "layer-grip:floating:s",
             Grip::South,
-            WindowEdge::South,
+            Cursor::ResizeNs,
             (-10.0, 40.0),
         ),
         (
             "layer-grip:floating:e",
             Grip::East,
-            WindowEdge::East,
+            Cursor::ResizeEw,
             (50.0, 10.0),
         ),
         (
             "layer-grip:floating:w",
             Grip::West,
-            WindowEdge::West,
+            Cursor::ResizeEw,
             (-50.0, -10.0),
         ),
         (
             "layer-grip:floating:nw:h",
             Grip::NorthWest,
-            WindowEdge::NorthWest,
+            Cursor::ResizeNwse,
             (-40.0, -30.0),
         ),
         (
             "layer-grip:floating:nw:v",
             Grip::NorthWest,
-            WindowEdge::NorthWest,
+            Cursor::ResizeNwse,
             (-30.0, -25.0),
         ),
         (
             "layer-grip:floating:ne:h",
             Grip::NorthEast,
-            WindowEdge::NorthEast,
+            Cursor::ResizeNesw,
             (45.0, -30.0),
         ),
         (
             "layer-grip:floating:ne:v",
             Grip::NorthEast,
-            WindowEdge::NorthEast,
+            Cursor::ResizeNesw,
             (35.0, -20.0),
         ),
         (
             "layer-grip:floating:sw:h",
             Grip::SouthWest,
-            WindowEdge::SouthWest,
+            Cursor::ResizeNesw,
             (-40.0, 35.0),
         ),
         (
             "layer-grip:floating:sw:v",
             Grip::SouthWest,
-            WindowEdge::SouthWest,
+            Cursor::ResizeNesw,
             (-30.0, 25.0),
         ),
         (
             "layer-grip:floating:se:h",
             Grip::SouthEast,
-            WindowEdge::SouthEast,
+            Cursor::ResizeNwse,
             (45.0, 35.0),
         ),
         (
             "layer-grip:floating:se:v",
             Grip::SouthEast,
-            WindowEdge::SouthEast,
+            Cursor::ResizeNwse,
             (35.0, 25.0),
         ),
     ];
@@ -467,11 +467,7 @@ fn all_eight_resize_grips_set_edge_cursors_and_send_expected_bounds() {
         let r = rect_of(&rt, key);
         let (sx, sy) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
         rt.pointer_move(sx, sy);
-        assert_eq!(
-            rt.cursor(),
-            Cursor::ResizeEdge(edge),
-            "{key} cursor mismatch"
-        );
+        assert_eq!(rt.cursor(), edge, "{key} cursor mismatch");
 
         let [_, _, iw, ih] = panes::inner(&rt.state);
         let expected = layers::dragged(

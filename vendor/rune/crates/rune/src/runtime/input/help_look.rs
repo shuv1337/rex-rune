@@ -25,6 +25,8 @@ pub struct HelpLook {
     /// `None`: the runtime's `help_delay`.
     pub(crate) delay: Option<f64>,
     pub(crate) skip: f64,
+    /// The keyboard focusing a help element shows its tooltip at once (`HelpLook::on_focus`).
+    pub(crate) on_focus: bool,
     /// Seconds the tooltip fades in and out (`HelpLook::fade`); 0 shows or hides at once.
     pub(crate) fade: [f64; 2],
     /// The scale it fades in from and out to.
@@ -34,6 +36,12 @@ pub struct HelpLook {
     pub(crate) key: KeyCap,
     /// Points between two rows ([`El::help_row`](crate::El::help_row)).
     pub(crate) row_gap: f32,
+    /// The line of text the tooltip sits on (`HelpLook::sit_on_line`).
+    pub(crate) line: Option<TextStyle>,
+    /// Default side of the element the tooltip opens on (`HelpLook::side`).
+    pub(crate) side: crate::Side,
+    /// Height in points of the pointer triangle facing the element (`HelpLook::arrow`); 0 draws none.
+    pub(crate) arrow: f32,
 }
 
 /// How a tooltip draws its keycaps.
@@ -75,6 +83,7 @@ impl HelpLook {
             margin: 4.0,
             delay: None,
             skip: 0.0,
+            on_focus: false,
             fade: [0.0; 2],
             fade_scale: 1.0,
             shadows: [None; SHADOWS],
@@ -90,7 +99,19 @@ impl HelpLook {
                 upper: false,
             },
             row_gap: 4.0,
+            line: None,
+            side: crate::Side::Bottom,
+            arrow: 0.0,
         }
+    }
+    /// The tooltip sits on a line of `strut` text, as a web tooltip that is `display:
+    /// inline-flex` inside its positioner's block does: under its element it drops until its
+    /// first row's baseline meets the line's, never rising; over its element its bottom stays
+    /// where it was. `@opencode/ui`'s tooltip (`tooltip.css`) on a 13/24 line drops 2 pt with
+    /// text alone and 1 pt beside 14 pt keycaps.
+    pub fn sit_on_line(mut self, strut: TextStyle) -> Self {
+        self.line = Some(strut);
+        self
     }
     /// Points between two rows of a tooltip with [`El::help_row`](crate::El::help_row)s.
     pub fn row_gap(mut self, gap: f32) -> Self {
@@ -163,6 +184,13 @@ impl HelpLook {
         self.skip = secs.max(0.0);
         self
     }
+    /// The keyboard moving focus onto a help element (a Tab, an arrow) shows its tooltip at once,
+    /// with no delay, as a web tooltip opens on `focus`; a press that focuses it doesn't. The
+    /// pointer resting on another help element shows that one instead. Off by default.
+    pub fn on_focus(mut self, on: bool) -> Self {
+        self.on_focus = on;
+        self
+    }
     /// The tooltip fades in over `enter` seconds (ease-out) and out over `exit` (ease-in),
     /// growing from `scale` and shrinking back to it about the middle of the edge that faces
     /// its element, as a web tooltip's open and close keyframes do. One closing as the next
@@ -180,6 +208,32 @@ impl HelpLook {
         for (slot, s) in self.shadows.iter_mut().zip(layers.into_iter().filter(|s| !s.inset)) {
             *slot = Some(s);
         }
+        self
+    }
+    /// Default side of the element the tooltip opens on, flipping to the opposite side when there
+    /// is no room (and mirroring `Left` / `Right` in right-to-left layout). Per-element
+    /// [`El::help_side`](crate::El::help_side) and [`El::help_above`](crate::El::help_above)
+    /// override this. Defaults to [`Side::Bottom`](crate::Side::Bottom).
+    ///
+    /// ```
+    /// use rune::{HelpLook, Side};
+    /// let look = HelpLook::system(true).side(Side::Top);
+    /// ```
+    pub fn side(mut self, side: crate::Side) -> Self {
+        self.side = side;
+        self
+    }
+    /// Height in points of the pointer triangle drawn on the tooltip edge facing its element
+    /// (base width `2 * size`, clamped inside the flat span between corner radii, offsetting the
+    /// tooltip box by `size` so the tip keeps [`HelpLook::gap`] clear of the element). `0.0`
+    /// (the default) draws no pointer; negative or non-finite values clamp to `0.0`.
+    ///
+    /// ```
+    /// use rune::{HelpLook, Side};
+    /// let look = HelpLook::system(true).side(Side::Top).arrow(5.0);
+    /// ```
+    pub fn arrow(mut self, size: f32) -> Self {
+        self.arrow = if size.is_finite() { size.max(0.0) } else { 0.0 };
         self
     }
 }

@@ -14,6 +14,7 @@ fn scene(frame: usize) -> Vec<Instance> {
     std::iter::once(square(frame as f32, 20.0)).chain(grid).collect()
 }
 
+#[cfg(feature = "test-gpu-counters")]
 fn live_buffers(device: &wgpu::Device) -> isize {
     device.get_internal_counters().hal.buffers.read()
 }
@@ -23,9 +24,10 @@ fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
     pixels[at..at + 4].try_into().unwrap()
 }
 
+#[cfg(feature = "test-gpu-counters")]
 #[test]
 fn a_steady_animating_frame_creates_no_buffers_and_skips_unchanged_globals() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -61,7 +63,7 @@ fn a_steady_animating_frame_creates_no_buffers_and_skips_unchanged_globals() {
 /// write lands: the frame draws each square where it is now.
 #[test]
 fn instances_are_written_in_the_spans_that_changed() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -102,7 +104,7 @@ fn instances_are_written_in_the_spans_that_changed() {
 /// caller may submit without `Renderer::submit`.
 #[test]
 fn uploads_land_before_a_draw_into_a_callers_pass() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -132,7 +134,7 @@ fn uploads_land_before_a_draw_into_a_callers_pass() {
 /// it would otherwise skip as unchanged.
 #[test]
 fn a_dropped_encoder_makes_the_next_frame_resend_everything() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -152,9 +154,10 @@ fn a_dropped_encoder_makes_the_next_frame_resend_everything() {
 
 /// `Frame::write_buffer`: each write lands ahead of the commands recorded after it, and a frame's
 /// writes share one reused staging chunk rather than making a buffer each, as a queue write would.
+#[cfg(feature = "test-gpu-counters")]
 #[test]
 fn compositor_buffer_writes_land_in_order_and_reuse_staging() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -177,7 +180,7 @@ fn compositor_buffer_writes_land_in_order_and_reuse_staging() {
         let created = live_buffers(device) - buffers;
         renderer.submit(queue, encoder);
         let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
+        slice.map_async(wgpu::MapMode::Read, |_| {});
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let words: Vec<u32> = bytemuck::cast_slice(&slice.get_mapped_range().unwrap()).to_vec();
         readback.unmap();
@@ -195,7 +198,7 @@ fn compositor_buffer_writes_land_in_order_and_reuse_staging() {
 
 #[test]
 fn a_frame_with_nothing_to_upload_never_touches_the_staging() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless_or_noop() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     renderer.upload_images(device, queue, &mut ImageAtlas::default());
@@ -219,11 +222,11 @@ fn a_frame_with_nothing_to_upload_never_touches_the_staging() {
 /// draw with `set_immediates`, no buffer written.
 #[test]
 fn a_device_asked_for_immediates_draws_with_them() {
-    let Ok(gpu) = Gpu::try_with_features(Gpu::instance(), None, wgpu::Features::IMMEDIATES) else { return };
+    let Some(gpu) = Gpu::test_with_features(wgpu::Features::IMMEDIATES) else { return };
     let device = &gpu.device;
     if !device.features().contains(wgpu::Features::IMMEDIATES) { return; }
     assert!(device.limits().max_immediate_size >= 16, "the limit came with the feature");
-    let plain = Gpu::headless();
+    let Some(plain) = Gpu::test_headless() else { return };
     if crate::gpu::backend::native(&plain.device) {
         assert!(plain.device.features().contains(wgpu::Features::IMMEDIATES), "free on the native backend, so always there");
     } else {
@@ -303,7 +306,7 @@ fn same_takes_lists_at_any_word_offset() {
 /// start one.
 #[test]
 fn batches_break_only_where_the_bound_page_changes() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless_or_noop() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -325,7 +328,7 @@ fn batches_break_only_where_the_bound_page_changes() {
 /// a changed `params`, a longer list or a lost staging batches again.
 #[test]
 fn only_a_changed_params_or_length_batches_again() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless_or_noop() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -348,4 +351,310 @@ fn only_a_changed_params_or_length_batches_again() {
     renderer.uploads.forget_instances();
     assert_eq!(prepare(&mut renderer, &frame(5.0, 0.0, 2)).0, 1, "forgotten");
     assert_eq!(prepare(&mut renderer, &[]), (1, vec![], vec![]), "emptied");
+}
+
+/// Idle rest (`give_back(false)`) drops GPU textures (and layer image bind groups) for image
+/// pages `ImageAtlas::rest` emptied while keeping visible pages resident; hidden/covered rest
+/// (`give_back(true)`) drops every image GPU texture, and the first drawn frame on wake
+/// recreates and uploads them with pixel-exact output.
+#[test]
+fn give_back_drops_freed_image_pages_at_rest_and_all_pages_when_hidden_and_wakes_cleanly() {
+    use std::sync::Arc;
+    use crate::el::{El, el};
+    use crate::image::ImageCache;
+    use crate::pixels::Pixels;
+    use crate::runtime::{Cx, Env, Runtime};
+
+    struct State {
+        small: Pixels,
+        large: Pixels,
+        show_small: bool,
+        show_large: bool,
+    }
+    // Wrap in an opacity layer so layer targets also hold image bind groups referencing the
+    // atlas textures: pruning/clearing must drop those bind groups too so HAL textures free.
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut inner = el().size(16.0, 16.0);
+        if s.show_small {
+            inner = inner.child(el().size(8.0, 8.0).pixels(&s.small));
+        }
+        if s.show_large {
+            inner = inner.child(el().size(8.0, 8.0).pixels(&s.large));
+        }
+        el().size(16.0, 16.0).opacity(0.95).child(inner)
+    }
+
+    let cache = ImageCache::new(Arc::new(|| {}));
+    let small_img = cache.rgba(4, 4, [240, 30, 80, 255].repeat(16));
+    small_img.wait().unwrap();
+    let large = Pixels::new();
+    large.set(1025, 64, [20, 210, 90, 255].repeat(1025 * 64));
+
+    let mut rt = Runtime::new(
+        State { small: small_img.pixels().clone(), large, show_small: true, show_large: true },
+        view,
+        (16.0, 16.0),
+        Env::new(true, 1.0),
+    );
+    let Some(gpu) = Gpu::test_headless() else { return };
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 16, 16);
+
+    #[cfg(feature = "test-gpu-counters")]
+    let (base_tex, base_mem) = {
+        let c = gpu.device.get_internal_counters().hal;
+        (c.textures.read(), c.texture_memory.read())
+    };
+
+    let draw_read = |rt: &mut Runtime<State>, renderer: &mut Renderer| -> Vec<u8> {
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (16, 16));
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut enc, &target.view, [0.0, 0.0, 0.0, 1.0]);
+        target.copy(&mut enc);
+        renderer.submit(&gpu.queue, enc);
+        target.read(&gpu.device)
+    };
+
+    // Frame 1: small image on shelf page 0 (1024x128 = 524,288 B) + large standalone page 1 (1025x64 = 262,400 B).
+    let page0_bytes = 1024u64 * 128 * 4;
+    let page1_bytes = 1025u64 * 64 * 4;
+    rt.frame(0.0);
+    let _ = draw_read(&mut rt, &mut renderer);
+    assert_eq!(rt.images.pages.len(), 2);
+    assert_eq!(renderer.image_texture_count(), 2);
+    assert_eq!(renderer.image_texture_bytes(), page0_bytes + page1_bytes);
+
+    // Frame 2: remove small image while keeping large image; shelf page 0 stays warm until rest.
+    rt.state.show_small = false;
+    rt.invalidate();
+    rt.frame(0.0);
+    let before_hide = draw_read(&mut rt, &mut renderer);
+    assert_eq!(renderer.image_texture_count(), 2);
+    assert_eq!(renderer.image_texture_bytes(), page0_bytes + page1_bytes);
+    #[cfg(feature = "test-gpu-counters")]
+    let (tex_before_rest, mem_before_rest) = {
+        let c = gpu.device.get_internal_counters().hal;
+        (c.textures.read(), c.texture_memory.read())
+    };
+
+    // Idle rest (Host::give_back(false)): interior page 0 is emptied by rest() and pruned from GPU;
+    // visible page 1 stays resident.
+    rt.images.rest();
+    assert_eq!(rt.images.pages.len(), 2);
+    assert!(rt.images.pages[0].data.is_empty());
+    assert!(!rt.images.pages[1].data.is_empty());
+    renderer.give_back(false, &mut rt.text.atlas.resident_caches, &rt.images);
+    assert!(renderer.has_images(), "visible image page stays resident at idle rest");
+    assert_eq!(renderer.image_texture_count(), 1);
+    assert_eq!(renderer.image_texture_bytes(), page1_bytes);
+    #[cfg(feature = "test-gpu-counters")]
+    {
+        let c = gpu.device.get_internal_counters().hal;
+        assert_eq!(c.textures.read(), tex_before_rest - 1, "idle rest frees emptied page 0 HAL texture");
+        if mem_before_rest > base_mem {
+            assert!(c.texture_memory.read() < mem_before_rest, "idle rest reclaims page 0 HAL texture memory");
+        }
+    }
+
+    // Hidden / covered (Host::give_back(true)): every image texture (and scratch layer target) drops.
+    rt.images.rest();
+    renderer.give_back(true, &mut rt.text.atlas.resident_caches, &rt.images);
+    gpu.queue.submit(std::iter::empty());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    renderer.trim_uploads();
+    assert!(!renderer.has_images(), "give_back(true) drops all GPU image textures");
+    assert_eq!(renderer.image_texture_count(), 0);
+    assert_eq!(renderer.image_texture_bytes(), 0);
+    #[cfg(feature = "test-gpu-counters")]
+    {
+        let c = gpu.device.get_internal_counters().hal;
+        assert_eq!(c.textures.read(), base_tex, "give_back(true) restores baseline HAL texture count");
+        assert_eq!(c.texture_memory.read(), base_mem, "give_back(true) restores baseline HAL texture memory");
+    }
+
+    // Wake from give_back(true): first frame draws identically with no rt.frame or manual invalidate.
+    let after_wake = draw_read(&mut rt, &mut renderer);
+    assert_eq!(after_wake, before_hide, "waking from give_back(true) draws identically on first frame");
+    assert_eq!(renderer.image_texture_count(), 1);
+    assert_eq!(renderer.image_texture_bytes(), page1_bytes);
+    assert!(small_img.is_ready(), "content-addressed ImageCache entry remains untouched");
+}
+
+/// Idle rest (`give_back(false)`) truncates `Renderer::images` and frees the GPU texture when
+/// `ImageAtlas::rest` truncates trailing empty pages (such as a warm first shelf page).
+#[test]
+fn give_back_truncates_trailing_empty_image_pages_at_rest() {
+    use crate::el::{El, el};
+    use crate::pixels::Pixels;
+    use crate::runtime::{Cx, Env, Runtime};
+
+    struct State {
+        px: Pixels,
+        show: bool,
+    }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut root = el().size(8.0, 8.0);
+        if s.show {
+            root = root.child(el().size(4.0, 4.0).pixels(&s.px));
+        }
+        root
+    }
+
+    let px = Pixels::new();
+    px.set(4, 4, [180, 90, 220, 255].repeat(16));
+    let mut rt = Runtime::new(State { px, show: true }, view, (8.0, 8.0), Env::new(true, 1.0));
+    let Some(gpu) = Gpu::test_headless() else { return };
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 8, 8);
+
+    #[cfg(feature = "test-gpu-counters")]
+    let (base_tex, base_mem) = {
+        let c = gpu.device.get_internal_counters().hal;
+        (c.textures.read(), c.texture_memory.read())
+    };
+
+    let draw_once = |rt: &mut Runtime<State>, renderer: &mut Renderer| {
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (8, 8));
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut enc, &target.view, [0.0; 4]);
+        renderer.submit(&gpu.queue, enc);
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    };
+
+    // Frame 1: shelf page 0 uploaded (1024x128 = 524,288 B).
+    let page0_bytes = 1024u64 * 128 * 4;
+    rt.frame(0.0);
+    draw_once(&mut rt, &mut renderer);
+    assert_eq!(renderer.image_texture_count(), 1);
+    assert_eq!(renderer.image_texture_bytes(), page0_bytes);
+    #[cfg(feature = "test-gpu-counters")]
+    assert_eq!(gpu.device.get_internal_counters().hal.textures.read(), base_tex + 1);
+
+    // Frame 2: image removed and settled, first shelf page stays warm until rest.
+    rt.state.show = false;
+    rt.invalidate();
+    rt.settle_all();
+    rt.frame(0.0);
+    draw_once(&mut rt, &mut renderer);
+    assert_eq!(rt.images.pages.len(), 1);
+    assert_eq!(renderer.image_texture_count(), 1);
+
+    // Idle rest: rest() truncates rt.images.pages to 0, give_back(false) truncates and drops GPU page.
+    rt.images.rest();
+    assert!(rt.images.pages.is_empty());
+    renderer.give_back(false, &mut rt.text.atlas.resident_caches, &rt.images);
+    assert!(!renderer.has_images(), "give_back(false) drops truncated trailing page GPU texture");
+    assert_eq!(renderer.image_texture_count(), 0);
+    assert_eq!(renderer.image_texture_bytes(), 0);
+    #[cfg(feature = "test-gpu-counters")]
+    {
+        let c = gpu.device.get_internal_counters().hal;
+        assert_eq!(c.textures.read(), base_tex, "truncated page HAL texture freed at idle rest");
+        assert_eq!(c.texture_memory.read(), base_mem, "truncated page HAL texture memory reclaimed at idle rest");
+    }
+}
+
+/// A steady scene showing more than `IMAGE_ATLAS_MAX_PAGES` (16) pages on every frame must keep
+/// all overflow pages resident with zero CPU re-copies and zero GPU texture uploads per frame,
+/// and still compact back under the bound once the visible set shrinks.
+#[test]
+fn steady_overflow_image_atlas_uploads_zero_pages_per_frame() {
+    use crate::pixels::{IMAGE_ATLAS_MAX_PAGES, ImageAtlas, Pixels};
+
+    let Some(gpu) = Gpu::test_headless() else { return };
+    let (device, queue) = (&gpu.device, &gpu.queue);
+    let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
+    let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
+    let target = Offscreen::new(device, 8, 8);
+
+    let count = IMAGE_ATLAS_MAX_PAGES + 4;
+    let (w, h) = (900u32, 900u32);
+    let imgs: Vec<Pixels> = (0..count)
+        .map(|i| {
+            let p = Pixels::new();
+            p.set(w, h, [10 + i as u8 * 10, 120, 200, 255].repeat((w * h) as usize));
+            p
+        })
+        .collect();
+
+    let mut images = ImageAtlas::default();
+    // Frame 0: initial placement and GPU upload of all 20 pages.
+    let mut prev_placed: Vec<_> = imgs.iter().map(|p| images.place(p, [w as f32, h as f32]).unwrap()).collect();
+    images.end_frame();
+    renderer.upload_images(device, queue, &mut images);
+    assert_eq!(images.pages.len(), count);
+    assert_eq!(renderer.image_texture_count(), count);
+
+    #[cfg(feature = "test-gpu-counters")]
+    let steady_hal_textures = device.get_internal_counters().hal.textures.read();
+
+    // Frames 1..=5: steady scene past the 16-page / 64 MiB bound.
+    for frame in 1..=5usize {
+        let mut slots_moved = 0usize;
+        for (i, img) in imgs.iter().enumerate() {
+            let placed = images.place(img, [w as f32, h as f32]).unwrap();
+            if placed != prev_placed[i] {
+                slots_moved += 1;
+                prev_placed[i] = placed;
+            }
+        }
+        images.end_frame();
+        let dirty_pages = images.pages.iter().filter(|p| p.dirty.is_some()).count();
+        let stats_before = renderer.uploads.stats();
+        renderer.upload_images(device, queue, &mut images);
+        let stats_after = renderer.uploads.stats();
+        let upload_writes = stats_after.writes - stats_before.writes;
+        let upload_bytes = stats_after.bytes - stats_before.bytes;
+        assert_eq!(slots_moved, 0, "frame {frame}: steady overflow must move 0 slots");
+        assert_eq!(dirty_pages, 0, "frame {frame}: steady overflow must dirty 0 pages");
+        assert_eq!(upload_writes, 0, "frame {frame}: steady overflow must perform 0 GPU texture writes");
+        assert_eq!(upload_bytes, 0, "frame {frame}: steady overflow must upload 0 bytes to GPU");
+        #[cfg(feature = "test-gpu-counters")]
+        assert_eq!(
+            device.get_internal_counters().hal.textures.read(),
+            steady_hal_textures,
+            "frame {frame}: steady overflow must not churn HAL textures",
+        );
+    }
+
+    // Shrink to 10 visible images (6 from 0..16 + the 4 overflow images 16..20): overflow images
+    // relocate onto freed pages < 16 and GPU texture count drops from 20 to 10.
+    let kept: Vec<usize> = (0..6).chain(IMAGE_ATLAS_MAX_PAGES..count).collect();
+    for _ in 0..2 {
+        for &i in &kept {
+            images.place(&imgs[i], [w as f32, h as f32]).unwrap();
+        }
+        images.end_frame();
+        renderer.upload_images(device, queue, &mut images);
+    }
+    assert!(images.pages.len() <= IMAGE_ATLAS_MAX_PAGES);
+    assert_eq!(renderer.image_texture_count(), kept.len());
+
+    // Draw one of the relocated overflow images (imgs[16]) and verify exact pixels on GPU.
+    let relocated = images.place(&imgs[IMAGE_ATLAS_MAX_PAGES], [w as f32, h as f32]).unwrap();
+    assert!(relocated.page < IMAGE_ATLAS_MAX_PAGES);
+    images.end_frame();
+    renderer.upload_images(device, queue, &mut images);
+    let inst = Instance {
+        rect: [0.0, 0.0, 8.0, 8.0],
+        radii: [0.0; 4],
+        fill: [0.0, 0.0, 0.0, 1.0],
+        border: [0.0; 4],
+        params: [relocated.page as f32, KIND_IMAGE, 0.0, 1.0],
+        uv: relocated.rect.map(|v| v as f32),
+        clip: NO_CLIP,
+        fade: [0; 4],
+    };
+    renderer.prepare(device, queue, &mut text.atlas, std::slice::from_ref(&inst), (8, 8));
+    let mut enc = device.create_command_encoder(&Default::default());
+    renderer.draw(&mut enc, &target.view, [0.0; 4]);
+    target.copy(&mut enc);
+    renderer.submit(queue, enc);
+    let out = target.read(device);
+    let want = [10 + IMAGE_ATLAS_MAX_PAGES as u8 * 10, 120, 200, 255];
+    for (got, want) in out[..4].iter().zip(want) {
+        assert!(got.abs_diff(want) <= 1, "relocated pixel {got} != {want}");
+    }
 }

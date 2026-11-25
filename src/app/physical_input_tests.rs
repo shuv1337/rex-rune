@@ -63,6 +63,8 @@ fn physical_input_preserves_layout_repeat_and_release() {
                 mods,
                 pressed,
                 repeat,
+                text: pressed.then(|| "Е".into()),
+                consumed_mods: Mods::default(),
             },
             KeyEvent {
                 key: Key::Text("Е".into()),
@@ -103,6 +105,8 @@ fn physical_input_without_base_does_not_invent_a_layout() {
             mods: Mods::default(),
             pressed: true,
             repeat: false,
+            text: Some("t".into()),
+            consumed_mods: Mods::default(),
         },
         KeyEvent {
             key: Key::Text("t".into()),

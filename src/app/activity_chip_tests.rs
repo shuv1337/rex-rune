@@ -71,6 +71,8 @@ fn prefix(rt: &mut Runtime<Workspace>) {
             mods,
             pressed: true,
             repeat: false,
+            text: None,
+            consumed_mods: rune::Mods::default(),
         },
         KeyEvent {
             key: Key::Command('b'),

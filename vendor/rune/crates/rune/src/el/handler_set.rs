@@ -2,13 +2,14 @@
 //! `Cold<Handlers>`, so elements without callbacks pay one pointer.
 use crate::cold::Empty;
 use crate::el::{
-    AtBottomFn, Cursor, DragEndFn, DragFn, DragOutFn, DropSpec, LanguagesFn, LayoutFn, LayoutTxFn, ModalSpec,
-    PasteFn, PointerFn, PressFn, ScrollOffsetFn, SelectionChangeFn, SelectionCopy, VisibleRowsFn,
-    WindowFocusFn,
+    A11yActionFn, AnyPressFn, AtBottomFn, Cursor, DragEndFn, DragFn, DragOutFn, DropSpec, LanguagesFn, LayoutFn,
+    LayoutTxFn, ModalSpec, PasteFn, PointerFn, PointerMotionFn, PressFn, ScrollOffsetFn, SelectionChangeFn, SelectionCopy,
+    VisibleRowsFn, WindowFocusFn,
 };
 
 #[derive(Clone)]
 pub(crate) struct Handlers {
+    pub on_a11y_action: Option<A11yActionFn>,
     pub on_paste: Option<PasteFn>,
     pub on_window_focus: Option<WindowFocusFn>,
     /// `El::on_spellcheck`: the app's spell checking setting and what flips it.
@@ -19,16 +20,34 @@ pub(crate) struct Handlers {
     pub on_press: Option<PressFn>,
     pub on_double_press: Option<PressFn>,
     pub on_secondary_press: Option<PointerFn>,
+    /// `El::on_middle_press`.
+    pub on_middle_press: Option<PressFn>,
+    /// `El::on_any_press`: passive window-wide mouse button-down observer.
+    pub on_any_press: Option<AnyPressFn>,
     pub on_hover: Option<PressFn>,
     pub on_hover_change: Option<WindowFocusFn>,
+    /// `El::on_focus_change`: this element gained (`true`) or lost (`false`) focus.
+    pub on_focus_change: Option<WindowFocusFn>,
+    /// `El::on_focus_within_change`: focus entered (`true`) or left (`false`) this element or a descendant.
+    pub on_focus_within_change: Option<WindowFocusFn>,
     /// Seconds the pointer must stay inside, then outside, before `on_hover_change` hears it.
     pub hover_delay: [f32; 2],
+    /// `El::hover_tracks_bounds`.
+    pub hover_tracks_bounds: bool,
     pub on_pointer_move: Option<PointerFn>,
+    /// `El::pointer_lock`: declarative relative mouse-look capture.
+    pub pointer_lock: Option<PointerMotionFn>,
     /// `on_wheel`, `on_magnify` and the other canvas handlers (`canvas_input.rs`).
     pub gestures: Option<Box<crate::input::canvas_input::CanvasInput>>,
     pub on_drag: Option<DragFn>,
     pub drag_out: Option<DragOutFn>,
     pub drag_threshold: Option<f32>,
+    /// `El::touch_drags_at_once`.
+    pub touch_at_once: bool,
+    /// `El::on_edge_drag`: the window edge, the zone's width in points, and the handler.
+    pub edge_drag: Option<(crate::el::SwipeEdge, f32, DragFn)>,
+    /// `El::press_on_down`.
+    pub press_on_down: bool,
     pub on_drag_start: Option<PressFn>,
     pub on_drag_end: Option<DragEndFn>,
     pub drop: Option<Box<DropSpec>>,
@@ -42,15 +61,16 @@ pub(crate) struct Handlers {
     pub on_drawn_layout: Option<LayoutTxFn>,
     /// `El::on_visible`: the element came on screen (`true`) or left it.
     pub on_visible: Option<WindowFocusFn>,
+    /// `El::on_mount`: runs once when this element mounts, in the same frame before drawing.
+    pub on_mount: Option<PressFn>,
     /// `El::drawn_rect_into`: where each frame draws the element.
     pub drawn_rect: Option<crate::Live<[f32; 4]>>,
     pub on_scroll_offset: Option<ScrollOffsetFn>,
     pub selection_copy: Option<SelectionCopy>,
     pub on_selection_change: Option<SelectionChangeFn>,
     pub cursor: Option<Cursor>,
-    /// `El::window_resize`.
-    pub window_resize: Option<crate::WindowEdge>,
     pub press_scale: Option<f32>,
+    pub press_offset: Option<[f32; 2]>,
     /// Debug builds: where the app set the handlers the commit warnings name.
     #[cfg(debug_assertions)]
     pub sites: HandlerSites,
@@ -67,6 +87,7 @@ pub(crate) struct HandlerSites {
     pub hover: Site,
     pub hover_change: Site,
     pub pointer_move: Site,
+    pub pointer_lock: Site,
     pub layout: Site,
     pub drawn_layout: Site,
     pub visible_rows: Site,
@@ -80,19 +101,21 @@ impl Handlers {
             || self.on_hover.is_some()
             || self.on_drag.is_some()
             || self.drag_out.is_some()
+            || self.pointer_lock.is_some()
     }
 
     #[inline]
     pub(crate) fn takes_hit(&self) -> bool {
         self.on_pointer_move.is_some()
+            || self.pointer_lock.is_some()
             || self.on_press.is_some()
             || self.on_double_press.is_some()
             || self.on_secondary_press.is_some()
+            || self.on_middle_press.is_some()
             || self.on_hover.is_some()
             || self.on_hover_change.is_some()
             || self.on_drag.is_some()
             || self.drag_out.is_some()
-            || self.window_resize.is_some()
             || self.modal.is_some()
             || self.gestures.as_ref().is_some_and(|g| g.takes_gestures())
     }
@@ -100,6 +123,7 @@ impl Handlers {
 
 impl Empty for Handlers {
     const EMPTY: &'static Self = &Handlers {
+        on_a11y_action: None,
         on_paste: None,
         on_window_focus: None,
         on_spellcheck: None,
@@ -108,14 +132,23 @@ impl Empty for Handlers {
         on_press: None,
         on_double_press: None,
         on_secondary_press: None,
+        on_middle_press: None,
+        on_any_press: None,
         on_hover: None,
         on_hover_change: None,
+        on_focus_change: None,
+        on_focus_within_change: None,
         hover_delay: [0.0; 2],
+        hover_tracks_bounds: false,
         on_pointer_move: None,
+        pointer_lock: None,
         gestures: None,
         on_drag: None,
         drag_out: None,
         drag_threshold: None,
+        touch_at_once: false,
+        edge_drag: None,
+        press_on_down: false,
         on_drag_start: None,
         on_drag_end: None,
         drop: None,
@@ -126,14 +159,15 @@ impl Empty for Handlers {
         on_screen_layout: None,
         on_drawn_layout: None,
         on_visible: None,
+        on_mount: None,
         drawn_rect: None,
         on_scroll_offset: None,
         selection_copy: None,
         on_selection_change: None,
         cursor: None,
-        window_resize: None,
         press_scale: None,
+        press_offset: None,
         #[cfg(debug_assertions)]
-        sites: HandlerSites { hover: None, hover_change: None, pointer_move: None, layout: None, drawn_layout: None, visible_rows: None },
+        sites: HandlerSites { hover: None, hover_change: None, pointer_move: None, pointer_lock: None, layout: None, drawn_layout: None, visible_rows: None },
     };
 }

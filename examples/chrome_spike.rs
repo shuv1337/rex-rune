@@ -1,7 +1,7 @@
 //! Spike: a borderless Rune window's own minimize / maximize / close, edge resize, drag and
-//! window menu, through the vendored Rune additions. `--auto` drives maximize, restore and
+//! window menu. `--auto` drives maximize, restore and
 //! minimize from a timer and logs what the window reports, for compositors without input.
-use rune::{AppSpec, Cursor, Cx, El, Tx, WindowEdge, col, el, row, text};
+use rune::{AppSpec, Cx, El, ResizeEdge, Tx, col, el, row, text};
 use std::time::Duration;
 
 fn c(hex: &str) -> rune::Color {
@@ -37,7 +37,7 @@ fn button(key: &'static str, label: String, f: impl Fn(&mut Spike, &mut Tx) + 's
 #[allow(clippy::too_many_arguments)]
 fn edge(
     key: &'static str,
-    e: WindowEdge,
+    e: ResizeEdge,
     l: Option<f32>,
     t: Option<f32>,
     r: Option<f32>,
@@ -45,11 +45,7 @@ fn edge(
     w: Option<f32>,
     h: Option<f32>,
 ) -> El {
-    let mut x = el()
-        .key(key)
-        .pin(l, t, r, b)
-        .window_resize(e)
-        .cursor(Cursor::ResizeEdge(e));
+    let mut x = el().key(key).pin(l, t, r, b).window_resize(e);
     if let Some(w) = w {
         x = x.w(w);
     }
@@ -60,36 +56,30 @@ fn edge(
 }
 
 fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
-    let maximized = cx.window_maximized();
-    let bar = row()
-        .key("bar")
-        .h(44.0)
-        .w_full()
-        .px(8.0)
-        .gap(8.0)
-        .center_y()
-        .fill(c("#091827"))
-        .child(
-            el().key("drag")
-                .grow(1.0)
-                .h_full()
-                .window_drag()
-                .on_secondary_press(|_: &mut Spike, p, tx| tx.show_window_menu(p.x, p.y))
-                .child(
-                    text("drag · double-click maximizes · right-click menu").color(c("#a0b2c3")),
-                ),
-        )
-        .child(button("min", "Minimize".into(), |_, tx| tx.minimize()))
-        .child(button(
-            "max",
-            if maximized {
-                "Restore".into()
-            } else {
-                "Maximize".into()
-            },
-            |_, tx| tx.toggle_maximized(),
-        ))
-        .child(button("close", "Close".into(), |_, tx| tx.close_window()));
+    let maximized = cx.is_maximized();
+    let bar =
+        row()
+            .key("bar")
+            .h(44.0)
+            .w_full()
+            .px(8.0)
+            .gap(8.0)
+            .center_y()
+            .fill(c("#091827"))
+            .child(el().key("drag").grow(1.0).h_full().window_drag().child(
+                text("drag · double-click maximizes · right-click menu").color(c("#a0b2c3")),
+            ))
+            .child(button("min", "Minimize".into(), |_, tx| tx.minimize()))
+            .child(button(
+                "max",
+                if maximized {
+                    "Restore".into()
+                } else {
+                    "Maximize".into()
+                },
+                |_, tx| tx.toggle_maximized(),
+            ))
+            .child(button("close", "Close".into(), |_, tx| tx.close_window()));
     let body = col()
         .key("body")
         .grow(1.0)
@@ -119,7 +109,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         .child(body)
         .child(edge(
             "n",
-            WindowEdge::North,
+            ResizeEdge::North,
             Some(b),
             Some(0.0),
             Some(b),
@@ -129,7 +119,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         ))
         .child(edge(
             "s",
-            WindowEdge::South,
+            ResizeEdge::South,
             Some(b),
             None,
             Some(b),
@@ -139,7 +129,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         ))
         .child(edge(
             "w",
-            WindowEdge::West,
+            ResizeEdge::West,
             Some(0.0),
             Some(b),
             None,
@@ -149,7 +139,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         ))
         .child(edge(
             "e",
-            WindowEdge::East,
+            ResizeEdge::East,
             None,
             Some(b),
             Some(0.0),
@@ -159,7 +149,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         ))
         .child(edge(
             "nw",
-            WindowEdge::NorthWest,
+            ResizeEdge::NorthWest,
             Some(0.0),
             Some(0.0),
             None,
@@ -169,7 +159,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         ))
         .child(edge(
             "ne",
-            WindowEdge::NorthEast,
+            ResizeEdge::NorthEast,
             None,
             Some(0.0),
             Some(0.0),
@@ -179,7 +169,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         ))
         .child(edge(
             "sw",
-            WindowEdge::SouthWest,
+            ResizeEdge::SouthWest,
             Some(0.0),
             None,
             None,
@@ -189,7 +179,7 @@ fn view(s: &Spike, cx: &mut Cx<Spike>) -> El {
         ))
         .child(edge(
             "se",
-            WindowEdge::SouthEast,
+            ResizeEdge::SouthEast,
             None,
             None,
             Some(0.0),

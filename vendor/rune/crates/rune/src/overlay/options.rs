@@ -50,6 +50,10 @@ pub enum DisplayTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OverlayPlacement {
+    /// Anchored to `edge` (`margin` points inward) and aligned along it (`inset` points from
+    /// start or end). On Windows, all four sides measure from [`crate::Display::work_area`]
+    /// (excluding the taskbar and docked app bars), matching `OverlaySpec`'s default edge
+    /// placement; other platforms measure from the full display bounds.
     Edge { edge: ScreenEdge, margin: f32, align: Align, inset: f32 },
     /// Points from the selected display's top-left, not desktop pixels. The rect isn't kept
     /// on that display, so on [`DisplayTarget::Primary`] it's a global rect that may sit on
@@ -58,6 +62,7 @@ pub enum OverlayPlacement {
     /// scale, and the overlay draws at the backing scale of the display it lands on.
     /// Elsewhere a rect off the primary display is exact only where displays share a scale.
     Rect { x: f32, y: f32, width: f32, height: f32 },
+    /// Covers the entire selected display (including taskbar/menu-bar areas).
     FullScreen,
 }
 
@@ -70,12 +75,35 @@ pub enum OverlayLevel {
     AboveOverlays,
 }
 
+/// Whether an overlay may take keyboard focus. `OverlayCapabilities::nonactivating_keys` says
+/// whether the backend it got can.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeyPolicy {
+    /// Never takes keys; a click neither focuses nor activates it.
     #[default]
     None,
-    /// Permit `OverlayHandle::request_keys`; showing alone never requests focus.
+    /// Permit `OverlayHandle::request_keys`, and a click on the overlay takes the keys too;
+    /// showing alone never requests focus. macOS: the panel becomes key without activating the
+    /// app. Wayland: layer-shell v4's on-demand keyboard interactivity; XWayland can't. X11: the
+    /// override-redirect window sets the input focus itself; when it hides, focus reverts to the
+    /// root window for the window manager to hand on. Windows: the window is made without
+    /// `WS_EX_NOACTIVATE`, and `request_keys` takes the foreground only when Windows lets this
+    /// process (it just had the user's input, or was given the right); a click always does.
     OnDemand,
+    /// As `OnDemand`, except on Wayland layer-shell: `request_keys` sets exclusive keyboard
+    /// interactivity, so the overlay keeps the keys wherever the pointer goes until
+    /// `OverlayHandle::release_keys` or a hide. Works on every layer-shell version. While it
+    /// holds them no other surface gets keys, so release them as soon as input ends. There is
+    /// no safety net yet: if the app's event loop hangs while it holds them, the whole desktop
+    /// stays without a keyboard until the process exits or is killed. Other hosts treat it as
+    /// `OnDemand`.
+    Exclusive,
+}
+
+impl KeyPolicy {
+    /// Whether an overlay with this policy may take keyboard focus (`OnDemand` or `Exclusive`).
+    #[inline]
+    pub fn takes_keys(self) -> bool { !matches!(self, KeyPolicy::None) }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -91,6 +119,8 @@ pub enum OverlayInput {
     All,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 impl OverlayInput {
     pub(crate) fn resolved(self, interactive: bool) -> Self {
         match self { Self::Legacy => if interactive { Self::All } else { Self::None }, other => other }
@@ -140,13 +170,14 @@ pub struct ConfiguredOverlay<T: 'static> {
     pub options: OverlayOptions,
     pub on_key: Option<fn(&mut T, &crate::KeyEvent, &mut crate::Tx) -> bool>,
     pub on_created: Option<Box<dyn FnMut(OverlayCreated)>>,
+    pub(crate) on_availability: Option<fn(&mut T, crate::Availability, &mut crate::Tx)>,
     pub(crate) poll: Option<fn(&mut T, f64, &mut crate::Tx) -> bool>,
-    pub(crate) on_focus: Option<fn(&mut T, bool, &mut crate::Tx)>,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<T>>>,
     pub(crate) setup: Option<fn(&mut T, crate::Waker)>,
-    pub(crate) srgb_blend: bool,
+    pub(crate) runtime: crate::app::RuntimeConfig<T>,
+    pub(crate) font_smoothing: Option<crate::FontSmoothing>,
     pub(crate) macos_level: Option<isize>,
-    pub(crate) modifier_keys: bool,
+    pub(crate) macos_color_space: crate::MacColorSpace,
     pub(crate) animate_reveal: bool,
     pub(crate) release_after: Option<std::time::Duration>,
 }
@@ -159,12 +190,64 @@ pub struct OverlayCreated {
 }
 
 impl<T: 'static> ConfiguredOverlay<T> {
-    pub fn on_focus(mut self, f: fn(&mut T, bool, &mut crate::Tx)) -> Self { self.on_focus = Some(f); self }
+    pub fn on_focus(mut self, f: fn(&mut T, bool, &mut crate::Tx)) -> Self { self.runtime.on_focus = Some(f); self }
+    /// Fallback handler for text-field menus when native pop-ups are unavailable, like
+    /// [`App::on_field_menu`](crate::App::on_field_menu).
+    ///
+    /// ```no_run
+    /// use rune::{FieldMenuRequest, OverlayOptions, OverlaySpec, Tx, el};
+    ///
+    /// let _overlay = OverlaySpec::new("quick", (320.0, 200.0), |_: &(), _| el())
+    ///     .options(OverlayOptions::default())
+    ///     .on_field_menu(|_: &mut (), _req: FieldMenuRequest, _tx: &mut Tx| {});
+    /// ```
+    pub fn on_field_menu(mut self, f: fn(&mut T, crate::FieldMenuRequest, &mut crate::Tx)) -> Self {
+        self.runtime.on_field_menu = Some(f);
+        self
+    }
     /// Composite this overlay's translucent fills, blurs, shadows, images, video and text in
     /// sRGB (gamma) space instead of linear light, matching CSS and Core Animation (on by
     /// default). With a `Compositor`, `Frame::srgb_blend` says which encoding its passes must
     /// match.
-    pub fn srgb_blend(mut self, enabled: bool) -> Self { self.srgb_blend = enabled; self }
+    pub fn srgb_blend(mut self, enabled: bool) -> Self { self.runtime.srgb_blend = enabled; self }
+    /// Maximum number of native `El::system_material` views this overlay may host at once
+    /// (default [`crate::MAX_NATIVE_MATERIALS`], clamped to 64), like
+    /// [`App::max_native_materials`](crate::App::max_native_materials).
+    ///
+    /// ```no_run
+    /// use rune::{OverlayOptions, OverlaySpec, el};
+    ///
+    /// let overlay = OverlaySpec::new("notifications", (360.0, 520.0), |_: &(), _| el())
+    ///     .options(OverlayOptions::default())
+    ///     .max_native_materials(8);
+    /// ```
+    pub fn max_native_materials(mut self, max: usize) -> Self {
+        self.runtime.max_native_materials = crate::system_material::clamp_max_native_materials(max);
+        self
+    }
+    /// Cap the wake rate (Hz) used when `El::reveal` word fades are the only active animation in
+    /// this overlay (`0.0`, default = full display rate; positive finite values clamp to at least
+    /// `1.0` Hz, non-positive or non-finite values normalize to `0.0`), like
+    /// [`App::reveal_fps`](crate::App::reveal_fps).
+    ///
+    /// `30.0` Hz is recommended because it divides both 60 Hz and 120 Hz displays cleanly without
+    /// beat judder (Apple WWDC21 Session 10147), though any positive rate is accepted.
+    ///
+    /// ```no_run
+    /// use rune::{OverlayOptions, OverlaySpec, el};
+    ///
+    /// let _overlay = OverlaySpec::new("stream", (360.0, 220.0), |_: &(), _| el())
+    ///     .options(OverlayOptions::default())
+    ///     .reveal_fps(30.0);
+    /// ```
+    pub fn reveal_fps(mut self, fps: f32) -> Self {
+        self.runtime.reveal_fps = crate::app::RuntimeConfig::<T>::normalize_reveal_fps(fps);
+        self
+    }
+    /// How this overlay rasterises and places glyphs (see [`crate::FontSmoothing`]).
+    /// Defaults to the app's `App::font_smoothing`; `Tx::set_font_smoothing` switches it
+    /// while running.
+    pub fn font_smoothing(mut self, mode: crate::FontSmoothing) -> Self { self.font_smoothing = Some(mode); self }
     /// Called before each frame; true means state changed, not that another frame is due.
     /// Defaults to the app's poll when its state type matches this overlay's. Other state
     /// types have no inherited poll. Use `Tx::wake_after` for the next timed update;
@@ -180,7 +263,19 @@ impl<T: 'static> ConfiguredOverlay<T> {
     pub fn on_key(mut self, f: fn(&mut T, &crate::KeyEvent, &mut crate::Tx) -> bool) -> Self { self.on_key = Some(f); self }
     /// Like `App::modifier_keys`: send modifier keys pressed and released on their own
     /// (`Key::Modifier`) to `on_key` and the focused input. Off by default.
-    pub fn modifier_keys(mut self) -> Self { self.modifier_keys = true; self }
+    pub fn modifier_keys(mut self) -> Self { self.runtime.modifier_keys = true; self }
+    /// Like [`App::media_keys`](crate::App::media_keys): opt into hardware media transport
+    /// keys ([`Key::Media`](crate::Key::Media)) for this overlay. Off by default.
+    ///
+    /// ```no_run
+    /// use rune::{OverlayOptions, OverlaySpec, el};
+    ///
+    /// let overlay = OverlaySpec::new("mini-player", (240.0, 64.0), |_: &(), _| el())
+    ///     .options(OverlayOptions::default())
+    ///     .media_keys();
+    /// let _ = overlay;
+    /// ```
+    pub fn media_keys(mut self) -> Self { self.runtime.media_keys = true; self }
     /// Like `AppSpec::setup`: called once with a waker other threads use when new data arrives
     /// (an `ImageCache` decode, a channel). It runs on the event thread when the event loop
     /// starts, before the overlay's first frame and before updates queued through its handle.
@@ -192,6 +287,30 @@ impl<T: 'static> ConfiguredOverlay<T> {
     /// `release_gpu_when_hidden`), so a window number in a capture filter stays current.
     /// Use `prewarm: true` to create at startup rather than waiting for `show()`.
     pub fn on_created(mut self, f: impl FnMut(OverlayCreated) + 'static) -> Self { self.on_created = Some(Box::new(f)); self }
+    /// Called on the event thread whenever this overlay's [`Availability`](crate::Availability)
+    /// changes (for example `Unknown` to `Available` once created, `Available` to `Unavailable`
+    /// when a surface fails or a Wayland compositor closes it, or `Unavailable` to `Available`
+    /// when a later show succeeds).
+    ///
+    /// Repeated transitions to the same [`Availability`](crate::Availability) are ignored, and
+    /// dropping the overlay does not invoke `f`. Inside `f`, [`OverlayHandle::availability`](crate::OverlayHandle::availability)
+    /// and [`OverlayHandle::failure`](crate::OverlayHandle::failure) already report the new state.
+    ///
+    /// ```no_run
+    /// use rune::{Availability, OverlayOptions, OverlaySpec, el};
+    ///
+    /// let overlay = OverlaySpec::new("status", (240.0, 44.0), |_: &(), _| el())
+    ///     .options(OverlayOptions::default())
+    ///     .on_availability(|_, availability, _tx| {
+    ///         if availability == Availability::Unavailable {
+    ///             // React to surface loss without a polling timer.
+    ///         }
+    ///     });
+    /// ```
+    pub fn on_availability(mut self, f: fn(&mut T, crate::Availability, &mut crate::Tx)) -> Self {
+        self.on_availability = Some(f);
+        self
+    }
     /// Showing doesn't settle motion: what the state started while hidden plays from the
     /// first visible frame, such as a notification stack's first card entering. By default
     /// an unretained overlay shows settled, at its target.
@@ -220,6 +339,27 @@ impl<T: 'static> ConfiguredOverlay<T> {
     /// `OverlayOptions::level`; `OverlayHandle::set_macos_level` changes it later. At any
     /// level a macOS overlay goes exactly where it's placed, over the menu bar too.
     pub fn macos_level(mut self, level: isize) -> Self { self.macos_level = Some(level); self }
+    /// Sets how macOS colour-manages this overlay panel (`NSWindow.colorSpace` and its
+    /// `CAMetalLayer.colorspace`), like [`MacWindowOptions::color_space`](crate::MacWindowOptions::color_space).
+    ///
+    /// Defaults to [`MacColorSpace::Srgb`](crate::MacColorSpace::Srgb) so both the native Metal
+    /// backend and the wgpu backend show sRGB colours as sRGB on wide-gamut displays. Pass
+    /// [`MacColorSpace::Unmanaged`](crate::MacColorSpace::Unmanaged) to leave
+    /// `NSWindow.colorSpace` unset (`nil`) and clear `CAMetalLayer.colorspace` so framebuffer
+    /// values reach the display unmodified. Retained across hide/recreate and ignored on other
+    /// platforms.
+    ///
+    /// ```no_run
+    /// use rune::{MacColorSpace, OverlayOptions, OverlaySpec, el};
+    ///
+    /// let _overlay = OverlaySpec::new("raw", (240.0, 80.0), |_: &(), _| el())
+    ///     .options(OverlayOptions::default())
+    ///     .macos_color_space(MacColorSpace::Unmanaged);
+    /// ```
+    pub fn macos_color_space(mut self, color_space: crate::MacColorSpace) -> Self {
+        self.macos_color_space = color_space;
+        self
+    }
 }
 
 impl<T: 'static> OverlaySpec<T> {
@@ -228,7 +368,11 @@ impl<T: 'static> OverlaySpec<T> {
     }
 
     pub fn options(self, options: OverlayOptions) -> ConfiguredOverlay<T> {
-        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None, srgb_blend: true, macos_level: None, modifier_keys: false, animate_reveal: false, release_after: None }
+        ConfiguredOverlay {
+            spec: self, options, on_key: None, on_created: None, on_availability: None, poll: None, compositor: None,
+            setup: None, runtime: crate::app::RuntimeConfig::default(), font_smoothing: None, macos_level: None,
+            macos_color_space: crate::MacColorSpace::Srgb, animate_reveal: false, release_after: None,
+        }
     }
 }
 
@@ -248,11 +392,33 @@ pub enum OverlaySupport {
     Failed,
 }
 
+/// What the overlay's backend can do. `Unsupported` in `placement`, `always_on_top` or
+/// `click_through` marks a degraded backing, such as the plain Wayland toplevel an overlay
+/// falls back to without layer-shell or XWayland (GNOME), so an app can adapt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OverlayCapabilities {
     pub capture_exclusion: OverlaySupport,
     pub nonactivating_keys: OverlaySupport,
     pub global_pointer: OverlaySupport,
+    /// The overlay goes where its edge, rect or display target says. A Wayland toplevel can't
+    /// position itself: the compositor places it.
+    pub placement: OverlaySupport,
+    /// The overlay stays above other windows. A Wayland toplevel stacks like any window.
+    pub always_on_top: OverlaySupport,
+    /// Clicks outside `OverlayInput::Regions` hit regions reach what's under the overlay. A
+    /// Wayland toplevel takes no input at all under `OverlayInput::None`, but under `Regions`
+    /// its whole surface takes clicks.
+    pub click_through: OverlaySupport,
+}
+
+impl OverlayCapabilities {
+    /// A backend that places, stacks and passes clicks through as asked (every one but the
+    /// Wayland toplevel fallback), with what else it reports.
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", target_os = "android"), allow(dead_code))]
+    pub(crate) const fn placed(capture_exclusion: OverlaySupport, nonactivating_keys: OverlaySupport, global_pointer: OverlaySupport) -> Self {
+        let s = OverlaySupport::Supported;
+        OverlayCapabilities { capture_exclusion, nonactivating_keys, global_pointer, placement: s, always_on_top: s, click_through: s }
+    }
 }
 
 /// Bounds in logical points, local to a display. Also shared by native placement tests.

@@ -16,48 +16,9 @@
 //! right-to-left direction: layout reads one small enum per element.
 use super::*;
 
-/// Which way an element and what it holds run, as HTML's `dir` attribute.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Direction {
-    /// Left to right. Inside a right-to-left subtree it's an island that keeps its own order,
-    /// as `dir="ltr"` on a path, a command or code.
-    #[default]
-    Ltr,
-    /// Right to left: Arabic, Hebrew, Persian, Urdu.
-    Rtl,
-    /// From the first strong character of the element's text (or, on a container, of the text
-    /// inside it, skipping subtrees that set their own direction), as `dir="auto"` and `<bdi>`
-    /// resolve it: right to left when that's Arabic or Hebrew, else left to right, and left to
-    /// right when there's none. An empty text field takes its placeholder's. For user strings
-    /// such as titles, names, messages and a prompt.
-    Auto,
-}
-
-impl Direction {
-    /// The direction of `text` as [`Direction::Auto`] resolves it: its first strong character's,
-    /// outside isolates (UAX #9 rules P2 and P3), or `None` when it has none.
-    pub fn of(text: &str) -> Option<Direction> {
-        use icu_properties::{CodePointMapData, props::BidiClass};
-        let classes = CodePointMapData::<BidiClass>::new();
-        let mut isolates = 0u32;
-        for c in text.chars() {
-            match classes.get(c) {
-                BidiClass::LeftToRightIsolate | BidiClass::RightToLeftIsolate | BidiClass::FirstStrongIsolate => isolates += 1,
-                BidiClass::PopDirectionalIsolate => isolates = isolates.saturating_sub(1),
-                BidiClass::ParagraphSeparator if isolates == 0 => return None,
-                BidiClass::LeftToRight if isolates == 0 => return Some(Direction::Ltr),
-                BidiClass::RightToLeft | BidiClass::ArabicLetter if isolates == 0 => return Some(Direction::Rtl),
-                _ => {}
-            }
-        }
-        None
-    }
-
-    /// Whether this is [`Direction::Rtl`].
-    pub fn is_rtl(self) -> bool {
-        self == Direction::Rtl
-    }
-}
+pub use rune_text::Direction;
+pub(crate) use rune_text::Flow;
+use rune_text::first_strong_char;
 
 impl El {
     /// Lays this element and its subtree out in `dir` (see [`Direction`]): `Rtl` mirrors rows,
@@ -92,30 +53,6 @@ impl El {
     }
 }
 
-/// The direction an element resolved to, which its subtree lays out in: what `El::dir` and its
-/// ancestors' give it, `Direction::Auto` settled by its text.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) enum Flow {
-    #[default]
-    Ltr,
-    Rtl,
-}
-
-impl Flow {
-    /// A laid-out paragraph's flow: its bidi base level.
-    pub(crate) fn of_layout<B: parley::Brush>(layout: &parley::Layout<B>) -> Flow {
-        if layout.is_rtl() { Flow::Rtl } else { Flow::Ltr }
-    }
-
-    /// The paragraph direction text in this flow lays out in.
-    pub(crate) fn base(self) -> parley::BaseDirection {
-        match self {
-            Flow::Ltr => parley::BaseDirection::Ltr,
-            Flow::Rtl => parley::BaseDirection::Rtl,
-        }
-    }
-}
-
 /// Where an element sits in its parent: where its parent's flow puts it, or where left-to-right
 /// layout does whatever the flow (`El::unmirrored`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -137,12 +74,16 @@ pub(crate) enum DirEvent<'a> {
     Inherit,
     /// `El::dir(Ltr)` or `El::dir(Rtl)`.
     Set(Flow),
-    /// `El::dir(Auto)`: its first strong character decides, left to right when none does.
+    /// `El::dir(Auto)`: its first strong character decides, its parent's flow when none does.
     Auto(&'a El),
 }
 
 impl<'a> DirEvent<'a> {
     pub(crate) fn of(el: &'a El) -> DirEvent<'a> {
+        // A field Ctrl+Shift set lays out that way, its padding and placeholder with it.
+        if let Some(flow) = el.cold.input.as_ref().and_then(|i| i.edit.forced_dir()) {
+            return DirEvent::Set(flow);
+        }
         match el.flags.dir() {
             None => DirEvent::Inherit,
             Some(Direction::Ltr) => DirEvent::Set(Flow::Ltr),
@@ -168,7 +109,13 @@ pub(crate) fn step(parent: Flow, event: DirEvent<'_>) -> (Flow, DirEffect) {
     let flow = match event {
         DirEvent::Inherit => parent,
         DirEvent::Set(flow) => flow,
-        DirEvent::Auto(el) => if first_strong(el) == Some(Direction::Rtl) { Flow::Rtl } else { Flow::Ltr },
+        // With no strong character (empty, digits, a path alone) it reads the way its parent
+        // does: an empty field in an Arabic window starts at the right.
+        DirEvent::Auto(el) => match first_strong(el) {
+            Some(Direction::Rtl) => Flow::Rtl,
+            Some(_) => Flow::Ltr,
+            None => parent,
+        },
     };
     let effect = match flow {
         Flow::Ltr => DirEffect::Keep,
@@ -180,6 +127,21 @@ pub(crate) fn step(parent: Flow, event: DirEvent<'_>) -> (Flow, DirEffect) {
 /// The first strong direction in `el`'s text, then its children's in order, skipping children
 /// that set their own direction.
 fn first_strong(el: &El) -> Option<Direction> {
+    // A by-paragraph field reads as a `contenteditable` with `dir="auto"`: its text across its
+    // lines, each mention pill (a `dir="auto"` span) skipped, and none while it's empty (its
+    // placeholder is another element).
+    if let (Some(t), Some(_)) = (&el.text, el.cold.input.as_ref())
+        && matches!(t.dir, TextDir::Plaintext(_))
+    {
+        let mut at = 0;
+        for p in t.cold.pills.iter().map(|p| (p.start as usize, p.end as usize)).chain([(t.content.len(), t.content.len())]) {
+            if let Some(d) = t.content.get(at..p.0).and_then(|s| first_strong_char(s, true)) {
+                return Some(d);
+            }
+            at = at.max(p.1);
+        }
+        return None;
+    }
     if let Some(t) = &el.text
         && let Some(d) = Direction::of(&t.content)
     {
@@ -231,14 +193,19 @@ pub(crate) fn mirror_visual(vis: &mut Visual) {
         cold.clip_corners = Some([tr, tl, bl, br]);
     }
 }
+/// Mirrors `Side::Left` and `Side::Right` in right-to-left layout.
+pub(crate) fn mirror_side(s: Side) -> Side {
+    match s {
+        Side::Left => Side::Right,
+        Side::Right => Side::Left,
+        other => other,
+    }
+}
+
 /// An anchored overlay's placement as a right-to-left element means it: `Left` and `Right`
 /// swap, and along a `Top` or `Bottom` side so do `Start` and `End`.
 pub(crate) fn mirror_anchor(a: &mut Anchor) {
-    a.side = match a.side {
-        Side::Left => Side::Right,
-        Side::Right => Side::Left,
-        s => s,
-    };
+    a.side = mirror_side(a.side);
     if matches!(a.side, Side::Top | Side::Bottom) {
         a.align = match a.align {
             Align::Start => Align::End,

@@ -91,21 +91,7 @@ fn shift_enter_keeps_shift_for_the_encoder() {
 }
 
 #[test]
-fn dead_key_waits_for_the_composed_text() {
-    let dead = KeyEvent {
-        key: Key::Dead(Some('~')),
-        mods: Mods::default(),
-    };
-    let first = payload(&dead, Some(C::Backquote), None, Action::Press).unwrap();
-    assert_eq!(
-        (
-            first["key"].as_str(),
-            first["text"].as_str(),
-            first["composing"].as_bool()
-        ),
-        (Some("backquote"), Some(""), Some(true))
-    );
-
+fn composed_space_keeps_the_accent_and_physical_position() {
     let completed = KeyEvent {
         key: Key::Text("~".into()),
         mods: Mods::default(),
@@ -394,21 +380,6 @@ fn modified_keys_keep_their_modifiers_in_the_payload() {
 
 #[test]
 fn shifted_dead_key_composition_consumes_shift_for_the_composed_text() {
-    let dead = payload(
-        &ev(Key::Dead(Some('¨')), NONE),
-        Some(C::BracketRight),
-        None,
-        Action::Press,
-    )
-    .unwrap();
-    assert_eq!(
-        (
-            fields(&dead).2,
-            fields(&dead).3,
-            dead["composing"].as_bool()
-        ),
-        ("", "", Some(true))
-    );
     let composed = payload(
         &ev(text("Ä"), SHIFT),
         Some(C::KeyA),

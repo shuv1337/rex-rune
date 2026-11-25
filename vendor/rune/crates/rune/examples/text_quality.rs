@@ -1,7 +1,7 @@
 //! Headless S5 raster oracle. Export the exact shaped glyph IDs/positions for CoreText.
 use parley::PositionedLayoutItem;
 use rune::color::hex;
-use rune::render::{Gpu, Instance, NO_CLIP, OFFSCREEN_FORMAT, Offscreen, Renderer, write_png};
+use rune::render::{Gpu, Instance, NO_CLIP, OFFSCREEN_FORMAT_LINEAR, Offscreen, Renderer, write_png};
 use rune::text::{ATLAS_SIZE, TextSystem};
 use rune::{Family, TextStyle};
 use serde_json::json;
@@ -19,6 +19,7 @@ fn experimental(
     cursor: &mut [u32; 3],
     out: &mut Vec<rune::text::GlyphQuad>,
 ) {
+    atlas.data.resize((ATLAS_SIZE * ATLAS_SIZE) as usize, 0);
     use swash::scale::{Render, ScaleContext, Source};
     use swash::zeno::{Format, Vector};
     let mut cx = ScaleContext::new();
@@ -107,7 +108,8 @@ fn main() {
         .map(|hint| (hint.as_str(), args.get(5).unwrap().parse::<f32>().unwrap()));
     let data: &'static [u8] = Box::leak(std::fs::read(path).unwrap().into_boxed_slice());
     let gpu = Gpu::new(Gpu::instance(), None);
-    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT_LINEAR);
+    renderer.set_srgb_blend(false);
     let strings = [
         "Hamburgefontsiv 0123456789",
         "The quick brown fox jumps over the lazy dog.",
@@ -117,7 +119,7 @@ fn main() {
     ];
     for scale in [1.0f32, 2.0] {
         let (w, h) = ((800.0 * scale) as u32, (1100.0 * scale) as u32);
-        let target = Offscreen::new(&gpu.device, w, h);
+        let target = Offscreen::with_format(&gpu.device, w, h, OFFSCREEN_FORMAT_LINEAR);
         let mut text = TextSystem::new(&[data], (family, family));
         let mut quads = Vec::new();
         let mut rows = Vec::new();
@@ -133,8 +135,8 @@ fn main() {
                     tracking: 0.0,
                     ..TextStyle::new(size, 400.0)
                 };
-                if std::env::var("RUNE_TEXT_OPSZ").as_deref() == Ok("point") { style = style.optical_size(size); }
-                if std::env::var("RUNE_TEXT_OPSZ").as_deref() == Ok("legacy") { style = style.optical_sizing(rune::OpticalSize::FontDefault); }
+                if rune::env::var("RUNE_TEXT_OPSZ").as_deref() == Some("point") { style = style.optical_size(size); }
+                if rune::env::var("RUNE_TEXT_OPSZ").as_deref() == Some("legacy") { style = style.optical_sizing(rune::OpticalSize::FontDefault); }
                 let layout = text.layout_rich(string, &[], style, scale, None);
                 if let Some((hint, embolden)) = experiment {
                     experimental(
@@ -237,7 +239,7 @@ fn main() {
         write_png(&out.join(format!("coverage-{scale}x.png")), w, h, &raw).unwrap();
         // 64 phases per device pixel across two pixels; each row is a frame.
         let (sw, sh) = (320, 128 * 40);
-        let sweep = Offscreen::new(&gpu.device, sw, sh);
+        let sweep = Offscreen::with_format(&gpu.device, sw, sh, OFFSCREEN_FORMAT_LINEAR);
         let style = TextStyle {
             size: 13.0,
             weight: 400.0,

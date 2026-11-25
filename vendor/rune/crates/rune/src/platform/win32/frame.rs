@@ -5,9 +5,10 @@
 //! flyout, the window menu and its animations; only the title bar goes. `WM_NCCALCSIZE`
 //! hands the caption's band to the client area and keeps the side and bottom borders, which
 //! Windows 10 and 11 draw invisibly outside the window, as resize edges. The top resize edge
-//! is then a band inside the client area that `WM_NCHITTEST` reports as `HTTOP`. Windows 11
-//! draws the window's 1 px border over the client area; Windows 10 draws it only around
-//! non-client pixels, so there a restored window keeps a 1 px non-client row at the top.
+//! is then a band inside the client area that `WM_NCHITTEST` reports as `HTTOP`. The top
+//! inset stays zero on restored windows: Windows 11 draws its 1 px border over the client
+//! area, and on Windows 10 any positive top non-client inset makes DWM paint a full native
+//! title bar over the window.
 //!
 //! Rune draws the caption buttons as elements (`titlebar::caption`), and this procedure answers
 //! hit tests over them as `HTMINBUTTON`, `HTMAXBUTTON` and `HTCLOSE`. Windows 11 shows its snap
@@ -24,22 +25,24 @@
 //! (`WM_GETDPISCALEDSIZE`, which Windows' `WM_DPICHANGED` rect then follows) and
 //! `request_inner_size` are corrected here to the frame's borders.
 
-use std::cell::Cell;
+#![allow(unsafe_code)]
+
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, ScreenToClient};
-use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows_sys::Win32::UI::Shell::{ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETAUTOHIDEBAREX, APPBARDATA, DefSubclassProc, RemoveWindowSubclass, SHAppBarMessage, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::runtime::WindowMenu;
+use crate::runtime::{DragHit, WindowMenu, drag_hit_at};
 use crate::titlebar::{Caption, CaptionButton, CaptionState};
 
 const SUBCLASS: usize = 0x5255_4e46;
+const DRAG_SUBCLASS: usize = 0x5255_4e44;
 /// `WM_MOUSEMOVE`'s flag for the (logical) left button held.
 const MK_LBUTTON: WPARAM = 0x0001;
 
@@ -51,17 +54,28 @@ pub(crate) struct CustomFrame {
 struct State {
     /// The titlebar's height in points, which the caption buttons take.
     height: Cell<f32>,
+    /// Whether Rune draws and hit-tests the caption buttons (`Titlebar::controls`).
+    controls: Cell<bool>,
     caption: Cell<CaptionState>,
     /// Windows' rect for the new scale while `WM_DPICHANGED` runs: winit's own `SetWindowPos`
     /// lands on it (`WM_WINDOWPOSCHANGING`), so the window moves and resizes once.
     dpi_rect: Cell<Option<RECT>>,
+    /// Committed bare `.window_drag()` hit-test region (top-to-bottom, window points), updated on
+    /// layout commit so `WM_NCHITTEST` answers `HTCAPTION` for native touch and mouse dragging.
+    drag_hits: RefCell<Vec<DragHit>>,
 }
 
 impl CustomFrame {
     /// Takes the title bar off `window`, keeping its client size.
-    pub(crate) fn install(window: &winit::window::Window, height: f32) -> Option<Self> {
+    pub(crate) fn install(window: &winit::window::Window, height: f32, controls: bool) -> Option<Self> {
         let hwnd = super::hwnd(window)?;
-        let state = Rc::new(State { height: Cell::new(height), caption: Cell::new(CaptionState::Idle), dpi_rect: Cell::new(None) });
+        let state = Rc::new(State {
+            height: Cell::new(height),
+            controls: Cell::new(controls),
+            caption: Cell::new(CaptionState::Idle),
+            dpi_rect: Cell::new(None),
+            drag_hits: RefCell::new(Vec::new()),
+        });
         let data = Rc::into_raw(state.clone());
         // SAFETY: `data` stays alive until WM_NCDESTROY, where the subclass that reads it goes.
         if unsafe { SetWindowSubclass(hwnd, Some(subclass), SUBCLASS, data as usize) } == 0 {
@@ -87,13 +101,118 @@ impl CustomFrame {
     pub(crate) fn caption(&self, window: &winit::window::Window) -> Caption {
         match super::hwnd(window) {
             Some(hwnd) => self.state.caption(hwnd),
-            None => Caption::new(self.state.height.get()),
+            None => Caption { hidden: !self.state.controls.get(), ..Caption::new(self.state.height.get()) },
         }
     }
 
     /// A new titlebar height (`Cx::titlebar_height`): the buttons and the band they hit-test.
     pub(crate) fn set_height(&self, height: f32) {
         self.state.height.set(height);
+    }
+
+    /// Whether Rune draws and hit-tests the caption buttons (`Titlebar::controls`).
+    pub(crate) fn set_controls(&self, controls: bool) {
+        if self.state.controls.replace(controls) != controls && !controls {
+            self.state.caption.set(CaptionState::Idle);
+        }
+    }
+
+    /// Publishes the committed bare `.window_drag()` hit-test region (window points).
+    pub(crate) fn set_drag_hits(&self, hits: Vec<DragHit>) {
+        let mut slot = self.state.drag_hits.borrow_mut();
+        if *slot != hits { *slot = hits; }
+    }
+}
+
+/// Last layout-commit basis synced into Win32's `WM_NCHITTEST` drag-region list, so idle and
+/// non-committing frames do zero work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DragHitSync {
+    synced: bool,
+    commits: u64,
+    zoom_bits: u32,
+    fullscreen: bool,
+    animating: bool,
+}
+
+impl DragHitSync {
+    /// Returns true only when layout committed, zoom or fullscreen changed, or motion is active
+    /// (including the first settled frame after motion ends).
+    pub(crate) fn needs_update(&mut self, commits: u64, zoom: f32, fullscreen: bool, animating: bool) -> bool {
+        let zoom_bits = zoom.to_bits();
+        let due = !self.synced
+            || self.commits != commits
+            || self.zoom_bits != zoom_bits
+            || self.fullscreen != fullscreen
+            || self.animating
+            || animating;
+        if due {
+            *self = Self { synced: true, commits, zoom_bits, fullscreen, animating };
+        }
+        due
+    }
+}
+
+/// Lightweight `WM_NCHITTEST` subclass for windows without [`CustomFrame`] (such as borderless
+/// windows) that contain `.window_drag()` regions. Installed lazily on the first non-empty drag
+/// region and removed automatically on `WM_NCDESTROY`.
+pub(crate) struct DragRegions {
+    hits: Rc<RefCell<Vec<DragHit>>>,
+}
+
+impl DragRegions {
+    /// Installs the hit-test subclass on `window` with `hits`.
+    pub(crate) fn install(window: &winit::window::Window, hits: Vec<DragHit>) -> Option<Self> {
+        let hwnd = super::hwnd(window)?;
+        let hits = Rc::new(RefCell::new(hits));
+        let data = Rc::into_raw(hits.clone());
+        // SAFETY: `data` stays alive until `WM_NCDESTROY`, where the subclass that reads it goes.
+        if unsafe { SetWindowSubclass(hwnd, Some(drag_subclass), DRAG_SUBCLASS, data as usize) } == 0 {
+            // SAFETY: never handed to Windows.
+            drop(unsafe { Rc::from_raw(data) });
+            return None;
+        }
+        Some(Self { hits })
+    }
+
+    /// Updates the committed bare `.window_drag()` hit-test region (window points).
+    pub(crate) fn set(&self, hits: Vec<DragHit>) {
+        let mut slot = self.hits.borrow_mut();
+        if *slot != hits { *slot = hits; }
+    }
+}
+
+unsafe extern "system" fn drag_subclass(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, _: usize, data: usize) -> LRESULT {
+    let ptr = data as *const RefCell<Vec<DragHit>>;
+    if message == WM_NCDESTROY {
+        // SAFETY: removes this subclass; if it was still installed, reclaims the ref `install` gave it.
+        unsafe {
+            if RemoveWindowSubclass(hwnd, Some(drag_subclass), DRAG_SUBCLASS) != 0 {
+                drop(Rc::from_raw(ptr));
+            }
+            return DefSubclassProc(hwnd, message, wparam, lparam);
+        }
+    }
+    // SAFETY: `ptr` is the live `Rc<RefCell<Vec<DragHit>>>` owned by the subclass until `WM_NCDESTROY`.
+    let hits: Rc<RefCell<Vec<DragHit>>> = unsafe {
+        Rc::increment_strong_count(ptr);
+        Rc::from_raw(ptr)
+    };
+    // SAFETY: reads the message's documented parameters on a live window this thread owns.
+    unsafe {
+        match message {
+            WM_NCHITTEST => {
+                let hit = DefSubclassProc(hwnd, message, wparam, lparam);
+                if hit != HTCLIENT as LRESULT { return hit; }
+                let mut point = client_point(lparam);
+                ScreenToClient(hwnd, &mut point);
+                return drag_hit_code(GetDpiForWindow(hwnd), point, &hits.borrow()) as LRESULT;
+            }
+            // Borderless windows do not open a blocking system menu from `DefWindowProc`.
+            WM_NCRBUTTONUP if wparam == HTCAPTION as WPARAM => return 0,
+            _ => {}
+        }
+        DefSubclassProc(hwnd, message, wparam, lparam)
     }
 }
 
@@ -106,8 +225,8 @@ pub(crate) fn request_inner_size(window: &winit::window::Window, size: (f32, f32
     // SAFETY: Win32 calls on a live window this thread owns.
     unsafe {
         if IsZoomed(hwnd) != 0 { ShowWindow(hwnd, SW_RESTORE); }
-        let b = borders(hwnd, GetDpiForWindow(hwnd));
-        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, w + b.left + b.right, h + top_border(hwnd) + b.bottom, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        let (cx, cy) = outer_size(w, h, borders(hwnd, GetDpiForWindow(hwnd)));
+        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, cx, cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
     true
 }
@@ -136,10 +255,9 @@ pub(crate) fn window_menu(window: &winit::window::Window, menu: WindowMenu, at: 
     let point = ((y as u16 as u32) << 16 | x as u16 as u32) as usize;
     // SAFETY: Win32 calls on a live window this thread owns; the subclass keeps no pointer.
     unsafe {
-        if SetWindowSubclass(hwnd, Some(menu_procedure), id, point) == 0 { return track_window_menu(hwnd, x, y); }
+        if SetWindowSubclass(hwnd, Some(menu_procedure), id, point) == 0 { return; }
         if PostMessageW(hwnd, menu_message(), id, 0) == 0 {
             RemoveWindowSubclass(hwnd, Some(menu_procedure), id);
-            track_window_menu(hwnd, x, y);
         }
     }
 }
@@ -169,7 +287,8 @@ unsafe extern "system" fn menu_procedure(hwnd: HWND, message: u32, w: WPARAM, l:
         // SAFETY: removes this subclass, on the window it was set on.
         unsafe { RemoveWindowSubclass(hwnd, Some(menu_procedure), id) };
         if message != WM_NCDESTROY {
-            track_window_menu(hwnd, (point & 0xffff) as u16 as i16 as i32, (point >> 16 & 0xffff) as u16 as i16 as i32);
+            let (x, y) = ((point & 0xffff) as u16 as i16 as i32, (point >> 16 & 0xffff) as u16 as i16 as i32);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| track_window_menu(hwnd, x, y))).ok();
             return 0;
         }
     }
@@ -179,6 +298,9 @@ unsafe extern "system" fn menu_procedure(hwnd: HWND, message: u32, w: WPARAM, l:
 
 /// Shows the window menu at screen point (`x`, `y`) until it closes, and carries out the pick.
 fn track_window_menu(hwnd: HWND, x: i32, y: i32) {
+    let Some(_modal) = crate::popup_menu::enter_menu_loop() else { return };
+    // SAFETY: `IsWindow` safely validates whether `hwnd` still refers to a live window.
+    if unsafe { IsWindow(hwnd) == 0 } { return; }
     let _turns = crate::popup_menu::turns(hwnd);
     // SAFETY: Win32 calls on a live window this thread owns and its own system menu.
     unsafe {
@@ -195,7 +317,7 @@ fn track_window_menu(hwnd: HWND, x: i32, y: i32) {
         enable(SC_CLOSE, true);
         SetMenuDefaultItem(menu, SC_CLOSE, 0);
         let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | crate::popup_menu::layout(), x, y, 0, hwnd, std::ptr::null());
-        if picked != 0 { PostMessageW(hwnd, WM_SYSCOMMAND, picked as WPARAM, 0); }
+        if picked != 0 && IsWindow(hwnd) != 0 { PostMessageW(hwnd, WM_SYSCOMMAND, picked as WPARAM, 0); }
     }
 }
 
@@ -210,17 +332,26 @@ pub(super) fn installed(hwnd: HWND) -> bool {
 }
 
 unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, _: usize, data: usize) -> LRESULT {
-    // SAFETY: `data` is the live `State` until WM_NCDESTROY.
-    let state = unsafe { &*(data as *const State) };
+    let ptr = data as *const State;
     if message == WM_NCDESTROY {
         FRAMED.with(|f| f.borrow_mut().retain(|&h| h != hwnd as usize));
-        // SAFETY: removes this subclass, then releases the reference `install` gave it.
+        // SAFETY: removes this subclass; if it was still installed, reclaims the ref `install` gave it.
         unsafe {
-            RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS);
-            drop(Rc::from_raw(data as *const State));
+            if RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS) != 0 {
+                drop(Rc::from_raw(ptr));
+            }
             return DefSubclassProc(hwnd, message, wparam, lparam);
         }
     }
+    // Hold our own strong reference for the duration of this callback so a re-entrant
+    // `WM_NCDESTROY` during `DefSubclassProc` or a modal menu loop cannot free `State` while
+    // this stack frame still uses it.
+    // SAFETY: `ptr` is the live `Rc<State>` owned by the subclass until `WM_NCDESTROY`.
+    let state: Rc<State> = unsafe {
+        Rc::increment_strong_count(ptr);
+        Rc::from_raw(ptr)
+    };
+    let state: &State = &state;
     if !framed(hwnd) {
         // Full screen: no frame to adjust.
         // SAFETY: forwards to the next window procedure.
@@ -233,9 +364,14 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lpa
             WM_NCCALCSIZE if wparam != 0 => {
                 let params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
                 let outer = params.rgrc[0];
+                let old_client = params.rgrc[2];
                 DefSubclassProc(hwnd, message, wparam, lparam);
-                params.rgrc[0].top = outer.top + top_border(hwnd);
+                params.rgrc[0] = nccalcsize_restored(outer, params.rgrc[0]);
                 if IsZoomed(hwnd) != 0 { fit_maximized(hwnd, &outer, &mut params.rgrc[0]); }
+                if super::dpi_drag::wants_valid_rects(hwnd) {
+                    super::dpi_drag::apply_valid_rects(params, old_client);
+                    return WVR_VALIDRECTS as LRESULT;
+                }
                 return 0;
             }
             WM_NCHITTEST => {
@@ -246,7 +382,7 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lpa
             // The default procedure would paint the classic frame's background first.
             WM_ERASEBKGND => return 1,
             WM_NCMOUSEMOVE => {
-                let button = caption_button(wparam);
+                let button = own_caption_button(state, hwnd, wparam, lparam);
                 // A press keeps the mouse; a move here means it lost it (WM_CAPTURECHANGED).
                 if !matches!(state.caption.get(), CaptionState::Pressed { .. }) {
                     state.set(hwnd, button.map_or(CaptionState::Idle, CaptionState::Hovered));
@@ -271,7 +407,9 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lpa
                 return 0;
             }
             WM_MOUSEMOVE if matches!(state.caption.get(), CaptionState::Hovered(_)) => state.set(hwnd, CaptionState::Idle),
-            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if let Some(button) = caption_button(wparam) => {
+            // Only a press on a button Rune drew: a caption button the system reports anywhere
+            // else is the system's own, and its default procedure handles it.
+            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if let Some(button) = own_caption_button(state, hwnd, wparam, lparam) => {
                 state.set(hwnd, CaptionState::Pressed { button, over: true });
                 SetCapture(hwnd);
                 return 0;
@@ -282,10 +420,10 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lpa
             }
             WM_NCLBUTTONUP => {
                 if let CaptionState::Pressed { button, .. } = state.caption.get() {
-                    state.release(hwnd, button, caption_button(wparam) == Some(button));
+                    state.release(hwnd, button, own_caption_button(state, hwnd, wparam, lparam) == Some(button));
                     return 0;
                 }
-                if caption_button(wparam).is_some() { return 0; }
+                if own_caption_button(state, hwnd, wparam, lparam).is_some() { return 0; }
             }
             // Another window took the mouse, or a menu or drag loop cancelled the press.
             WM_CAPTURECHANGED | WM_CANCELMODE if matches!(state.caption.get(), CaptionState::Pressed { .. }) => {
@@ -299,7 +437,14 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lpa
                 if let Some((x, y)) = client_top_right(hwnd) { track_window_menu(hwnd, x, y); }
                 return 0;
             }
-            WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK if caption_button(wparam).is_some() => return 0,
+            WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK if own_caption_button(state, hwnd, wparam, lparam).is_some() => return 0,
+            // A right-click or touch long-press on `HTCAPTION` opens the window menu through
+            // `track_window_menu`, keeping Rune's event-loop turns and RTL layout active.
+            WM_NCRBUTTONUP if wparam == HTCAPTION as WPARAM => {
+                let p = client_point(lparam);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| track_window_menu(hwnd, p.x, p.y))).ok();
+                return 0;
+            }
             // The default would repaint a title bar this window doesn't have.
             WM_NCACTIVATE => return DefSubclassProc(hwnd, message, wparam, -1),
             WM_GETMINMAXINFO => {
@@ -307,19 +452,16 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lpa
                 let (min, max) = (info.ptMinTrackSize.y, info.ptMaxTrackSize.y);
                 let result = DefSubclassProc(hwnd, message, wparam, lparam);
                 // winit sized them for a title bar: take it back off what it set.
-                let top = borders(hwnd, GetDpiForWindow(hwnd)).top - top_border(hwnd);
-                if info.ptMinTrackSize.y != min { info.ptMinTrackSize.y = (info.ptMinTrackSize.y - top).max(1); }
-                if info.ptMaxTrackSize.y != max { info.ptMaxTrackSize.y = (info.ptMaxTrackSize.y - top).max(1); }
+                let standard = borders(hwnd, GetDpiForWindow(hwnd));
+                info.ptMinTrackSize.y = adjust_track_height(min, info.ptMinTrackSize.y, standard);
+                info.ptMaxTrackSize.y = adjust_track_height(max, info.ptMaxTrackSize.y, standard);
                 return result;
             }
             WM_GETDPISCALEDSIZE if IsZoomed(hwnd) == 0 => {
                 let dpi = wparam as u32;
                 let (w, h) = client_size(hwnd);
-                let ratio = f64::from(dpi) / f64::from(GetDpiForWindow(hwnd).max(1));
-                let b = borders(hwnd, dpi);
                 let out = &mut *(lparam as *mut SIZE);
-                out.cx = (f64::from(w) * ratio).round() as i32 + b.left + b.right;
-                out.cy = (f64::from(h) * ratio).round() as i32 + top_border(hwnd) + b.bottom;
+                *out = dpi_scaled_outer_size(w, h, GetDpiForWindow(hwnd), dpi, borders(hwnd, dpi));
                 return 1;
             }
             // winit sizes the window for a title bar; Windows' rect (from WM_GETDPISCALEDSIZE)
@@ -374,7 +516,8 @@ impl State {
             maximized: zoomed,
             minimizable: style & WS_MINIMIZEBOX != 0,
             maximizable: style & WS_MAXIMIZEBOX != 0,
-            hidden: !framed(hwnd),
+            hidden: !framed(hwnd) || !self.controls.get(),
+            mirrored: crate::labels::rtl(),
         }
     }
 }
@@ -405,34 +548,88 @@ fn client_point(lparam: LPARAM) -> POINT {
     POINT { x: lparam as i16 as i32, y: (lparam >> 16) as i16 as i32 }
 }
 
-/// What a point (screen pixels) in the client area hits: the top resize edge, an enabled
-/// caption button, or the client.
-fn hit_test(state: &State, hwnd: HWND, mut point: POINT) -> u32 {
+/// The window's place for a hit test: the point (screen pixels) in client pixels, and what
+/// the test reads of the window.
+struct HitWindow {
+    caption: Caption,
+    width: i32,
+    dpi: u32,
+    edge: i32,
+    zoomed: bool,
+    resizable: bool,
+    point: POINT,
+}
+
+fn hit_window(state: &State, hwnd: HWND, mut point: POINT) -> HitWindow {
     // SAFETY: Win32 calls on a live window this thread owns.
     let (dpi, zoomed, resizable) = unsafe {
         ScreenToClient(hwnd, &mut point);
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
         (GetDpiForWindow(hwnd), IsZoomed(hwnd) != 0, style & WS_THICKFRAME != 0)
     };
-    let edge = frame_thickness(dpi);
-    let client_width = client_size(hwnd).0;
-    if !zoomed && resizable && point.y >= 0 && point.y < edge {
-        return if point.x < edge { HTTOPLEFT } else if point.x >= client_width - edge { HTTOPRIGHT } else { HTTOP };
+    HitWindow { caption: state.caption(hwnd), width: client_size(hwnd).0, dpi, edge: frame_thickness(dpi), zoomed, resizable, point }
+}
+
+/// What a point (screen pixels) in the client area hits: the top resize edge, an enabled
+/// caption button, a bare `.window_drag()` region, or the client.
+fn hit_test(state: &State, hwnd: HWND, point: POINT) -> u32 {
+    client_hit(&hit_window(state, hwnd, point), &state.drag_hits.borrow())
+}
+
+fn client_hit(w: &HitWindow, drag_hits: &[DragHit]) -> u32 {
+    let p = w.point;
+    if !w.zoomed && w.resizable && p.y >= 0 && p.y < w.edge {
+        return if p.x < w.edge { HTTOPLEFT } else if p.x >= w.width - w.edge { HTTOPRIGHT } else { HTTOP };
     }
-    match caption_hit(state, hwnd, point) {
+    match button_at(&w.caption, w.width, w.dpi, p) {
         Some(CaptionButton::Minimize) => HTMINBUTTON,
         Some(CaptionButton::Maximize) => HTMAXBUTTON,
         Some(CaptionButton::Close) => HTCLOSE,
-        None => HTCLIENT,
+        None if in_caption_strip(&w.caption, w.width, w.dpi, p) => HTCLIENT,
+        None => drag_hit_code(w.dpi, p, drag_hits),
     }
+}
+
+/// `HTCAPTION` when client pixel `point` at `dpi` lands on a bare `.window_drag()` region in
+/// `drag_hits`, else `HTCLIENT`.
+fn drag_hit_code(dpi: u32, point: POINT, drag_hits: &[DragHit]) -> u32 {
+    if dpi == 0 || drag_hits.is_empty() { return HTCLIENT; }
+    let scale = dpi as f32 / 96.0;
+    if drag_hit_at(drag_hits, point.x as f32 / scale, point.y as f32 / scale) { HTCAPTION } else { HTCLIENT }
+}
+
+/// The drawn button a non-client mouse message (`hit`, at `lparam`'s screen point) is for: only
+/// when `hit_test` would answer that hit there. A caption button the system reports anywhere
+/// else, as over a native caption it draws, is not Rune's.
+fn own_caption_button(state: &State, hwnd: HWND, hit: WPARAM, lparam: LPARAM) -> Option<CaptionButton> {
+    caption_button(hit)?;
+    owned_button(&hit_window(state, hwnd, client_point(lparam)), hit)
+}
+
+fn owned_button(w: &HitWindow, hit: WPARAM) -> Option<CaptionButton> {
+    caption_button(hit).filter(|_| client_hit(w, &[]) == hit as u32)
+}
+
+fn button_at(caption: &Caption, width: i32, dpi: u32, point: POINT) -> Option<CaptionButton> {
+    if dpi == 0 { return None; }
+    let scale = dpi as f32 / 96.0;
+    caption.hit(width as f32 / scale, scale, (point.x as f32 / scale, point.y as f32 / scale))
+}
+
+/// Whether `point` (client pixels) falls inside any drawn caption button slot, enabled or dimmed.
+fn in_caption_strip(caption: &Caption, width: i32, dpi: u32, point: POINT) -> bool {
+    if dpi == 0 { return false; }
+    let scale = dpi as f32 / 96.0;
+    let (x, y) = (point.x as f32 / scale, point.y as f32 / scale);
+    caption.rects(width as f32 / scale, scale)
+        .any(|(_, [rx, ry, rw, rh])| x >= rx && x < rx + rw && y >= ry && y < ry + rh)
 }
 
 /// The enabled caption button under a point in client pixels.
 fn caption_hit(state: &State, hwnd: HWND, point: POINT) -> Option<CaptionButton> {
     // SAFETY: reads a live window's scale.
-    let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
-    let width = client_size(hwnd).0 as f32 / scale;
-    state.caption(hwnd).hit(width, scale, (point.x as f32 / scale, point.y as f32 / scale))
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    button_at(&state.caption(hwnd), client_size(hwnd).0, dpi, point)
 }
 
 /// The sizing border's thickness: the top resize edge, and how far a maximized window's top
@@ -442,30 +639,49 @@ fn frame_thickness(dpi: u32) -> i32 {
     unsafe { GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) }
 }
 
-/// The non-client pixels left at the top: Windows 10 draws a restored window's top border only
-/// over non-client pixels.
-fn top_border(hwnd: HWND) -> i32 {
-    // SAFETY: reads a live window's state.
-    i32::from(windows_10() && unsafe { IsZoomed(hwnd) } == 0)
+/// What a restored custom frame adds around its client area given the standard frame's
+/// `borders`: keeps the invisible side and bottom resize borders and leaves a 0 top inset,
+/// which Windows 10 requires so DWM does not paint a full native title bar.
+fn custom_borders(standard: RECT) -> RECT {
+    RECT { top: 0, ..standard }
 }
 
-/// Windows before 11 (build 22000). `RtlGetVersion` reports the real build, whatever the
-/// executable's manifest says.
-fn windows_10() -> bool {
-    static BEFORE_11: OnceLock<bool> = OnceLock::new();
-    *BEFORE_11.get_or_init(|| {
-        #[repr(C)]
-        struct Version { size: u32, major: u32, minor: u32, build: u32, platform: u32, service_pack: [u16; 128] }
-        let mut v = Version { size: size_of::<Version>() as u32, major: 0, minor: 0, build: 0, platform: 0, service_pack: [0; 128] };
-        let ntdll: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
-        // SAFETY: ntdll is loaded in every process; RtlGetVersion fills the OSVERSIONINFOW
-        // `Version` mirrors, whose size field says which struct it is.
-        unsafe {
-            let Some(get) = GetProcAddress(GetModuleHandleW(ntdll.as_ptr()), c"RtlGetVersion".as_ptr().cast()) else { return false };
-            let get: unsafe extern "system" fn(*mut Version) -> i32 = std::mem::transmute(get);
-            get(&mut v) == 0 && v.major == 10 && v.build < 22000
-        }
-    })
+/// Restored client rect for `WM_NCCALCSIZE`: keeps the side and bottom borders computed by the
+/// default procedure (`def_client`) and restores the top edge to `outer.top` (0 top inset).
+fn nccalcsize_restored(outer: RECT, def_client: RECT) -> RECT {
+    RECT { top: outer.top, ..def_client }
+}
+
+/// Outer window size `(width, height)` in pixels for a restored custom-framed window whose
+/// client area is `(w, h)` and whose standard frame adds `standard`.
+fn outer_size(w: i32, h: i32, standard: RECT) -> (i32, i32) {
+    let b = custom_borders(standard);
+    (w + b.left + b.right, h + b.top + b.bottom)
+}
+
+/// Outer window size for `WM_GETDPISCALEDSIZE` when scaling a restored client size `(w, h)`
+/// from `old_dpi` to `new_dpi`, with standard frame borders `new_standard` at `new_dpi`.
+fn dpi_scaled_outer_size(w: i32, h: i32, old_dpi: u32, new_dpi: u32, new_standard: RECT) -> SIZE {
+    let ratio = f64::from(new_dpi) / f64::from(old_dpi.max(1));
+    let (cx, cy) = outer_size((f64::from(w) * ratio).round() as i32, (f64::from(h) * ratio).round() as i32, new_standard);
+    SIZE { cx, cy }
+}
+
+/// Corrects a `WM_GETMINMAXINFO` track height that winit sized for a standard title bar
+/// (`after != before`) by subtracting the removed top frame height (`standard.top`).
+fn adjust_track_height(before: i32, after: i32, standard: RECT) -> i32 {
+    if after == before { return after; }
+    let removed = standard.top - custom_borders(standard).top;
+    (after - removed).max(1)
+}
+
+/// What the window's frame adds around its client area while it is restored, at `dpi`, each
+/// edge as a positive width: a custom frame keeps the standard frame's sides and bottom and
+/// leaves a 0 top inset so Windows 10 DWM does not paint a native title bar.
+pub(super) fn restored_borders(hwnd: HWND, dpi: u32) -> RECT {
+    let b = borders(hwnd, dpi);
+    if !installed(hwnd) || !framed(hwnd) { return b; }
+    custom_borders(b)
 }
 
 /// What a standard frame adds around the client area at `dpi`, each edge as a positive width.
@@ -515,3 +731,7 @@ fn client_size(hwnd: HWND) -> (i32, i32) {
     unsafe { GetClientRect(hwnd, &mut r); }
     (r.right - r.left, r.bottom - r.top)
 }
+
+#[cfg(test)]
+#[path = "frame_tests.rs"]
+mod tests;

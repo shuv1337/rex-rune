@@ -107,7 +107,7 @@ pub struct Workspace {
     pub title_inset: f32,
     /// The traffic lights are hidden for full screen. Known only where Rex's title row is.
     pub full_screen: bool,
-    /// The window says it is full screen (`Cx::window_full_screen`); read when it resizes or
+    /// The window says it is full screen (`Cx::is_full_screen`); read when it resizes or
     /// its traffic lights move. On X11 the window manager entering or leaving full screen is
     /// not seen: after it takes Rex out of a full screen Rex entered, this stays true until
     /// Rex toggles it again.
@@ -119,9 +119,12 @@ pub struct Workspace {
     pub option_choice: bool,
     /// Whether the layout in use is U.S., read again when the person picks another one.
     pub us_layout: Option<bool>,
-    /// The panes' Option keys, as last asked of Rune (`Tx::set_option_alt`); Rune drops them
-    /// while a field has focus.
-    pub option_as_alt: Option<rune::OptionAsAlt>,
+    /// A physical press whose layout spent Option producing text. The following logical
+    /// press carries the same physical code.
+    pub composed_option: Option<rune::PhysicalKeyCode>,
+    /// Physical Option presses, so Shift+Option can distinguish the configured Alt side
+    /// from the composing side when both modifiers are reported as consumed.
+    pub held_option: OptionSides,
     /// The pane a file drag from another app is over.
     pub drop_hover: Option<String>,
     /// Pane headers brought out by the pointer or by Reveal pane headers.
@@ -315,7 +318,8 @@ impl Workspace {
             unified_title: !cfg!(test) && super::platform::chrome::UNIFIED,
             option_choice: !cfg!(test) && super::platform::keys::OPTION_COMPOSES,
             us_layout: None,
-            option_as_alt: None,
+            composed_option: None,
+            held_option: OptionSides::NEITHER,
             title_inset: 0.,
             full_screen: false,
             window_full_screen: false,
@@ -880,6 +884,9 @@ impl Workspace {
         } else {
             self.bindings.consumed.clear();
             self.forwarded.clear();
+            self.held_option = OptionSides::NEITHER;
+            self.composed_option = None;
+            self.toolbar_reveal.clear_hover();
         }
         if !focused {
             self.cancel_layer_drag();
@@ -1200,9 +1207,8 @@ impl Workspace {
         self.full_screen || self.window_full_screen
     }
 
-    /// Asks Rune for the panes' Option when the setting or the layout has changed. Main
-    /// thread only: `layout_changed` reads the layout again.
-    pub fn sync_option_key(&mut self, tx: &mut Tx, layout_changed: bool) {
+    /// Reads and watches the layout on the main thread for the Automatic setting.
+    pub fn sync_option_layout(&mut self) {
         if !self.option_choice {
             return;
         }
@@ -1210,39 +1216,39 @@ impl Workspace {
         if self.us_layout.is_none() && !cfg!(test) {
             let handle = self.handle.clone();
             super::platform::keys::watch_layout(move || {
-                handle.update(|s, tx| s.sync_option_key(tx, true));
+                handle.update(|s, _| s.us_layout = Some(super::platform::keys::us_layout()));
             });
         }
-        if (layout_changed && !cfg!(test)) || self.us_layout.is_none() {
+        if self.us_layout.is_none() {
             self.us_layout = Some(cfg!(test) || super::platform::keys::us_layout());
         }
-        // Rune keeps Option's characters for whichever of Rex's own fields has focus (@ in an
-        // address, é in a search), so this is the panes' Option.
-        let alt = match self.option_sides() {
+    }
+
+    pub fn terminal_option_as_alt(&self) -> rune::OptionAsAlt {
+        if !self.option_choice {
+            return rune::OptionAsAlt::None;
+        }
+        match self
+            .settings
+            .terminal
+            .option_key
+            .alt_sides(self.us_layout != Some(false))
+        {
             OptionSides::BOTH => rune::OptionAsAlt::Both,
             OptionSides::LEFT => rune::OptionAsAlt::Left,
             OptionSides::RIGHT => rune::OptionAsAlt::Right,
-            _ => rune::OptionAsAlt::Neither,
-        };
-        if self.option_as_alt != Some(alt) {
-            tx.set_option_alt(alt);
-            self.option_as_alt = Some(alt);
+            _ => rune::OptionAsAlt::None,
         }
     }
 
-    /// The Option keys Terminal settings make Alt with the layout in use.
-    fn option_sides(&self) -> OptionSides {
-        (self.settings.terminal.option_key).alt_sides(self.us_layout != Some(false))
-    }
-
-    /// Whether Option composes the text of a key typed with the `held` Option keys
-    /// (`Tx::alt_keys`), which the program then gets without Alt.
-    pub fn option_composes(&self, held: rune::AltKeys) -> bool {
-        let held = OptionSides {
-            left: held.left,
-            right: held.right,
-        };
-        self.option_choice && !self.option_sides().alt_with(held)
+    pub fn option_composes(&self) -> bool {
+        self.option_choice
+            && !self
+                .settings
+                .terminal
+                .option_key
+                .alt_sides(self.us_layout != Some(false))
+                .alt_with(self.held_option)
     }
 
     /// A drag writes preferences once, after the window has kept its size for a second.

@@ -1,12 +1,14 @@
 //! AppKit cursors set directly: for overlays, which are rarely the key window, and for image
 //! cursors, which winit would size in pixels (twice too big on Retina).
 
+#![allow(unsafe_code)]
+
 use std::cell::RefCell;
 #[cfg(feature = "macos-background-cursor")]
 use std::cell::Cell;
 
 use objc2::rc::Retained;
-use objc2::{msg_send, msg_send_id};
+use objc2::msg_send;
 use objc2_foundation::{NSObject, NSPoint, NSSize};
 
 use crate::cursor::CursorImage;
@@ -65,20 +67,20 @@ pub(crate) fn ns_cursor(d: &Decoded) -> Result<Retained<NSObject>, String> {
     use objc2::rc::Allocated;
     use objc2::runtime::{AnyClass, AnyObject, Bool};
     use objc2_foundation::NSString;
-    let class = |name: &str| AnyClass::get(name).ok_or_else(|| format!("{name} is unavailable"));
-    let (bitmap, image, cursor, color_space) = (class("NSBitmapImageRep")?, class("NSImage")?, class("NSCursor")?, class("NSColorSpace")?);
+    let class = |name: &std::ffi::CStr| AnyClass::get(name).ok_or_else(|| format!("{} is unavailable", name.to_string_lossy()));
+    let (bitmap, image, cursor, color_space) = (class(c"NSBitmapImageRep")?, class(c"NSImage")?, class(c"NSCursor")?, class(c"NSColorSpace")?);
     let (w, h) = (d.width as isize, d.height as isize);
     // SAFETY: AppKit image and cursor construction; every object is retained, the bitmap
     // written only within its rows.
     objc2::rc::autoreleasepool(|_| unsafe {
-        let rep: Allocated<AnyObject> = msg_send_id![bitmap, alloc];
+        let rep: Allocated<AnyObject> = msg_send![bitmap, alloc];
         let null: *mut *mut u8 = std::ptr::null_mut();
         // Default bitmapFormat: premultiplied alpha-last RGBA.
-        let rep: Option<Retained<AnyObject>> = msg_send_id![rep,
-            initWithBitmapDataPlanes: null pixelsWide: w pixelsHigh: h bitsPerSample: 8isize
-            samplesPerPixel: 4isize hasAlpha: Bool::YES isPlanar: Bool::NO
-            colorSpaceName: &*NSString::from_str("NSDeviceRGBColorSpace") bitmapFormat: 0usize
-            bytesPerRow: w * 4 bitsPerPixel: 32isize];
+        let rep: Option<Retained<AnyObject>> = msg_send![rep,
+            initWithBitmapDataPlanes: null, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8isize,
+            samplesPerPixel: 4isize, hasAlpha: Bool::YES, isPlanar: Bool::NO,
+            colorSpaceName: &*NSString::from_str("NSDeviceRGBColorSpace"), bitmapFormat: 0usize,
+            bytesPerRow: w * 4, bitsPerPixel: 32isize];
         let rep = rep.ok_or("could not allocate a cursor bitmap")?;
         let data: *mut u8 = msg_send![&*rep, bitmapData];
         let stride: isize = msg_send![&*rep, bytesPerRow];
@@ -91,57 +93,113 @@ pub(crate) fn ns_cursor(d: &Decoded) -> Result<Retained<NSObject>, String> {
             }
         }
         let srgb: *mut AnyObject = msg_send![color_space, sRGBColorSpace];
-        let tagged: Option<Retained<AnyObject>> = msg_send_id![&*rep, bitmapImageRepByRetaggingWithColorSpace: srgb];
+        let tagged: Option<Retained<AnyObject>> = msg_send![&*rep, bitmapImageRepByRetaggingWithColorSpace: srgb];
         let rep = tagged.unwrap_or(rep);
         let size = NSSize::new(d.width as f64 / d.scale as f64, d.height as f64 / d.scale as f64);
-        let ns_image: Allocated<NSObject> = msg_send_id![image, alloc];
-        let ns_image: Option<Retained<NSObject>> = msg_send_id![ns_image, initWithSize: size];
+        let ns_image: Allocated<NSObject> = msg_send![image, alloc];
+        let ns_image: Option<Retained<NSObject>> = msg_send![ns_image, initWithSize: size];
         let ns_image = ns_image.ok_or("NSImage refused the size")?;
         let _: () = msg_send![&*ns_image, addRepresentation: &*rep];
         let [x, y] = d.hot.map(|h| h as f64 / d.scale as f64);
-        let ns_cursor: Allocated<NSObject> = msg_send_id![cursor, alloc];
-        let ns_cursor: Option<Retained<NSObject>> = msg_send_id![ns_cursor, initWithImage: &*ns_image, hotSpot: NSPoint::new(x, y)];
+        let ns_cursor: Allocated<NSObject> = msg_send![cursor, alloc];
+        let ns_cursor: Option<Retained<NSObject>> = msg_send![ns_cursor, initWithImage: &*ns_image, hotSpot: NSPoint::new(x, y)];
         ns_cursor.ok_or_else(|| "NSCursor refused the image".into())
     })
 }
 
-/// `[NSCursor set]` with winit's shape for each cursor. Main thread.
-pub(crate) fn set_ns_cursor(cursor: Cursor) {
-    use Cursor as C;
+/// `NSCursorFrameResizePosition` and `NSCursorFrameResizeDirections` (AppKit, macOS 15+).
+const FRAME_RESIZE_TOP: usize = 1 << 0;
+const FRAME_RESIZE_LEFT: usize = 1 << 1;
+const FRAME_RESIZE_RIGHT: usize = 1 << 3;
+const FRAME_RESIZE_TOP_LEFT: usize = FRAME_RESIZE_TOP | FRAME_RESIZE_LEFT;
+const FRAME_RESIZE_TOP_RIGHT: usize = FRAME_RESIZE_TOP | FRAME_RESIZE_RIGHT;
+const FRAME_RESIZE_ALL: usize = (1 << 0) | (1 << 1);
+
+/// Resolves AppKit's `NSCursor` for `cursor` without calling `-[NSCursor set]`. Main thread.
+pub(crate) fn resolve_ns_cursor(cursor: Cursor) -> Option<Retained<NSObject>> {
+    use crate::cursor::{MacCursor as M, mac_cursor};
     thread_local! {
         static TRANSPARENT: Option<Retained<NSObject>> = image_cursor(None);
         static MOVE: Option<Retained<NSObject>> = image_cursor(Some("move"));
+        static CELL: Option<Retained<NSObject>> = image_cursor(Some("cell"));
     }
-    let Some(class) = objc2::runtime::AnyClass::get("NSCursor") else { return };
+    let class = objc2::runtime::AnyClass::get(c"NSCursor")?;
+    // SAFETY: NSCursor class methods on the main thread.
+    unsafe {
+        match mac_cursor(cursor) {
+            M::Arrow => arrow(class),
+            M::PointingHand => msg_send![class, pointingHandCursor],
+            M::IBeam => msg_send![class, IBeamCursor],
+            M::OpenHand => msg_send![class, openHandCursor],
+            M::ClosedHand => msg_send![class, closedHandCursor],
+            M::NotAllowed => msg_send![class, operationNotAllowedCursor],
+            M::ResizeLeftRight => msg_send![class, resizeLeftRightCursor],
+            M::ResizeUpDown => msg_send![class, resizeUpDownCursor],
+            // Public from macOS 15; before that fall back to the legacy/private selectors winit uses.
+            M::ResizeEw => frame_resize(class, FRAME_RESIZE_LEFT, &[objc2::sel!(resizeLeftRightCursor)]),
+            M::ResizeNs => frame_resize(class, FRAME_RESIZE_TOP, &[objc2::sel!(resizeUpDownCursor)]),
+            M::ResizeNwse => frame_resize(class, FRAME_RESIZE_TOP_LEFT, &[objc2::sel!(_windowResizeNorthWestSouthEastCursor)]),
+            M::ResizeNesw => frame_resize(class, FRAME_RESIZE_TOP_RIGHT, &[objc2::sel!(_windowResizeNorthEastSouthWestCursor)]),
+            M::Crosshair => msg_send![class, crosshairCursor],
+            // Public from macOS 15; before that only as the private selectors winit uses.
+            M::ZoomIn => named(class, &[objc2::sel!(zoomInCursor), objc2::sel!(_zoomInCursor)]),
+            M::ZoomOut => named(class, &[objc2::sel!(zoomOutCursor), objc2::sel!(_zoomOutCursor)]),
+            // AppKit has neither in public: the private selectors winit uses, else the arrow.
+            M::Help => named(class, &[objc2::sel!(_helpCursor)]),
+            M::Progress => named(class, &[objc2::sel!(busyButClickableCursor)]),
+            // No built-in NSCursor class method: loaded from the system/app image, falling back to
+            // the arrow if unavailable.
+            M::Transparent => TRANSPARENT.with(Clone::clone).or_else(|| arrow(class)),
+            M::MoveImage => MOVE.with(Clone::clone).or_else(|| arrow(class)),
+            M::CellImage => CELL.with(Clone::clone).or_else(|| arrow(class)),
+            M::Custom(image) => native(image).or_else(|| arrow(class)),
+        }
+    }
+}
+
+/// `[NSCursor set]` with winit's shape for each cursor. Main thread.
+pub(crate) fn set_ns_cursor(cursor: Cursor) {
     #[cfg(feature = "macos-background-cursor")]
     sets_cursor_in_background();
-    // SAFETY: NSCursor class methods and -set on the main thread.
+    let Some(ns) = resolve_ns_cursor(cursor) else { return };
+    // SAFETY: `ns` is an `NSCursor` on the main thread.
+    unsafe { let _: () = msg_send![&*ns, set]; }
+}
+
+/// macOS 15's public `+[NSCursor frameResizeCursorFromPosition:inDirections:]`, falling back to
+/// `fallback` selectors and then the arrow on older macOS.
+///
+/// # Safety
+/// Main thread; `class` is `NSCursor`, and each fallback selector is a class method returning an
+/// `NSCursor`.
+unsafe fn frame_resize(
+    class: &objc2::runtime::AnyClass,
+    position: usize,
+    fallback: &[objc2::runtime::Sel],
+) -> Option<Retained<NSObject>> {
+    // SAFETY: caller guarantees main thread and `NSCursor`; `respondsToSelector:` guards the send.
     unsafe {
-        let image = match cursor {
-            C::Hidden => TRANSPARENT.with(Clone::clone),
-            C::Move => MOVE.with(Clone::clone),
-            C::Image(image) => native(image),
-            _ => None,
-        };
-        let ns: Option<Retained<NSObject>> = match (image, cursor) {
-            (Some(image), _) => Some(image),
-            (None, C::Pointer) => msg_send_id![class, pointingHandCursor],
-            (None, C::Text) => msg_send_id![class, IBeamCursor],
-            (None, C::Grab) => msg_send_id![class, openHandCursor],
-            (None, C::Grabbing) => msg_send_id![class, closedHandCursor],
-            (None, C::NotAllowed) => msg_send_id![class, operationNotAllowedCursor],
-            (None, C::ResizeColumn) => msg_send_id![class, resizeLeftRightCursor],
-            (None, C::ResizeRow) => msg_send_id![class, resizeUpDownCursor],
-            (None, C::ResizeEdge(crate::WindowEdge::East | crate::WindowEdge::West)) => msg_send_id![class, resizeLeftRightCursor],
-            (None, C::ResizeEdge(_)) => msg_send_id![class, resizeUpDownCursor],
-            (None, C::Crosshair) => msg_send_id![class, crosshairCursor],
-            // Public from macOS 15; before that only as the private selectors winit uses.
-            (None, C::ZoomIn) => named(class, &[objc2::sel!(zoomInCursor), objc2::sel!(_zoomInCursor)]),
-            (None, C::ZoomOut) => named(class, &[objc2::sel!(zoomOutCursor), objc2::sel!(_zoomOutCursor)]),
-            (None, _) => msg_send_id![class, arrowCursor],
-        };
-        if let Some(ns) = ns { let _: () = msg_send![&*ns, set]; }
+        let sel = objc2::sel!(frameResizeCursorFromPosition:inDirections:);
+        let responds: bool = msg_send![class, respondsToSelector: sel];
+        if responds {
+            let cursor: Option<Retained<NSObject>> = msg_send![
+                class,
+                frameResizeCursorFromPosition: position,
+                inDirections: FRAME_RESIZE_ALL
+            ];
+            if cursor.is_some() { return cursor; }
+        }
+        named(class, fallback)
     }
+}
+
+/// `[NSCursor arrowCursor]`.
+///
+/// # Safety
+/// Main thread; `class` is `NSCursor`.
+unsafe fn arrow(class: &objc2::runtime::AnyClass) -> Option<Retained<NSObject>> {
+    // SAFETY: caller guarantees main thread and `NSCursor` class.
+    unsafe { msg_send![class, arrowCursor] }
 }
 
 /// The first of `selectors` NSCursor answers, else the arrow.
@@ -153,11 +211,11 @@ unsafe fn named(class: &objc2::runtime::AnyClass, selectors: &[objc2::runtime::S
         // SAFETY: the caller's; `respondsToSelector:` guards the send.
         unsafe {
             let responds: bool = msg_send![class, respondsToSelector: sel];
-            if responds { return msg_send_id![class, performSelector: sel]; }
+            if responds { return msg_send![class, performSelector: sel]; }
         }
     }
     // SAFETY: as above.
-    unsafe { msg_send_id![class, arrowCursor] }
+    unsafe { msg_send![class, arrowCursor] }
 }
 
 /// The window server ignores `[NSCursor set]` from an app that isn't active, which an overlay's
@@ -196,25 +254,25 @@ fn image_cursor(name: Option<&str>) -> Option<Retained<NSObject>> {
         0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0x00, 0x02, 0x0e, 0x84, 0x8f, 0xa9, 0xcb, 0xed, 0x0f,
         0xa3, 0x9c, 0xb4, 0xda, 0x8b, 0xb3, 0x3e, 0x05, 0x00, 0x3b,
     ];
-    let (image_class, cursor_class) = (AnyClass::get("NSImage")?, AnyClass::get("NSCursor")?);
+    let (image_class, cursor_class) = (AnyClass::get(c"NSImage")?, AnyClass::get(c"NSCursor")?);
     // SAFETY: AppKit image and cursor construction on the main thread; every object is retained.
     unsafe {
         let image: Option<Retained<NSObject>> = match name {
             None => {
-                let data: Option<Retained<NSObject>> = msg_send_id![objc2::class!(NSData), dataWithBytes: TRANSPARENT.as_ptr().cast::<std::ffi::c_void>(), length: TRANSPARENT.len()];
-                let image: objc2::rc::Allocated<NSObject> = msg_send_id![image_class, alloc];
-                msg_send_id![image, initWithData: &*data?]
+                let data: Option<Retained<NSObject>> = msg_send![objc2::class!(NSData), dataWithBytes: TRANSPARENT.as_ptr().cast::<std::ffi::c_void>(), length: TRANSPARENT.len()];
+                let image: objc2::rc::Allocated<NSObject> = msg_send![image_class, alloc];
+                msg_send![image, initWithData: &*data?]
             }
             Some(name) => {
                 let path = NSString::from_str(&format!("/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors/{name}/cursor.pdf"));
-                let image: objc2::rc::Allocated<NSObject> = msg_send_id![image_class, alloc];
-                msg_send_id![image, initByReferencingFile: &*path]
+                let image: objc2::rc::Allocated<NSObject> = msg_send![image_class, alloc];
+                msg_send![image, initByReferencingFile: &*path]
             }
         };
         let image = image?;
         let size: NSSize = msg_send![&*image, size];
         let hot = if name.is_some() { NSPoint::new(size.width / 2.0, size.height / 2.0) } else { NSPoint::new(0.0, 0.0) };
-        let cursor: objc2::rc::Allocated<NSObject> = msg_send_id![cursor_class, alloc];
-        msg_send_id![cursor, initWithImage: &*image, hotSpot: hot]
+        let cursor: objc2::rc::Allocated<NSObject> = msg_send![cursor_class, alloc];
+        msg_send![cursor, initWithImage: &*image, hotSpot: hot]
     }
 }

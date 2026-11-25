@@ -1,0 +1,425 @@
+//! A window's first frame painted on the CPU, for the moment before any GPU device exists.
+//!
+//! `paint` takes the same draw data the renderer consumes for a frame (the instance list after
+//! layout, the glyph atlas pages and the image atlas pages) and fills a `Bgra8` buffer with the
+//! bytes the GPU would write to a `Bgra8Unorm` swap chain for it: tiles of 64 × 32 pixels run
+//! across threads, each instance blended into the 8-bit target in sRGB encoding as the GPU
+//! blends (`Renderer::srgb_blend`), with the uber shader's coverage for each kind (`shade.rs`
+//! mirrors shader.wgsl function for function).
+//!
+//! Text comes from the same masks the GPU samples. With [`attach_text`] the text system queues
+//! Windfoil masks as it does for a renderer that fills them, and [`fill_masks`] fills them across
+//! threads with the coverage function the GPU fill's shader runs (`text::outline::coverage`).
+//! Those masks then belong to the CPU copy of the atlas: the GPU's first frame uploads and
+//! samples the same texels, so text doesn't change at the hand-over.
+//!
+//! What it doesn't draw it doesn't guess at: [`Scene::needs_gpu`] names the first thing in a
+//! frame that only the GPU can draw (a blurred or isolated layer, a backdrop blur, a compositor's
+//! effect slot, a native surface, a glyph drawn from its outline), and `paint` refuses that frame
+//! with the same answer. The supported set is the list in `NeedsGpu`'s negation, kept small on
+//! purpose: a second renderer that drifts from the first shows as a flicker at the hand-over, so
+//! [`drift`] counts how many pixels the GPU's frame changed when it took over.
+//!
+//! Nothing here runs or allocates until it's called: no statics to initialise, no tables.
+
+use super::{Instance, Kind};
+use crate::pixels::ImageAtlas;
+use crate::text::{Atlas, FontSmoothing};
+
+mod backdrop;
+pub(super) mod bin;
+mod blend;
+mod damage;
+mod drift;
+mod fill;
+mod painter;
+mod pool;
+mod raster;
+mod scroll;
+#[doc(hidden)]
+pub mod record;
+mod shade;
+pub(crate) mod tool;
+
+#[cfg(test)]
+mod tests;
+
+pub use drift::{Drift, Pixels, drift, drift_wanted, last_drift};
+pub use fill::{FillReport, attach_text, fill_masks};
+#[cfg(test)]
+pub(crate) use painter::UploadPlan;
+pub use painter::{CpuPainter, Painted};
+
+/// One frame's draw data, borrowed from the runtime that built it.
+pub struct Scene<'a> {
+    instances: &'a [Instance],
+    glyph_pages: Vec<&'a [u8]>,
+    /// The outline store, for glyphs drawn from their outlines (text whose scale moves).
+    outlines: Option<&'a crate::text::outline::OutlineStore>,
+    images: Vec<Image<'a>>,
+    size: (u32, u32),
+    clear: [f32; 4],
+    /// The frame's text draws subpixel masks blended by channel (`Atlas::lcd`).
+    lcd: bool,
+    srgb_blend: bool,
+    native_surfaces: bool,
+    compositor: bool,
+    smoothing: Option<FontSmoothing>,
+    /// How many times the atlas has evicted a page (`Atlas::resets`): a glyph at the same place
+    /// may be another mask after one.
+    atlas_resets: u64,
+    /// How the GPU that takes over rounds into half floats (layers, blur levels).
+    half: HalfRounding,
+    /// Packed explicit scroll-fade stops (`Runtime::fade_stops`), matching `Globals::flags[2..4]`.
+    fade_stops: [f32; 2],
+    /// When true, degradable GPU-only features paint live without their GPU-only modifier while a
+    /// mid-session GPU handover builds off the UI thread (`NeedsGpu::is_degradable`).
+    degraded: bool,
+}
+
+/// How a GPU stores a float into an `Rgba16Float` target. Vendors differ, and a layer's pixels
+/// come out a step apart when the CPU guesses wrong, so the painter follows the adapter the
+/// window will use (`gpu::pick`, known before any device exists).
+///
+/// Measured on D3D12 (a mid-animation layer frame at 2880×1800 against each GPU's own frame of
+/// the same draw data): Intel Iris Xe and NVIDIA RTX 3080 Ti both store toward zero (rounded to
+/// nearest, 9% of that frame's pixels come out a step off; toward zero, 0.13–0.27%). D3D lets a
+/// float target's conversion round either way, so a vendor not measured takes toward zero too;
+/// if it rounds to nearest instead, layer pixels can come out a step off (two inside a nested
+/// layer), and the drift count at the hand-over says so.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HalfRounding {
+    #[default]
+    TowardZero,
+    /// To nearest, ties to even (IEEE's default).
+    NearestEven,
+}
+
+/// PCI vendor IDs whose half-float rounding was measured.
+const MEASURED: [(u32, HalfRounding); 2] = [(0x8086, HalfRounding::TowardZero), (0x10de, HalfRounding::TowardZero)];
+
+impl HalfRounding {
+    /// The rounding of the GPU with PCI vendor ID `vendor`: measured for Intel and NVIDIA,
+    /// assumed (toward zero) for any other, AMD (0x1002) among them.
+    pub fn of_vendor(vendor: u32) -> HalfRounding {
+        MEASURED.iter().find(|m| m.0 == vendor).map_or(HalfRounding::TowardZero, |m| m.1)
+    }
+}
+
+/// A scene's switches (`Scene::flags`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Flags {
+    srgb_blend: bool,
+    native_surfaces: bool,
+    compositor: bool,
+    lcd: bool,
+    smoothing: Option<FontSmoothing>,
+    half: HalfRounding,
+    fade_stops: [u32; 2],
+    degraded: bool,
+}
+
+/// An image atlas page: RGBA8 texels, `width * 4` bytes a row.
+#[derive(Clone, Copy)]
+pub struct Image<'a> {
+    width: u32,
+    data: &'a [u8],
+    /// Rows written since the renderer last uploaded the page (`ImagePage::dirty`).
+    dirty: Option<(u32, u32)>,
+}
+
+impl<'a> Scene<'a> {
+    /// The frame `instances` draws with `atlas`'s glyph masks and `images`' pages into a
+    /// `size` (device pixels) target cleared to `clear` (`Runtime::clear_color`), blending in
+    /// sRGB encoding as windows do by default.
+    pub fn new(instances: &'a [Instance], atlas: &'a Atlas, images: &'a ImageAtlas, size: (u32, u32), clear: [f32; 4]) -> Self {
+        let glyph_pages = (0..atlas.page_count()).filter_map(|p| atlas.page_data(p)).collect();
+        let images = images.pages.iter().map(|p| Image { width: p.width, data: &p.data, dirty: p.dirty }).collect();
+        Scene { instances, glyph_pages, outlines: Some(&atlas.outlines), images, size, clear, lcd: atlas.lcd, srgb_blend: true, native_surfaces: false, compositor: false, smoothing: None, atlas_resets: atlas.resets(), half: HalfRounding::default(), fade_stops: [0.0; 2], degraded: false }
+    }
+
+    /// Packed explicit scroll-fade stops (`Runtime::fade_stops`).
+    pub fn fade_stops(mut self, stops: [f32; 2]) -> Self {
+        self.fade_stops = stops;
+        self
+    }
+
+    /// Whether the frame blends in sRGB encoding (`Runtime::srgb_blend`). Linear blending needs
+    /// the GPU's sRGB target.
+    pub fn srgb_blend(mut self, on: bool) -> Self {
+        self.srgb_blend = on;
+        self
+    }
+
+    /// Whether the frame shows native surfaces (`Runtime::surfaces`: video, an embedded browser).
+    pub fn native_surfaces(mut self, any: bool) -> Self {
+        self.native_surfaces = any;
+        self
+    }
+
+    /// Whether the window has a compositor (`App::compositor`), which draws into effect slots.
+    /// Without one an effect slot draws nothing.
+    pub fn compositor(mut self, has: bool) -> Self {
+        self.compositor = has;
+        self
+    }
+
+    /// Whether subpixel text blends by channel, as the GPU's subpixel pipeline does; it does when
+    /// the atlas says so, unless the GPU couldn't (no dual-source blending).
+    pub fn lcd(mut self, on: bool) -> Self {
+        self.lcd = on;
+        self
+    }
+
+    /// Allows painting degradable GPU-only features live without their GPU-only modifier
+    /// (`LayerBlur` unblurred, `TurnedLayer` unrotated, nested `BackdropBlur` unblurred, `Effect`
+    /// and `NativeSurface` blank, `LinearBlend` in sRGB) instead of refusing the frame.
+    ///
+    /// Non-degradable reasons (`NeedsGpu::SlugText`, `NeedsGpu::OutlineGlyph`,
+    /// `NeedsGpu::UnknownKind`, `NeedsGpu::Target`) still fail so the caller keeps the previous
+    /// frame until the GPU takes over.
+    ///
+    /// ```
+    /// use rune::render::cpu_boot::{CpuPainter, NeedsGpu, Scene, Target};
+    /// use rune::{Color, Env, Runtime, el};
+    ///
+    /// let mut rt = Runtime::new((), |_, _| el().size(32.0, 32.0).fill(Color::WHITE).blur(8.0), (32.0, 32.0), Env::new(true, 1.0));
+    /// rt.frame(0.0);
+    /// let mut buf = vec![0u8; 32 * 32 * 4];
+    /// let mut painter = CpuPainter::new(1);
+    /// let scene = Scene::new(&rt.instances, &rt.text.atlas, &rt.images, (32, 32), rt.clear_color());
+    /// assert_eq!(scene.needs_gpu(), Some(NeedsGpu::LayerBlur));
+    /// assert!(painter.paint(&scene.degraded(true), &mut Target::new(&mut buf, 32, 32)).is_ok());
+    /// ```
+    #[doc(hidden)]
+    pub fn degraded(mut self, allow: bool) -> Self {
+        self.degraded = allow;
+        self
+    }
+
+    /// The same frame's `instances` in a `size` target cleared to nothing, with no subpixel text
+    /// (it blends by channel only over the window): a turned layer's contents (`raster::turn`).
+    fn part<'b>(&self, instances: &'b [Instance], size: (u32, u32)) -> Scene<'b>
+    where
+        'a: 'b,
+    {
+        Scene {
+            instances,
+            glyph_pages: self.glyph_pages.clone(),
+            outlines: self.outlines,
+            images: self.images.clone(),
+            size,
+            clear: [0.0; 4],
+            lcd: false,
+            srgb_blend: self.srgb_blend,
+            native_surfaces: false,
+            compositor: self.compositor,
+            smoothing: self.smoothing,
+            atlas_resets: self.atlas_resets,
+            half: self.half,
+            fade_stops: self.fade_stops,
+            degraded: self.degraded,
+        }
+    }
+
+    /// The scene-wide switches, which a frame that only recolours keeps.
+    fn flags(&self) -> Flags {
+        Flags { srgb_blend: self.srgb_blend, native_surfaces: self.native_surfaces, compositor: self.compositor, lcd: self.lcd, smoothing: self.smoothing, half: self.half, fade_stops: [self.fade_stops[0].to_bits(), self.fade_stops[1].to_bits()], degraded: self.degraded }
+    }
+
+    /// How the GPU that will take over rounds half floats (`HalfRounding::of_vendor`).
+    pub fn half_rounding(mut self, r: HalfRounding) -> Self {
+        self.half = r;
+        self
+    }
+
+    /// The text's font smoothing (`Runtime::font_smoothing`): Slug's coverage has no CPU form.
+    pub fn font_smoothing(mut self, mode: FontSmoothing) -> Self {
+        self.smoothing = Some(mode);
+        self
+    }
+
+    /// The first thing in this frame only the GPU can draw, or None when `paint` draws all of it.
+    pub fn needs_gpu(&self) -> Option<NeedsGpu> {
+        if !self.srgb_blend { return Some(NeedsGpu::LinearBlend); }
+        if self.native_surfaces { return Some(NeedsGpu::NativeSurface); }
+        if self.smoothing == Some(FontSmoothing::Slug) { return Some(NeedsGpu::SlugText); }
+        // How many layer scopes are open: a backdrop blur inside one reads that layer's target.
+        let mut depth = 0u32;
+        self.instances.iter().find_map(|i| match i.kind() {
+            Some(Kind::Layer) if i.params[2] != 0.0 => Some(NeedsGpu::LayerBlur),
+            // A quarter turn paints (`bin::quarter`); any other needs the GPU's resampling.
+            Some(Kind::Layer) if i.border[1] != 0.0 && bin::quarter(i).is_none() => Some(NeedsGpu::TurnedLayer),
+            Some(Kind::Layer) => { depth += 1; None }
+            Some(Kind::LayerEnd) => { depth = depth.saturating_sub(1); None }
+            Some(Kind::BackdropBlur) if depth > 0 => Some(NeedsGpu::BackdropBlur),
+            Some(Kind::Effect) if self.compositor => Some(NeedsGpu::Effect),
+            // Slug's rays (coverage 1) have no CPU form; Windfoil's box does (outline::coverage).
+            Some(Kind::Glyph) if i.radii[3] > 0.0 && (self.outlines.is_none() || i.border[3] == super::instance::shader_consts::OUTLINE_MODE_SLUG as f32) => Some(NeedsGpu::OutlineGlyph),
+            Some(
+                Kind::Rect | Kind::Shadow | Kind::Glyph | Kind::Inset | Kind::Gradient
+                | Kind::Segment | Kind::Triangle | Kind::Image | Kind::Dashed | Kind::Radial
+                | Kind::Effect | Kind::BackdropBlur,
+            ) => None,
+            None => Some(NeedsGpu::UnknownKind),
+        })
+    }
+
+    /// The first reason this scene cannot paint in its current mode: identical to
+    /// [`Scene::needs_gpu`] when `degraded` is false, or only non-degradable reasons
+    /// (`SlugText`, `OutlineGlyph`, `UnknownKind`) when `degraded` is true.
+    pub(super) fn blocking_needs_gpu(&self) -> Option<NeedsGpu> {
+        if !self.degraded {
+            return self.needs_gpu();
+        }
+        if self.smoothing == Some(FontSmoothing::Slug) {
+            return Some(NeedsGpu::SlugText);
+        }
+        self.instances.iter().find_map(|i| match i.kind() {
+            Some(Kind::Glyph)
+                if i.radii[3] > 0.0
+                    && (self.outlines.is_none()
+                        || i.border[3] == super::instance::shader_consts::OUTLINE_MODE_SLUG as f32) =>
+            {
+                Some(NeedsGpu::OutlineGlyph)
+            }
+            Some(_) => None,
+            None => Some(NeedsGpu::UnknownKind),
+        })
+    }
+}
+
+/// Why a frame needs the GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NeedsGpu {
+    /// The frame blends in linear light (`App::srgb_blend(false)`).
+    LinearBlend,
+    /// It shows a native surface.
+    NativeSurface,
+    /// Its text uses Slug's coverage.
+    SlugText,
+    /// A layer blurred as a whole (`El::blur`).
+    LayerBlur,
+    /// A layer turned as a whole (`Instance::turned`) by anything but a multiple of 90°, or a
+    /// turned layer that is cached or plus-lighter.
+    TurnedLayer,
+    /// A backdrop blur inside a layer (it blurs that layer's target).
+    BackdropBlur,
+    /// An effect slot a compositor draws into.
+    Effect,
+    /// A glyph drawn from its outline with Slug's coverage, or with no outline store at hand.
+    OutlineGlyph,
+    /// An instance kind this painter doesn't know.
+    UnknownKind,
+    /// The target isn't the scene's size, or its buffer is too small.
+    Target,
+}
+
+impl NeedsGpu {
+    /// Whether a live CPU fallback frame can paint without this GPU-only feature while a
+    /// mid-session GPU handover builds off the UI thread.
+    ///
+    /// Degradable reasons paint without their GPU-only modifier (`LayerBlur` unblurred,
+    /// `TurnedLayer` unrotated, nested `BackdropBlur` unblurred, `Effect` and `NativeSurface`
+    /// blank, `LinearBlend` in sRGB). Non-degradable reasons (`SlugText`, `OutlineGlyph`,
+    /// `UnknownKind`, `Target`) keep the previous frame until the GPU takes over.
+    ///
+    /// ```
+    /// use rune::render::cpu_boot::NeedsGpu;
+    ///
+    /// assert!(NeedsGpu::LayerBlur.is_degradable());
+    /// assert!(NeedsGpu::TurnedLayer.is_degradable());
+    /// assert!(!NeedsGpu::SlugText.is_degradable());
+    /// ```
+    #[doc(hidden)]
+    pub const fn is_degradable(self) -> bool {
+        matches!(
+            self,
+            Self::LinearBlend
+                | Self::NativeSurface
+                | Self::LayerBlur
+                | Self::TurnedLayer
+                | Self::BackdropBlur
+                | Self::Effect
+        )
+    }
+}
+
+/// Where `paint` writes: `width × height` pixels, four bytes each in memory order B, G, R, A,
+/// `stride` bytes from one row's start to the next, row 0 at the top.
+pub struct Target<'a> {
+    pixels: &'a mut [u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+}
+
+impl<'a> Target<'a> {
+    /// Tightly packed rows (`width * 4` bytes), as a top-down 32-bit DIB section lays them out.
+    pub fn new(pixels: &'a mut [u8], width: u32, height: u32) -> Self {
+        Target { pixels, width, height, stride: width as usize * 4 }
+    }
+
+    /// Rows `stride` bytes apart.
+    pub fn with_stride(pixels: &'a mut [u8], width: u32, height: u32, stride: usize) -> Self {
+        Target { pixels, width, height, stride }
+    }
+}
+
+/// How a `paint` went: each stage's time and what it drew.
+#[derive(Clone, Debug, Default)]
+pub struct Report {
+    pub threads: usize,
+    /// Binning instances into tiles, on the calling thread.
+    pub bin_ns: u64,
+    /// Painting every tile, all threads, wall clock.
+    pub raster_ns: u64,
+    pub total_ns: u64,
+    pub tiles: usize,
+    /// Instance-tile pairs painted, and those a later opaque instance covering the whole tile
+    /// made unnecessary.
+    pub binned: usize,
+    pub culled: usize,
+    /// Tiles cleared to the clear colour (the rest begin under an opaque instance).
+    pub cleared: usize,
+    /// Pixels written by each path: constant spans, per-pixel shading, glyph texels.
+    pub span_px: u64,
+    pub shaded_px: u64,
+    pub glyph_px: u64,
+    /// The longest one tile took: no thread count paints faster.
+    pub slowest_tile_ns: u64,
+    /// Taking backdrop blurs, on the calling thread between phases.
+    pub blur_ns: u64,
+}
+
+/// Paints `scene` into `target` on `threads` threads (the calling one among them), or says why
+/// only the GPU can.
+pub fn paint(scene: &Scene<'_>, target: &mut Target<'_>, threads: usize) -> Result<Report, NeedsGpu> {
+    if let Some(why) = scene.blocking_needs_gpu() { return Err(why); }
+    check_target(scene, target)?;
+    let start = crate::time::now();
+    let bins = bin::Bins::of(scene);
+    let binned = crate::time::now();
+    let tiles: Vec<u32> = (0..bins.tile_count() as u32).collect();
+    let mut report = raster::run(scene, &bins, target, &tiles, &raster::Spawn(threads.max(1)), &raster::Spawn(threads.max(1)));
+    let done = crate::time::now();
+    report.bin_ns = ns(binned - start);
+    report.raster_ns = ns(done - binned);
+    report.total_ns = ns(done - start);
+    report.tiles = bins.tile_count();
+    report.binned = bins.len();
+    report.culled = bins.culled;
+    Ok(report)
+}
+
+/// Whether `target` is `scene`'s size, with rows at least a row of pixels apart.
+fn check_target(scene: &Scene<'_>, target: &Target<'_>) -> Result<(), NeedsGpu> {
+    let (w, h) = scene.size;
+    let fits = target.width == w && target.height == h && target.stride >= w as usize * 4
+        && target.pixels.len() >= target.stride * h.saturating_sub(1) as usize + w as usize * 4;
+    if fits { Ok(()) } else { Err(NeedsGpu::Target) }
+}
+
+fn ns(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}

@@ -37,10 +37,17 @@ export async function pngBytes(blob, max) {
     return blob && blob.size <= max ? new Uint8Array(await blob.arrayBuffer()) : undefined;
 }
 
+// Opens `url` in a new tab with no opener or referrer. False when no click or key press was
+// active, which browsers block: with `noopener` the browser returns null whether or not the
+// tab opened, so the page's user activation, read before `window.open` spends it, is all there
+// is to go on. Browsers without `navigator.userActivation` say true.
 export function openLink(url) {
     const parsed = new URL(url);
     if (!['https:', 'http:', 'mailto:'].includes(parsed.protocol)) throw new Error('Unsupported link scheme.');
+    const activation = navigator.userActivation;
+    const active = !activation || activation.isActive;
     window.open(parsed.href, '_blank', 'noopener,noreferrer');
+    return active;
 }
 
 // `url` resolved against the page, and whether it stays on the page's origin.
@@ -52,48 +59,6 @@ export function resolveLink(url) {
 
 export function assignLink(href) {
     location.assign(href);
-}
-
-// `url` (relative to the page) decoded by the browser's own codecs, which run off the main
-// thread: `[width, height, rgba]` with straight-alpha sRGB RGBA bytes, upright by EXIF. SVG comes
-// back as `[0, 0, bytes]` for Rune to rasterize. Images over `maxSide` a side are refused
-// before their pixels are read. It resolves in a task of its own, so Rune's work on one image
-// (its mips) never runs in the same long task as another's or a frame's.
-export async function fetchImage(url, maxSide) {
-    const reply = await readImage(url, maxSide);
-    await nextTask();
-    return reply;
-}
-
-async function readImage(url, maxSide) {
-    const response = await fetch(new URL(url, document.baseURI));
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    const type = (response.headers.get('content-type') || blob.type).split(';')[0].trim().toLowerCase();
-    const path = response.url ? new URL(response.url).pathname : '';
-    if (type === 'image/svg+xml' || /\.svgz?$/i.test(path)) return [0, 0, new Uint8Array(await blob.arrayBuffer())];
-    return blobRgba(blob, maxSide);
-}
-
-export async function decodeImage(bytes, maxSide) {
-    const reply = await blobRgba(new Blob([bytes]), maxSide);
-    await nextTask();
-    return reply;
-}
-
-async function blobRgba(blob, maxSide) {
-    const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image', colorSpaceConversion: 'default' });
-    try {
-        const { width, height } = bitmap;
-        if (width > maxSide || height > maxSide) throw new Error(`${width}×${height} is over ${maxSide} pixels a side`);
-        const canvas = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(width, height)
-            : Object.assign(document.createElement('canvas'), { width, height });
-        const context = canvas.getContext('2d', { willReadFrequently: true });
-        context.drawImage(bitmap, 0, 0);
-        return [width, height, new Uint8Array(context.getImageData(0, 0, width, height).data.buffer)];
-    } finally {
-        bitmap.close();
-    }
 }
 
 export function objectUrl(bytes, type) {
@@ -112,17 +77,9 @@ export function setCursor(canvas, css) {
     if (!canvas.style.cursor) canvas.style.cursor = `-webkit-${css}`;
 }
 
-export function browserPlatform() {
-    const nav = globalThis.navigator;
-    return nav ? (nav.userAgentData?.platform || nav.platform || '') : undefined;
-}
-
-export function touchPoints() {
-    return globalThis.navigator?.maxTouchPoints || 0;
-}
-
-export function nextTask() {
-    return globalThis.scheduler?.yield ? globalThis.scheduler.yield() : new Promise((resolve) => setTimeout(resolve, 0));
+// Resolves in the page's next idle time, or after `timeout` ms at the latest.
+export function nextIdle(timeout) {
+    return new Promise((resolve) => globalThis.requestIdleCallback ? requestIdleCallback(() => resolve(), { timeout }) : setTimeout(resolve, timeout));
 }
 
 export async function fetchBytes(url) {
@@ -133,6 +90,14 @@ export async function fetchBytes(url) {
 
 export function resolveUrl(url, base) {
     return new URL(url, base).href;
+}
+
+// Browser preferred languages as BCP 47 tags, most preferred first (`Cx::system_languages`).
+export function preferredLanguages() {
+    const nav = globalThis.navigator;
+    if (!nav) return [];
+    const raw = nav.languages?.length ? [...nav.languages] : (nav.language ? [nav.language] : []);
+    return raw.filter(tag => typeof tag === 'string' && tag.trim().length > 0);
 }
 
 export function viewport(canvas, callback, embedded) {
@@ -147,10 +112,18 @@ export function viewport(canvas, callback, embedded) {
     const update = () => {
         if (!embedded) {
             const v = window.visualViewport;
-            canvas.style.width = `${v?.width ?? innerWidth}px`;
-            canvas.style.height = `${v?.height ?? innerHeight}px`;
-            canvas.style.left = `${v?.offsetLeft ?? 0}px`;
-            canvas.style.top = `${v?.offsetTop ?? 0}px`;
+            const width = `${v?.width ?? innerWidth}px`;
+            const height = `${v?.height ?? innerHeight}px`;
+            const left = `${v?.offsetLeft ?? 0}px`;
+            const top = `${v?.offsetTop ?? 0}px`;
+            const sibling = canvas.previousElementSibling;
+            const targets = sibling?.hasAttribute?.('data-rune-cpu') ? [canvas, sibling] : [canvas];
+            for (const target of targets) {
+                target.style.width = width;
+                target.style.height = height;
+                target.style.left = left;
+                target.style.top = top;
+            }
         }
         const s = getComputedStyle(probe);
         callback(JSON.stringify({ kind: 'viewport', h: largest.offsetHeight || innerHeight,
@@ -158,8 +131,28 @@ export function viewport(canvas, callback, embedded) {
     };
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const reduced = () => callback(JSON.stringify({ kind: 'motion', reduced: motion.matches }));
+    // A primary pointer that can't hover (a touch screen): `Cx::hover_none`.
+    const hoverNone = matchMedia('(hover: none)');
+    const coarse = matchMedia('(pointer: coarse)');
+    const pointer = () => callback(JSON.stringify({ kind: 'primary_pointer', hover: !hoverNone.matches, coarse: coarse.matches }));
+    // A contrast theme (Windows' Contrast themes): `forced-colors`, and its system colours read
+    // off a probe, as sRGB bytes, for `Cx::system_contrast`.
+    const forced = matchMedia('(forced-colors: active)');
+    const contrast = () => {
+        if (!forced.matches) { callback(JSON.stringify({ kind: 'contrast', colors: null })); return; }
+        const swatch = document.createElement('span');
+        swatch.style.cssText = 'position:fixed;visibility:hidden;forced-color-adjust:none';
+        document.body.append(swatch);
+        const colors = ['Canvas', 'CanvasText', 'Highlight', 'HighlightText', 'GrayText', 'ButtonFace', 'ButtonText', 'LinkText'].map((name) => {
+            swatch.style.color = name;
+            return (getComputedStyle(swatch).color.match(/\d+(\.\d+)?/g) ?? ['0', '0', '0']).slice(0, 3).map(Number);
+        });
+        swatch.remove();
+        callback(JSON.stringify({ kind: 'contrast', colors }));
+    };
     const focus = () => callback(JSON.stringify({ kind: 'focus', focused: document.hasFocus() }));
-    const visibility = () => callback(JSON.stringify({ kind: 'visibility', visible: !document.hidden }));
+    const languageChange = () => callback(JSON.stringify({ kind: 'languages', languages: preferredLanguages() }));
+    const visibility = () => callback(JSON.stringify({ kind: 'visibility', visible: !document.hidden, focused: document.hasFocus() }));
     let dprMedia = null;
     const watchDpr = () => {
         dprMedia?.removeEventListener('change', onDpr);
@@ -174,22 +167,43 @@ export function viewport(canvas, callback, embedded) {
     window.visualViewport?.addEventListener('resize', update);
     window.visualViewport?.addEventListener('scroll', update);
     window.addEventListener('resize', update);
+    // The safe area can change with no resize (Safari settles nv() after a rotation's resize;
+    // a Home Screen app's status bar): the probe's padding is the insets, so its border box follows
+    // them (its content box is always empty, which is what an observer watches by default).
+    const insets = new ResizeObserver(update);
+    insets.observe(probe, { box: 'border-box' });
     motion.addEventListener('change', reduced);
+    hoverNone.addEventListener('change', pointer);
+    coarse.addEventListener('change', pointer);
+    forced.addEventListener('change', contrast);
     window.addEventListener('focus', focus);
     window.addEventListener('blur', focus);
+    window.addEventListener('languagechange', languageChange);
     document.addEventListener('visibilitychange', visibility);
     // Mount is called while Rust is installing the shell; enter it only after installation.
-    queueMicrotask(() => { update(); reduced(); focus(); visibility(); });
+    queueMicrotask(() => { update(); reduced(); pointer(); contrast(); focus(); visibility(); });
     return () => {
         dprMedia?.removeEventListener('change', onDpr);
         window.visualViewport?.removeEventListener('resize', update);
         window.visualViewport?.removeEventListener('scroll', update);
         window.removeEventListener('resize', update);
+        insets.disconnect();
         motion.removeEventListener('change', reduced);
+        hoverNone.removeEventListener('change', pointer);
+        coarse.removeEventListener('change', pointer);
+        forced.removeEventListener('change', contrast);
         window.removeEventListener('focus', focus);
         window.removeEventListener('blur', focus);
+        window.removeEventListener('languagechange', languageChange);
         document.removeEventListener('visibilitychange', visibility);
         probe.remove();
         largest.remove();
     };
+}
+
+// One face of an app font as the page's own, so the semantic mirror's text sets in it.
+export function addFontFace(family, bytes, weight, style) {
+    const face = new FontFace(family, bytes.slice(), { weight, style });
+    document.fonts.add(face);
+    face.load().catch(() => {});
 }

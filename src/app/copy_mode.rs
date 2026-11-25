@@ -424,12 +424,6 @@ impl Workspace {
         if matches!(ev.key, Key::Modifier { .. }) {
             return true;
         }
-        // Dead keys never reach the PTY.
-        if matches!(ev.key, Key::Dead(_)) {
-            self.bindings.consumed.insert(identity, true);
-            return true;
-        }
-
         let mods = modifiers_on(ev.mods, rex_rune::keymap::command_key());
         let plain_mods = !mods.ctrl && !mods.alt && !mods.logo;
         let ctrl_only = mods.ctrl && !mods.alt && !mods.logo && !mods.shift;

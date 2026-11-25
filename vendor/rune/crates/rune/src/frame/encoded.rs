@@ -79,36 +79,39 @@ impl FrameEncoded {
     pub fn encode_ms(&self) -> Option<f64> { self.encode_ms }
 }
 
-/// A window's hooks and the count it numbers reports with. Without a hook every call is one
+/// A window's hook and the count it numbers reports with. Without a hook every call is one
 /// `Option` check and nothing else, so reporting never changes how the window draws.
-pub(crate) struct FrameReports<S: 'static>(Option<Reporter>, Option<OnFrameDrawn<S>>);
-
-impl<S: 'static> Default for FrameReports<S> {
-    fn default() -> Self { Self(None, None) }
-}
+#[derive(Default)]
+pub(crate) struct FrameReports(Option<Reporter>);
 
 struct Reporter {
-    hook: OnFrameEncoded,
+    hook: Option<OnFrameEncoded>,
     window: Option<Rc<str>>,
     seq: u64,
     refresh_hz: Option<f64>,
 }
 
-impl<S: 'static> FrameReports<S> {
+impl FrameReports {
     pub(crate) fn new(hook: Option<OnFrameEncoded>, window: Option<&str>) -> Self {
-        Self(hook.map(|hook| Reporter { hook, window: window.map(Rc::from), seq: 0, refresh_hz: None }), None)
+        Self::with_presented_seq(hook, false, window)
     }
 
-    pub(crate) fn inspecting(mut self, drawn: Option<OnFrameDrawn<S>>) -> Self {
-        self.1 = drawn;
-        self
+    /// Creates frame reporting, also numbering frames when `track_seq` is true (for
+    /// `App::on_frame_presented`) without stamping encode times or reading refresh rates when no
+    /// `on_frame_encoded` hook is registered.
+    pub(crate) fn with_presented_seq(hook: Option<OnFrameEncoded>, track_seq: bool, window: Option<&str>) -> Self {
+        let active = hook.is_some() || track_seq;
+        Self(active.then(|| Reporter { hook, window: window.map(Rc::from), seq: 0, refresh_hz: None }))
     }
 
-    /// The time to report a `Drawn` frame at, taken only when there's a hook.
-    pub(crate) fn stamp(&self) -> Option<Instant> { self.0.as_ref().map(|_| Instant::now()) }
+    /// The time to report a `Drawn` frame at, taken only when there's an `on_frame_encoded` hook.
+    pub(crate) fn stamp(&self) -> Option<Instant> {
+        self.0.as_ref().filter(|r| r.hook.is_some()).map(|_| crate::time::now())
+    }
 
-    /// Whether anyone reads the reports, so a host asks for what only they need.
-    pub(crate) fn wanted(&self) -> bool { self.0.is_some() }
+    /// Whether `on_frame_encoded` reads the reports, so a host asks for what only it needs.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn wanted(&self) -> bool { self.0.as_ref().is_some_and(|r| r.hook.is_some()) }
 
     /// The display refresh the next reports carry, until it changes.
     pub(crate) fn set_refresh(&mut self, hz: Option<f64>) {
@@ -116,32 +119,48 @@ impl<S: 'static> FrameReports<S> {
     }
 
     /// A frame encoded at `at` (from `stamp`), which started at `started` and spent `update_ms`
-    /// of that building.
-    pub(crate) fn drawn(&mut self, at: Option<Instant>, presents_at: Option<Instant>, started: Instant, update_ms: f64) {
-        let Some(at) = at else { return };
-        let encode_ms = (at.saturating_duration_since(started).as_secs_f64() * 1000.0 - update_ms).max(0.0);
-        self.report(FrameOutcome::Drawn, at, presents_at, Some((started, update_ms, encode_ms)));
+    /// of that building. Returns this frame's `seq` when either `on_frame_encoded` or
+    /// `on_frame_presented` tracks it.
+    pub(crate) fn drawn(&mut self, at: Option<Instant>, presents_at: Option<Instant>, started: Instant, update_ms: f64) -> Option<u64> {
+        let r = self.0.as_mut()?;
+        let seq = r.seq;
+        if r.hook.is_some() {
+            let at = at?;
+            let encode_ms = (at.saturating_duration_since(started).as_secs_f64() * 1000.0 - update_ms).max(0.0);
+            self.report(FrameOutcome::Drawn, at, presents_at, Some((started, update_ms, encode_ms)));
+        } else {
+            r.seq += 1;
+        }
+        Some(seq)
     }
 
-    /// After a `Drawn` frame: `App::on_frame_drawn` reads the runtime as it presented.
-    pub(crate) fn inspect(&mut self, rt: &crate::Runtime<S>) {
-        if let Some(hook) = &mut self.1 { hook(rt); }
-    }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn unchanged(&mut self, presents_at: Option<Instant>) {
-        if self.0.is_some() { self.report(FrameOutcome::Unchanged, Instant::now(), presents_at, None); }
+        let Some(r) = self.0.as_mut() else { return };
+        if r.hook.is_some() {
+            self.report(FrameOutcome::Unchanged, crate::time::now(), presents_at, None);
+        } else {
+            r.seq += 1;
+        }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn skipped(&mut self) {
-        if self.0.is_some() { self.report(FrameOutcome::Skipped, Instant::now(), None, None); }
+        let Some(r) = self.0.as_mut() else { return };
+        if r.hook.is_some() {
+            self.report(FrameOutcome::Skipped, crate::time::now(), None, None);
+        } else {
+            r.seq += 1;
+        }
     }
 
     fn report(&mut self, outcome: FrameOutcome, at: Instant, presents_at: Option<Instant>, work: Option<(Instant, f64, f64)>) {
         let Some(r) = &mut self.0 else { return };
+        let Some(hook) = r.hook.as_mut() else { return };
         let (started, update_ms, encode_ms) = (work.map(|w| w.0), work.map(|w| w.1), work.map(|w| w.2));
         let frame = FrameEncoded { at, outcome, window: r.window.clone(), seq: r.seq, presents_at, started, refresh_hz: r.refresh_hz, update_ms, encode_ms };
         r.seq += 1;
-        (r.hook)(&frame);
+        hook(&frame);
     }
 }
 

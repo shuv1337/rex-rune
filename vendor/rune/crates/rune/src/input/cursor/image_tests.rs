@@ -131,20 +131,21 @@ fn web_css_names_the_png_at_2x_with_the_hot_spot_in_points() {
 /// its bitmap, and its hot spot is in points.
 #[cfg(target_os = "macos")]
 #[test]
+#[allow(unsafe_code)]
 fn a_macos_image_cursor_is_sized_in_points() {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{msg_send, msg_send_id};
+    use objc2::msg_send;
     use objc2_foundation::{NSPoint, NSSize};
     let d = decode(CursorImage::png(png(64, 40), [2.0, 30.0]), SOURCE_SCALE).unwrap();
     let cursor = crate::platform::macos::cursor::ns_cursor(&d).unwrap();
     // SAFETY: reading back AppKit objects made above.
     let (size, hot, pixels) = unsafe {
-        let image: Retained<AnyObject> = msg_send_id![&*cursor, image];
+        let image: Retained<AnyObject> = msg_send![&*cursor, image];
         let size: NSSize = msg_send![&*image, size];
         let hot: NSPoint = msg_send![&*cursor, hotSpot];
-        let reps: Retained<AnyObject> = msg_send_id![&*image, representations];
-        let rep: Retained<AnyObject> = msg_send_id![&*reps, firstObject];
+        let reps: Retained<AnyObject> = msg_send![&*image, representations];
+        let rep: Retained<AnyObject> = msg_send![&*reps, firstObject];
         let (w, h): (isize, isize) = (msg_send![&*rep, pixelsWide], msg_send![&*rep, pixelsHigh]);
         (size, hot, (w, h))
     };
@@ -152,4 +153,46 @@ fn a_macos_image_cursor_is_sized_in_points() {
     assert_eq!((size.width, size.height), (32.0, 20.0), "points, not pixels");
     assert_eq!(pixels, (64, 40), "the 2x pixels stay");
     assert_eq!((hot.x, hot.y), (2.0, 19.5), "the hot spot in points, clamped into the 20 pt height");
+}
+
+/// AppKit resolves all four bidirectional/diagonal resize cursors without modifying the live
+/// desktop cursor (never calls `-[NSCursor set]`).
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(unsafe_code)]
+fn macos_resize_cursors_resolve_distinct_nscursors() {
+    use objc2::msg_send;
+    let kinds = [Cursor::ResizeEw, Cursor::ResizeNs, Cursor::ResizeNwse, Cursor::ResizeNesw];
+    let resolved: Vec<_> = kinds
+        .iter()
+        .map(|&cursor| {
+            (cursor, crate::platform::macos::cursor::resolve_ns_cursor(cursor)
+                .unwrap_or_else(|| panic!("{cursor:?} must resolve an NSCursor")))
+        })
+        .collect();
+    for (i, (a_kind, a)) in resolved.iter().enumerate() {
+        for (b_kind, b) in &resolved[i + 1..] {
+            // SAFETY: comparing retained NSCursor objects via NSObject's isEqual:.
+            let equal: bool = unsafe { msg_send![&**a, isEqual: &**b] };
+            assert!(!equal, "{a_kind:?} and {b_kind:?} must resolve to distinct NSCursors");
+        }
+    }
+}
+
+/// Chromium's Windows pictures for the shapes Windows has no system cursor for: each decodes at
+/// its own size, draws something, and keeps its hot spot; every other shape stays the system's.
+#[test]
+fn the_windows_pictures_decode_with_their_hot_spots() {
+    let pictures = [(Cursor::Cell, [7, 7]), (Cursor::Grab, [13, 13]), (Cursor::Grabbing, [13, 13]), (Cursor::ZoomIn, [6, 6]), (Cursor::ZoomOut, [6, 6])];
+    for (cursor, hot) in pictures {
+        let image = crate::cursor::windows_image(cursor).unwrap_or_else(|| panic!("{cursor:?} has a picture"));
+        // At one pixel a point the doubled bitmap is Chromium's own 32 px one.
+        let d = decode(image, 1.0).unwrap_or_else(|e| panic!("{cursor:?}: {e}"));
+        assert_eq!((d.width, d.height, d.hot), (32, 32, hot), "{cursor:?}");
+        assert!(d.rgba.chunks_exact(4).any(|p| p[3] == 255), "{cursor:?} draws something");
+        assert!(d.rgba.chunks_exact(4).all(|p| p[3] == 0 || p[3] == 255), "{cursor:?} keeps its 1-bit edges");
+    }
+    for cursor in [Cursor::Default, Cursor::Pointer, Cursor::Text, Cursor::ResizeColumn, Cursor::ResizeRow, Cursor::NotAllowed, Cursor::Move] {
+        assert!(crate::cursor::windows_image(cursor).is_none(), "{cursor:?} is the system's");
+    }
 }

@@ -35,19 +35,36 @@ impl El {
         if self.cold.input.is_none()
             && let Some(t) = &mut self.text
         {
-            t.content = content.into();
+            let redacted = t.redacted;
+            let content = content.into();
+            if redacted {
+                t.replace_content(content);
+                if let Some(mut src) = t.source.take() {
+                    text_spec::wipe_string(&mut src.text);
+                }
+            } else {
+                t.content = content;
+                t.shape = None;
+                t.source = None;
+            }
             t.spans.clear();
             if let Some(cold) = t.cold.get_mut_if_some() {
-                cold.links.clear();
+                if redacted {
+                    text_spec::wipe_links(&mut cold.links);
+                } else {
+                    cold.links.clear();
+                }
                 cold.uncopied.clear();
                 cold.strikes.clear();
+                cold.overlines.clear();
+                cold.span_boxes.clear();
                 cold.highlights.clear();
+                cold.line_fills.clear();
                 cold.pills.clear();
                 cold.rings.clear();
                 cold.blocks.clear();
                 cold.soft_breaks.clear();
             }
-            t.source = None;
         }
         self
     }
@@ -110,18 +127,119 @@ impl El {
         }
         self
     }
+    /// Draws bytes `range` of a [`text`](crate::text()) or [`rich`] element inside a
+    /// padded [`SpanBox`](crate::SpanBox) with its own layout-affecting horizontal padding,
+    /// per-corner radii, and optional inset border.
+    ///
+    /// Unlike [`Span::bg`], `SpanBox` padding reserves horizontal room in the line so adjacent
+    /// inline chips (such as a search filter's `from:` key and `ada` value) meet without
+    /// overlapping, and distinct adjacent ranges are never merged. UTF-8 byte offsets, selection
+    /// and copy remain unchanged. Ranges are authored UTF-8 bytes on char boundaries; empty,
+    /// out-of-range, or overlapping ones are skipped. Ignored on [`text_input`] fields.
+    ///
+    /// ```no_run
+    /// # use rune::{Color, SpanBox, text};
+    /// let chip = text("from:ada")
+    ///     .span_box(0..5, SpanBox::new().bg(Color::WHITE.alpha(0.12)).pad_x(6.0, 4.0).corners([4.0, 0.0, 0.0, 4.0]))
+    ///     .span_box(5..8, SpanBox::new().bg(Color::WHITE.alpha(0.22)).pad_x(4.0, 6.0).corners([0.0, 4.0, 4.0, 0.0]));
+    /// ```
+    pub fn span_box(self, range: std::ops::Range<usize>, style: crate::text::SpanBox) -> Self {
+        self.span_boxes([(range, style)])
+    }
+    /// Padded [`SpanBox`](crate::SpanBox)es for multiple non-overlapping byte ranges (see [`El::span_box`]).
+    pub fn span_boxes(mut self, boxes: impl IntoIterator<Item = (std::ops::Range<usize>, crate::text::SpanBox)>) -> Self {
+        if self.cold.input.is_some() {
+            return self;
+        }
+        let Some(t) = &mut self.text else { return self };
+        for (r, style) in boxes {
+            let ok = r.start < r.end
+                && r.end <= t.content.len()
+                && t.content.is_char_boundary(r.start)
+                && t.content.is_char_boundary(r.end)
+                && style.has_effect();
+            let (start, end) = (r.start as u32, r.end as u32);
+            if !ok || t.cold.span_boxes.iter().any(|b| b.start < end && start < b.end) {
+                continue;
+            }
+            let at = t.cold.span_boxes.partition_point(|b| b.start < start);
+            t.cold.span_boxes.insert(at, crate::text::SpanBoxRun { start, end, style });
+            t.shape = None;
+        }
+        self
+    }
     /// A strikethrough line across bytes `start..end` in `color` (`None`: the span's or text's
-    /// colour). Wrapped lines each get their own segment.
+    /// colour). Wrapped lines each get their own segment. On a [`text_input`], byte offsets are
+    /// relative to `edit.text` and shift across any active IME preedit, as [`El::spans`] do.
     pub fn strike(mut self, start: usize, end: usize, color: Option<Color>) -> Self {
-        if let Some(t) = &mut self.text && start < end {
+        if start >= end {
+            return self;
+        }
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            inp.decoration_strikes.push((start as u32, end as u32, color));
+            self.sync_input_rich();
+        } else if let Some(t) = &mut self.text {
             t.cold.strikes.push((start as u32, end as u32, color));
         }
         self
     }
     /// Strikethrough lines `(start, end, color)` for multiple byte ranges (see [`El::strike`]).
     pub fn strikes(mut self, strikes: impl IntoIterator<Item = (usize, usize, Option<Color>)>) -> Self {
-        for (start, end, color) in strikes {
-            self = self.strike(start, end, color);
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            let before = inp.decoration_strikes.len();
+            inp.decoration_strikes.extend(
+                strikes.into_iter().filter(|&(s, e, _)| s < e).map(|(s, e, c)| (s as u32, e as u32, c)),
+            );
+            if inp.decoration_strikes.len() != before {
+                self.sync_input_rich();
+            }
+        } else if let Some(t) = &mut self.text {
+            for (start, end, color) in strikes {
+                if start < end {
+                    t.cold.strikes.push((start as u32, end as u32, color));
+                }
+            }
+        }
+        self
+    }
+    /// An overline above bytes `start..end` in `color` (`None`: the span's or text's colour),
+    /// matching CSS `text-decoration-line: overline` and ANSI SGR 53/55. Wrapped lines each get
+    /// their own segment, and overlines coexist with [`Span::underline`] and [`El::strike`]. On
+    /// a [`text_input`], byte offsets are relative to `edit.text` and shift across any active
+    /// IME preedit, as [`El::spans`] and [`El::strike`] do.
+    ///
+    /// ```no_run
+    /// # use rune::{Color, text};
+    /// let el = text("OVER plain").overline(0, 4, Some(Color::WHITE));
+    /// ```
+    pub fn overline(mut self, start: usize, end: usize, color: Option<Color>) -> Self {
+        if start >= end {
+            return self;
+        }
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            inp.decoration_overlines.push((start as u32, end as u32, color));
+            self.sync_input_rich();
+        } else if let Some(t) = &mut self.text {
+            t.cold.overlines.push((start as u32, end as u32, color));
+        }
+        self
+    }
+    /// Overlines `(start, end, color)` for multiple byte ranges (see [`El::overline`]).
+    pub fn overlines(mut self, overlines: impl IntoIterator<Item = (usize, usize, Option<Color>)>) -> Self {
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            let before = inp.decoration_overlines.len();
+            inp.decoration_overlines.extend(
+                overlines.into_iter().filter(|&(s, e, _)| s < e).map(|(s, e, c)| (s as u32, e as u32, c)),
+            );
+            if inp.decoration_overlines.len() != before {
+                self.sync_input_rich();
+            }
+        } else if let Some(t) = &mut self.text {
+            for (start, end, color) in overlines {
+                if start < end {
+                    t.cold.overlines.push((start as u32, end as u32, color));
+                }
+            }
         }
         self
     }
@@ -139,6 +257,47 @@ impl El {
     pub fn text_highlights(mut self, highlights: impl IntoIterator<Item = crate::text::TextHighlight>) -> Self {
         for h in highlights {
             self = self.text_highlight(h);
+        }
+        self
+    }
+    /// A display-only full-width line fill and/or left vertical bar ([`LineFill`]) painted under
+    /// every visual line intersected by its UTF-8 byte range (see [`El::line_fills`]).
+    pub fn line_fill(self, fill: LineFill) -> Self {
+        self.line_fills([fill])
+    }
+    /// Display-only full-width line fills and left bars ([`LineFill`]) painted under text across
+    /// the field's full width without mutating [`TextEdit`] or undo history (for fenced code
+    /// blocks, block quotes, and similar plain-text decorations). Calling this more than once
+    /// appends to earlier fills. On a [`text_input`], byte offsets are relative to `edit.text`
+    /// and shift automatically across any active IME preedit, as [`El::decorations`] and
+    /// [`El::strikes`] do.
+    ///
+    /// ```
+    /// # use rune::{Color, LineFill, TextEdit, TextStyle, text_input};
+    /// # struct App { edit: TextEdit }
+    /// # let s = App { edit: TextEdit::default() };
+    /// # let body = TextStyle::new(14.0, 400.0);
+    /// # let (code_start, code_end, quote_start, quote_end) = (0, 0, 0, 0);
+    /// # let (code_bg, quote_bar) = (Color::WHITE, Color::WHITE);
+    /// # let _ =
+    /// text_input(&s.edit, body)
+    ///     .line_fills([LineFill::new(code_start, code_end).bg(code_bg)])
+    ///     .line_fills([LineFill::new(quote_start, quote_end).left_bar(2.0, quote_bar)])
+    /// # ;
+    /// ```
+    pub fn line_fills(mut self, fills: impl IntoIterator<Item = LineFill>) -> Self {
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            let before = inp.line_fills.len();
+            inp.line_fills.extend(fills.into_iter().filter(LineFill::is_visible));
+            if inp.line_fills.len() != before {
+                self.sync_input_rich();
+            }
+        } else if let Some(t) = &mut self.text {
+            for f in fills {
+                if f.is_visible() {
+                    t.cold.line_fills.push(f);
+                }
+            }
         }
         self
     }
@@ -168,8 +327,15 @@ impl El {
     /// The leading icon for each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`],
     /// by the pill's id (`None`: no icon). The icon takes the label's colour.
     ///
-    /// ```ignore
-    /// text_input(s.draft.clone(), body).pill_icon(|id| id.starts_with("file:").then_some(&FILE))
+    /// ```
+    /// # use rune::{Icon, TextEdit, TextStyle, text_input};
+    /// # const FILE: Icon = Icon { name: "file", view: 16.0, body: "" };
+    /// # struct App { draft: TextEdit }
+    /// # let s = App { draft: TextEdit::default() };
+    /// # let body = TextStyle::new(14.0, 400.0);
+    /// # let _ =
+    /// text_input(&s.draft, body).pill_icon(|id| id.starts_with("file:").then_some(&FILE))
+    /// # ;
     /// ```
     ///
     /// The closure may capture state; it runs each time the field is built, so a pill follows
@@ -182,23 +348,70 @@ impl El {
         }
         self
     }
+    /// A leading full-colour [`Pixels`](crate::Pixels) image (such as a service logo or avatar)
+    /// for each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`], by the pill's id
+    /// (`None`: no image). Drawn in the leading icon's slot and room, scaled to fit while keeping
+    /// its aspect ratio, without tinting. When `Some`, it takes precedence over
+    /// [`PillStyle::icon`] and [`El::pill_icon`].
+    ///
+    /// ```
+    /// # use std::collections::HashMap;
+    /// # use rune::{Pixels, TextEdit, TextStyle, text_input};
+    /// # struct App { draft: TextEdit, logos: HashMap<String, Pixels> }
+    /// # let s = App { draft: TextEdit::default(), logos: HashMap::new() };
+    /// # let body = TextStyle::new(14.0, 400.0);
+    /// # let _ =
+    /// text_input(&s.draft, body).pill_image({
+    ///     let logos = s.logos.clone();
+    ///     move |id| logos.get(id).cloned()
+    /// })
+    /// # ;
+    /// ```
+    pub fn pill_image(mut self, image: impl Fn(&str) -> Option<crate::Pixels> + 'static) -> Self {
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            inp.pill_image = Some(Rc::new(image));
+            self.sync_input_pills();
+            self.sync_input_rich();
+        }
+        self
+    }
     /// The look of each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`] by the
     /// pill's id: chip colour, label colour and icon, so a person and an agent can differ.
     /// What the style leaves unset falls back to [`El::pill_colors`] and [`El::pill_icon`].
     /// The closure may capture app state; it runs each time the field is built, and what it
     /// returns is drawn, so a cached subtree restyles when that state changes.
     ///
-    /// ```ignore
-    /// text_input(s.draft.clone(), body).pill_style({
+    /// ```
+    /// # use std::collections::HashSet;
+    /// # use rune::{Color, Icon, PillStyle, TextEdit, TextStyle, text_input};
+    /// # const PURPLE: Color = Color::WHITE;
+    /// # const BOT: Icon = Icon { name: "bot", view: 16.0, body: "" };
+    /// # struct App { draft: TextEdit, agents: HashSet<String> }
+    /// # let s = App { draft: TextEdit::default(), agents: HashSet::new() };
+    /// # let body = TextStyle::new(14.0, 400.0);
+    /// # let _ =
+    /// text_input(&s.draft, body).pill_style({
     ///     let agents = s.agents.clone();
     ///     move |id| if agents.contains(id) { PillStyle::default().bg(PURPLE).icon(&BOT) } else { PillStyle::default() }
     /// })
+    /// # ;
     /// ```
     pub fn pill_style(mut self, style: impl Fn(&str) -> PillStyle + 'static) -> Self {
         if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
             inp.pill_style = Some(Rc::new(style));
             self.sync_input_pills();
             self.sync_input_rich();
+        }
+        self
+    }
+
+    /// Secondary press (right-click or macOS control-click) on a [`Mark::Pill`](crate::Mark::Pill)
+    /// inside this [`text_input`]. Called with the pill's id and the press point
+    /// in window points; return `true` to handle it (opening a pill-specific menu) or `false` to
+    /// fall through to the field's standard context menu.
+    pub fn on_pill_secondary<S: 'static>(mut self, f: impl Fn(&mut S, &str, PointerPress, &mut Tx) -> bool + 'static) -> Self {
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            inp.on_pill_secondary = Some(Rc::new(move |s, id, press, tx| f(downcast::<S>(s), id, press, tx)));
         }
         self
     }
@@ -214,24 +427,36 @@ impl El {
             .into_iter()
             .map(|(start, end, id)| {
                 let st = inp.pill_style.as_ref().map(|f| f(id)).unwrap_or_default();
-                let icon = st.icon.or_else(|| inp.pill_icon.as_ref().and_then(|f| f(id)));
-                crate::text::PillChip { start, end, icon, bg: st.bg, fg: st.fg, bare: None }
+                let image = inp.pill_image.as_ref().and_then(|f| f(id));
+                let icon = if image.is_some() {
+                    None
+                } else {
+                    st.icon.or_else(|| inp.pill_icon.as_ref().and_then(|f| f(id)))
+                };
+                crate::text::PillChip { start, end, icon, image, bg: st.bg, fg: st.fg, ring: st.ring, radius: st.radius, bare: None }
             })
             .collect();
     }
     pub(crate) fn sync_input_rich(&mut self) {
         let (Some(inp), Some(t)) = (&self.cold.input, &mut self.text) else { return };
         t.cold.rich_style = Some(inp.rich_style);
-        if inp.edit.is_plain() && inp.decorations.is_empty() {
+        if inp.edit.is_plain()
+            && inp.decorations.is_empty()
+            && inp.decoration_strikes.is_empty()
+            && inp.decoration_overlines.is_empty()
+            && inp.line_fills.is_empty()
+        {
             // A plain field lays out and draws exactly as before rich editing existed.
             t.spans.clear();
             t.cold.strikes.clear();
+            t.cold.overlines.clear();
+            t.cold.line_fills.clear();
             t.cold.blocks.clear();
             t.cold.soft_breaks.clear();
             t.cold.pills.clear();
             return;
         }
-        let (mut base_spans, strikes, rich_links, blocks) =
+        let (mut base_spans, mut strikes, rich_links, blocks) =
             inp.edit.rich_display_specs(t.style, inp.rich_style);
         for d in &inp.decorations {
             for (ds, de) in inp.edit.map_range_to_display(d.start as usize, d.end as usize) {
@@ -239,6 +464,17 @@ impl El {
                 sp.start = ds;
                 sp.end = de;
                 base_spans.push(sp);
+            }
+        }
+        for &(start, end, color) in &inp.decoration_strikes {
+            for (ds, de) in inp.edit.map_range_to_display(start as usize, end as usize) {
+                strikes.push((ds, de, color));
+            }
+        }
+        let mut overlines = Vec::with_capacity(inp.decoration_overlines.len());
+        for &(start, end, color) in &inp.decoration_overlines {
+            for (ds, de) in inp.edit.map_range_to_display(start as usize, end as usize) {
+                overlines.push((ds, de, color));
             }
         }
         let pill_fg = t.cold.pill_colors.and_then(|(_, fg)| fg);
@@ -251,10 +487,24 @@ impl El {
                 s.underline = Some(s.color.unwrap_or(t.color));
             }
         }
+        let mut line_fills = Vec::with_capacity(inp.line_fills.len());
+        for &fill in &inp.line_fills {
+            if !fill.is_visible() {
+                continue;
+            }
+            let mapped = inp.edit.map_range_to_display(fill.start as usize, fill.end as usize);
+            if let (Some(&(ds, _)), Some(&(_, de))) = (mapped.first(), mapped.last())
+                && ds < de
+            {
+                line_fills.push(LineFill { start: ds, end: de, ..fill });
+            }
+        }
         t.spans = flat;
         t.cold.strikes = strikes;
+        t.cold.overlines = overlines;
+        t.cold.line_fills = line_fills;
         t.cold.blocks = blocks;
-        t.cold.soft_breaks = inp.edit.soft_breaks.clone();
+        t.cold.soft_breaks = inp.edit.soft_breaks().to_vec();
         // Replace links generated from `Mark::Link` while keeping any explicit `.link(...)` calls.
         t.cold.links = rich_links;
     }
@@ -272,6 +522,34 @@ impl El {
         }
         self
     }
+    /// Keep text unwrapped so lines break only at explicit newlines (`\n`), matching HTML's
+    /// `<textarea wrap="off">` and CSS's `white-space: pre`.
+    ///
+    /// On a multi-line [`text_input`], this clears wrapping without enabling [`El::single_line`]:
+    /// the field keeps newlines, Up/Down navigation and multi-line editing while measuring the
+    /// natural width of its longest line. Place it inside an [`El::scroll_x`] or [`El::scroll_xy`]
+    /// viewport so long lines scroll sideways and keep the caret in view.
+    ///
+    /// ```no_run
+    /// # use rune::{TextEdit, TextStyle, col, text_input};
+    /// let code = TextEdit::new("let long_line = 1;\nlet next = 2;");
+    /// let editor = col().size(320.0, 160.0).scroll_xy()
+    ///     .child(text_input(&code, TextStyle::new(13.0, 400.0).mono()).nowrap());
+    /// ```
+    #[inline]
+    pub fn nowrap(mut self) -> Self {
+        self.set_nowrap();
+        self
+    }
+    /// [`El::nowrap`] in place.
+    #[inline]
+    pub fn set_nowrap(&mut self) -> &mut Self {
+        if let Some(t) = &mut self.text {
+            t.wrap = false;
+            t.wrap_anywhere = false;
+        }
+        self
+    }
     /// Wrap text at the element's width, breaking inside a word only when the word alone would
     /// overflow the line (`overflow-wrap: anywhere`) while breaking normal words at spaces, and
     /// lowering the text's min-content width. Does not change flex shrinking; use
@@ -286,22 +564,19 @@ impl El {
         }
         self
     }
+    /// Break this text's lines greedily when the app wraps text prettily
+    /// ([`crate::text::set_pretty_wrap`]): text that grows while it's read, such as a reply
+    /// still streaming in, whose last lines would move as each word arrives.
+    pub fn wrap_greedy(mut self) -> Self {
+        if let Some(t) = &mut self.text {
+            t.flags.set(crate::el::text_spec::TextFlags::GREEDY, true);
+        }
+        self
+    }
     /// Whether this is text that wraps (`.wrap()`), for containers that let such text shrink
     /// to their width.
     pub fn wraps(&self) -> bool {
         self.text.as_ref().is_some_and(|t| t.wrap)
-    }
-    /// Keep styled display text on its original line, without ellipsis or a fade. Useful for
-    /// fixed-grid renderers that own line breaking. Text fields keep their editing behavior.
-    pub fn no_wrap(mut self) -> Self {
-        if self.cold.input.is_none() && let Some(t) = &mut self.text {
-            t.wrap = false;
-            t.wrap_anywhere = false;
-            t.truncate = false;
-            t.truncate_fade = false;
-            t.max_lines = 0;
-        }
-        self
     }
     /// One line, cut with "…" when wider than the element; the element may shrink below its
     /// text's width. A [`text_input`] ignores it and the other truncations.
@@ -354,10 +629,12 @@ impl El {
         self.style.set_min_width(length(0.0));
     }
     /// Wrapped text that stops after `lines` lines, "…" ending the last when more would follow,
-    /// as CSS's `line-clamp`. The element measures at most `lines` lines tall. The cut falls
-    /// between graphemes and refits when the element resizes; spans and links keep their
-    /// looks up to it, and copying and the accessibility text keep the whole string. 0 shows
-    /// every line. A [`text_input`] ignores it; use [`auto_grow`] there.
+    /// as CSS's `line-clamp`. Combine with [`El::elide_middle`] or [`El::elide_head`] in either
+    /// order to keep the trailing text (for example a file extension) across multiple lines.
+    /// The element measures at most `lines` lines tall. The cut falls between graphemes and
+    /// refits when the element resizes; spans and links keep their looks across the visible parts,
+    /// and copying and the accessibility text keep the whole string. 0 shows every line. A
+    /// [`text_input`] ignores it; use [`auto_grow`] there.
     pub fn max_lines(mut self, lines: usize) -> Self {
         if self.cold.input.is_some() { return self; }
         if let Some(t) = &mut self.text {
@@ -365,6 +642,50 @@ impl El {
             t.max_lines = lines;
             t.truncate = false;
             t.truncate_fade = false;
+        }
+        self
+    }
+    /// Put the ellipsis in the middle ("…" replaces the middle, keeping both ends) without
+    /// changing wrapping or [`El::max_lines`], matching AppKit's `NSLineBreakByTruncatingMiddle`
+    /// with `maximumNumberOfLines` and Pango's `PANGO_ELLIPSIZE_MIDDLE`.
+    ///
+    /// Combine with [`El::max_lines`] in either order (`.max_lines(2).elide_middle()` or
+    /// `.elide_middle().max_lines(2)`). For single-line middle truncation, see
+    /// [`El::truncate_middle`]. A [`text_input`] ignores it.
+    ///
+    /// ```no_run
+    /// # use rune::text;
+    /// let label = text("Quarterly report final revised version two of the budget.xlsx")
+    ///     .w(120.0)
+    ///     .max_lines(2)
+    ///     .elide_middle();
+    /// ```
+    pub fn elide_middle(mut self) -> Self {
+        if self.cold.input.is_some() { return self; }
+        if let Some(t) = &mut self.text {
+            t.elide = Elide::Middle;
+        }
+        self
+    }
+    /// Put the ellipsis at the start ("…" replaces the head, keeping the end) without changing
+    /// wrapping or [`El::max_lines`], matching AppKit's `NSLineBreakByTruncatingHead` with
+    /// `maximumNumberOfLines` and Pango's `PANGO_ELLIPSIZE_START`.
+    ///
+    /// Combine with [`El::max_lines`] in either order (`.max_lines(2).elide_head()` or
+    /// `.elide_head().max_lines(2)`). For single-line head truncation, see [`El::truncate_head`].
+    /// A [`text_input`] ignores it.
+    ///
+    /// ```no_run
+    /// # use rune::text;
+    /// let path = text("~/Projects/rune/crates/rune-kit/src/components/appearance_panel.rs")
+    ///     .w(140.0)
+    ///     .max_lines(2)
+    ///     .elide_head();
+    /// ```
+    pub fn elide_head(mut self) -> Self {
+        if self.cold.input.is_some() { return self; }
+        if let Some(t) = &mut self.text {
+            t.elide = Elide::Head;
         }
         self
     }
@@ -377,7 +698,11 @@ impl El {
         self.one_line(|t| {
             t.truncate = false;
             t.truncate_fade = true;
-            t.fade_em = em.max(0.0);
+            // The usual width is the cold block's own: only another one writes (and allocates) it.
+            let em = em.max(0.0);
+            if t.cold.fade_em != em {
+                t.cold.fade_em = em;
+            }
         })
     }
     /// Streaming word reveal (see [`TextSpec::reveal`]).
@@ -409,15 +734,30 @@ impl El {
     pub fn link(mut self, link: Link) -> Self {
         if let Some(t) = &mut self.text {
             t.cold.links.push(link);
-            self.cold_mut().focus.enabled = true;
-            if self.handlers.cursor.is_none() {
-                self.handlers.cursor = Some(Cursor::Pointer);
+            if !self.cold.focus.opt_out && !self.cold.focus.disabled {
+                self.cold_mut().focus.enabled = true;
             }
         }
         self
     }
+    /// The pointer's shape over this text's links while the text is [`El::selectable`] (or sets no
+    /// cursor of its own): the hand unless this names another, such as [`Cursor::Default`] for a
+    /// link that reads as plain text. Selectable text keeps the I-beam for itself, so
+    /// [`El::cursor`] can't say this. Text that isn't selectable and sets a cursor shows that over
+    /// its links, and a text field's links keep the hand.
+    pub fn link_cursor(mut self, cursor: Cursor) -> Self {
+        if let Some(t) = &mut self.text {
+            t.cold.link_cursor = Some(cursor);
+        }
+        self
+    }
     /// Called with a [`Link`]'s id when it is clicked, or pressed with Enter or Space while
-    /// focused.
+    /// focused. Read [`Tx::link_rect`] inside the handler for the activated link's first drawn
+    /// line box `[left, top, width, height]` in window points (for anchoring a popover or preview
+    /// card beside the link on both pointer and keyboard activation). A middle click on a link
+    /// calls it too, as a browser opens a link in a new tab: [`Tx::button`] is then
+    /// [`PointerButton::Middle`](crate::PointerButton::Middle), for a handler whose link only
+    /// opens in place to ignore.
     pub fn on_link<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
         if let Some(t) = &mut self.text {
             t.cold.on_link = Some(LinkFn(Rc::new(move |s, id, tx| f(downcast::<S>(s), id, tx))));
@@ -434,10 +774,56 @@ impl El {
         }
         self
     }
+    /// Called when the pointer enters, switches between, or leaves this text's [`Link`] spans:
+    /// `(Some(id), Some([left, top, width, height]))` in window points for the hovered link's
+    /// hit line box on enter or switch, and `(None, None)` when hover ends (pointer leaves the
+    /// link or window, link scrolls away under a stationary pointer, an overlying hit cover
+    /// occludes it, or the text unmounts, rebuilds, or becomes disabled/inert).
+    ///
+    /// Moving within the same link does not re-fire. Read [`Tx::pressing`] inside the handler
+    /// to tell whether a mouse button is held down (for example while drag-selecting text).
+    /// Disabled links and touch gestures never report hover. Windows without an `on_link_hover`
+    /// handler pay no pointer-move work.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, Link, Runtime, col, text};
+    /// # #[derive(Default)] struct S { hovered: Option<(String, [f32; 4])> }
+    /// # fn view(_: &S, _: &mut Cx<S>) -> El {
+    /// col().size(240.0, 80.0).child(
+    ///     text("Open the docs")
+    ///         .link(Link::new(9..13, "https://example.com/docs"))
+    ///         .on_link_hover(|s: &mut S, url, rect, _| {
+    ///             s.hovered = url.zip(rect).map(|(u, r)| (u.to_owned(), r));
+    ///         }),
+    /// )
+    /// # }
+    /// # let mut rt = Runtime::new(S::default(), view, (240.0, 80.0), Env::new(true, 1.0));
+    /// # rt.frame(0.0);
+    /// # let (x, y) = rt.find("https://example.com/docs").unwrap();
+    /// # rt.pointer_move(x, y);
+    /// # rt.frame(0.0);
+    /// # assert_eq!(rt.state.hovered.as_ref().map(|(u, _)| u.as_str()), Some("https://example.com/docs"));
+    /// # rt.pointer_leave();
+    /// # rt.frame(0.0);
+    /// # assert!(rt.state.hovered.is_none());
+    /// ```
+    pub fn on_link_hover<S: 'static>(
+        mut self,
+        f: impl Fn(&mut S, Option<&str>, Option<[f32; 4]>, &mut Tx) + 'static,
+    ) -> Self {
+        if let Some(t) = &mut self.text {
+            t.cold.on_link_hover = Some(LinkHoverFn(Rc::new(move |s, id, rect, tx| {
+                f(downcast::<S>(s), id, rect, tx)
+            })));
+        }
+        self
+    }
     /// Mark this text field's misspelled words, as a browser's `spellcheck` does: the platform's
-    /// checker (Windows' spell checking API, AppKit's `NSSpellChecker`; none on Linux or the
-    /// web) puts a red marker under each word the caret has left, and the field's menu offers its
-    /// suggestions and Learn Spelling. Off by default; a secure field never checks.
+    /// checker (Windows' spell checking API, AppKit's `NSSpellChecker` on macOS, installed system
+    /// Hunspell dictionaries on Linux when the default-on `hunspell` feature is enabled, or fetched
+    /// Hunspell dictionaries on the web) puts a red
+    /// marker under each word the caret has left, and the field's menu offers its suggestions and
+    /// Learn Spelling. Off by default; a secure field never checks.
     pub fn spellcheck(mut self, on: bool) -> Self {
         if let Some(i) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
             i.spellcheck = on;
@@ -452,11 +838,29 @@ impl El {
         }
         self
     }
+    /// Lay this field's placeholder out in `style` rather than the field's own, as CSS's
+    /// `::placeholder` can: a phone's field types at 16 pt (so iOS doesn't zoom to it) while its
+    /// hint keeps the design's size.
+    pub fn placeholder_font(mut self, style: TextStyle) -> Self {
+        if let Some(i) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            i.placeholder_style = Some(style);
+        }
+        self
+    }
+    /// The insertion caret and selection highlight colours for a text field or
+    /// [`El::caret_browsing`] selectable text. Without it, the caret follows the text colour
+    /// ([`El::color`], else [`Cx::foreground`](crate::Cx::foreground), else white), matching CSS
+    /// `caret-color: auto`, and a text field's selection uses that colour at 20%.
     pub fn caret(mut self, caret: Color, selection: Color) -> Self {
         if let Some(i) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
             i.caret = caret;
             i.selection = selection;
             i.caret_inked = true;
+            i.selection_inked = true;
+        }
+        if let Some(t) = &mut self.text {
+            t.cold.caret = Some(caret);
+            t.cold.selection = selection;
         }
         self
     }
@@ -481,8 +885,9 @@ impl El {
         if let Some(t) = &mut self.text {
             if self.cold.input.is_some() || t.redacted { return self; }
             t.selectable = on;
-            if on && (self.handlers.cursor.is_none() || (!t.cold.links.is_empty() && self.handlers.cursor == Some(Cursor::Pointer))) {
+            if on && self.handlers.cursor.is_none() {
                 self.handlers.cursor = Some(Cursor::Text);
+                t.flags.set(crate::el::text_spec::TextFlags::SELECTABLE_CURSOR, true);
             }
         }
         self
@@ -497,21 +902,53 @@ impl El {
         self.flags.set(ElFlags::SELECTION_GROUP, on);
         self
     }
+    /// Opts an [`El::selectable`] text element or [`El::selection_group`] container into keyboard
+    /// caret browsing, as in Chrome's caret browsing mode: the element becomes focusable via click
+    /// or Tab, draws a 1.5 pt caret when focused and collapsed (coloured by [`El::caret`], else
+    /// [`El::color`] / [`Cx::foreground`](crate::Cx::foreground)), moves by character, word, visual
+    /// line, page, and line or document `Home`/`End`, extends the selection with `Shift` across
+    /// mounted sibling texts and unmounted `virtual_rows` / `virtualize` rows in tree order (keeping
+    /// offscreen anchors pinned for copy), collapses a non-empty selection on plain `Left`/`Right`,
+    /// scrolls enclosing viewports to keep the caret in view, preserves `Cmd/Ctrl+C` and
+    /// `Cmd/Ctrl+A`, and publishes the caret and selection to accessibility. Off by default,
+    /// leaving ordinary [`El::selectable`] text non-focusable and untouched.
+    ///
+    /// ```
+    /// use rune::{El, col, text};
+    ///
+    /// let _doc: El = col()
+    ///     .selection_group(true)
+    ///     .caret_browsing(true)
+    ///     .child(text("First paragraph").selectable(true))
+    ///     .child(text("Second paragraph").selectable(true));
+    /// ```
+    pub fn caret_browsing(mut self, on: bool) -> Self {
+        if on || self.cold.get().is_some() {
+            self.cold_mut().focus.caret_browsing = on;
+        }
+        self
+    }
     /// What copying a text selection inside this element puts on the clipboard (Cmd+C and the
     /// Copy menu) instead of the selected text as drawn, so a document drawn from source can
     /// copy the source. `f` sees every [`El::selectable`] text inside this element that the
     /// selection could reach (those of its selection group), in tree order, each with its
     /// selected range (empty when it isn't selected) and its path relative to this element.
-    /// Return `None` to copy the drawn text after all ([`TextSelection::text`]). The nearest
-    /// such element around both ends of the selection answers. Kit's `Markdown::copy_source`
-    /// is one.
+    /// Return `None` to copy the drawn text after all ([`TextSelection::text`]). When a
+    /// selection spans unbuilt virtual rows, collection stops at 10,000 unbuilt rows or 4 MiB of
+    /// UTF-8 text and sets [`TextSelection::truncated`]. The nearest such element around both ends
+    /// of the selection answers. Kit's `Markdown::copy_source` is one.
     ///
-    /// ```ignore
+    /// ```
+    /// # use rune::col;
+    /// # let note = String::from("# Note");
+    /// # let _ =
     /// col().selection_group(true)
     ///     .selection_copy(move |sel| sel.texts().iter().all(|t| t.is_whole()).then(|| note.clone()))
+    /// # ;
     /// ```
     ///
     /// [`TextSelection::text`]: crate::TextSelection::text
+    /// [`TextSelection::truncated`]: crate::TextSelection::truncated
     pub fn selection_copy(mut self, f: impl Fn(&crate::TextSelection) -> Option<String> + 'static) -> Self {
         self.handlers.selection_copy = Some(Rc::new(f));
         self
@@ -526,10 +963,14 @@ impl El {
     /// press making it releases ([`dragging`](crate::SelectionChange::dragging)). A press leaving
     /// only a caret isn't heard. Call [`Tx::live_only`] when the view reads nothing that changed.
     ///
-    /// ```ignore
+    /// ```
+    /// # use rune::col;
+    /// # struct Notes { whole_note_highlight: bool }
+    /// # let _ =
     /// col().selection_group(true).on_selection_change(|s: &mut Notes, change, _| {
     ///     if change.started() { s.whole_note_highlight = false; }
     /// })
+    /// # ;
     /// ```
     ///
     /// [`SelectionChange`]: crate::SelectionChange
@@ -562,8 +1003,12 @@ impl El {
     /// one: the larger of the two texts' asks, one by default. Two leaves a blank line, as a web
     /// page's paragraphs copy. Texts side by side still take a tab.
     ///
-    /// ```ignore
+    /// ```
+    /// # use rune::text;
+    /// # let para = "first para";
+    /// # let _ =
     /// text(para).selectable(true).copy_breaks(2, 2) // "first para\n\nsecond para"
+    /// # ;
     /// ```
     pub fn copy_breaks(mut self, before: u8, after: u8) -> Self {
         if let Some(t) = &mut self.text { t.cold.copy_breaks = [before, after]; }
@@ -588,7 +1033,10 @@ impl El {
     }
     /// The selection highlight of [`El::selectable`] text or a text field, drawn alike for both.
     pub fn selection_color(mut self, color: Color) -> Self {
-        if let Some(i) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) { i.selection = color; }
+        if let Some(i) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            i.selection = color;
+            i.selection_inked = true;
+        }
         if let Some(t) = &mut self.text { t.cold.selection = color; }
         self
     }
@@ -618,13 +1066,32 @@ impl El {
 }
 
 impl El {
-    /// Paint the latest text in this element's fixed layout box. `text("00:00")` reserves
-    /// that placeholder's size; explicit `.size(w, h)` also works. Updates never resize the
-    /// box or reflow siblings, and overflow is clipped. Plain single-line text only.
+    /// Paint the latest text in this element's fixed layout box without rebuilding the view or
+    /// reflowing siblings. `text("00:00")` reserves that placeholder's size; explicit
+    /// `.size(w, h)` also works, and overflow is clipped.
+    ///
+    /// Plain single-line text (including [`El::truncate_fade`]) shapes one line directly.
+    /// [`El::wrap`], [`El::truncate`] (and `truncate_middle` / `truncate_head`), and
+    /// [`El::max_lines`] re-wrap or re-elide inside the existing box width. [`El::inline`] boxes
+    /// stay in flow and reposition their child elements on every live update (a box placed at the
+    /// end of a non-empty placeholder stays anchored at the end as length changes; any earlier
+    /// offset stays at its authored byte clamped down to the nearest UTF-8 char boundary). Where
+    /// plain string replacement cannot apply (a text editor, non-text element, [`El::spans`],
+    /// [`El::reveal`], [`El::secure`], links, pills, or byte-indexed text decorations), the
+    /// binding is ignored and the element keeps its authored text without panicking.
+    ///
+    /// ```no_run
+    /// # use rune::{LiveText, text};
+    /// let caption = LiveText::new("Starting...");
+    /// let el = text("Placeholder").size(160.0, 40.0).max_lines(2).live_text(&caption);
+    /// caption.set("Live caption that wraps and elides inside the box");
+    /// ```
     pub fn live_text(mut self, value: &crate::LiveText) -> Self {
-        assert!(self.cold.input.is_none(), "live_text cannot bind a text editor");
-        let spec = self.text.as_mut().expect("live_text requires a text element");
-        spec.cold.live = Some(value.clone());
+        if self.cold.input.is_none()
+            && let Some(spec) = &mut self.text
+        {
+            spec.cold.live = Some(value.clone());
+        }
         self
     }
     #[inline]
@@ -643,7 +1110,15 @@ impl El {
             *ic = c;
             cold.icon_inked = true;
         }
-        if self.cold.input.is_some() {
+        let has_input = if let Some(i) = self.cold.get_mut_if_some().and_then(|cold| cold.input.as_deref_mut()) {
+            if !i.placeholder_inked { i.placeholder_color = c.alpha(0.4); }
+            if !i.caret_inked { i.caret = c; }
+            if !i.selection_inked { i.selection = c.alpha(0.2); }
+            true
+        } else {
+            false
+        };
+        if has_input {
             self.sync_input_rich();
         }
         self
@@ -658,6 +1133,39 @@ impl El {
     pub fn set_align(&mut self, a: Align) -> &mut Self {
         if let Some(t) = &mut self.text {
             t.align = a;
+        }
+        self
+    }
+    /// Vertically aligns a text element's or [`text_input`](crate::text_input)'s laid-out lines
+    /// inside its content box when the box is taller than the text, as CSS Box Alignment
+    /// `align-content` does (`Align::Center` matches HTML `<input type="text">` vertical
+    /// centring). Defaults to [`Align::Start`] (top of the content box).
+    ///
+    /// Moves glyphs, placeholder, selection highlight, caret, IME candidate area, inline links,
+    /// pills, pointer hit-testing, [`Runtime::text_offset_at`](crate::Runtime::text_offset_at),
+    /// [`Cx::caret`](crate::Cx::caret), [`Cx::field_selection_rects`](crate::Cx::field_selection_rects),
+    /// and accessibility text-run bounds together. Auto-height fields and boxes no taller than the
+    /// text receive zero vertical shift.
+    ///
+    /// ```no_run
+    /// # use rune::{Align, TextEdit, TextStyle, text_input};
+    /// let edit = TextEdit::new("Search");
+    /// let field = text_input(&edit, TextStyle::new(14.0, 400.0).lh(20.0))
+    ///     .single_line()
+    ///     .h(56.0)
+    ///     .px(12.0)
+    ///     .align_y(Align::Center);
+    /// ```
+    #[inline]
+    pub fn align_y(mut self, a: Align) -> Self {
+        self.set_align_y(a);
+        self
+    }
+    /// [`El::align_y`] in place.
+    #[inline]
+    pub fn set_align_y(&mut self, a: Align) -> &mut Self {
+        if let Some(t) = &mut self.text && t.cold.align_y != a {
+            t.cold.align_y = a;
         }
         self
     }
@@ -680,6 +1188,41 @@ impl El {
         }
         self
     }
+    /// Indents the first formatted line of a [`text`](crate::text()), [`rich`], or
+    /// [`text_input`] element by `points` from its inline-start edge,
+    /// matching CSS Text Module Level 3 `text-indent: <length>`.
+    ///
+    /// Positive values indent the first line inward; negative values pull it outward into leading
+    /// padding (for example `.pl(48.0).text_indent(-48.0)` for a hanging indent). Mirrors to the
+    /// right edge in right-to-left text. Subsequent wrapped lines and lines after explicit `\n`
+    /// breaks stay unindented. Non-finite values are ignored.
+    ///
+    /// ```no_run
+    /// # use rune::text;
+    /// let msg = text("10:42 Ada: Wrapping message body aligned under the body column.")
+    ///     .w(280.0)
+    ///     .pl(48.0)
+    ///     .wrap()
+    ///     .text_indent(-48.0);
+    /// ```
+    #[inline]
+    pub fn text_indent(mut self, points: f32) -> Self {
+        self.set_text_indent(points);
+        self
+    }
+    /// [`El::text_indent`] in place.
+    #[inline]
+    pub fn set_text_indent(&mut self, points: f32) -> &mut Self {
+        if points.is_finite()
+            && let Some(t) = &mut self.text
+        {
+            let points = if points == 0.0 { 0.0 } else { points };
+            if t.cold.text_indent != points {
+                t.cold.text_indent = points;
+            }
+        }
+        self
+    }
     /// Measure this text as the grapheme at byte `at` of `run`, shaped as one line in the same
     /// style, instead of on its own rounded up to a device pixel. Neighbouring cells of one run
     /// then sit at its fractional, kerned advances and together take its width, and each draws
@@ -690,4 +1233,17 @@ impl El {
         }
         self
     }
+    /// A filled disc in a list's outside marker column. The column's inline end is where the
+    /// item's text begins; its top is the top of the first line. Its width, and thus wrapping,
+    /// is up to the caller. The disc's diameter and inset resolve from the primary font's
+    /// metrics in whole device pixels during layout, also after a zoom or display change.
+    pub fn outside_list_disc(mut self, font: TextStyle) -> Self {
+        let (a, d) = crate::text::primary_extents(font).unwrap_or((0.8, 0.2));
+        self.cold_mut().list_disc = Some([a * font.size, d.abs() * font.size, font.line_px()]);
+        self.radius(999.0).a11y_hidden()
+    }
 }
+
+#[cfg(test)]
+#[path = "text_tests.rs"]
+mod tests;

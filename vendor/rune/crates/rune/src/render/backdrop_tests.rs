@@ -6,7 +6,7 @@ fn rect(rect: [f32; 4], fill: [f32; 4]) -> Instance {
 
 #[test]
 fn backdrop_pool_is_lazy_reused_resized_and_follows_live_formats() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless_or_noop() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -23,7 +23,7 @@ fn backdrop_pool_is_lazy_reused_resized_and_follows_live_formats() {
     assert_eq!(renderer.backdrops[0].view, original);
 
     // Switching after prepare is legal: the next draw must already have the new format's pool.
-    let format = OFFSCREEN_FORMAT.remove_srgb_suffix();
+    let format = OFFSCREEN_FORMAT_LINEAR;
     renderer.set_format(device, format);
     assert!(renderer.backdrops.iter().any(|b| b.format == format));
     for (format, size) in [(format, (48, 24)), (OFFSCREEN_FORMAT, (24, 48)), (format, (32, 32))] {
@@ -49,7 +49,7 @@ fn backdrop_pool_is_lazy_reused_resized_and_follows_live_formats() {
 
 #[test]
 fn split_resets_the_hook_viewport_and_scissor_for_later_primitives() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
@@ -77,7 +77,7 @@ fn split_resets_the_hook_viewport_and_scissor_for_later_primitives() {
 
 #[test]
 fn backdrop_slot_degrades_when_the_target_cannot_be_copied() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
     let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));

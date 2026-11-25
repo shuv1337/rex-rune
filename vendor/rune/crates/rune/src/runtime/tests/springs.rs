@@ -10,9 +10,9 @@ fn dissolve_prepass_only_runs_for_trees_with_dissolve_nodes() {
     let mut rt = Runtime::new(false, view, (64.0, 32.0), Env::new(true, 1.0));
     for enabled in [false, true, false] {
         rt.state = enabled; rt.invalidate(); rt.frame(0.0);
-        assert_eq!(rt.has_dissolve, enabled);
-        assert_eq!(rt.dissolve_scratch.is_empty(), !enabled);
-        if enabled { assert!(rt.dissolve_scratch[0]); }
+        assert_eq!(rt.tree.has_dissolve, enabled);
+        assert_eq!(rt.paint.dissolve_scratch().is_empty(), !enabled);
+        if enabled { assert!(rt.paint.dissolve_scratch()[0]); }
     }
 }
 
@@ -23,10 +23,10 @@ fn a_child_too_faint_to_paint_does_not_isolate_its_dissolve_parent() {
     }
     let mut rt = Runtime::new(0.0005, view, (64.0, 32.0), Env::new(true, 1.0));
     rt.frame(0.0);
-    assert!(!rt.dissolve_scratch[0]);
+    assert!(!rt.paint.dissolve_scratch()[0]);
     rt.state = 0.5; rt.invalidate();
     for _ in 0..60 { rt.frame(1.0 / 60.0); }
-    assert!(rt.dissolve_scratch[0]);
+    assert!(rt.paint.dissolve_scratch()[0]);
 }
 
 #[test]
@@ -66,6 +66,47 @@ fn sequences_run_without_commits_then_sleep_and_settle() {
     assert_eq!(pose(&reduced).scale, 1.0);
     assert_eq!(pose(&reduced).opacity, 1.0);
     assert_eq!(pose(&reduced).loop_phase, Some(1.0));
+    assert_eq!(reduced.wake_deadline(), None);
+}
+#[test]
+fn repeating_sequence_loops_without_commits_cools_on_removal_and_holds_first_pose_reduced() {
+    const BEATS: &[crate::Beat] = &[
+        crate::Beat::new(0.0).opacity(0.4).scale(0.8),
+        crate::Beat::new(0.4).opacity(1.0).scale(1.0).easing(crate::Easing::LINEAR),
+        crate::Beat::new(0.8).opacity(0.4).scale(0.8).easing(crate::Easing::LINEAR),
+    ];
+    fn view(on: &bool, _: &mut Cx<bool>) -> El {
+        let mut dot = el().key("dot").size(20.0, 20.0).fill(Color::WHITE);
+        if *on {
+            dot = dot.sequence(crate::Sequence::new(BEATS).repeating());
+        }
+        el().key("root").size(100.0, 100.0).child(dot)
+    }
+    let dot = |rt: &Runtime<bool>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("dot")).unwrap();
+    let mut rt = Runtime::new(true, view, (100.0, 100.0), Env::new(true, 1.0));
+    assert!(rt.frame(0.0));
+    let commits = rt.stats.commits;
+    assert!(rt.frame(0.2));
+    let first = dot(&rt);
+    assert!((first.opacity - 0.7).abs() < 1e-4 && (first.scale - 0.9).abs() < 1e-4);
+    assert!(rt.frame(0.8));
+    let second = dot(&rt);
+    assert!((second.opacity - first.opacity).abs() < 1e-4 && (second.scale - first.scale).abs() < 1e-4, "wraps every period");
+    assert_eq!(rt.stats.commits, commits, "repeating sequence runs with zero view commits");
+    // Removing the sequence cools smoothly to neutral (1.0, 1.0) and goes idle.
+    rt.update(|on, _| *on = false);
+    assert!(rt.frame(1.0 / 120.0));
+    for _ in 0..120 { rt.frame(1.0 / 120.0); }
+    assert!(!rt.animating, "cooled repeating sequence sleeps");
+    let rested = dot(&rt);
+    assert!((rested.opacity - 1.0).abs() < 1e-3 && (rested.scale - 1.0).abs() < 1e-3);
+    // Reduced motion holds the calm first pose and schedules no frames.
+    let mut reduced = Runtime::new(true, view, (100.0, 100.0), Env::new(true, 1.0));
+    reduced.set_system_reduced_motion(true);
+    assert!(!reduced.frame(0.0));
+    let p = dot(&reduced);
+    assert!((p.opacity - 0.4).abs() < 1e-5 && (p.scale - 0.8).abs() < 1e-5);
+    assert_eq!(p.loop_phase, Some(0.0));
     assert_eq!(reduced.wake_deadline(), None);
 }
 
@@ -198,12 +239,12 @@ fn a_duplicate_matched_id_matches_the_last_one_and_warns() {
             .child(el().key("b").matched("tile").size(10.0, 10.0))
     }
     let mut rt = Runtime::new((), view, (100.0, 100.0), Env::new(true, 1.0));
-    rt.key_warnings = Some(Vec::new());
+    rt.commit.enable_key_warnings();
     rt.frame(0.0);
-    let warnings = rt.key_warnings.as_ref().unwrap();
+    let warnings = rt.commit.key_warnings().unwrap();
     assert!(warnings.len() == 1 && warnings[0].contains("duplicate matched id \"tile\""), "{warnings:?}");
-    let b = rt.nodes.iter().find(|n| n.key.as_deref() == Some("b")).unwrap().id;
-    assert_eq!(rt.matched.iter().map(|m| m.1).collect::<Vec<_>>(), [b]);
+    let b = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("b")).unwrap().id;
+    assert_eq!(rt.motion.matched_ids(), [b]);
 }
 
 #[test]
@@ -227,7 +268,7 @@ fn presence_exits_stay_drawn_and_revive_mid_flight() {
 
     // Remove the badge: it stays in the tree while its blur-replace exit runs.
     rt.state = false;
-    rt.dirty = true;
+    rt.commit.dirty = true;
     assert!(rt.frame(1.0 / 60.0));
     let badge = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).unwrap();
     assert!(badge.opacity > 0.0 && badge.opacity < 1.0);
@@ -235,14 +276,14 @@ fn presence_exits_stay_drawn_and_revive_mid_flight() {
     // Revive mid-exit: continues without a jump.
     let before = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).unwrap().opacity;
     rt.state = true;
-    rt.dirty = true;
+    rt.commit.dirty = true;
     rt.frame(1.0 / 60.0);
     let after = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).unwrap().opacity;
     assert!((after - before).abs() < 0.15, "{before} -> {after}");
 
     // Remove again and run until settled: unmounts only after opacity reaches 0.
     rt.state = false;
-    rt.dirty = true;
+    rt.commit.dirty = true;
     for _ in 0..120 {
         rt.frame(1.0 / 60.0);
     }
@@ -276,7 +317,7 @@ const LAB_DT: f64 = 1.0 / 60.0;
 
 fn lab_set(rt: &mut Runtime<Lab>, f: impl FnOnce(&mut Lab)) {
     f(&mut rt.state);
-    rt.dirty = true;
+    rt.commit.dirty = true;
 }
 
 fn lab_steps(rt: &mut Runtime<Lab>, n: usize) {
@@ -376,7 +417,7 @@ fn an_exit_in_a_frozen_subtree_finishes_after_resuming() {
 #[test]
 fn a_node_unmounted_at_once_in_a_scaled_subtree_drops_its_clock() {
     let mut rt = Lab::at(1.0, 0.5).runtime();
-    let badge = rt.nodes.iter().find(|n| n.key.as_deref() == Some("badge")).unwrap().id;
+    let badge = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("badge")).unwrap().id;
     assert_eq!(rt.scene.store().node_time_scale(badge), 0.5);
     lab_set(&mut rt, |s| s.badge = false);
     rt.settle_all();
@@ -398,7 +439,7 @@ fn an_exiting_element_drops_its_own_time_scale() {
     let mut rt = Runtime::new(true, view, (200.0, 100.0), Env::new(true, 1.0));
     assert!(!rt.frame(0.0));
     rt.state = false;
-    rt.dirty = true;
+    rt.commit.dirty = true;
     for _ in 0..3 { rt.frame(LAB_DT); }
     let card = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("card")).expect("exiting");
     assert!(card.exiting && card.opacity < 1.0, "its exit runs: {}", card.opacity);
@@ -439,4 +480,217 @@ fn removing_what_draws_nothing_skips_its_exit() {
     rt.frame(1.0 / 60.0);
     rt.frame(1.0 / 60.0);
     assert!(!exiting(&rt, "dot"), "the dot under a parent that hid at once is gone");
+}
+
+#[test]
+fn frame_motion_overrides_commit_motion_without_inheriting_and_respects_instant_and_reduced_motion() {
+    struct S { w: f32, snap_parent: bool }
+
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let child = el().key("child").w(s.w * 0.5).h(20.0);
+        let mut parent = col().key("parent").w(s.w).h(60.0).width_leads().child(child);
+        parent = if s.snap_parent {
+            parent.frame_motion(rune_motion::Anim::INSTANT)
+        } else {
+            parent.frame_motion(rune_motion::Curve::linear(0.4))
+        };
+        col().size(400.0, 200.0).child(parent)
+    }
+
+    let width = |rt: &Runtime<S>, key: &str| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[2]
+    };
+
+    // 1. frame_motion(Anim::INSTANT) snaps parent during a slow Tx::motion_curve commit,
+    // while child is NOT affected (not inherited) and still follows the commit's tween.
+    let mut rt = Runtime::new(S { w: 100.0, snap_parent: true }, view, (400.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, tx| {
+        s.w = 200.0;
+        tx.motion_curve(rune_motion::Curve::linear(0.4));
+    });
+    rt.frame(0.0);
+    rt.frame(0.1);
+    assert!((width(&rt, "parent") - 200.0).abs() < 0.1, "parent snapped immediately, got {}", width(&rt, "parent"));
+    assert!((width(&rt, "child") - 62.5).abs() < 3.0, "child still animates on commit tween (~62.5 at 0.1s), got {}", width(&rt, "child"));
+
+    // 2. frame_motion(Curve::linear(0.4)) beats a fast Tx::motion spring and skips width_leads.
+    let mut rt = Runtime::new(S { w: 100.0, snap_parent: false }, view, (400.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, tx| {
+        s.w = 200.0;
+        tx.motion(Spring::new(0.05, 0.0));
+    });
+    rt.frame(0.0);
+    rt.frame(0.2);
+    assert!((width(&rt, "parent") - 150.0).abs() < 2.0, "parent uses its 0.4s linear frame_motion (~150 at 0.2s), got {}", width(&rt, "parent"));
+    assert!((width(&rt, "child") - 100.0).abs() < 0.5, "child already landed on the fast 0.05s commit spring, got {}", width(&rt, "child"));
+    rt.frame(0.25);
+    assert!((width(&rt, "parent") - 200.0).abs() < 0.1);
+
+    // 3. Tx::instant() still overrides frame_motion.
+    let mut rt = Runtime::new(S { w: 100.0, snap_parent: false }, view, (400.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, tx| {
+        s.w = 200.0;
+        tx.instant();
+    });
+    rt.frame(1.0 / 120.0);
+    assert!((width(&rt, "parent") - 200.0).abs() < 0.1, "Tx::instant overrides frame_motion");
+
+    // 4. Reduce Motion lands frame_motion immediately.
+    let mut rt = Runtime::new(S { w: 100.0, snap_parent: false }, view, (400.0, 200.0), Env::new(true, 1.0));
+    rt.set_system_reduced_motion(true);
+    rt.frame(0.0);
+    rt.update(|s, _| s.w = 200.0);
+    rt.frame(1.0 / 120.0);
+    assert!((width(&rt, "parent") - 200.0).abs() < 0.1, "Reduce Motion lands frame_motion immediately");
+}
+
+#[test]
+fn transition_motion_drives_timed_presence_and_respects_instant_and_reduced_motion() {
+    fn view(shown: &bool, _: &mut Cx<bool>) -> El {
+        col().size(200.0, 100.0).children(shown.then(|| {
+            el().key("toast").size(100.0, 40.0).fill(Color::WHITE)
+                .transition(Transition::opacity())
+                .transition_motion(
+                    rune_motion::Curve::linear(0.4),
+                    rune_motion::Curve::linear(0.2),
+                )
+        }))
+    }
+
+    let toast_op = |rt: &Runtime<bool>| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some("toast")).map(|e| e.opacity)
+    };
+
+    // Timed enter (0.4 s linear) and exit (0.2 s linear).
+    let mut rt = Runtime::new(false, view, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, _| *s = true);
+    rt.frame(0.0);
+    rt.frame(0.2);
+    let op = toast_op(&rt).unwrap();
+    assert!((op - 0.5).abs() < 0.08, "enter midpoint ~0.5, got {op}");
+    rt.frame(0.25);
+    assert!((toast_op(&rt).unwrap() - 1.0).abs() < 1e-3);
+
+    rt.update(|s, _| *s = false);
+    rt.frame(0.0);
+    rt.frame(0.1);
+    let op = toast_op(&rt).unwrap();
+    assert!((op - 0.5).abs() < 0.08, "exit midpoint ~0.5, got {op}");
+    rt.frame(0.15);
+    assert!(toast_op(&rt).is_none(), "toast unmounted after 0.2s linear exit");
+
+    // Tx::instant() overrides timed transition_motion.
+    rt.update(|s, tx| { *s = true; tx.instant(); });
+    rt.frame(1.0 / 120.0);
+    assert!((toast_op(&rt).unwrap() - 1.0).abs() < 1e-3, "Tx::instant mounts immediately");
+    rt.update(|s, tx| { *s = false; tx.instant(); });
+    rt.frame(1.0 / 120.0);
+    assert!(toast_op(&rt).is_none(), "Tx::instant unmounts immediately");
+
+    // Reduce Motion compresses a long timed enter to REDUCED_FADE (~0.18 s).
+    let mut rm = Runtime::new(false, view, (200.0, 100.0), Env::new(true, 1.0));
+    rm.set_system_reduced_motion(true);
+    rm.frame(0.0);
+    rm.update(|s, _| *s = true);
+    rm.frame(0.0);
+    rm.frame(0.22);
+    assert!((toast_op(&rm).unwrap() - 1.0).abs() < 1e-3, "Reduce Motion settles 0.4s enter by 0.22s");
+}
+
+#[test]
+fn matched_motion_drives_timed_flight_and_respects_reduced_motion_and_instant() {
+    #[derive(Clone, Copy)]
+    enum FlightKind { MatchedMotion, TxCurve }
+    struct S { right: bool, kind: FlightKind }
+
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let mut pill = el().key(if s.right { "pill-b" } else { "pill-a" })
+            .matched("pill")
+            .size(40.0, 40.0)
+            .fill(if s.right { Color::WHITE } else { Color::BLACK });
+        if matches!(s.kind, FlightKind::MatchedMotion) {
+            pill = pill.matched_motion(rune_motion::Curve::linear(0.4));
+        }
+        let mut root = crate::row().size(240.0, 60.0);
+        if s.right {
+            root = root.child(el().size(200.0, 40.0)).child(pill);
+        } else {
+            root = root.child(pill).child(el().size(200.0, 40.0));
+        }
+        root
+    }
+
+    let pill_x = |rt: &Runtime<S>| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some("pill-b")).map(|e| e.rect[0])
+    };
+
+    // 1. El::matched_motion overrides a fast commit spring with a 0.4 s linear flight.
+    let mut rt = Runtime::new(S { right: false, kind: FlightKind::MatchedMotion }, view, (240.0, 60.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, tx| {
+        s.right = true;
+        tx.motion(Spring::new(0.05, 0.0));
+    });
+    rt.frame(0.0);
+    rt.frame(0.2);
+    let x = pill_x(&rt).unwrap();
+    assert!((x - 100.0).abs() < 5.0, "matched_motion 0.4s linear midpoint ~100, got {x}");
+    rt.frame(0.25);
+    assert!((pill_x(&rt).unwrap() - 200.0).abs() < 0.5);
+
+    // 2. Without matched_motion, Tx::motion_curve drives the matched flight on a timed curve too.
+    let mut rt = Runtime::new(S { right: false, kind: FlightKind::TxCurve }, view, (240.0, 60.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, tx| {
+        s.right = true;
+        tx.motion_curve(rune_motion::Curve::linear(0.4));
+    });
+    rt.frame(0.0);
+    rt.frame(0.2);
+    let x = pill_x(&rt).unwrap();
+    assert!((x - 100.0).abs() < 5.0, "Tx::motion_curve 0.4s linear midpoint ~100, got {x}");
+    rt.frame(0.25);
+    assert!((pill_x(&rt).unwrap() - 200.0).abs() < 0.5);
+
+    // 3. Reduce Motion disables matched flight (lands at x = 200 and fades in place).
+    let mut rm = Runtime::new(S { right: false, kind: FlightKind::MatchedMotion }, view, (240.0, 60.0), Env::new(true, 1.0));
+    rm.set_system_reduced_motion(true);
+    rm.frame(0.0);
+    rm.update(|s, _| s.right = true);
+    rm.frame(0.05);
+    assert!((pill_x(&rm).unwrap() - 200.0).abs() < 0.5, "Reduce Motion skips matched flight");
+
+    // 4. Tx::instant() skips matched flight and swaps immediately.
+    let mut inst = Runtime::new(S { right: false, kind: FlightKind::MatchedMotion }, view, (240.0, 60.0), Env::new(true, 1.0));
+    inst.frame(0.0);
+    inst.update(|s, tx| { s.right = true; tx.instant(); });
+    inst.frame(1.0 / 120.0);
+    assert!((pill_x(&inst).unwrap() - 200.0).abs() < 0.5, "Tx::instant skips matched flight");
+}
+
+#[test]
+fn memo_root_motion_overrides_invalidate_reuse_when_changed() {
+    fn view(fast: &bool, _: &mut Cx<bool>) -> El {
+        let base = crate::memo("card", 0u32, || el().h(40.0).fill(Color::WHITE));
+        let card = if *fast {
+            base.w(200.0).frame_motion(rune_motion::Anim::INSTANT)
+        } else {
+            base.w(100.0).frame_motion(rune_motion::Curve::linear(0.4))
+        };
+        col().size(300.0, 100.0).child(card)
+    }
+
+    let mut rt = Runtime::new(false, view, (300.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|fast, tx| {
+        *fast = true;
+        tx.motion_curve(rune_motion::Curve::linear(0.4));
+    });
+    rt.frame(1.0 / 120.0);
+    let w = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("card")).unwrap().rect[2];
+    assert!((w - 200.0).abs() < 0.1, "updated frame_motion on memo root took effect, got {w}");
 }

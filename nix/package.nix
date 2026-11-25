@@ -72,7 +72,8 @@ rustPlatform.buildRustPackage {
   cargoLock = {
     lockFile = ../Cargo.lock;
     outputHashes = {
-      "rune-kit-0.0.1" = "sha256-IWvwANCYSmgeI9ZZ/X0YYFeJaSKSr2CYnQSsZyJgB1c=";
+      # All Rune git packages, including the registry patches, share this checkout.
+      "rune-kit-0.0.1" = "sha256-rlDi4WiUnCvOU4x32O0Qb20cdiXbljnjNAFjn3UMCwM=";
     };
   };
   nativeBuildInputs = [

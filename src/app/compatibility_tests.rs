@@ -590,6 +590,8 @@ fn once_mode_suppresses_held_repeats_and_a_persistent_top_mode_does_not_pop_an_o
                 mods: Mods::default(),
                 pressed,
                 repeat,
+                text: None,
+                consumed_mods: Mods::default(),
             },
             KeyEvent {
                 key: Key::Right,

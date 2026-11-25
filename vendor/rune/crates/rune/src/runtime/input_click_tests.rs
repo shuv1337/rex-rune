@@ -1,6 +1,9 @@
 use super::*;
 use crate::{Cx, El, Env, Ime, Key, KeyEvent, Mods, PhysicalInput, Runtime, TextEdit, TextStyle, col, text_input};
 
+/// 1 where a double-click's word takes the space after it (Windows, `selectable::with_trailing_space`).
+const WIN: usize = if cfg!(target_os = "windows") { 1 } else { 0 };
+
 struct Form {
     single: TextEdit,
     multi: TextEdit,
@@ -102,8 +105,9 @@ fn rect_of(rt: &Runtime<Form>, key: &str) -> [f32; 4] {
 
 /// Window point `(x, y)` at `frac` (`0.0..1.0`) across the glyph cluster at `byte` in `key`.
 fn point_in_cluster(rt: &Runtime<Form>, key: &str, byte: usize, frac: f32) -> (f32, f32) {
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap();
-    let l = n.text_layout.as_ref().unwrap();
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap();
+    let piece = n.text_layout.as_ref().unwrap().view().piece_at(byte);
+    let (l, byte) = (piece.layout, piece.shaped(byte));
     let s = rt.env.scale;
     let cl = parley::Cluster::from_byte_index(l, byte).unwrap();
     let x0 = cl.visual_offset().unwrap();
@@ -113,7 +117,7 @@ fn point_in_cluster(rt: &Runtime<Form>, key: &str, byte: usize, frac: f32) -> (f
     let r = rect_of(rt, key);
     (
         r[0] + n.inset[0] + (x0 + adv * frac) / s,
-        r[1] + n.inset[1] + ((bb.y0 + bb.y1) * 0.5) as f32 / s,
+        r[1] + n.inset[1] + (piece.y + ((bb.y0 + bb.y1) * 0.5) as f32) / s,
     )
 }
 
@@ -139,16 +143,17 @@ fn double_and_triple_click_select_word_and_line_in_single_line_input() {
     rt.pointer_up(x, y);
     rt.frame(1.0 / 60.0);
     assert!(rt.state.single.focused);
-    assert!(!rt.focus.keyboard(), "pointer focus does not turn on keyboard focus ring");
+    assert!(!rt.kbd.focus.keyboard(), "pointer focus does not turn on keyboard focus ring");
     assert_eq!(rt.state.single.anchor, rt.state.single.focus);
     assert!(rt.state.single.focus > 0 && rt.state.single.focus < 4);
 
-    // Second press within double_click_interval and CLICK_SLOP selects "make" (0..4).
+    // Second press within double_click_interval and CLICK_SLOP selects "make" (0..4), and on
+    // Windows the space after it (0..5), as Chromium's double-click there does.
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(1.0 / 60.0);
-    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (0, 4));
-    assert_eq!(rt.state.single.selected(), "make");
+    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (0, 4 + WIN));
+    assert_eq!(rt.state.single.selected(), if WIN == 1 { "make " } else { "make" });
 
     // Third press selects the whole single-line text; fourth stays at three.
     rt.pointer_down(x, y);
@@ -170,8 +175,8 @@ fn triple_click_in_multiline_input_selects_hard_line_paragraph() {
 
     click(&mut rt, pt);
     click(&mut rt, pt);
-    assert_eq!((rt.state.multi.anchor, rt.state.multi.focus), (second, second + 6));
-    assert_eq!(rt.state.multi.selected(), "second");
+    assert_eq!((rt.state.multi.anchor, rt.state.multi.focus), (second, second + 6 + WIN));
+    assert_eq!(rt.state.multi.selected(), if WIN == 1 { "second " } else { "second" });
 
     click(&mut rt, pt);
     assert_eq!((rt.state.multi.anchor, rt.state.multi.focus), (second, third));
@@ -204,7 +209,7 @@ fn click_drag_double_drag_and_triple_drag_extend_by_unit_in_both_directions() {
     click(&mut rt, p_the);
     rt.pointer_down(p_the.0, p_the.1);
     rt.frame(1.0 / 60.0);
-    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (5, 8));
+    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (5, 8 + WIN));
     rt.pointer_move(p_smaller.0, p_smaller.1);
     rt.frame(1.0 / 60.0);
     assert_eq!((rt.state.single.anchor, rt.state.single.focus), (5, 22));
@@ -214,8 +219,8 @@ fn click_drag_double_drag_and_triple_drag_extend_by_unit_in_both_directions() {
     rt.pointer_move(p_make.0, p_make.1);
     rt.pointer_up(p_make.0, p_make.1);
     rt.frame(1.0 / 60.0);
-    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (8, 0));
-    assert_eq!(rt.state.single.selected(), "make the");
+    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (8 + WIN, 0));
+    assert_eq!(rt.state.single.selected(), if WIN == 1 { "make the " } else { "make the" });
 
     // Triple-click on line 2 of multi ("second line there\n") and drag down to line 3, then up to line 1.
     rt.frame(1.0);
@@ -238,6 +243,29 @@ fn click_drag_double_drag_and_triple_drag_extend_by_unit_in_both_directions() {
     rt.pointer_up(l1.0, l1.1);
     rt.frame(1.0 / 60.0);
     assert_eq!((rt.state.multi.anchor, rt.state.multi.focus), (third, 0));
+}
+
+#[test]
+fn double_click_drag_extends_by_word_across_paragraphs() {
+    let mut rt = runtime();
+    let text = &rt.state.multi.text;
+    let line = text.find("line").unwrap();
+    let second = text.find("second").unwrap();
+    let end = text.find("end").unwrap();
+    let start = point_at_byte(&rt, "multi", second + 2);
+    let forward = point_at_byte(&rt, "multi", end + 1);
+    let back = point_at_byte(&rt, "multi", line + 1);
+
+    click(&mut rt, start);
+    rt.pointer_down(start.0, start.1);
+    rt.frame(1.0 / 60.0);
+    rt.pointer_move(forward.0, forward.1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!((rt.state.multi.anchor, rt.state.multi.focus), (second, end + 3));
+    rt.pointer_move(back.0, back.1);
+    rt.pointer_up(back.0, back.1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!((rt.state.multi.anchor, rt.state.multi.focus), (second + 6 + WIN, line));
 }
 
 #[test]
@@ -327,15 +355,14 @@ fn timing_slop_and_target_changes_reset_multiclick_count_and_preedit_ignores_it(
     click(&mut rt, pt);
     assert_eq!(rt.state.single.anchor, rt.state.single.focus, "pressing another input resets the click count");
 
-    // 4. Active IME composition ignores multi-click and keeps preedit intact.
+    // 4. A press mid-composition writes the composition into the text, as a browser's field
+    // does, and puts the caret where it landed.
     rt.frame(1.0);
-    rt.ime(Ime::Preedit("かん".into(), Some((0, 6))));
+    rt.ime(Ime::Preedit("かん".into(), Some((0, 6)), Vec::new()));
     rt.frame(1.0 / 60.0);
-    let before = (rt.state.single.anchor, rt.state.single.focus);
     click(&mut rt, pt);
-    click(&mut rt, pt);
-    assert!(rt.state.single.preedit().is_some());
-    assert_eq!((rt.state.single.anchor, rt.state.single.focus), before);
+    assert!(rt.state.single.preedit().is_none());
+    assert!(rt.state.single.text.contains("かん"));
 }
 
 #[test]
@@ -347,12 +374,12 @@ fn right_half_of_char_and_pill_trailing_padding_select_the_hit_word_and_pill() {
     click(&mut rt, right_of_e);
     assert_eq!((rt.state.single.anchor, rt.state.single.focus), (4, 4));
     click(&mut rt, right_of_e);
-    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (0, 4));
-    assert_eq!(rt.state.single.selected(), "make");
+    assert_eq!((rt.state.single.anchor, rt.state.single.focus), (0, 4 + WIN));
+    assert_eq!(rt.state.single.selected(), if WIN == 1 { "make " } else { "make" });
 
     // In "pills" ("@maya hello" where 0..5 is a pill), find the trailing inline box of "@maya".
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pills")).unwrap();
-    let l = n.text_layout.as_ref().unwrap();
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("pills")).unwrap();
+    let l = n.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
     let s = rt.env.scale;
     let line = l.get(0).unwrap();
     let trail = line
@@ -412,13 +439,13 @@ fn focus_loss_and_input_removal_clear_active_drag_and_drop_queued_drag_steps() {
     rt.physical_input(PhysicalInput::Modifiers(Mods::default()));
     let after_shift = (rt.state.single.anchor, rt.state.single.focus);
     assert_eq!(after_shift.0, anchor);
-    assert!(rt.input_click.dragging_path().is_some());
+    assert!(rt.edit.input_click.dragging_path().is_some());
 
     // Queue a drag move, then lose focus before the frame drains the queue: the queued drag step is dropped.
     rt.pointer_move(p_smaller.0, p_smaller.1);
     rt. set_focus(None, false);
     rt.frame(1.0 / 60.0);
-    assert!(rt.input_click.dragging_path().is_none());
+    assert!(rt.edit.input_click.dragging_path().is_none());
     assert_eq!((rt.state.single.anchor, rt.state.single.focus), after_shift);
     rt.pointer_up(p_smaller.0, p_smaller.1);
     rt.frame(1.0 / 60.0);
@@ -437,7 +464,7 @@ fn focus_loss_and_input_removal_clear_active_drag_and_drop_queued_drag_steps() {
         tx.instant();
     });
     rt.frame(1.0 / 60.0);
-    assert!(rt.input_click.dragging_path().is_none(), "unmounting the dragged input clears dragging");
+    assert!(rt.edit.input_click.dragging_path().is_none(), "unmounting the dragged input clears dragging");
 
     rt.update(|s, tx| {
         s.show_single = true;
@@ -524,4 +551,96 @@ fn a_field_that_stops_following_its_press_keeps_the_press_until_release() {
     assert!(matches!(c.steps.front(), Some((_, Step::Cancelled))), "its queued drag step does nothing");
     assert!(c.end_press());
     assert!(!c.captured() && !c.end_press(), "the release ends it once");
+}
+
+#[test]
+fn clicking_centered_end_aligned_rtl_and_multiline_inputs_hits_drawn_glyphs() {
+    struct AlignForm {
+        centered: TextEdit,
+        end: TextEdit,
+        rtl: TextEdit,
+        multi: TextEdit,
+    }
+    fn align_view(s: &AlignForm, _: &mut Cx<AlignForm>) -> El {
+        let st = style();
+        col().w_full().h_full().padding(10.0).gap(8.0)
+            .child(text_input(&s.centered, st).single_line().align(crate::Align::Center).px(8.0)
+                .key("centered").size(300.0, 32.0).on_edit(|s: &mut AlignForm| &mut s.centered))
+            .child(text_input(&s.end, st).single_line().align(crate::Align::End).px(8.0)
+                .key("end").size(300.0, 32.0).on_edit(|s: &mut AlignForm| &mut s.end))
+            .child(text_input(&s.rtl, st).single_line().dir(crate::Direction::Rtl).px(8.0)
+                .key("rtl").size(300.0, 32.0).on_edit(|s: &mut AlignForm| &mut s.rtl))
+            .child(text_input(&s.multi, st).px(8.0)
+                .key("multi").size(300.0, 80.0).on_edit(|s: &mut AlignForm| &mut s.multi))
+    }
+    let rtl_text = "مرحبا بالعالم";
+    let mut rt = Runtime::new(
+        AlignForm {
+            centered: TextEdit::new("ABCDEFGH"),
+            end: TextEdit::new("ABCDEFGH"),
+            rtl: TextEdit::new(rtl_text),
+            multi: TextEdit::new("Hello world\nSecond line"),
+        },
+        align_view,
+        (340.0, 260.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+
+    // Drawn window coordinates of byte `byte` inside field `key`, computed by the canonical paint rule.
+    let drawn_byte_pt = |rt: &Runtime<AlignForm>, key: &str, byte: usize| -> (f32, f32) {
+        let i = rt.tree.nodes.iter().position(|n| n.key.as_deref() == Some(key)).unwrap();
+        let n = &rt.tree.nodes[i];
+        let spec = n.text.as_ref().unwrap();
+        let flow = n.text_layout.as_ref().unwrap().view();
+        let s = rt.env.scale;
+        let rect = rt.drawn_box(i);
+        let [ox, oy] = links::origin(n, spec, flow, rect, s, 1.0);
+        let bb = flow.caret(byte, parley::Affinity::Downstream, 1.5 * s);
+        (ox + bb.x0 as f32 / s + 0.25, oy + ((bb.y0 + bb.y1) * 0.5) as f32 / s)
+    };
+
+    // Centered single-line input: click at byte 4.
+    let pt = drawn_byte_pt(&rt, "centered", 4);
+    rt.pointer_move(pt.0, pt.1);
+    rt.pointer_down(pt.0, pt.1);
+    rt.pointer_up(pt.0, pt.1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.centered.focus, 4, "centered single-line click at drawn byte 4");
+
+    // Secondary click (field_menu) on centered input at byte 2 moves caret to byte 2.
+    let pt2 = drawn_byte_pt(&rt, "centered", 2);
+    rt.pointer_move(pt2.0, pt2.1);
+    rt.secondary_down(pt2.0, pt2.1);
+    rt.secondary_up(pt2.0, pt2.1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.centered.focus, 2, "centered field_menu right-click at drawn byte 2");
+    rt.resolve_popup(None).ok();
+
+    // End-aligned single-line input: click at byte 2.
+    let pt = drawn_byte_pt(&rt, "end", 2);
+    rt.pointer_move(pt.0, pt.1);
+    rt.pointer_down(pt.0, pt.1);
+    rt.pointer_up(pt.0, pt.1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.end.focus, 2, "end-aligned single-line click at drawn byte 2");
+
+    // RTL single-line input: click at the byte boundary after "مرحبا " (right-aligned from x1).
+    let rtl_byte = "مرحبا ".len();
+    let pt = drawn_byte_pt(&rt, "rtl", rtl_byte);
+    rt.pointer_move(pt.0, pt.1);
+    rt.pointer_down(pt.0, pt.1);
+    rt.pointer_up(pt.0, pt.1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.rtl.focus, rtl_byte, "RTL single-line click at drawn byte {rtl_byte}");
+
+    // Multi-line input ignores any single-line `input_scroll` entry for its path.
+    let multi_path = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap().path.clone();
+    rt.edit.input_scroll.insert(multi_path, 150.0);
+    let pt = drawn_byte_pt(&rt, "multi", 2);
+    rt.pointer_move(pt.0, pt.1);
+    rt.pointer_down(pt.0, pt.1);
+    rt.pointer_up(pt.0, pt.1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.multi.focus, 2, "multi-line input click must ignore single-line input_scroll");
 }

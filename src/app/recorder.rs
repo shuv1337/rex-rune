@@ -612,7 +612,7 @@ pub fn key(s: &mut Workspace, event: &KeyEvent, tx: &mut Tx) -> bool {
             }
             return true;
         }
-        Key::Modifier { .. } | Key::Dead(_) => return true,
+        Key::Modifier { .. } => return true,
         _ => {}
     }
     let input = Input {
@@ -650,7 +650,9 @@ pub fn ime(s: &mut Workspace, ime: &Ime) -> bool {
     let Some(recorder) = s.recorder.as_mut() else {
         return false;
     };
-    recorder.composing = matches!(ime, Ime::Preedit(text, _) if !text.is_empty());
+    if !matches!(ime, Ime::Select(_)) {
+        recorder.composing = matches!(ime, Ime::Preedit(text, ..) if !text.is_empty());
+    }
     true
 }
 

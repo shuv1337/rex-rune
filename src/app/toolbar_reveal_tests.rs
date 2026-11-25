@@ -42,6 +42,7 @@ fn drawn(
         framed_terminal(&mut ws, block, &sender, b"$ make\r\nok");
     }
     let mut rt = runtime(ws);
+    rt.poll = Some(crate::app::poll);
     settle(&mut rt);
     (rt, host, sent)
 }
@@ -272,7 +273,7 @@ fn always_keeps_the_toolbar_in_its_row_above_the_panes() {
     assert_eq!(toolbar_reveal::placement(&rt.state), Placement::Row);
     assert_eq!(rect(&rt, "toolbar"), [0., 0., 1024., TOOLBAR]);
     assert_eq!(rt.state.area, [0., TOOLBAR, 1024., 700. - TOOLBAR]);
-    assert!(!has(&rt, "toolbar-band") && !has(&rt, "toolbar-float"));
+    assert!(!has(&rt, "toolbar-float"));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -483,7 +484,7 @@ fn a_lone_panes_floating_header_stays_clear_of_the_top_edge_too() {
 fn hidden_gives_the_toolbars_row_to_the_panes() {
     let (mut rt, _host, _sent) = drawn("single", ToolbarBehavior::Hidden);
     assert_eq!(toolbar_reveal::placement(&rt.state), Placement::None);
-    assert!(!has(&rt, "toolbar") && !has(&rt, "toolbar-band"));
+    assert!(!has(&rt, "toolbar"));
     assert_eq!(rt.state.area, [0., 0., 1024., 700.], "all 52 pt of it");
     assert_eq!(rect(&rt, "pane:block:a"), [0., 0., 1024., 700.]);
     assert_eq!(
@@ -533,7 +534,6 @@ fn on_hover_floats_the_toolbar_over_the_top_edge_without_moving_a_terminal() {
     let (mut rt, host, sent) = drawn("single", ToolbarBehavior::OnHover);
     assert!(!has(&rt, "toolbar"));
     assert_eq!(rt.state.area, [0., 0., 1024., 700.]);
-    assert_eq!(rect(&rt, "toolbar-band"), [0., 0., 1024., 8.]);
     let (pane, grid) = (rect(&rt, "pane:block:a"), rect(&rt, "grid:block:a"));
     let x = 300.;
 
@@ -563,7 +563,6 @@ fn on_hover_floats_the_toolbar_over_the_top_edge_without_moving_a_terminal() {
     assert!(sent_verbs(&sent).is_empty() && requests(&host).is_empty());
 
     // On the toolbar itself it stays, and its controls work.
-    assert_eq!(rect(&rt, "toolbar-band")[3], TOOLBAR);
     let settings = rect(&rt, "settings");
     rest_at(&mut rt, settings[0] + 10., settings[1] + 26.);
     assert!(has(&rt, "toolbar"));
@@ -589,7 +588,6 @@ fn on_hover_floats_the_toolbar_over_the_top_edge_without_moving_a_terminal() {
     settle(&mut rt);
     assert!(!has(&rt, "toolbar"), "gone again");
     assert!(!rt.state.toolbar_reveal.hover);
-    assert_eq!(rect(&rt, "toolbar-band")[3], 8.);
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -658,15 +656,8 @@ fn hover_revealed_toolbar_keeps_tab_session_and_window_context_menus() {
     rt.frame(1. / 60.);
     rt.secondary_up(x, y);
     settle(&mut rt);
-    // Rune keeps the native menu request private. Its input trace confirms dispatch
-    // to the toolbar handler that calls Tx::show_window_menu, not the hover band.
-    assert!(
-        rt.events
-            .iter()
-            .any(|event| event.starts_with("secondary press ") && event.ends_with("/toolbar")),
-        "window-menu handler reached: {:?}",
-        rt.events
-    );
+    // The native window menu is covered by the X11 spike. No Rex popup should open.
+    assert!(rt.state.panel.is_none());
     assert!(sent_verbs(&sent).is_empty() && requests(&host).is_empty());
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
@@ -784,6 +775,8 @@ fn a_waiting_key_sequence_still_shows_with_no_toolbar_to_hold_it() {
             mods,
             pressed: true,
             repeat: false,
+            text: None,
+            consumed_mods: Mods::default(),
         },
         KeyEvent {
             key: Key::Command('b'),

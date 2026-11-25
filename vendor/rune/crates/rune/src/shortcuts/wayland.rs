@@ -1,25 +1,39 @@
-//! xdg-desktop-portal GlobalShortcuts. Each binding owns a session so unregister works on
-//! portal v1 (which cannot remove a binding from an existing session).
-use super::{Backend, Shortcut, ShortcutError, ShortcutId, Sink};
-use futures_util::StreamExt;
+//! xdg-desktop-portal GlobalShortcuts. One portal session holds the app's entire active set of
+//! shortcuts: startup shortcuts bind together in one `BindShortcuts` call, runtime changes close
+//! the current session and bind the new full set in a fresh session, and removing the last
+//! shortcut closes the session without rebinding.
+use super::{
+    Backend, Shortcut, ShortcutDetails, ShortcutError, ShortcutId, Sink,
+    wayland_session::{self, BindOutcome, Effect, Event, PortalShortcut, State},
+};
+use crate::{
+    machine::{Attempt, Effects, Seq},
+    platform::portal::{self, DEST, PATH, RequestError, RequestTimeouts},
+};
+use async_channel::{Receiver, Sender, unbounded};
+use async_executor::{LocalExecutor, Task};
+use futures_lite::{FutureExt, StreamExt};
 use std::{collections::HashMap, sync::mpsc, thread::JoinHandle, time::Duration};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant, fdo};
+use zbus::{
+    Connection, Proxy,
+    proxy::SignalStream,
+    zvariant::{OwnedObjectPath, OwnedValue, Type, Value},
+};
 
-const DEST: &str = "org.freedesktop.portal.Desktop";
-const PATH: &str = "/org/freedesktop/portal/desktop";
 const INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
-type Reply = mpsc::SyncSender<Result<(), ShortcutError>>;
-enum Command { Register(ShortcutId, Shortcut, Reply), Unregister(ShortcutId, Reply) }
-pub(super) struct Native { commands: Option<UnboundedSender<Command>>, worker: Option<JoinHandle<()>> }
+type BatchReply = mpsc::SyncSender<Vec<Result<(), ShortcutError>>>;
+type UnitReply = mpsc::SyncSender<Result<(), ShortcutError>>;
+type BindDone = (Attempt, Result<BindOutcome<OwnedObjectPath>, ShortcutError>);
+enum Command {
+    Register(Vec<PortalShortcut>, BatchReply),
+    Unregister(ShortcutId, UnitReply),
+}
+pub(super) struct Native { commands: Option<Sender<Command>>, worker: Option<JoinHandle<()>> }
 
 fn dbus_error(e: zbus::Error) -> ShortcutError {
-    // zbus reports the standard org.freedesktop.DBus.Error.* replies as typed FDO errors.
-    if let zbus::Error::FDO(fdo) = &e
-        && matches!(**fdo, fdo::Error::ServiceUnknown(_) | fdo::Error::NameHasNoOwner(_) | fdo::Error::UnknownInterface(_)
-            | fdo::Error::UnknownMethod(_) | fdo::Error::UnknownObject(_)) {
+    if portal::is_unavailable(&e) {
         return ShortcutError::Unsupported;
     }
     if let zbus::Error::MethodError(name, _, _) = &e {
@@ -37,75 +51,160 @@ fn response_status(status: u32) -> Result<(), ShortcutError> {
 }
 fn timed_out() -> ShortcutError { ShortcutError::Backend("portal request timed out".into()) }
 
-async fn request<B: serde::Serialize + zbus::Type>(conn: &Connection, portal: &Proxy<'_>, token: &str,
-    method: &str, body: &B) -> Result<HashMap<String, OwnedVariant>, ShortcutError> {
-    let sender = conn.unique_name().ok_or(ShortcutError::Unsupported)?.trim_start_matches(':').replace('.', "_");
-    let path = format!("{PATH}/request/{sender}/{token}");
-    let proxy = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request").await.map_err(dbus_error)?;
-    // Subscribe before making the request: a portal can respond before the method returns.
-    let mut responses = proxy.receive_signal("Response").await.map_err(dbus_error)?;
-    let result = tokio::time::timeout(CONSENT_TIMEOUT, async {
-        let returned: OwnedObjectPath = portal.call(method, body).await.map_err(dbus_error)?;
-        if returned.as_str() != path { return Err(ShortcutError::Backend("portal returned an unexpected request path".into())); }
-        let response = responses.next().await.ok_or_else(|| ShortcutError::Backend("portal disconnected".into()))?;
-        let (status, values): (u32, HashMap<String, OwnedVariant>) = response.body().deserialize().map_err(dbus_error)?;
-        response_status(status)?;
-        Ok(values)
-    }).await.unwrap_or_else(|_| Err(timed_out()));
-    if result.is_err() {
-        let _ = tokio::time::timeout(RPC_TIMEOUT, proxy.call::<_, _, ()>("Close", &())).await;
-    }
-    result
+async fn request<B: serde::Serialize + Type>(
+    conn: &Connection,
+    portal_proxy: &Proxy<'_>,
+    token: &str,
+    method: &str,
+    body: &B,
+    cancel: &Receiver<()>,
+) -> Result<HashMap<String, OwnedValue>, ShortcutError> {
+    let (status, values) = portal::request(
+        conn,
+        portal_proxy,
+        token,
+        method,
+        body,
+        RequestTimeouts { rpc: RPC_TIMEOUT, response: Some(CONSENT_TIMEOUT) },
+        async { cancel.recv().await.ok(); },
+    ).await.map_err(|err| match err {
+        RequestError::Dbus(e) => dbus_error(e),
+        RequestError::Unavailable => ShortcutError::Unsupported,
+        RequestError::TimedOut => timed_out(),
+        RequestError::Disconnected => ShortcutError::Backend("portal disconnected".into()),
+        RequestError::Cancelled => ShortcutError::NotRunning,
+    })?;
+    response_status(status)?;
+    Ok(values)
 }
 
 async fn close(conn: &Connection, session: &OwnedObjectPath) -> Result<(), ShortcutError> {
-    tokio::time::timeout(RPC_TIMEOUT, async {
+    portal::timeout(RPC_TIMEOUT, async {
         let proxy = Proxy::new(conn, DEST, session.as_str(), "org.freedesktop.portal.Session").await.map_err(dbus_error)?;
         proxy.call::<_, _, ()>("Close", &()).await.map_err(dbus_error)
-    }).await.unwrap_or_else(|_| Err(timed_out()))
+    }).await.unwrap_or_else(|| Err(timed_out()))
 }
 
-async fn bind(conn: &Connection, portal: &Proxy<'_>, id: ShortcutId, shortcut: &Shortcut) -> Result<OwnedObjectPath, ShortcutError> {
-    let create = format!("rune_{}_create", id.0);
-    let session_token = format!("rune_{}_session", id.0);
-    let options = HashMap::from([("handle_token", Variant::from(create.as_str())), ("session_handle_token", Variant::from(session_token.as_str()))]);
-    let response = request(conn, portal, &create, "CreateSession", &(options,)).await?;
+async fn bind_set(
+    conn: &Connection,
+    portal_proxy: &Proxy<'_>,
+    shortcuts: &[PortalShortcut],
+    cancel: Receiver<()>,
+) -> Result<BindOutcome<OwnedObjectPath>, ShortcutError> {
+    let create = portal::next_token("shortcuts_create");
+    let session_token = portal::next_token("shortcuts_session");
+    let options = HashMap::from([
+        ("handle_token", Value::from(create.as_str())),
+        ("session_handle_token", Value::from(session_token.as_str())),
+    ]);
+    let response = request(conn, portal_proxy, &create, "CreateSession", &(options,), &cancel).await?;
     let value = response.get("session_handle").ok_or_else(|| ShortcutError::Backend("portal omitted session_handle".into()))?;
     let session = if let Ok(path) = <&str>::try_from(value) {
         OwnedObjectPath::try_from(path.to_owned()).map_err(|e| ShortcutError::Backend(e.to_string()))?
-    } else { OwnedObjectPath::try_from(value.try_clone().map_err(|e| ShortcutError::Backend(e.to_string()))?)
-        .map_err(|e| ShortcutError::Backend(e.to_string()))? };
-    let bind_token = format!("rune_{}_bind", id.0);
-    let options = HashMap::from([("handle_token", Variant::from(bind_token.as_str()))]);
-    let trigger = shortcut.portal_trigger();
-    let description = format!("Shortcut {shortcut}");
-    let info = HashMap::from([("description", Variant::from(description.as_str())), ("preferred_trigger", Variant::from(trigger.as_str()))]);
-    let shortcuts = vec![(id.0.to_string(), info)];
-    match request(conn, portal, &bind_token, "BindShortcuts", &(&session, shortcuts, "", options)).await {
+    } else {
+        OwnedObjectPath::try_from(value.try_clone().map_err(|e| ShortcutError::Backend(e.to_string()))?)
+            .map_err(|e| ShortcutError::Backend(e.to_string()))?
+    };
+    let bind_token = portal::next_token("shortcuts_bind");
+    let options = HashMap::from([("handle_token", Value::from(bind_token.as_str()))]);
+    let entries: Vec<(&str, HashMap<&str, Value<'_>>)> = shortcuts.iter().map(|s| {
+        let info = HashMap::from([
+            ("description", Value::from(s.description.as_str())),
+            ("preferred_trigger", Value::from(s.preferred_trigger.as_str())),
+        ]);
+        (s.portal_id.as_str(), info)
+    }).collect();
+    match request(conn, portal_proxy, &bind_token, "BindShortcuts", &(&session, entries, "", options), &cancel).await {
         Ok(response) => {
-            // Success with no matching binding is not a registration. The compositor chooses
-            // the actual trigger; a preferred-trigger conflict is not standardized by the portal.
-            let bindings = response.get("shortcuts").and_then(|v| v.try_clone().ok())
-                .and_then(|v| Vec::<(String, HashMap<String, OwnedVariant>)>::try_from(v).ok());
-            if bindings.as_ref().is_some_and(|v| v.iter().any(|(key, _)| key == &id.0.to_string())) { Ok(session) }
-            else { let _ = close(conn, &session).await; Err(ShortcutError::PermissionDenied) }
+            let bound_portal_ids = response.get("shortcuts").and_then(|v| v.try_clone().ok())
+                .and_then(|v| Vec::<(String, HashMap<String, OwnedValue>)>::try_from(v).ok())
+                .map(|v| v.into_iter().map(|(key, _)| key).collect())
+                .unwrap_or_default();
+            Ok(BindOutcome { session, bound_portal_ids })
         }
-        Err(e) => { let _ = close(conn, &session).await; Err(e) }
+        Err(e) => {
+            close(conn, &session).await.ok();
+            Err(e)
+        }
+    }
+}
+
+fn to_portal_shortcut(id: ShortcutId, shortcut: &Shortcut, details: &ShortcutDetails) -> PortalShortcut {
+    PortalShortcut {
+        id,
+        portal_id: details.portal_id(shortcut),
+        description: details.portal_description(shortcut),
+        preferred_trigger: shortcut.portal_trigger(),
+    }
+}
+
+async fn apply_effects(
+    effects: Effects<Effect<OwnedObjectPath, BatchReply, UnitReply>>,
+    conn: &Connection,
+    portal: &Proxy<'static>,
+    local: &LocalExecutor<'_>,
+    done_tx: &Sender<BindDone>,
+    in_flight: &mut Option<(Attempt, Sender<()>, Task<()>)>,
+    sink: &Sink,
+) {
+    for effect in effects {
+        match effect {
+            Effect::CloseSession(session) => { close(conn, &session).await.ok(); }
+            Effect::Bind { attempt, shortcuts } => {
+                let (cancel_tx, cancel_rx) = async_channel::bounded::<()>(1);
+                let (conn, portal, done_tx) = (conn.clone(), portal.clone(), done_tx.clone());
+                let task = local.spawn(async move {
+                    let result = bind_set(&conn, &portal, &shortcuts, cancel_rx).await;
+                    done_tx.try_send((attempt, result)).ok();
+                });
+                *in_flight = Some((attempt, cancel_tx, task));
+            }
+            Effect::CancelBind(attempt) => {
+                if let Some((current, cancel_tx, task)) = in_flight.take() {
+                    if current == attempt {
+                        drop(cancel_tx);
+                        task.await;
+                    } else {
+                        *in_flight = Some((current, cancel_tx, task));
+                    }
+                }
+            }
+            Effect::ReplyRegister { reply, results } => { reply.send(results).ok(); }
+            Effect::ReplyUnregister { reply, result } => { reply.send(result).ok(); }
+            Effect::Activate { id, token } => sink(id, token),
+        }
+    }
+}
+
+async fn watch_session_closed(
+    conn: &Connection,
+    state: &State<OwnedObjectPath, BatchReply, UnitReply>,
+    session_closed: &mut Option<(OwnedObjectPath, SignalStream<'static>)>,
+) {
+    match state {
+        State::Bound { session, .. } => {
+            if session_closed.as_ref().is_some_and(|(path, _)| path == session) { return; }
+            *session_closed = async {
+                let proxy = Proxy::new(conn, DEST, session.clone(), "org.freedesktop.portal.Session").await.ok()?;
+                let stream = proxy.receive_signal("Closed").await.ok()?;
+                Some((session.clone(), stream))
+            }.await;
+        }
+        _ => { *session_closed = None; }
     }
 }
 
 impl Native {
     pub(super) fn new(sink: Sink) -> Result<Self, ShortcutError> {
-        let (commands, mut receiver) = unbounded_channel();
+        let (commands, receiver) = unbounded();
         let (ready, result) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new().name("rune-shortcuts-portal".into()).spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(r) => r, Err(e) => { let _ = ready.send(Err(ShortcutError::Backend(e.to_string()))); return; }
-            };
-            runtime.block_on(async move {
-                let setup = tokio::time::timeout(RPC_TIMEOUT, async {
+            let local = LocalExecutor::new();
+            async_io::block_on(local.run(async {
+                let setup = portal::timeout(RPC_TIMEOUT, async {
                     // No session bus means this desktop cannot supply the portal.
                     let conn = Connection::session().await.map_err(|_| ShortcutError::Unsupported)?;
+                    portal::register_app_id(&conn).await;
                     let portal = Proxy::new(&conn, DEST, PATH, INTERFACE).await.map_err(dbus_error)?;
                     // Some portal frontends report InvalidArgs rather than UnknownInterface
                     // when a backend for this interface is absent. The property is fixed here.
@@ -114,41 +213,68 @@ impl Native {
                     Ok::<_, ShortcutError>((conn, portal, events))
                 }).await.unwrap_or(Err(ShortcutError::Unsupported));
                 let (conn, portal, mut events) = match setup {
-                    Ok(v) => { let _ = ready.send(Ok(())); v },
-                    Err(e) => { let _ = ready.send(Err(e)); return; }
+                    Ok(v) => { ready.send(Ok(())).ok(); v }
+                    Err(e) => { ready.send(Err(e)).ok(); return; }
                 };
-                let mut sessions: HashMap<ShortcutId, OwnedObjectPath> = HashMap::new();
-                loop {
-                    tokio::select! {
-                        command = receiver.recv() => match command {
-                            Some(Command::Register(id, shortcut, reply)) => {
-                                let result = bind(&conn, &portal, id, &shortcut).await.map(|session| { sessions.insert(id, session); });
-                                let _ = reply.send(result);
-                            }
-                            Some(Command::Unregister(id, reply)) => {
-                                let result = match sessions.get(&id) {
-                                    Some(session) => close(&conn, session).await,
-                                    None => Err(ShortcutError::UnknownId),
-                                };
-                                if result.is_ok() { sessions.remove(&id); }
-                                let _ = reply.send(result);
-                            }
-                            None => break,
-                        },
-                        event = events.next() => {
-                            let Some(event) = event else { break };
-                            if let Ok((session, key, _, options)) = event.body().deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedVariant>)>()
-                                && let Ok(id) = key.parse::<u32>().map(ShortcutId)
-                                && sessions.get(&id) == Some(&session) {
-                                let token = options.get("activation_token").and_then(|v| <&str>::try_from(v).ok()).map(str::to_owned);
-                                sink(id, token);
-                            }
-                        }
-                    }
+                let (done_tx, done_rx) = unbounded::<BindDone>();
+                let mut seq = Seq::default();
+                let mut state: State<OwnedObjectPath, BatchReply, UnitReply> = State::default();
+                let mut in_flight: Option<(Attempt, Sender<()>, Task<()>)> = None;
+                let mut session_closed: Option<(OwnedObjectPath, SignalStream<'static>)> = None;
+                enum Wake {
+                    Command(Option<Command>),
+                    BindDone(Option<BindDone>),
+                    Activated(Option<zbus::Message>),
+                    SessionClosed(OwnedObjectPath),
                 }
-                for session in sessions.values() { let _ = close(&conn, session).await; }
-                let _ = conn.close().await;
-            });
+                loop {
+                    let wait_closed = async {
+                        match session_closed.as_mut() {
+                            Some((path, stream)) => match stream.next().await {
+                                Some(_) => Wake::SessionClosed(path.clone()),
+                                None => std::future::pending().await,
+                            },
+                            None => std::future::pending().await,
+                        }
+                    };
+                    let next = async { Wake::Command(receiver.recv().await.ok()) }
+                        .or(async { Wake::BindDone(done_rx.recv().await.ok()) })
+                        .or(async { Wake::Activated(events.next().await) })
+                        .or(wait_closed)
+                        .await;
+                    let event = match next {
+                        Wake::Command(Some(Command::Register(items, reply))) => Event::Register { items, reply },
+                        Wake::Command(Some(Command::Unregister(id, reply))) => Event::Unregister { id, reply },
+                        Wake::BindDone(Some((attempt, result))) => {
+                            if in_flight.as_ref().is_some_and(|(a, ..)| *a == attempt) {
+                                in_flight = None;
+                            }
+                            Event::BindFinished { attempt, result }
+                        }
+                        Wake::Activated(Some(event)) => {
+                            let Ok((session, portal_id, _, options)) = event.body().deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>() else {
+                                continue;
+                            };
+                            let token = options.get("activation_token").and_then(|v| <&str>::try_from(v).ok()).map(str::to_owned);
+                            Event::Activated { session, portal_id, token }
+                        }
+                        Wake::SessionClosed(session) => {
+                            session_closed = None;
+                            Event::SessionClosed { session }
+                        }
+                        Wake::Command(None) | Wake::Activated(None) | Wake::BindDone(None) => {
+                            drop(session_closed.take());
+                            let effects = wayland_session::step(&mut seq, &mut state, Event::Shutdown);
+                            apply_effects(effects, &conn, &portal, &local, &done_tx, &mut in_flight, &sink).await;
+                            break;
+                        }
+                    };
+                    let effects = wayland_session::step(&mut seq, &mut state, event);
+                    apply_effects(effects, &conn, &portal, &local, &done_tx, &mut in_flight, &sink).await;
+                    watch_session_closed(&conn, &state, &mut session_closed).await;
+                }
+                conn.close().await.ok();
+            }));
         }).map_err(|e| ShortcutError::Backend(e.to_string()))?;
         let mut native = Self { commands: Some(commands), worker: Some(worker) };
         if let Err(e) = result.recv().unwrap_or(Err(ShortcutError::Unsupported)) {
@@ -157,26 +283,51 @@ impl Native {
         }
         Ok(native)
     }
-    fn send(&self, command: impl FnOnce(Reply) -> Command) -> Result<(), ShortcutError> {
+
+    fn send_batch(&self, items: Vec<PortalShortcut>) -> Vec<Result<(), ShortcutError>> {
+        let count = items.len();
+        let Some(commands) = self.commands.as_ref() else { return vec![Err(ShortcutError::NotRunning); count]; };
         let (reply, result) = mpsc::sync_channel(1);
-        self.commands.as_ref().ok_or(ShortcutError::NotRunning)?.send(command(reply)).map_err(|_| ShortcutError::Backend("portal disconnected".into()))?;
+        if commands.try_send(Command::Register(items, reply)).is_err() {
+            return vec![Err(ShortcutError::Backend("portal disconnected".into())); count];
+        }
+        result.recv().unwrap_or_else(|_| vec![Err(ShortcutError::Backend("portal disconnected".into())); count])
+    }
+
+    fn send_unregister(&self, id: ShortcutId) -> Result<(), ShortcutError> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.commands.as_ref().ok_or(ShortcutError::NotRunning)?
+            .try_send(Command::Unregister(id, reply))
+            .map_err(|_| ShortcutError::Backend("portal disconnected".into()))?;
         result.recv().unwrap_or_else(|_| Err(ShortcutError::Backend("portal disconnected".into())))
     }
 }
+
 impl Backend for Native {
-    fn register(&mut self, id: ShortcutId, shortcut: &Shortcut) -> Result<(), ShortcutError> { self.send(|reply| Command::Register(id, shortcut.clone(), reply)) }
-    fn unregister(&mut self, id: ShortcutId) -> Result<(), ShortcutError> { self.send(|reply| Command::Unregister(id, reply)) }
+    fn register(&mut self, id: ShortcutId, shortcut: &Shortcut) -> Result<(), ShortcutError> {
+        self.register_with(id, shortcut, &ShortcutDetails::default())
+    }
+    fn register_with(&mut self, id: ShortcutId, shortcut: &Shortcut, details: &ShortcutDetails) -> Result<(), ShortcutError> {
+        self.send_batch(vec![to_portal_shortcut(id, shortcut, details)]).into_iter().next().unwrap_or(Ok(()))
+    }
+    fn register_batch(&mut self, items: &[(ShortcutId, Shortcut, ShortcutDetails)]) -> Vec<Result<(), ShortcutError>> {
+        let shortcuts = items.iter().map(|(id, shortcut, details)| to_portal_shortcut(*id, shortcut, details)).collect();
+        self.send_batch(shortcuts)
+    }
+    fn unregister(&mut self, id: ShortcutId) -> Result<(), ShortcutError> { self.send_unregister(id) }
 }
+
 impl Drop for Native {
     fn drop(&mut self) {
         self.commands.take();
-        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+        if let Some(worker) = self.worker.take() { worker.join().ok(); }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zbus::fdo;
     #[test]
     fn portal_cancellation_is_not_a_conflict() {
         assert_eq!(response_status(1), Err(ShortcutError::PermissionDenied));
@@ -187,6 +338,7 @@ mod tests {
         let fdo = |e| zbus::Error::FDO(Box::new(e));
         assert_eq!(dbus_error(fdo(fdo::Error::ServiceUnknown("portal".into()))), ShortcutError::Unsupported);
         assert_eq!(dbus_error(fdo(fdo::Error::UnknownMethod("BindShortcuts".into()))), ShortcutError::Unsupported);
+        assert_eq!(dbus_error(fdo(fdo::Error::SpawnChildExited("portal".into()))), ShortcutError::Unsupported);
         assert!(matches!(dbus_error(fdo(fdo::Error::Failed("x".into()))), ShortcutError::Backend(_)));
     }
 }

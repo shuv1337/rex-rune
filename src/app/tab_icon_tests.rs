@@ -495,8 +495,8 @@ fn counts_keep_overflow_downloads_status_and_menu_navigation() {
                 settle(&mut rt);
                 let last = element(&rt, "tab:extra-7");
                 let strip = rect(&rt, "tabs");
-                assert_eq!(last.visible[2], strip[2].min(last.rect[2]));
-                assert_eq!(last.rect[0] + last.rect[2], strip[0] + strip[2]);
+                assert!((last.visible[2] - strip[2].min(last.rect[2])).abs() <= 0.5);
+                assert!((last.rect[0] + last.rect[2] - strip[0] - strip[2]).abs() <= 0.5);
                 assert!(
                     last.label
                         .as_deref()

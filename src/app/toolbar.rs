@@ -588,7 +588,6 @@ pub fn toolbar(s: &Workspace) -> El {
         .gap(8.)
         .center_y()
         .window_drag()
-        .on_secondary_press(|_: &mut Workspace, p, tx| tx.show_window_menu(p.x, p.y))
         .child(chrome_button(
             "toggle-sidebar",
             &SIDEBAR,

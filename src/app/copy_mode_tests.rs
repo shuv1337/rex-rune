@@ -242,6 +242,8 @@ fn send_key(
                 mods: ev.mods,
                 pressed: down,
                 repeat,
+                text: None,
+                consumed_mods: Mods::default(),
             },
             ev,
             None,
@@ -529,13 +531,14 @@ fn zero_pty_leaks_across_all_copy_mode_states_and_input_paths() {
             tap_text(&mut rt, ch);
         }
         tap_key(&mut rt, Code::Backspace, Key::Backspace);
-        send_key(
-            &mut rt,
-            None,
-            key_ev(Key::Dead(Some('^')), Mods::default()),
-            true,
-            false,
-        );
+        rt.physical_input(PhysicalInput::Key {
+            key: Code::BracketRight,
+            mods: Mods::default(),
+            pressed: true,
+            repeat: false,
+            text: None,
+            consumed_mods: Mods::default(),
+        });
         send_key(
             &mut rt,
             Some(Code::ShiftLeft),
@@ -569,7 +572,7 @@ fn zero_pty_leaks_across_all_copy_mode_states_and_input_paths() {
             tap_key(&mut rt, Code::Enter, Key::Enter);
         }
         // IME Preedit + Commit must be swallowed with zero Command::Paste.
-        rt.ime(Ime::Preedit("漢字".into(), None));
+        rt.ime(Ime::Preedit("漢字".into(), None, vec![]));
         rt.ime(Ime::Commit("漢字".into()));
         rt.frame(1. / 60.);
         assert!(

@@ -41,9 +41,9 @@ grabs, Windows, X11 and the portal name nobody, so it returns None. Headless run
 answer only for their own virtual registrations. `ShortcutError::Conflict` itself is
 unchanged.
 
-A chord needs ⌘, ⌃ or ⌥ (Ctrl, Alt or Super elsewhere), or an F1–F24 key, because a
-global Space or ⇧A would take that key from typing in every app. Both the builder and
-`register_shortcut` refuse one without them with `InvalidAccelerator`
+A chord needs ⌘, ⌃ or ⌥ (Ctrl, Alt or Super elsewhere), or an F1–F24 or Print Screen
+key, because a global Space or ⇧A would take that key from typing in every app. Both the
+builder and `register_shortcut` refuse one without them with `InvalidAccelerator`
 (`shortcut.require_modifier()` checks it), unless the App opts in with
 `.allow_unmodified_shortcuts()`.
 
@@ -57,20 +57,39 @@ even if other threads retain `AppHandle`s.
 ## Desktop behavior
 
 - macOS: Carbon `RegisterEventHotKey`, no Accessibility permission. Command is
-  the Super modifier. Hardware key positions follow the US layout; F21–F24 have
-  no Carbon key code and return `InvalidAccelerator`.
+  the Super modifier. Hardware key positions follow the US layout; F21–F24 and
+  Print Screen have no Carbon key code and return `InvalidAccelerator`. Registrations ask for
+  `kEventHotKeyExclusive` first so another app's exclusive hold returns
+  `Conflict`; when Carbon returns `-9878` (`eventHotKeyExistsErr`) for a chord
+  that `CopySymbolicHotKeys` lists only as disabled (such as Spotlight's ⌘Space
+  after turning it off in System Settings), Rune retries once without the
+  exclusive flag.
 - Windows: `RegisterHotKey` on a message-only window owned by the event thread.
-  Repeat is disabled. Windows-reserved combinations may fail registration.
+  Repeat is disabled. Print Screen resolves directly to `VK_SNAPSHOT`.
+  Windows-reserved combinations (or Print Screen when Windows' own screen
+  capture tool claims it) may fail registration with `Conflict`.
 - X11: checked passive grabs on every root, including CapsLock/NumLock variants.
   A failed variant rolls back the registration. Autorepeat is filtered, so a held
   chord fires once, as on macOS and Windows. Keys use the current keymap's
   base keysyms; restart/re-register after changing the keymap.
 - Wayland: xdg-desktop-portal GlobalShortcuts. No portal returns `Unsupported`.
+  An XWayland app in a Wayland session (`XDG_SESSION_TYPE=wayland` or
+  `WAYLAND_DISPLAY` set) tries the portal first so shortcuts fire while native
+  Wayland windows have focus, falling back to X11 grabs only if the portal is
+  unavailable or the `dbus` feature is off.
   The portal may ask for permission or let the user choose another trigger;
   `preferred_trigger` is a preference, not an exclusive-grab guarantee. Cancellation
-  is `PermissionDenied`, not `Conflict`. Each shortcut owns a portal session so
-  unregister also works with version 1. The activation token is available only
-  during its handler, through `Tx::activation_token()`.
+  is `PermissionDenied`, not `Conflict`. One portal session holds the app's
+  entire active set of shortcuts: startup `.global_shortcut` /
+  `.global_shortcut_named` calls bind together in a single `BindShortcuts` call so
+  GNOME and KDE prompt once and remember the set across launches. Each shortcut
+  defaults to its canonical accelerator string as its stable portal id (or the
+  explicit id and description from `global_shortcut_named` /
+  `register_shortcut_named`). Registering or unregistering a shortcut at runtime
+  closes the current portal session and opens a fresh session with the new full
+  set (or closes the session without rebinding when removing the last shortcut),
+  so register all startup shortcuts up front on Wayland. The activation token is
+  available only during its handler, through `Tx::activation_token()`.
 
 Registration is synchronous, including portal consent, with a two-minute bound.
 Register startup shortcuts before showing windows; use a worker thread for
@@ -115,7 +134,7 @@ launch): then recording it again retries it through the callback. The
 default message names the chord ("⌃J is already in use."); `.error_message(|error,
 chord| ...)` rewords it, falling back on `rune_kit::shortcut_error_message`, and
 `ShortcutRecorderState::refused()` reads the chord. A chord without a modifier (other
-than F1–F24) is refused before the callback with "Add ⌘, ⌃ or ⌥." unless
+than F1–F24 or Print Screen) is refused before the callback with "Add ⌘, ⌃ or ⌥." unless
 `.allow_unmodified()`.
 Click or keyboard activation starts recording, held modifiers preview immediately,
 Escape cancels, Backspace clears, and focus loss or disabling cancels recording.
@@ -144,6 +163,7 @@ input path; overlays and Wayland layer surfaces also forward physical input.
 
 ```rust,ignore
 let app = App::new(spec)
+    .menu_item(MenuItem::about("About My App", open_about).id("about"))
     .menu_item(MenuItem::new("Open Quick Panel", open_panel).id("quick")
         .key_equivalent("cmd+shift+space".parse()?))
     .menu_item(MenuItem::new("Preferences", preferences).menu("Tools"))
@@ -158,16 +178,35 @@ handle.set_menu([
 ])?;
 ```
 
-Actions are `fn(&mut S, &mut Tx)` queued on the app thread. `set_menu` replaces all
-custom items for that App; an empty list removes them. It validates atomically and
-queues installation. `take_menu_errors()` reports deferred startup/installation
-errors. Replaced, disabled or removed items invalidate stale queued actions.
+Actions are `fn(&mut S, &mut Tx)` (`MenuItem::new`) or `Fn(&mut S, &mut Tx) + Send + Sync + 'static`
+closures (`MenuItem::with_action`) queued on the app thread, keeping `MenuItem<S>` `Clone`,
+`Send`, and `Sync` without requiring `S: Send + Sync`. `set_menu` replaces all custom items for
+that App; an empty list removes them. It validates atomically and queues installation.
+`take_menu_errors()` reports deferred startup/installation errors. Replaced, disabled or removed
+items invalidate stale queued actions.
+
+`MenuItem::submenu(title, items)` nests child items (action items, separators, or further
+submenus) to arbitrary depth, backed by `NSMenuItem.setSubmenu:` on macOS. Place a top-level
+submenu with `menu`, `dock`, or `after` like any item; children inside a submenu cannot set
+`menu` or `dock` or use `MenuItem::about`. Leaf ids must be unique across the whole menu tree,
+headless scripts fire nested leaves by id or unique title, and disabling any ancestor submenu
+prevents its descendants from firing.
+
+`MenuItem::about(title, action)` replaces the macOS app menu's standard About item
+(`orderFrontStandardAboutPanel:`) at index 0. At most one About replacement may appear
+in a snapshot, and it must stay in the app menu (cannot use `menu`, `dock`, `after`, or
+`alternate`). Clearing custom items (or handing the menu bar to another window without a
+custom About item) restores AppKit's standard About item.
+
 `MenuItem::separator()` is a separator line (`NSMenuItem.separatorItem` on macOS), placed
-with `menu` or `dock` in list order like any item. It needs no id, takes no part in
-id/title lookup and can't be fired.
+with `menu`, `dock`, or inside a submenu in list order like any item. It needs no id, takes no
+part in id/title lookup and can't be fired.
 
 On macOS, one App owns the process-wide custom menus. Default Quit/Hide items and
-existing named-menu items are preserved. The Dock adapter adds an absent
+existing named-menu items are preserved; if a custom item claims `⌘Q`, the app menu's
+built-in `terminate:` Quit item yields `⌘Q` (staying in the menu without a shortcut,
+including after `set_dock_icon(true)` promotes an accessory app) and restores `⌘Q` once
+no custom item claims it. The Dock adapter adds an absent
 `applicationDockMenu:` selector to winit's existing delegate class, retaining the
 delegate and all existing methods. An existing non-Rune selector is an error; the
 Rune hook returns nil after teardown. Key equivalents are native menu equivalents,
@@ -197,8 +236,9 @@ window starts; an app that set its own menu bar is left alone. Rune never adds Q
 an accessory app that later shows its Dock icon gets winit's app menu (with Quit) as
 before. Items go into existing menus of the same title, an item whose action is
 already there is skipped, and custom `MenuItem`s keep working in either order. A
-custom item with a standard item's equivalent (Close Tab ⌘W) takes it: the standard
-item shows none until the custom one goes, whichever was set first. New custom menus
+custom item with a standard item's equivalent (Close Tab ⌘W) or the built-in app-menu
+Quit item's ⌘Q takes it: the built-in item shows none until the custom one goes,
+whichever was set first and across `set_dock_icon(true)` promotions. New custom menus
 take the Mac order: File before Edit, the app's other menus before Window, Help last.
 Clearing custom items keeps a menu the standard items share. An accessory app's menu
 bar is hidden, but AppKit still matches its key equivalents.

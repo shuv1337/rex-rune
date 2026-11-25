@@ -17,23 +17,72 @@ pub enum Cursor {
     Default,
     Pointer,
     Text,
+    /// An open hand (CSS `grab`), over something a drag moves. Windows has no such system
+    /// cursor, so there it draws Chromium's.
     Grab,
+    /// A closed hand (CSS `grabbing`), while the drag holds it. Chromium's on Windows, as for
+    /// [`Cursor::Grab`].
     Grabbing,
     NotAllowed,
     Move,
     ResizeColumn,
     ResizeRow,
-    /// A window frame's resize arrow for an edge or corner, over an
-    /// [`El::window_resize`](crate::El::window_resize) region. macOS shows the closest of its
-    /// column and row arrows.
-    ResizeEdge(crate::WindowEdge),
+    /// Horizontal bidirectional resize (CSS `ew-resize`), for left and right frame edges.
+    ///
+    /// ```
+    /// # use rune::{Cursor, el};
+    /// # let _ =
+    /// el().size(8.0, 120.0).hit().cursor(Cursor::ResizeEw)
+    /// # ;
+    /// ```
+    ResizeEw,
+    /// Vertical bidirectional resize (CSS `ns-resize`), for top and bottom frame edges.
+    ///
+    /// ```
+    /// # use rune::{Cursor, el};
+    /// # let _ =
+    /// el().size(120.0, 8.0).hit().cursor(Cursor::ResizeNs)
+    /// # ;
+    /// ```
+    ResizeNs,
+    /// Diagonal resize from north-west to south-east (CSS `nwse-resize`), for top-left and
+    /// bottom-right corners.
+    ///
+    /// ```
+    /// # use rune::{Cursor, el};
+    /// # let _ =
+    /// el().size(12.0, 12.0).hit().cursor(Cursor::ResizeNwse)
+    /// # ;
+    /// ```
+    ResizeNwse,
+    /// Diagonal resize from north-east to south-west (CSS `nesw-resize`), for top-right and
+    /// bottom-left corners.
+    ///
+    /// ```
+    /// # use rune::{Cursor, el};
+    /// # let _ =
+    /// el().size(12.0, 12.0).hit().cursor(Cursor::ResizeNesw)
+    /// # ;
+    /// ```
+    ResizeNesw,
     /// A precise-selection cross (CSS `crosshair`), for picking a point or dragging out a rect.
     Crosshair,
+    /// A thick white plus (CSS `cell`), over a spreadsheet's cells. Windows has no such system
+    /// cursor, so there it draws Chromium's.
+    Cell,
     /// The system's magnifier with a plus (CSS `zoom-in`), at the size of every other system
-    /// cursor: over a picture that opens larger.
+    /// cursor: over a picture that opens larger. Windows has no such system cursor, so there it
+    /// draws Chromium's.
     ZoomIn,
-    /// The magnifier with a minus (CSS `zoom-out`).
+    /// The magnifier with a minus (CSS `zoom-out`). Chromium's on Windows, as for
+    /// [`Cursor::ZoomIn`].
     ZoomOut,
+    /// The arrow with a question mark (CSS `help`): over something that explains itself when
+    /// the pointer rests on it.
+    Help,
+    /// The arrow with a busy mark (CSS `progress`): work is under way and the app still takes
+    /// input.
+    Progress,
     /// No OS cursor (CSS `none`), for views that draw their own. It shows again as soon as the
     /// pointer leaves the element or the window, the element goes away, or the host loses the
     /// pointer: a window losing focus, an overlay hiding.
@@ -45,13 +94,48 @@ pub enum Cursor {
     Image(CursorImage),
 }
 
+impl Cursor {
+    /// The CSS name of this shape (`default`, `pointer`, `col-resize`, ...), which the tree dump
+    /// (`--tree`) writes: `none` for [`Cursor::Hidden`] and `image` for an app's own picture.
+    pub(crate) fn css_name(self) -> &'static str {
+        match self {
+            Cursor::Default => "default",
+            Cursor::Pointer => "pointer",
+            Cursor::Text => "text",
+            Cursor::Grab => "grab",
+            Cursor::Grabbing => "grabbing",
+            Cursor::NotAllowed => "not-allowed",
+            Cursor::Move => "move",
+            Cursor::ResizeColumn => "col-resize",
+            Cursor::ResizeRow => "row-resize",
+            Cursor::ResizeEw => "ew-resize",
+            Cursor::ResizeNs => "ns-resize",
+            Cursor::ResizeNwse => "nwse-resize",
+            Cursor::ResizeNesw => "nesw-resize",
+            Cursor::Crosshair => "crosshair",
+            Cursor::Cell => "cell",
+            Cursor::ZoomIn => "zoom-in",
+            Cursor::ZoomOut => "zoom-out",
+            Cursor::Help => "help",
+            Cursor::Progress => "progress",
+            Cursor::Hidden => "none",
+            Cursor::Image(_) => "image",
+        }
+    }
+}
+
 /// The picture for [`Cursor::Image`]: a PNG drawn at 2x, so a 64×64 px PNG makes a
 /// 32×32 pt cursor, and its hot spot (the point that clicks) in points from the top-left,
 /// clamped into the image.
 ///
-/// ```ignore
-/// const PENCIL: CursorImage = CursorImage::png(include_bytes!("pencil.png"), [2.0, 30.0]);
+/// ```
+/// # use rune::{Cursor, CursorImage, el};
+/// # const PENCIL_PNG: &[u8] = &[];
+/// # let canvas = el();
+/// const PENCIL: CursorImage = CursorImage::png(PENCIL_PNG, [2.0, 30.0]); // e.g. include_bytes!("pencil.png")
+/// # let _ =
 /// canvas.cursor(Cursor::Image(PENCIL))
+/// # ;
 /// ```
 ///
 /// Two images are the same cursor when they have the same bytes and hot spot. Comparing one
@@ -62,12 +146,61 @@ pub enum Cursor {
 pub struct CursorImage {
     bytes: &'static [u8],
     hot: [f32; 2],
+    /// Resampled to the OS cursor's scale pixel for pixel, for a 1-bit cursor drawn on a grid.
+    crisp: bool,
+}
+
+/// [`Cursor::Cell`] where the OS has none: Chromium's Windows `cell` cursor, each pixel of its
+/// 32 px bitmap doubled.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const CELL: CursorImage = CursorImage { bytes: include_bytes!("cursor/cell.png"), hot: [7.0, 7.0], crisp: true };
+
+/// The picture Windows shows for `c` where it has no system cursor of its own: Chromium's Windows
+/// cursors (`ui/resources/cursors/*.cur`), each pixel of their 32 px bitmaps doubled, with their
+/// hot spots. winit's stand-ins there are the four-way move arrows for both hands and the arrow
+/// for both magnifiers. (Chromium's `col-resize` and `row-resize` invert the screen under them,
+/// which a colour cursor can't; those stay the system's two-way arrows.)
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_image(c: Cursor) -> Option<CursorImage> {
+    let picture = |bytes: &'static [u8], hot: [f32; 2]| CursorImage { bytes, hot, crisp: true };
+    match c {
+        Cursor::Cell => Some(CELL),
+        Cursor::Grab => Some(picture(include_bytes!("cursor/grab.png"), [13.0, 13.0])),
+        Cursor::Grabbing => Some(picture(include_bytes!("cursor/grabbing.png"), [13.0, 13.0])),
+        Cursor::ZoomIn => Some(picture(include_bytes!("cursor/zoom_in.png"), [6.0, 6.0])),
+        Cursor::ZoomOut => Some(picture(include_bytes!("cursor/zoom_out.png"), [6.0, 6.0])),
+        _ => None,
+    }
+}
+
+/// The pan cursor a middle-click autoscroll shows (`runtime/input/autoscroll.rs`): Chromium's
+/// Windows `pan_*` cursors, each pixel of their 32 px bitmaps doubled, which Blink picks the way
+/// this does: while it scrolls, an arrow the way it goes; at rest, a mark of the axes
+/// (horizontal, vertical) it can scroll on.
+pub(crate) fn pan(axes: (bool, bool), velocity: (f32, f32)) -> CursorImage {
+    let pan = |bytes: &'static [u8]| CursorImage { bytes, hot: [16.0, 16.0], crisp: true };
+    let (east, west, south, north) = (velocity.0 > 0.0, velocity.0 < 0.0, velocity.1 > 0.0, velocity.1 < 0.0);
+    match (north, south, east, west) {
+        (true, _, true, _) => pan(include_bytes!("cursor/pan_north_east.png")),
+        (true, _, _, true) => pan(include_bytes!("cursor/pan_north_west.png")),
+        (true, ..) => pan(include_bytes!("cursor/pan_north.png")),
+        (_, true, true, _) => pan(include_bytes!("cursor/pan_south_east.png")),
+        (_, true, _, true) => pan(include_bytes!("cursor/pan_south_west.png")),
+        (_, true, ..) => pan(include_bytes!("cursor/pan_south.png")),
+        (_, _, true, _) => pan(include_bytes!("cursor/pan_east.png")),
+        (_, _, _, true) => pan(include_bytes!("cursor/pan_west.png")),
+        _ => match axes {
+            (true, false) => pan(include_bytes!("cursor/pan_middle_horizontal.png")),
+            (false, true) => pan(include_bytes!("cursor/pan_middle_vertical.png")),
+            _ => pan(include_bytes!("cursor/pan_middle.png")),
+        },
+    }
 }
 
 impl CursorImage {
     /// A PNG drawn at 2x, with its hot spot in points from the top-left.
     pub const fn png(bytes: &'static [u8], hot: [f32; 2]) -> Self {
-        CursorImage { bytes, hot }
+        CursorImage { bytes, hot, crisp: false }
     }
 
     pub(crate) fn bytes(&self) -> &'static [u8] {
@@ -78,11 +211,17 @@ impl CursorImage {
         self.hot
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn crisp(&self) -> bool {
+        self.crisp
+    }
+
 }
 
 impl PartialEq for CursorImage {
     fn eq(&self, other: &Self) -> bool {
         self.hot.map(f32::to_bits) == other.hot.map(f32::to_bits)
+            && self.crisp == other.crisp
             && (std::ptr::eq(self.bytes, other.bytes) || self.bytes == other.bytes)
     }
 }
@@ -98,5 +237,60 @@ impl std::hash::Hash for CursorImage {
 impl std::fmt::Debug for CursorImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CursorImage").field("png_bytes", &self.bytes.len()).field("hot", &self.hot).finish()
+    }
+}
+
+/// Which AppKit cursor backs each [`Cursor`] variant, kept cross-platform so adding a new
+/// [`Cursor`] variant fails to compile until its macOS mapping is explicit.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MacCursor {
+    Arrow,
+    PointingHand,
+    IBeam,
+    OpenHand,
+    ClosedHand,
+    NotAllowed,
+    ResizeLeftRight,
+    ResizeUpDown,
+    ResizeEw,
+    ResizeNs,
+    ResizeNwse,
+    ResizeNesw,
+    Crosshair,
+    ZoomIn,
+    ZoomOut,
+    Help,
+    Progress,
+    Transparent,
+    MoveImage,
+    CellImage,
+    Custom(CursorImage),
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) fn mac_cursor(cursor: Cursor) -> MacCursor {
+    match cursor {
+        Cursor::Default => MacCursor::Arrow,
+        Cursor::Pointer => MacCursor::PointingHand,
+        Cursor::Text => MacCursor::IBeam,
+        Cursor::Grab => MacCursor::OpenHand,
+        Cursor::Grabbing => MacCursor::ClosedHand,
+        Cursor::NotAllowed => MacCursor::NotAllowed,
+        Cursor::ResizeColumn => MacCursor::ResizeLeftRight,
+        Cursor::ResizeRow => MacCursor::ResizeUpDown,
+        Cursor::ResizeEw => MacCursor::ResizeEw,
+        Cursor::ResizeNs => MacCursor::ResizeNs,
+        Cursor::ResizeNwse => MacCursor::ResizeNwse,
+        Cursor::ResizeNesw => MacCursor::ResizeNesw,
+        Cursor::Crosshair => MacCursor::Crosshair,
+        Cursor::ZoomIn => MacCursor::ZoomIn,
+        Cursor::ZoomOut => MacCursor::ZoomOut,
+        Cursor::Help => MacCursor::Help,
+        Cursor::Progress => MacCursor::Progress,
+        Cursor::Hidden => MacCursor::Transparent,
+        Cursor::Move => MacCursor::MoveImage,
+        Cursor::Cell => MacCursor::CellImage,
+        Cursor::Image(image) => MacCursor::Custom(image),
     }
 }

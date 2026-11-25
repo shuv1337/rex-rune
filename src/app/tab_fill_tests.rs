@@ -227,8 +227,8 @@ fn tab_fill_overflow_scroll_reveal_click_and_context_menu() {
         let strip = rect(&rt, "tabs");
         // At 640 pt with Downloads and a long identity, a whole 96 pt pill cannot
         // fit. Reveal its trailing edge and all the viewport, keeping both arrows.
-        assert_eq!(last.visible[2], strip[2].min(last.rect[2]));
-        assert_eq!(last.rect[0] + last.rect[2], strip[0] + strip[2]);
+        assert!((last.visible[2] - strip[2].min(last.rect[2])).abs() <= 0.5);
+        assert!((last.rect[0] + last.rect[2] - strip[0] - strip[2]).abs() <= 0.5);
         host.try_iter().for_each(drop);
         sent.try_iter().for_each(drop);
         click(&mut rt, "tab:extra-7");

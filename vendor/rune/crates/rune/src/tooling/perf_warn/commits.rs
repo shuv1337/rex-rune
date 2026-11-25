@@ -58,8 +58,10 @@ struct Meter {
     /// Frames of the scroll underway, and how many of them each site committed.
     frames: u32,
     counts: HashMap<String, u32>,
-    /// Frames in a row that committed and asked for an instant scroll.
+    /// Frames in a row that ran the view and asked for an instant scroll.
     instant: u32,
+    /// Committing measure passes that ran the app's view.
+    view_commits: u64,
     /// The elements each hover handler committed for, by where it was set, until it warns.
     hover_rows: HashMap<&'static std::panic::Location<'static>, Vec<String>>,
 }
@@ -73,19 +75,15 @@ impl CommitMeter {
     }
 
     /// Handler `name` on the element at `path`, set at `at`, asked for a commit.
-    #[inline(always)]
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    #[cfg(debug_assertions)]
     pub(crate) fn handler(&mut self, name: &'static str, path: Option<&str>, at: Option<&'static std::panic::Location<'static>>) {
-        #[cfg(debug_assertions)]
-        {
-            let site = match (at, path) {
-                (Some(at), _) => format!("{name} {at}"),
-                (None, Some(path)) => super::handler_site(name, path),
-                (None, None) => name.to_owned(),
-            };
-            if let (Some(at), Some(path), "on_hover" | "on_hover_change") = (at, path, name) { self.hover_row(name, at, path); }
-            self.meter.sources.push(Source { site, cause: Cause::Handler(name), subject: path.map(str::to_owned), at });
-        }
+        let site = match (at, path) {
+            (Some(at), _) => format!("{name} {at}"),
+            (None, Some(path)) => super::handler_site(name, path),
+            (None, None) => name.to_owned(),
+        };
+        if let (Some(at), Some(path), "on_hover" | "on_hover_change") = (at, path, name) { self.hover_row(name, at, path); }
+        self.meter.sources.push(Source { site, cause: Cause::Handler(name), subject: path.map(str::to_owned), at });
     }
 
     #[cfg(debug_assertions)]
@@ -107,40 +105,51 @@ impl CommitMeter {
         self.meter.sources.push(Source { site: format!("read {key}"), cause: Cause::Read, subject: Some(key.to_owned()), at });
     }
 
-    /// The frame's commits are done. `scrolling`: a hand, momentum or a glide moves a viewport;
-    /// `committed`: the frame committed; `instant`: the viewport an instant scroll this frame
-    /// asked to move, if any.
+    /// A committing measure pass ran the app's view (as opposed to a pure relayout or virtual-row
+    /// remount).
+    #[cfg(debug_assertions)]
     #[inline(always)]
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    pub(crate) fn view_commit(&mut self) {
+        self.meter.view_commits += 1;
+    }
+
+    /// View-running commits completed so far.
+    #[cfg(debug_assertions)]
+    #[inline(always)]
+    pub(crate) fn view_commits(&self) -> u64 {
+        self.meter.view_commits
+    }
+
+    /// The frame's commits are done. `scrolling`: a hand, momentum or a glide moves a viewport;
+    /// `committed`: the frame ran the view; `instant`: the viewport an instant scroll this frame
+    /// asked to move, if any.
+    #[cfg(debug_assertions)]
     pub(crate) fn frame_ends(&mut self, scrolling: bool, committed: bool, instant: Option<&str>) {
-        #[cfg(debug_assertions)]
-        {
-            let m = &mut self.meter;
-            let sources = std::mem::take(&mut m.sources);
-            match instant.filter(|_| committed) {
-                Some(key) => {
-                    m.instant += 1;
-                    if m.instant == INSTANT_FRAMES { super::warn_once(format!("instant scroll {key}"), || instant_message(key)); }
-                }
-                None => m.instant = 0,
+        let m = &mut self.meter;
+        let sources = std::mem::take(&mut m.sources);
+        match instant.filter(|_| committed) {
+            Some(key) => {
+                m.instant += 1;
+                if m.instant == INSTANT_FRAMES { super::warn_once(format!("instant scroll {key}"), || instant_message(key)); }
             }
-            if !scrolling {
-                m.frames = 0;
-                m.counts.clear();
-                return;
-            }
-            m.frames += 1;
-            if !committed { return; }
-            let mut seen: Vec<&str> = Vec::new();
-            for s in &sources {
-                if seen.contains(&s.site.as_str()) { continue; }
-                seen.push(&s.site);
-                let count = m.counts.entry(s.site.clone()).or_default();
-                *count += 1;
-                if *count >= COMMITS && *count * SHARE >= m.frames {
-                    let (count, frames) = (*count, m.frames);
-                    super::warn_once(format!("scroll commit {}", s.site), || message(s, count, frames));
-                }
+            None => m.instant = 0,
+        }
+        if !scrolling {
+            m.frames = 0;
+            m.counts.clear();
+            return;
+        }
+        m.frames += 1;
+        if !committed { return; }
+        let mut seen: Vec<&str> = Vec::new();
+        for s in &sources {
+            if seen.contains(&s.site.as_str()) { continue; }
+            seen.push(&s.site);
+            let count = m.counts.entry(s.site.clone()).or_default();
+            *count += 1;
+            if *count >= COMMITS && *count * SHARE >= m.frames {
+                let (count, frames) = (*count, m.frames);
+                super::warn_once(format!("scroll commit {}", s.site), || message(s, count, frames));
             }
         }
     }
@@ -158,10 +167,12 @@ fn message(s: &Source, count: u32, frames: u32) -> String {
              `El::on_scroll_offset` and live values"),
         Cause::Read => {
             let window = crate::runtime::window_read_key(subject);
+            let anchor = crate::runtime::anchor_read_key(subject);
             let at = s.at.map_or_else(String::new, |at| format!(" at {at}"));
-            let read = match window {
-                Some(key) => format!("the view's `Cx::window_layout` read of {key:?}{at}"),
-                None => format!("the view's layout read of {subject:?}{at}"),
+            let read = match (window, anchor) {
+                (Some(key), _) => format!("the view's `Cx::window_layout` read of {key:?}{at}"),
+                (_, Some(key)) => format!("the view's `Cx::anchor_placement` read of {key:?}{at}"),
+                (None, None) => format!("the view's layout read of {subject:?}{at}"),
             };
             (format!("{read} moved and"),
              if window.is_some() { "read `Cx::layout_size` or `Cx::layout` (unscrolled) unless the view needs where the \

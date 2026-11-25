@@ -2,6 +2,278 @@
 //! fits its content asks for (`App::fit_content_height`), and the title (`Tx::set_title`).
 use super::*;
 
+/// Window/host boundary state owned by [`RuntimeCore`]: system settings, zoom, titlebar, window
+/// frame/title/fit/minimize requests, popups, file dialogs, open-URL requests, accessibility and
+/// web page bands.
+pub(crate) struct HostState {
+    /// The view's UI zoom and the window it applies to (`Cx::zoom`).
+    pub(in crate::runtime) zoom: zoom::Zoom,
+    pub(in crate::runtime) titlebar: titlebar::Titlebar,
+    pub(in crate::runtime) titlebar_inset: f32,
+    pub(in crate::runtime) maximized: bool,
+    pub(in crate::runtime) full_screen: bool,
+    pub(in crate::runtime) system_reduced_motion: bool,
+    pub(in crate::runtime) system_accent: crate::SystemAccent,
+    /// What [`Cx::system_contrast`] reports.
+    pub(in crate::runtime) system_contrast: Option<crate::SystemContrast>,
+    /// What [`Cx::system_increased_contrast`] reports.
+    pub(in crate::runtime) system_increased_contrast: bool,
+    pub(in crate::runtime) scroll_bars: system_settings::ScrollBarHost,
+    /// Preferred languages set via `Runtime::set_languages` or browser `languagechange` (`None`: lazy OS query).
+    pub(in crate::runtime) system_languages: Option<Rc<[String]>>,
+    /// Incremented whenever `system_languages` changes, so memos rebuild without querying the OS.
+    pub(in crate::runtime) languages_gen: u64,
+    pub(crate) native_overlay: bool,
+    /// The window or overlay surface's frame counts, published by its host.
+    pub(crate) surface_stats: Option<std::sync::Arc<std::sync::Mutex<crate::SurfaceStats>>>,
+    /// `App::dev_stats`.
+    pub(crate) app_stats: Option<fn() -> String>,
+    /// The window's content top-left in global screen points, as its host last saw it.
+    window_origin: (f32, f32),
+    /// The window's content top-left in desktop pixels, as its host last saw it (`Drag::screen_point`).
+    pub(in crate::runtime) window_pixels: Option<(i32, i32)>,
+    pub(in crate::runtime) window_focused: Option<bool>,
+    /// The host's window frame isn't moving or about to: set by the host before each frame.
+    pub(crate) window_resting: bool,
+    /// A frame change for the window (`Tx::resize_window`), with its spring resolved.
+    pub(crate) window_frame: Option<crate::window::frame::FrameRequest>,
+    /// The window's title (`Tx::set_title`), from `AppSpec`'s.
+    pub(crate) window_title: Title,
+    /// Per-window native color scheme requested via `Tx::set_color_scheme`, taken by the host.
+    pub(crate) window_color_scheme: Option<crate::ColorScheme>,
+    /// macOS document path (`MacWindowOptions::represented_file`, `Tx::set_represented_file`).
+    pub(crate) represented_file: Latched<Option<std::path::PathBuf>>,
+    /// macOS document edited dot (`MacWindowOptions::document_edited`, `Tx::set_document_edited`).
+    pub(crate) document_edited: Latched<bool>,
+    /// The window's height follows the root's natural height (`App::fit_content_height`).
+    pub(crate) fit_height: bool,
+    /// The height a window that fits its content last asked for, and the frame its move
+    /// starts with. The host takes the hold as it starts the move.
+    pub(crate) fit: FitWindow,
+    /// A user-initiated close request (`Tx::request_user_close`) waiting for the host's
+    /// `close_requested` gate.
+    pub(crate) user_close_request: bool,
+    /// A handler or `update` asked to minimize the window (`Tx::minimize`); the shell takes it,
+    /// after a show the same turn asked for (`window::Minimize`).
+    pub(crate) minimize: crate::window::Minimize,
+    /// Links handlers asked to open that this runtime left unopened (`Runtime::take_url_requests`).
+    url_requests: Vec<String>,
+    /// Local paths handlers asked to open or reveal that this runtime left unopened (`Runtime::take_path_requests`).
+    path_requests: Vec<crate::open_path::PathRequest>,
+    /// Schemes `AppHandle::register_url_scheme` asked to claim that this runtime left alone (`Runtime::take_url_scheme_requests`).
+    url_scheme_requests: Vec<String>,
+    /// True when attached to a live window, overlay or web canvas, not a headless or scripted run.
+    pub(crate) open_urls_natively: bool,
+    /// Pop-up menus asked for (`Tx::popup_menu`) and not yet answered, oldest first.
+    pub(in crate::runtime) popups: popup_dispatch::Popups,
+    /// Pending text-field menu delivered to `App::on_field_menu`, awaiting `Tx::resolve_field_menu`.
+    pub(in crate::runtime) field_menu_fallback: Option<Box<crate::runtime::field_menu::PendingFieldMenu>>,
+    /// Monotonic token tagging each opened fallback field menu so a deferred pick never matches a newer menu.
+    pub(in crate::runtime) field_menu_seq: u64,
+    /// `Tx::resolve_field_menu(Some(id))` deferred until after the frame's commit unmounts a closing modal.
+    pub(in crate::runtime) deferred_field_menu_pick: Option<(u64, String)>,
+    /// Test-only seam forcing `App::on_field_menu` even where `popup_menu_supported()` is true.
+    #[cfg(test)]
+    pub(crate) force_field_menu_fallback: bool,
+    /// The file dialog asked for (`Tx::open_file`, `Tx::save_file`) and not yet answered.
+    pub(in crate::runtime) file_dialog: crate::file_dialog::DialogState,
+    /// File dialog callbacks, by id, until their answer runs.
+    pub(in crate::runtime) file_dialog_answers: Vec<(u64, crate::file_dialog::AnswerFn)>,
+    pub(in crate::runtime) next_file_dialog: u64,
+    /// `Tx::announce`'s last words, for the accessibility tree's live region.
+    pub(crate) announcement: crate::a11y::Announcement,
+    /// `Tx::haptic` requests waiting for `Runtime::take_haptics`.
+    pub(crate) haptics: crate::haptics::Haptics,
+    /// The accessibility tree, while an assistive client listens (`a11y/tree.rs`).
+    pub(in crate::runtime) a11y: Option<Box<crate::a11y::tree::A11yTree>>,
+    /// The band of a taller document the window draws (`App::web_document`).
+    pub(in crate::runtime) page: Option<web_page::Page>,
+}
+
+impl HostState {
+    // Single-caller constructor for `RuntimeCore::new`; inlined so it stays in its caller's
+    // codegen unit instead of shifting partitioning and dropping inlining in the paint walk.
+    #[inline]
+    pub(in crate::runtime) fn new(viewport: (f32, f32), env: &Env) -> Self {
+        Self {
+            zoom: zoom::Zoom { k: 1.0, window: viewport, window_scale: env.scale },
+            titlebar: Default::default(),
+            titlebar_inset: 0.0,
+            maximized: false,
+            full_screen: false,
+            system_reduced_motion: false,
+            system_accent: crate::SystemAccent::DEFAULT,
+            system_contrast: None,
+            system_increased_contrast: false,
+            scroll_bars: Default::default(),
+            system_languages: None,
+            languages_gen: 0,
+            native_overlay: false,
+            surface_stats: None,
+            app_stats: None,
+            window_origin: (0.0, 0.0),
+            window_pixels: None,
+            window_focused: None,
+            window_resting: false,
+            window_frame: None,
+            window_title: Default::default(),
+            window_color_scheme: None,
+            represented_file: Default::default(),
+            document_edited: Default::default(),
+            fit_height: false,
+            fit: Default::default(),
+            user_close_request: false,
+            minimize: Default::default(),
+            url_requests: Vec::new(),
+            path_requests: Vec::new(),
+            url_scheme_requests: Vec::new(),
+            open_urls_natively: false,
+            popups: Default::default(),
+            field_menu_fallback: None,
+            field_menu_seq: 0,
+            deferred_field_menu_pick: None,
+            #[cfg(test)]
+            force_field_menu_fallback: false,
+            file_dialog: Default::default(),
+            file_dialog_answers: Vec::new(),
+            next_file_dialog: 0,
+            announcement: Default::default(),
+            haptics: Default::default(),
+            a11y: None,
+            page: None,
+        }
+    }
+
+    #[inline]
+    pub(super) fn window_origin(&self) -> (f32, f32) {
+        self.window_origin
+    }
+
+    /// Updates the cached global screen origin; returns true when it changed.
+    #[inline]
+    pub(super) fn set_window_origin(&mut self, origin: (f32, f32)) -> bool {
+        if self.window_origin == origin { return false; }
+        self.window_origin = origin;
+        true
+    }
+
+    /// Takes the links handlers asked to open that this runtime didn't open: all of them in a
+    /// headless run or test, none in a window. Each was already checked.
+    #[inline]
+    pub(crate) fn take_url_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.url_requests)
+    }
+
+    #[inline]
+    pub(crate) fn push_url_request(&mut self, url: String) {
+        self.url_requests.push(url);
+    }
+
+    /// Takes the schemes `AppHandle::register_url_scheme` asked to claim that this runtime
+    /// didn't claim: all of them in a headless run or test, none in a window.
+    #[inline]
+    pub(crate) fn take_url_scheme_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.url_scheme_requests)
+    }
+
+    #[inline]
+    pub(crate) fn push_url_scheme_request(&mut self, scheme: String) {
+        self.url_scheme_requests.push(scheme);
+    }
+
+    /// Takes the local path requests handlers asked to open or reveal that this runtime didn't
+    /// execute natively: all of them in a headless run or test, none in a window.
+    #[inline]
+    pub(crate) fn take_path_requests(&mut self) -> Vec<crate::open_path::PathRequest> {
+        std::mem::take(&mut self.path_requests)
+    }
+
+    #[inline]
+    pub(crate) fn push_path_request(&mut self, request: crate::open_path::PathRequest) {
+        self.path_requests.push(request);
+    }
+
+    #[inline]
+    pub(crate) fn a11y(&self) -> Option<&crate::a11y::tree::A11yTree> {
+        self.a11y.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn a11y_mut(&mut self) -> Option<&mut crate::a11y::tree::A11yTree> {
+        self.a11y.as_deref_mut()
+    }
+
+    #[inline]
+    pub(crate) fn a11y_or_insert(&mut self) -> &mut crate::a11y::tree::A11yTree {
+        self.a11y.get_or_insert_with(Default::default)
+    }
+
+    #[inline]
+    pub(crate) fn a11y_deactivate(&mut self) {
+        self.a11y = None;
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn popup_is_open(&self) -> bool {
+        self.popups.is_open()
+    }
+
+    #[inline]
+    pub(super) fn clear_titlebar(&mut self) {
+        self.titlebar.clear();
+    }
+
+    #[inline]
+    pub(crate) fn set_app_stats(&mut self, stats: Option<fn() -> String>) {
+        self.app_stats = stats;
+    }
+
+    /// Asks the window for the content's new height, on this commit's spring. The first
+    /// commit, a viewport change and `Tx::instant` jump.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn fit_window(
+        &mut self,
+        height: f32,
+        viewport: (f32, f32),
+        scale: f32,
+        reduced_motion: bool,
+        headless: bool,
+        tx: &Tx,
+        first: bool,
+    ) {
+        let height = height.ceil_to(scale).max(1.0);
+        if !self.fit.ask(height, viewport.1) { return; }
+        let jump = first || tx.commit.snaps() || tx.relayout || reduced_motion;
+        // Only a macOS window and headless runs move the frame on a spring.
+        if !jump && self.window_resting && (cfg!(target_os = "macos") || headless) { self.fit.hold = FitHold::Asked; }
+        let request = crate::window::frame::FrameRequest {
+            size: Some((viewport.0, height)), animate: !jump,
+            spring: (!jump).then(|| tx.motion.map_or(crate::tok::motion::DEFAULT, MotionSource::spring)), center: false,
+            resize_drag: None,
+        };
+        self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
+    }
+
+    #[inline]
+    pub(super) fn content_height_from(&self, view_height: f32) -> f32 {
+        (view_height * self.zoom.k).ceil_to(self.zoom.window_scale).max(1.0)
+    }
+
+    /// Someone resized a window that fits its content (not a page's band) to `height`: it
+    /// goes back to the content's height.
+    #[inline]
+    pub(super) fn fit_resized(&mut self, height: f32, current_height: f32) -> bool {
+        self.fit_height && self.page.is_none() && self.window_resting && self.fit.resized(height, current_height)
+    }
+
+    /// Whether this frame holds its motion for the window (see [`FitHold`]).
+    #[inline]
+    pub(super) fn fit_frame_holds(&mut self) -> bool {
+        self.fit.frame_holds()
+    }
+}
+
 /// The window's title: `AppSpec`'s until a handler sets another, and whether the window has
 /// yet to show the last one set.
 #[derive(Debug, Default)]
@@ -63,6 +335,83 @@ impl Title {
     }
 }
 
+/// A latched host-window property seeded from creation options and updated by `Tx`.
+/// Deduplicates repeated sets to the currently applied value, cancels a pending change if a
+/// later `Tx` reverts back to the applied value before the host takes it, and retains the
+/// latest value across native window recreation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Latched<T> {
+    #[default]
+    Unset,
+    /// Value already applied to the native window (or seeded at creation).
+    Applied(T),
+    /// Value updated via `Tx` that differs from `applied` and awaits `Host::shell`.
+    Pending { applied: Option<T>, next: T },
+}
+
+enum LatchedEvent<T> {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Seed(T),
+    Set(T),
+    TakeChange,
+    MarkApplied,
+}
+
+impl<T: PartialEq> Latched<T> {
+    /// Seeds the initial creation-time value before any `Tx` update runs.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn seed(&mut self, value: T) {
+        *self = std::mem::take(self).step(LatchedEvent::Seed(value)).0;
+    }
+
+    /// Latches a new requested value from `Tx`.
+    pub(crate) fn set(&mut self, value: T) {
+        *self = std::mem::take(self).step(LatchedEvent::Set(value)).0;
+    }
+
+    /// Returns the latest value (applied or pending) for native creation/recreation.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) fn current(&self) -> Option<&T> {
+        match self {
+            Latched::Unset => None,
+            Latched::Applied(v) | Latched::Pending { next: v, .. } => Some(v),
+        }
+    }
+
+    /// Marks the current value as already applied to a freshly created native window.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) fn mark_applied(&mut self) {
+        *self = std::mem::take(self).step(LatchedEvent::MarkApplied).0;
+    }
+
+    /// Takes a pending change for the host to apply, transitioning it to `Applied`.
+    pub(crate) fn take_change(&mut self) -> Option<&T> {
+        let (next, changed) = std::mem::take(self).step(LatchedEvent::TakeChange);
+        *self = next;
+        if !changed { return None; }
+        match &*self {
+            Latched::Applied(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    fn step(self, event: LatchedEvent<T>) -> (Self, bool) {
+        match (self, event) {
+            (Latched::Unset, LatchedEvent::Seed(v)) => (Latched::Applied(v), false),
+            (state, LatchedEvent::Seed(_)) => (state, false),
+            (Latched::Unset, LatchedEvent::Set(v)) => (Latched::Pending { applied: None, next: v }, false),
+            (Latched::Applied(a), LatchedEvent::Set(v)) if a == v => (Latched::Applied(a), false),
+            (Latched::Applied(a), LatchedEvent::Set(v)) => (Latched::Pending { applied: Some(a), next: v }, false),
+            (Latched::Pending { applied: Some(a), .. }, LatchedEvent::Set(v)) if a == v => (Latched::Applied(a), false),
+            (Latched::Pending { applied, .. }, LatchedEvent::Set(v)) => (Latched::Pending { applied, next: v }, false),
+            (Latched::Pending { next, .. }, LatchedEvent::TakeChange) => (Latched::Applied(next), true),
+            (state, LatchedEvent::TakeChange) => (state, false),
+            (Latched::Pending { next, .. }, LatchedEvent::MarkApplied) => (Latched::Applied(next), false),
+            (state, LatchedEvent::MarkApplied) => (state, false),
+        }
+    }
+}
+
 /// A window that fits its content (`App::fit_content_height`): the height it last asked the
 /// window for, and the frame its move starts with.
 #[derive(Debug, Default)]
@@ -116,40 +465,48 @@ impl FitWindow {
     }
 }
 
-impl<S: 'static> Runtime<S> {
+impl RuntimeCore {
     /// Asks the window for the content's new height, on this commit's spring. The first
     /// commit, a viewport change and `Tx::instant` jump.
+    #[inline]
     pub(super) fn fit_window(&mut self, height: f32, tx: &Tx, first: bool) {
-        let height = height.ceil_to(self.env.scale).max(1.0);
-        if !self.fit.ask(height, self.viewport.1) { return; }
-        let jump = first || tx.instant || tx.relayout || self.reduced_motion;
-        // Only a macOS window and headless runs move the frame on a spring.
-        if !jump && self.window_resting && (cfg!(target_os = "macos") || self.wall_start.is_none()) { self.fit.hold = FitHold::Asked; }
-        let request = crate::window::frame::FrameRequest {
-            size: Some((self.viewport.0, height)), animate: !jump,
-            spring: (!jump).then(|| tx.motion.unwrap_or(motion::DEFAULT)), center: false,
-        };
-        self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
+        self.host.fit_window(height, self.viewport, self.env.scale, self.reduced_motion, self.wall_start.is_none(), tx, first);
     }
 
     /// The root's natural height at the current width, in window points (the view's times its
     /// zoom), measured without committing, so a window that fits its content can open at that
     /// height.
-    pub fn content_height(&mut self) -> f32 {
-        let measured = self.measure_pass(&Tx::default(), false);
+    pub(crate) fn content_height(&mut self, app: &dyn ViewDriver) -> f32 {
+        let measured = self.measure_pass(app, &Tx::default(), false);
         let height = measured.nodes.first().map_or(self.viewport.1, |root| root.local.h);
         self.discard_measured(measured);
-        (height * self.zoom.k).ceil_to(self.zoom.window_scale).max(1.0)
+        self.host.content_height_from(height)
     }
 
     /// Someone resized a window that fits its content (not a page's band) to `height`: it
     /// goes back to the content's height.
+    #[inline]
     pub(super) fn fit_resized(&mut self, height: f32) -> bool {
-        self.fit_height && self.page.is_none() && self.window_resting && self.fit.resized(height, self.viewport.1)
+        self.host.fit_resized(height, self.viewport.1)
     }
 
     /// Whether this frame holds its motion for the window (see [`FitHold`]).
-    pub(super) fn fit_frame_holds(&mut self) -> bool { self.fit.frame_holds() }
+    #[inline]
+    pub(super) fn fit_frame_holds(&mut self) -> bool {
+        self.host.fit_frame_holds()
+    }
+
+    /// Takes a pending user-initiated close request (`Tx::request_user_close`).
+    #[inline]
+    pub(crate) fn take_user_close_request(&mut self) -> bool {
+        std::mem::take(&mut self.host.user_close_request)
+    }
+
+    /// Whether a user-initiated close request is pending for the host.
+    #[inline]
+    pub(crate) fn has_user_close_request(&self) -> bool {
+        self.host.user_close_request
+    }
 }
 
 #[cfg(test)]

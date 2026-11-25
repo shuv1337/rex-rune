@@ -188,3 +188,26 @@ fn a_second_configure_replaces_the_size_nobody_read() {
     assert!(state.closed());
     assert_eq!(state.take_size(), None);
 }
+
+#[test]
+fn fullscreen_placement_uses_exclusive_zone_minus_one_and_others_stay_zero() {
+    use super::exclusive_zone;
+    use crate::overlay::ScreenEdge;
+    use crate::{Align, OverlayPlacement};
+
+    assert_eq!(exclusive_zone(Some(OverlayPlacement::FullScreen)), -1);
+    assert_eq!(exclusive_zone(None), 0);
+    assert_eq!(
+        exclusive_zone(Some(OverlayPlacement::Edge {
+            edge: ScreenEdge::Top,
+            margin: 8.0,
+            align: Align::Center,
+            inset: 0.0,
+        })),
+        0
+    );
+    assert_eq!(
+        exclusive_zone(Some(OverlayPlacement::Rect { x: 10.0, y: 20.0, width: 200.0, height: 100.0 })),
+        0
+    );
+}

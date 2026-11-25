@@ -895,7 +895,7 @@ fn glyph_run(content: String, style: RunStyle, x: f32, y: f32, m: &Metrics) -> E
     if style.strike {
         e = e.strike(0, len, Some(color));
     }
-    e.no_wrap().font(font).color(color).absolute(x + m.inset, y)
+    e.nowrap().font(font).color(color).absolute(x + m.inset, y)
 }
 
 /// (character, bold, italic, the grid's text style) → advances exactly one cell.
@@ -1010,7 +1010,7 @@ impl Segment {
         }
         let mut e = rich(self.text, self.spans)
             // The server owns line breaks. Fractional-DPI rounding must not wrap a run again.
-            .no_wrap()
+            .nowrap()
             .font(m.style)
             .absolute(self.col as f32 * m.cell.0 + m.inset, 0.);
         for (a, b, fg) in self.strikes {
@@ -1421,7 +1421,8 @@ pub struct GridLook {
     /// The shape the pane with the keyboard draws whatever its program asked for (Force
     /// style); none draws the frame's own.
     pub cursor_force: Option<CursorShape>,
-    pub ime: bool,
+    /// The terminal owns the input method when this is set, even without a visible cursor.
+    pub ime: Option<rune::OptionAsAlt>,
     pub colors: TermColors,
 }
 
@@ -1508,10 +1509,20 @@ impl Term {
 
 /// The visible rows of `term`'s frame, each memoized by its content.
 pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
-    let Some(frame) = term.display_frame() else {
-        return el().w_full().h_full();
-    };
     let (cw, ch) = m.cell;
+    let ime_anchor = |x, y, mode| {
+        el().key(format!("{key}/ime"))
+            .absolute(x, y)
+            .size(cw, ch)
+            .ime_cursor()
+            .ime_option_as_alt_mode(mode)
+    };
+    let Some(frame) = term.display_frame() else {
+        return el()
+            .w_full()
+            .h_full()
+            .children(look.ime.map(|mode| ime_anchor(0., 0., mode)));
+    };
     let visible = term.visible_rows(m.cell);
     let start = frame.display_row_start(visible);
     let cols = frame.cols as usize;
@@ -1687,15 +1698,10 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             grid = grid.child(glyph_run(cell.text.clone(), style, px, py, m));
         }
     }
-    if look.ime {
+    if let Some(option_as_alt) = look.ime {
         let (col, pane_row) = ime_cell(frame, start, visible, term.visible_cols(m.cell));
         let (px, py) = (col as f32 * cw, pane_row as f32 * ch);
-        grid = grid.child(
-            el().key(format!("{key}/ime"))
-                .absolute(px, py)
-                .size(cw, ch)
-                .ime_cursor(),
-        );
+        grid = grid.child(ime_anchor(px, py, option_as_alt));
         if !term.preedit.is_empty() {
             let len = term.preedit.len();
             grid = grid.child(
@@ -1707,7 +1713,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                     }],
                 )
                 .key(format!("{key}/preedit"))
-                .no_wrap()
+                .nowrap()
                 .font(m.style)
                 .color(rgb(frame.fg))
                 .fill(rgb(body))
@@ -1992,7 +1998,7 @@ mod tests {
         let look = GridLook {
             cursor: None,
             cursor_force: None,
-            ime: false,
+            ime: None,
             colors: TermColors::default(),
         };
         el().w_full()
@@ -2077,7 +2083,7 @@ mod tests {
     /// Construct only under a family guard: TextSystem also registers measurement fonts.
     fn bundled_row_fonts() -> rune::text::TextSystem {
         let fonts = crate::app::fonts::load("IBM Plex Mono", &[]);
-        rune::text::TextSystem::new_with_paths(fonts.files, &[], fonts.families)
+        rune::text::TextSystem::new(fonts.files, fonts.families)
     }
 
     /// A row at 1.5 device pixels per point, placed off the pixel grid.
@@ -2257,7 +2263,7 @@ mod tests {
             let look = GridLook {
                 cursor: None,
                 cursor_force: None,
-                ime: false,
+                ime: None,
                 colors: TermColors::default(),
             };
             grid("g", term, &clipped_metrics(), look)
@@ -2283,7 +2289,7 @@ mod tests {
         // The selected match's six letters are drawn in its mark's text colour; the two
         // before it keep the terminal's.
         let glyphs = |colour: rune::Color| {
-            let fill = [colour.r, colour.g, colour.b, colour.a];
+            let fill = colour.premul_srgb(1.);
             rt.instances
                 .iter()
                 .filter(|q| q.params[1] == rune::render::KIND_GLYPH && q.fill == fill)
@@ -2487,7 +2493,7 @@ mod tests {
             let look = GridLook {
                 cursor: Some(CursorLook::Block),
                 cursor_force: None,
-                ime: false,
+                ime: None,
                 colors: s.colors,
             };
             el().w_full()
@@ -2506,7 +2512,7 @@ mod tests {
         );
         let glyph_count = |rt: &Runtime<State>, color: u32| {
             let c = rgb(color);
-            let want = [c.r, c.g, c.b, c.a];
+            let want = c.premul_srgb(1.);
             rt.instances
                 .iter()
                 .filter(|q| q.params[1] == rune::render::KIND_GLYPH && q.fill == want)
@@ -2588,7 +2594,7 @@ mod tests {
             let look = GridLook {
                 cursor: s.cursor,
                 cursor_force: None,
-                ime: s.ime,
+                ime: s.ime.then_some(rune::OptionAsAlt::None),
                 colors: TermColors::default(),
             };
             el().w_full()

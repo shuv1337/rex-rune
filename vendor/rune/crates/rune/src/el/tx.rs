@@ -6,34 +6,56 @@ use rune_motion::{Anim, Spring};
 
 use crate::el::*;
 
+mod elements;
 mod keys;
+mod pick;
 mod press;
+mod rects;
 mod scroll;
+
+#[cfg(test)]
+mod tests;
 
 /// What a handler may say about the commit it causes.
 #[derive(Clone, Debug, Default)]
 pub struct Tx {
     pub(crate) shortcut_activation_token: Option<String>,
     pub(crate) key_repeat: bool,
+    /// `Tx::key_direction`.
+    pub(crate) key_rtl: bool,
     /// `Tx::drag_repeat`.
     pub(crate) drag_repeat: bool,
     /// `Tx::drag_repeat_after`.
     pub(crate) drag_repeat_after: Option<std::time::Duration>,
     /// `Tx::input_time`.
     pub(crate) input_time: Option<crate::time::Instant>,
+    /// `Tx::input_waiting`.
+    pub(crate) input_waiting: bool,
     pub(crate) physical_key: Option<crate::PhysicalKeyCode>,
     pub(crate) key_base: Option<char>,
-    /// `Tx::alt_keys`.
-    pub(crate) alt_keys: crate::AltKeys,
     pub(crate) focused: Option<String>,
-    pub(crate) instant: bool,
-    pub(crate) motion: Option<Spring>,
-    /// The layout curve from [`Tx::motion_curve`]; `motion` holds its spring stand-in.
-    pub(crate) motion_curve: Option<Anim>,
+    /// Full tree path of the focused element, for [`Tx::focus_within`].
+    pub(crate) focused_path: Option<String>,
+    /// Focused inline link id (when focus sits on a [`Link`](crate::Link)), for [`Tx::focus_within`].
+    pub(crate) focused_link: Option<String>,
+    /// What this change does with motion ([`Tx::instant`], [`Tx::animated`], [`Tx::settle`]).
+    pub(crate) commit: Commit,
+    /// The motion this change's layout moves on ([`Tx::motion`], [`Tx::motion_curve`]).
+    pub(crate) motion: Option<MotionSource>,
     /// `Tx::follow_edge`.
     pub(crate) follow_edge: bool,
+    /// No input in this window caused this commit and no handler asked for motion
+    /// (`Tx::animated`): what it mounts and unmounts appears and goes in its final state.
+    /// Set by the runtime for each frame's commit.
+    pub(crate) unprompted: bool,
+    /// A handler called [`Self::animated`].
+    pub(crate) asked_motion: bool,
+    /// Virtual growth stacks whose visible tail may grow for this commit alone.
+    pub(crate) live_growth: Vec<(String, bool)>, // selector, carry row ink
+    pub(crate) tail_rooms: Vec<(String, String, String)>,
+    /// A resting poll changed the model but hasn't committed its tree yet.
+    pub(crate) polled_change: bool,
     pub(crate) color_motion: Option<Spring>,
-    pub(crate) settle: bool,
     pub(crate) relayout: bool,
     /// The viewport moved only because the window's own resize animation stepped it.
     pub(crate) window_step: bool,
@@ -52,34 +74,62 @@ pub struct Tx {
     /// Scroll viewports to send to their bottom: (key, animated).
     pub(crate) scroll_bottom: Vec<(String, bool)>,
     /// Scroll viewports to page: (key, pages).
-    pub(crate) scroll_pages: Vec<(String, i32)>,
+    pub(crate) scroll_pages: Vec<(String, i32, crate::ScrollSource)>,
     /// Scroll viewports to move to offsets (`Tx::scroll_to` and kin).
     pub(crate) scroll_offsets: Vec<crate::runtime::ScrollRequest>,
+    /// Scroll viewports to halt where they stand (`Tx::stop_scroll`).
+    pub(crate) scroll_stops: Vec<String>,
     /// Elements to hold where they show across this commit (`Tx::keep_on_screen`).
     pub(crate) keep_on_screen: Vec<String>,
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
-    pub(crate) minimize: bool,
+    /// User-initiated close request (macOS unhandled ⌘W / Window › Close, assistive activation of
+    /// the custom caption close button): routes through `App::on_close_request` instead of
+    /// programmatic `Shell::Close`.
+    pub(crate) user_close_request: bool,
+    pub(crate) minimize_order: Option<std::num::NonZeroU64>,
     /// `Tx::toggle_maximized`.
     pub(crate) toggle_maximized: bool,
-    /// `Tx::toggle_full_screen`.
-    pub(crate) toggle_full_screen: bool,
-    /// `Tx::set_option_alt`; the last wins.
-    pub(crate) option_as_alt: Option<crate::OptionAsAlt>,
-    /// `Tx::show_window_menu`, in window points; the last wins.
-    pub(crate) show_window_menu: Option<(f32, f32)>,
+    /// `Tx::toggle_full_screen` and `Tx::set_full_screen`; the last call in a turn wins.
+    pub(crate) full_screen: Option<FullScreenRequest>,
     /// `Tx::send_key`, in order.
     pub(crate) keys: Vec<crate::KeyEvent>,
     /// `Tx::drop_point`.
     pub(crate) drop_point: Option<PointerEvent>,
+    /// `Tx::drag_paths`.
+    pub(crate) drag_paths: Option<Rc<[std::path::PathBuf]>>,
     pub(crate) title: Option<String>,
+    pub(crate) color_scheme: Option<crate::ColorScheme>,
+    /// `Tx::set_represented_file`: `Some(Some(path))` sets, `Some(None)` clears.
+    pub(crate) represented_file: Option<Option<std::path::PathBuf>>,
+    /// `Tx::set_document_edited`.
+    pub(crate) document_edited: Option<bool>,
+    /// `Tx::announce`: what a screen reader says after this handler.
+    pub(crate) announce: Option<(String, crate::LiveRegion)>,
     pub(crate) open_urls: Vec<crate::open_url::Link>,
+    /// `Tx::haptic`, in order.
+    pub(crate) haptics: Vec<crate::Haptic>,
+    pub(crate) open_paths: Vec<crate::open_path::PathRequest>,
+    /// `AppHandle::register_url_scheme`: schemes to claim with the system.
+    pub(crate) url_schemes: Vec<crate::open_url::scheme::Claim>,
     pub(crate) trace: Option<TraceCalls>,
     pub(crate) popups: Vec<crate::popup_menu::Call>,
+    /// `Tx::resolve_field_menu`: `Some(Some(id))` picks an item, `Some(None)` dismisses.
+    pub(crate) field_menu_resolution: Option<Option<String>>,
+    /// A handler in this transaction opened a new fallback field menu (`App::on_field_menu`),
+    /// superseding any earlier action's stale `field_menu_resolution` in the same frame.
+    pub(crate) field_menu_opened: bool,
     pub(crate) file_dialogs: Vec<crate::file_dialog::Call>,
     pub(crate) window_frame: Option<crate::window::frame::FrameRequest>,
     /// The mouse button driving this press or drag (`Tx::button`).
     pub(crate) button: crate::PointerButton,
+    /// Whether any mouse button was held down anywhere in the window ([`Tx::pressing`]).
+    pub(crate) pressing: bool,
+    pub(crate) touch_tap: bool,
+    /// `Tx::press_point`.
+    pub(crate) press_point: Option<PointerEvent>,
+    /// `Tx::link_rect`.
+    pub(crate) link_rect: Option<[f32; 4]>,
     /// Modifier keys held as the handler runs.
     pub(crate) mods: crate::Mods,
     pub(crate) srgb_blend: Option<bool>,
@@ -87,11 +137,21 @@ pub struct Tx {
     pub(crate) rewind: Option<Option<crate::rewind::Rewind>>,
     pub(crate) font_smoothing: Option<crate::text::FontSmoothing>,
     pub(crate) font_families: Option<(String, String)>,
+    /// `Tx::set_emoji_family`: `Some(Some(name))` sets, `Some(None)` clears to system fallback.
+    pub(crate) emoji_family: Option<Option<String>>,
+    /// `Tx::add_font`: new font bytes were registered during this handler.
+    pub(crate) fonts_added: bool,
     pub(crate) blur: bool,
+    /// `Tx::cancel_pointer`.
+    pub(crate) cancel_pointer: bool,
     /// `Tx::focus` and `Tx::return_focus`: the key, whether its ring shows, and which asked.
     pub(crate) focus_to: Option<(String, bool, FocusAsk)>,
     /// `Tx::focus_visible`.
     pub(crate) focus_visible: bool,
+    /// `Tx::assistive_technology`.
+    pub(crate) assistive: bool,
+    /// Not `Tx::window_visible`, so a `Tx` no runtime made reads as visible.
+    pub(crate) window_hidden: bool,
     /// `Tx::by_keys`.
     pub(crate) by_keys: bool,
     /// The text selection as the event arrived (`Tx::text_selection`).
@@ -109,12 +169,24 @@ pub struct Tx {
     pub(crate) evict_memos: Vec<String>,
     /// `Tx::clock`.
     pub(crate) clock: f64,
+    /// `Tx::scale` (0 when unset on `Tx::default()`, which reads as 1.0).
+    pub(crate) scale: f32,
 }
 
-/// Which asked for focus: [`Tx::focus`], or [`Tx::return_focus`] handing it back.
+/// What a handler asked of the window's full-screen state ([`Tx::toggle_full_screen`],
+/// [`Tx::set_full_screen`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FullScreenRequest {
+    Toggle,
+    Set(bool),
+}
+
+/// Which asked for focus: [`Tx::focus`], [`Tx::focus_when_shown`], or [`Tx::return_focus`]
+/// handing it back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FocusAsk {
     Focus,
+    WhenShown,
     Return,
 }
 
@@ -124,6 +196,114 @@ pub(crate) enum SelectRequest {
     Range(String, std::ops::Range<usize>),
     All(String),
     Clear,
+}
+
+/// What a change does with motion, from `Tx::instant`, `Tx::animated` and `Tx::settle`, where
+/// the last call in a handler wins. Two facts live in it so neither can disagree with the
+/// other: whether this change's own layout applies at once, and whether it lands every running
+/// track. `settle` then `animated` keeps the second without the first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Commit {
+    /// Animate this change; motion an earlier change set going keeps running.
+    #[default]
+    Animate,
+    /// Only the lack of an input cause made this commit instant. An explicit instant wins
+    /// even over a request to animate a list's tail.
+    Unprompted,
+    /// Apply this change at once; motion an earlier change set going keeps running.
+    Instant,
+    /// Apply this change at once and land every running track.
+    Settle,
+    /// Land every running track, and still animate this change's own layout: `settle` then
+    /// `animated`.
+    SettleAnimated,
+}
+
+impl Commit {
+    pub(crate) fn without_input(self) -> Self {
+        if self == Self::Animate { Self::Unprompted } else { self.instant() }
+    }
+
+    /// The two facts as one intent.
+    pub(crate) fn new(snaps: bool, lands: bool) -> Commit {
+        match (snaps, lands) {
+            (false, false) => Commit::Animate,
+            (true, false) => Commit::Instant,
+            (true, true) => Commit::Settle,
+            (false, true) => Commit::SettleAnimated,
+        }
+    }
+
+    /// This change's own layout applies at once instead of moving on its spring.
+    pub(crate) fn snaps(self) -> bool {
+        matches!(self, Commit::Unprompted | Commit::Instant | Commit::Settle)
+    }
+
+    /// This change lands every running track: growth, reveals and follow-the-end.
+    pub(crate) fn lands(self) -> bool {
+        matches!(self, Commit::Settle | Commit::SettleAnimated)
+    }
+
+    /// Set or clear the snap, keeping whether running tracks land.
+    pub(crate) fn snap(self, snaps: bool) -> Commit {
+        Commit::new(snaps, self.lands())
+    }
+
+    /// `Tx::instant`: this change applies at once.
+    pub(crate) fn instant(self) -> Commit {
+        self.snap(true)
+    }
+
+    /// `Tx::animated`: this change animates, while running tracks still land if they were asked
+    /// to, and a later `instant` in the same change wins.
+    pub(crate) fn animated(self) -> Commit {
+        self.snap(false)
+    }
+
+    /// Two handlers' asks for one commit: either may snap or land it.
+    pub(crate) fn merge(self, one: Commit) -> Commit {
+        Commit::new(self.snaps() || one.snaps(), self.lands() || one.lands())
+    }
+}
+
+/// The motion a change's layout moves on: `Tx::motion`'s spring, or a whole curve from
+/// `Tx::motion_curve`. Read as one source, so the curve and the spring stand-in that only
+/// spring-taking motion uses can never disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MotionSource {
+    /// A spring, as Rune's layout springs normally are.
+    Spring(Spring),
+    /// A curve, with the zero-bounce spring of its duration for what the layout moves but only
+    /// takes a spring (matched flights). Scroll requests aren't one: they glide on the spring
+    /// they name.
+    Curve { anim: Anim, spring: Spring },
+}
+
+impl MotionSource {
+    /// `Tx::motion_curve`'s source: the curve, and its stand-in spring.
+    pub(crate) fn curve(anim: Anim) -> MotionSource {
+        let spring = match anim.curve {
+            rune_motion::Curve::Spring(s) => s,
+            c => Spring::new(c.logical_duration().max(0.01), 0.0),
+        };
+        MotionSource::Curve { anim, spring }
+    }
+
+    /// The spring this change's layout moves on.
+    pub(crate) fn spring(self) -> Spring {
+        match self {
+            MotionSource::Spring(spring) | MotionSource::Curve { spring, .. } => spring,
+        }
+    }
+
+    /// The curve this change's layout moves on, for what draws progress rather than stepping a
+    /// spring.
+    pub(crate) fn anim(self) -> Anim {
+        match self {
+            MotionSource::Spring(spring) => spring.into(),
+            MotionSource::Curve { anim, .. } => anim,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,6 +323,7 @@ pub enum Shell {
     Relaunch,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Shell {
     /// What follows the app's exit for this request, when it quits.
     pub(crate) fn after(self) -> Option<crate::quit::After> {
@@ -164,7 +345,8 @@ impl Tx {
         self.pick_read(None, x, y, crate::Pick::default(), f);
     }
 
-    /// [`Tx::element_at`] with options ([`Pick`](crate::Pick)).
+    /// [`Tx::element_at`] with options ([`Pick`](crate::Pick)): transparent layers,
+    /// [`crate::Pick::interactive`] hit targets, or [`crate::Pick::drop_targets`].
     pub fn element_at_with<S: 'static>(&mut self, x: f32, y: f32, pick: crate::Pick, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
         self.pick_read(None, x, y, pick, f);
     }
@@ -185,7 +367,7 @@ impl Tx {
         let f: PickFn = Box::new(move |s, picked, tx| {
             if let Some(s) = s.cast::<S>() { f(s, picked, tx); }
         });
-        self.pick_reads.push(PickRead { within, x, y, pick, f: Rc::new(std::cell::Cell::new(Some(f))) });
+        self.pick_reads.push(PickRead::Element { within, x, y, pick, f: Rc::new(std::cell::Cell::new(Some(f))) });
     }
 
     /// [`Runtime::invalidate_memos_by_prefix`](crate::Runtime::invalidate_memos_by_prefix) on
@@ -202,7 +384,7 @@ impl Tx {
     /// or a text flight. A `wake_after` only schedules.
     pub(crate) fn frame_work(&self) -> bool {
         !self.pick_reads.is_empty() || !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.scroll_offsets.is_empty()
-            || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty() || !self.launches.is_empty() || self.select.is_some()
+            || !self.scroll_stops.is_empty() || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty() || !self.launches.is_empty() || self.select.is_some() || self.field_menu_resolution.is_some()
     }
 
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
@@ -226,10 +408,13 @@ impl Tx {
     ///
     /// `wake_after(Duration::ZERO)` from the poll asks for the next frame: a poll that steps
     /// its own animation from the frame clock keeps a shown window or overlay drawing at the
-    /// display's rate this way, until it stops asking. That needs a display link pacing the
-    /// surface (macOS); hidden, covered, faded out or unpaced, a wake due sooner than a frame
-    /// waits about a frame (60 Hz), so a poll that keeps asking never spins the loop.
+    /// display's rate this way, until it stops asking. That uses the display link on macOS and
+    /// display vblank pacing on Windows; hidden, covered, faded out or unpaced, a wake due sooner
+    /// than a frame waits about a frame (60 Hz), so a poll that keeps asking never spins the loop.
+    #[cfg_attr(feature = "frame-profile", track_caller)]
     pub fn wake_after(&mut self, duration: std::time::Duration) {
+        #[cfg(feature = "frame-profile")]
+        crate::frame::live_log::waker(std::panic::Location::caller(), duration);
         self.wakes.push(duration);
     }
 
@@ -241,17 +426,46 @@ impl Tx {
         self.clock
     }
 
+    /// The window's display scale in device pixels per view point (matching
+    /// [`Cx::env`](crate::Cx::env)`.scale`, including any [`Cx::zoom`](crate::Cx::zoom)) as
+    /// this handler or `poll` runs. `1.0` for a `Tx` no runtime made.
+    ///
+    /// ```
+    /// # use rune::el;
+    /// # struct Viewer { backing_px: [u32; 2] }
+    /// # let _ = el()
+    /// .on_layout_tx(|s: &mut Viewer, [_, _, w, h], tx| {
+    ///     let scale = tx.scale();
+    ///     s.backing_px = [(w * scale).round() as u32, (h * scale).round() as u32];
+    /// })
+    /// # ;
+    /// ```
+    pub fn scale(&self) -> f32 {
+        if self.scale.is_finite() && self.scale > 0.0 { self.scale } else { 1.0 }
+    }
+
     /// Wake the app's poll hook once the clock reaches `due` (seconds on [`Tx::clock`]), as
     /// [`Tx::wake_after`] does for the time left; a deadline already past wakes the next
     /// frame. A timed state stores its deadline and asks for it here, and its poll checks
     /// `clock >= due` to fire the timer as an event.
+    #[cfg_attr(feature = "frame-profile", track_caller)]
     pub fn wake_at(&mut self, due: f64) {
+        #[cfg(feature = "frame-profile")]
+        crate::frame::live_log::waker(std::panic::Location::caller(), std::time::Duration::from_secs_f64((due - self.clock).max(0.0)));
         self.wakes.push(std::time::Duration::from_secs_f64((due - self.clock).max(0.0)));
     }
 
-    /// Close the window after this handler, as the close button would (`App::on_close` runs).
+    /// Close the window after this handler (`App::on_close` runs; bypasses
+    /// `App::on_close_request` so an approved close completes without re-asking).
     pub fn close_window(&mut self) {
         self.shell = self.shell.max(Some(Shell::Close));
+    }
+
+    /// Requests closing the window on the user's behalf (macOS unhandled ⌘W / Window › Close,
+    /// assistive activation of the custom caption close button), routing through
+    /// `App::on_close_request` before closing. Programmatic app code calls `Self::close_window`.
+    pub(crate) fn request_user_close(&mut self) {
+        self.user_close_request = true;
     }
 
     /// Quit the app after this handler, whether or not it keeps running without a window. Every
@@ -269,51 +483,49 @@ impl Tx {
     }
 
     /// Minimize this window after this handler, as its minimize button would (winit's
-    /// `set_minimized` off macOS). Does nothing (logging in debug builds) where a window
-    /// can't minimize: an overlay, a panel or launcher, a borderless window on macOS (elsewhere
-    /// a borderless window that draws its own controls minimizes), or one without a minimize
-    /// button.
+    /// `set_minimized` off macOS). On Windows and Linux, resizable borderless windows
+    /// (`WindowOptions { borderless: true, ..Default::default() }`) minimize when
+    /// `WindowButtons::MINIMIZE` is enabled; does nothing (logging in debug builds) for a
+    /// hidden window, a panel or launcher, a click-through overlay, a non-resizable
+    /// borderless window, a borderless window on macOS, or a window without a minimize button.
     /// A close or quit asked in the same change wins.
     pub fn minimize(&mut self) {
-        self.minimize = true;
+        self.minimize_order = Some(crate::app::window_request_order());
     }
 
     /// Maximize this window after this handler, or restore it when it is maximized, as its
-    /// maximize button would (macOS zooms). Does nothing for overlays and headless runs.
+    /// maximize button would (macOS zooms). Does nothing for overlays, macOS non-activating
+    /// panels, and headless runs. Read the confirmed OS state with [`crate::Cx::is_maximized`].
     pub fn toggle_maximized(&mut self) {
         self.toggle_maximized = true;
-    }
-
-    /// Open the window manager's window menu at `x`, `y` in window points, as a secondary
-    /// press on a title bar does (winit's `show_window_menu`), for a borderless window that
-    /// draws its own title bar. A no-op where the platform has no such menu: winit supports it
-    /// on Wayland and Windows only, and a custom Windows frame opens its own menu.
-    pub fn show_window_menu(&mut self, x: f32, y: f32) {
-        self.show_window_menu = Some((x, y));
     }
 
     /// Take this window full screen after this handler, or bring it back, as macOS's green
     /// button and Electron's `setFullScreen` do: on Windows and Linux a borderless window over
     /// its display, which hides a custom titlebar's caption buttons (`Cx::chrome_insets`).
-    /// Does nothing for overlays and headless runs.
+    /// Does nothing for overlays, macOS non-activating panels, and headless runs. When both
+    /// `toggle_full_screen` and [`Self::set_full_screen`] run in one turn, the last call wins.
+    /// Read the current full-screen state with [`crate::Cx::is_full_screen`] (flips at transition
+    /// start on macOS and on OS confirmation on Windows and Linux).
     pub fn toggle_full_screen(&mut self) {
-        self.toggle_full_screen = true;
+        self.full_screen = Some(FullScreenRequest::Toggle);
     }
 
-    /// Whether macOS's Option keys act as Alt in this window: the key arrives as the character
-    /// it types without Option (Shift kept), with `alt`, instead of the character Option
-    /// composes (∫ for B), and Option never starts a dead key. winit's `OptionAsAlt::Both` or
-    /// `None`. Lasts until the next call, but a focused text field gets Option's characters;
-    /// the window follows focus after every frame that runs input. Does nothing off macOS.
-    pub fn set_option_as_alt(&mut self, on: bool) {
-        self.set_option_alt(if on { crate::OptionAsAlt::Both } else { crate::OptionAsAlt::Neither });
-    }
-
-    /// [`Tx::set_option_as_alt`] for one Option key alone (winit's `OptionAsAlt::OnlyLeft` or
-    /// `OnlyRight`): a key typed with the other one composes, dead keys included. With both
-    /// held, the key is Alt. [`Tx::alt_keys`] says which were held with a key.
-    pub fn set_option_alt(&mut self, alt: crate::OptionAsAlt) {
-        self.option_as_alt = Some(alt);
+    /// Enter (`true`) or exit (`false`) full screen after this handler, as Electron's
+    /// `BrowserWindow.setFullScreen(flag)` does: on Windows and Linux a borderless window over
+    /// its display, on macOS a native full-screen Space. Does nothing for overlays, macOS
+    /// non-activating panels, and headless runs, and is a no-op when the window is already in
+    /// the requested state. When multiple calls to `set_full_screen` or
+    /// [`Self::toggle_full_screen`] run in one turn, the last call wins. Read the current
+    /// full-screen state with [`crate::Cx::is_full_screen`] (flips at transition start on macOS
+    /// and on OS confirmation on Windows and Linux).
+    ///
+    /// ```
+    /// # use rune::{el, Tx};
+    /// let _button = el().on_press_tx(|_: &mut (), tx: &mut Tx| tx.set_full_screen(true));
+    /// ```
+    pub fn set_full_screen(&mut self, full_screen: bool) {
+        self.full_screen = Some(FullScreenRequest::Set(full_screen));
     }
 
     /// Deliver `ev` once this handler is done, as if it were typed: to the focused field, then
@@ -331,12 +543,82 @@ impl Tx {
         self.title = Some(title.into());
     }
 
+    /// Override this window's native light or dark chrome after this handler, retained across
+    /// native window recreation.
+    ///
+    /// On Windows this updates the native titlebar (`DWMWA_USE_IMMERSIVE_DARK_MODE`), on macOS
+    /// `NSWindow.appearance`, on Wayland client-side decorations, and on X11 `_GTK_THEME_VARIANT`.
+    /// Passing [`ColorScheme::System`](crate::ColorScheme::System) clears the per-window override
+    /// so the window inherits any app-wide override set via
+    /// [`AppHandle::set_color_scheme`](crate::AppHandle::set_color_scheme) or the operating
+    /// system's appearance. Ignored on overlays, web, and headless.
+    ///
+    /// ```no_run
+    /// use rune::{ColorScheme, El, el};
+    ///
+    /// let button: El = el().on_press_tx(|_: &mut (), tx| tx.set_color_scheme(ColorScheme::Dark));
+    /// let _ = button;
+    /// ```
+    pub fn set_color_scheme(&mut self, scheme: crate::ColorScheme) {
+        self.color_scheme = Some(scheme);
+    }
+
+    /// Sets or clears this window's represented document path on macOS (`NSWindow.representedURL`),
+    /// updating AppKit's titlebar proxy icon and path menu without performing filesystem I/O.
+    /// Pass `None` (or an empty path) to clear the represented file. When the window opted into
+    /// [`MacWindowOptions::title_from_file`](crate::MacWindowOptions::title_from_file), the
+    /// native title updates to the file's final path component (and restores the window's
+    /// configured title when cleared); calling [`Tx::set_title`](Self::set_title) in the same
+    /// turn takes precedence. Retained across native window recreation. No-op off macOS, on
+    /// overlays, and in headless runs.
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use rune::{El, el};
+    ///
+    /// let button: El = el().on_press_tx(|_: &mut (), tx| {
+    ///     tx.set_represented_file(Some(PathBuf::from("/tmp/notes.md")));
+    /// });
+    /// let _ = button;
+    /// ```
+    pub fn set_represented_file(&mut self, path: Option<std::path::PathBuf>) {
+        self.represented_file = Some(crate::window::spec::normalize_represented_file(path));
+    }
+
+    /// Sets this window's document-edited state on macOS (`NSWindow.documentEdited`), showing
+    /// (`true`) or hiding (`false`) the unsaved-changes dot inside the close button. Retained
+    /// across native window recreation. No-op off macOS, on overlays, and in headless runs.
+    ///
+    /// Following AppKit's default, marking a document as edited disables dragging its proxy icon
+    /// until `set_document_edited(false)` is called.
+    ///
+    /// ```no_run
+    /// use rune::{El, el};
+    ///
+    /// let button: El = el().on_press_tx(|_: &mut (), tx| tx.set_document_edited(true));
+    /// let _ = button;
+    /// ```
+    pub fn set_document_edited(&mut self, edited: bool) {
+        self.document_edited = Some(edited);
+    }
+
+    /// Have a screen reader say `text` after this handler, without moving focus: a reply that
+    /// finished, a request that arrived, an item that moved. `Polite` waits for the reader to
+    /// finish what it's saying; `Assertive` interrupts it (errors and requests that block
+    /// work). Each window keeps one announcement, a live region of its own that draws nothing;
+    /// the last call in a frame wins, and saying the same words again says them again. With no
+    /// assistive technology listening it costs one string.
+    pub fn announce(&mut self, text: impl Into<String>, how: crate::LiveRegion) {
+        if how != crate::LiveRegion::Off { self.announce = Some((text.into(), how)); }
+    }
+
     /// Open `url` in the system's default handler once this handler's frame is done: a browser
     /// for `http:` and `https:`, the mail app for `mailto:`. Other schemes (`file:`, an app's
     /// own) and malformed links are refused here with the reason and nothing opens. Headless
     /// runs and tests open nothing; read the requests with `Runtime::take_url_requests`.
+    /// [`Tx::open_url_then`] also says whether the open worked.
     pub fn open_url(&mut self, url: &str) -> Result<(), crate::open_url::OpenUrlError> {
-        self.open_urls.push(crate::open_url::Link { url: crate::open_url::check(url)?, same_tab: false });
+        self.open_urls.push(crate::open_url::Link { url: crate::open_url::check(url)?, same_tab: false, opened: None });
         Ok(())
     }
 
@@ -346,7 +628,7 @@ impl Tx {
     /// On web a link without a scheme (`/notes/42`) is relative to the page. Native opens it as
     /// `open_url` does, and headless runs record it with the others.
     pub fn open_url_same_tab(&mut self, url: &str) -> Result<(), crate::open_url::OpenUrlError> {
-        self.open_urls.push(crate::open_url::Link { url: crate::open_url::check_same_tab(url)?, same_tab: true });
+        self.open_urls.push(crate::open_url::Link { url: crate::open_url::check_same_tab(url)?, same_tab: true, opened: None });
         Ok(())
     }
 
@@ -375,6 +657,29 @@ impl Tx {
         self.frame_request(crate::window::frame::FrameRequest { center: true, ..Default::default() });
     }
 
+    /// Start an interactive OS/compositor-driven window resize from `edge` (winit's
+    /// `Window::drag_resize_window`: Win32 sizing borders, X11 `_NET_WM_MOVERESIZE`, Wayland
+    /// `xdg_toplevel.resize`). Call from a press or [`El::on_drag`](crate::El::on_drag)
+    /// [`Phase::Down`](crate::Phase::Down) handler on a custom resize grip; for a plain resize
+    /// edge or corner without custom logic, prefer
+    /// [`El::window_resize`](crate::El::window_resize), which also supplies the matching resize
+    /// cursor. Ignored on macOS, on the web, in overlays, and in headless runs.
+    ///
+    /// ```
+    /// # use rune::{Cursor, Phase, ResizeEdge, el};
+    /// # struct App;
+    /// # let _ =
+    /// el().size(12.0, 12.0).cursor(Cursor::ResizeNwse).on_drag(|_: &mut App, d, tx| {
+    ///     if d.phase == Phase::Down {
+    ///         tx.drag_resize_window(ResizeEdge::SouthEast);
+    ///     }
+    /// })
+    /// # ;
+    /// ```
+    pub fn drag_resize_window(&mut self, edge: crate::ResizeEdge) {
+        self.frame_request(crate::window::frame::FrameRequest { resize_drag: Some(edge), ..Default::default() });
+    }
+
     /// Drop keyboard focus, as a click on empty space does: after this handler, nothing is
     /// focused, the focused field's `TextEdit::focused` turns false (through its `on_edit`
     /// accessor) and keys go to the window's `on_key` again. A field focused only by setting
@@ -393,6 +698,16 @@ impl Tx {
         self.focus_to = Some((key.into(), ring, FocusAsk::Focus));
     }
 
+    /// [`Tx::focus`] for an element that may not be shown yet: content still loading, a card that
+    /// comes in with the next build, a window that isn't drawing. The request waits, through any
+    /// number of commits, until an element with the key shows, and focuses it then, however long
+    /// its loading or motion takes, whatever focus did meanwhile (a closing palette leaving it on
+    /// the prompt). It's dropped when the user presses a key or a pointer button, or when another
+    /// focus is asked for.
+    pub fn focus_when_shown(&mut self, key: impl Into<String>, ring: bool) {
+        self.focus_to = Some((key.into(), ring, FocusAsk::WhenShown));
+    }
+
     /// [`Tx::focus`] for focus a closing menu or popover hands back to its trigger, as a web
     /// menu's `onCloseAutoFocus` does after the change that closed it. A modal that opens in the
     /// same change (a dialog a menu's pick opens) keeps focus, and as it closes hands it back to
@@ -406,7 +721,27 @@ impl Tx {
         }
     }
 
-    /// Whether keyboard focus was showing its ring (`:focus-visible`) as this event arrived:
+    /// Whether an assistive client (a screen reader, Voice Access, an automation tool) is
+    /// reading this window's accessibility tree: the tree is built only then. Work done only for
+    /// one, such as deciding what [`Tx::announce`] says, can wait for it and cost nothing without.
+    /// In a browser it's always true: a page can't tell whether a screen reader reads it, and
+    /// its mirror and live regions are always there.
+    pub fn assistive_technology(&self) -> bool {
+        self.assistive
+    }
+
+    /// Whether the window is on screen as this handler or poll runs: false while it's hidden,
+    /// minimised, covered whole by other windows where the system says so, or (in a browser) its
+    /// tab is hidden. A window that isn't visible draws no frames; each change wakes `poll` once,
+    /// so a poll can pause and resume work no one sees (as [`App::on_visibility`] hears it).
+    ///
+    /// [`App::on_visibility`]: crate::App::on_visibility
+    pub fn window_visible(&self) -> bool {
+        !self.window_hidden
+    }
+
+    /// Whether keyboard focus was showing its ring (`:focus-visible`) as this event arrived
+    /// (or after the transition inside [`El::on_focus_change`] and [`El::on_focus_within_change`]):
     /// the keyboard, not the pointer, has been driving. A menu that opens with it returns focus
     /// to its trigger with the ring.
     pub fn focus_visible(&self) -> bool {
@@ -422,9 +757,11 @@ impl Tx {
     }
 
     /// The [`El::selectable`] text selection as this event arrived: the texts it covers with
-    /// their selected ranges, and the text as copying takes it. `None` when nothing is
-    /// selected (a single click leaves only a caret-sized selection, which reads as `None`).
-    /// What this handler asks with [`Tx::select_text`] and kin shows from the next event on.
+    /// their selected ranges, the text as copying takes it, and whether collection across unbuilt
+    /// virtual rows hit its cap ([`TextSelection::truncated`](crate::TextSelection::truncated)).
+    /// `None` when nothing is selected (a single click leaves only a caret-sized selection, which
+    /// reads as `None`). What this handler asks with [`Tx::select_text`] and kin shows from the
+    /// next event on.
     pub fn text_selection(&self) -> Option<&crate::TextSelection> {
         self.selection.as_deref()
     }
@@ -434,7 +771,7 @@ impl Tx {
     /// handler's commit: an element the same change builds can be selected, and an unbuilt
     /// [`El::virtual_rows`] or [`El::virtualize`] row is built and pinned without scrolling.
     /// The range is clamped to the text and its character boundaries; Cmd+C then copies it and Cmd+A selects all of its text or group.
-    /// Nothing happens when `key` (the element's final key; a [`memo`](crate::memo)'s id replaces one set inside) names no selectable text.
+    /// Nothing happens when `key` (the element's final key; a [`memo`](crate::memo())'s id replaces one set inside) names no selectable text.
     pub fn select_text(&mut self, key: impl Into<String>, range: std::ops::Range<usize>) {
         self.select = Some(SelectRequest::Range(key.into(), range));
         self.select_from_change = false;
@@ -490,6 +827,84 @@ impl Tx {
         self.font_families = Some((sans.into(), mono.into()));
     }
 
+    /// Sets or clears the opt-in preferred colour emoji font family (or comma-separated CSS family
+    /// list) for every window and overlay on this thread, and for windows opened later, as
+    /// [`App::emoji_family`](crate::App::emoji_family) does at launch.
+    ///
+    /// Precedence for emoji graphemes is: this explicit `emoji_family` first, then any colour
+    /// emoji font explicitly named in the active family stack (`AppSpec::families`,
+    /// [`Self::set_font_families`], or `Family::Named`), then the lazily loaded system emoji
+    /// font, then the active text stack. Pass `None` or an empty / whitespace-only string to clear
+    /// the override and restore default emoji fallback. Asking for the value already active costs
+    /// nothing; changing it drops shaped layouts, rebuilds memoized subtrees, updates
+    /// [`rune::text::measure`](crate::text::measure), and advances
+    /// [`rune::text::font_epoch`](crate::text::font_epoch).
+    ///
+    /// ```
+    /// # use rune::Tx;
+    /// # let mut tx = Tx::default();
+    /// tx.set_emoji_family(Some("Twemoji"));
+    /// tx.set_emoji_family(None);
+    /// ```
+    pub fn set_emoji_family(&mut self, family: Option<&str>) {
+        self.emoji_family = Some(crate::text::normalize_emoji_family(family));
+    }
+
+    /// Registers font bytes (TTF, OTF, TTC, or variable font) into the process-wide font
+    /// collection at runtime, returning the registered family names in registration order.
+    ///
+    /// Pass bytes loaded off the UI thread (or embedded bytes); never read font files on the UI
+    /// thread. Select a returned family with [`Self::set_font_families`] or
+    /// [`Family::Named`](crate::Family::Named). Every window, overlay, and
+    /// [`rune::text::measure`](crate::text::measure) picks up the new faces, and caches keyed on
+    /// [`rune::text::font_epoch`](crate::text::font_epoch) invalidate automatically.
+    ///
+    /// Empty slices, blobs larger than 64 MiB, and unrecognised font data are ignored and return
+    /// an empty list. Registering bytes that are already registered returns their family names
+    /// without duplicating data or triggering a relayout.
+    ///
+    /// ```
+    /// # use rune::Tx;
+    /// # let mut tx = Tx::default();
+    /// # let bytes: Vec<u8> = Vec::new();
+    /// let families = tx.add_font(bytes);
+    /// if let Some(family) = families.first() {
+    ///     tx.set_font_families(family, "ui-monospace");
+    /// }
+    /// ```
+    pub fn add_font(&mut self, bytes: impl Into<std::sync::Arc<[u8]>>) -> Vec<String> {
+        let (families, added) = crate::text::full_faces::add_font_checked(bytes.into());
+        self.fonts_added |= added;
+        families
+    }
+
+    /// Shapes and breaks the text of `view` into the window's layout cache in its next idle turn,
+    /// laid out as the window would lay it out (at its own size, or at `size` in points), without
+    /// mounting it: nothing draws, hits, animates or is announced, and no handler runs. A view shown
+    /// later with the same texts at the same widths finds them laid out. For the most it from the
+    /// window's own root, as the next frame will lay it out (the session under a resting pointer
+    /// shown where the open one is). Prepared layouts no view holds are kept to about 1 MiB by the
+    /// cache's own count, oldest out first, and all go at the window's next rest. One request is
+    /// held, the latest, for the window whose state `view` reads; it never runs on a turn with
+    /// input waiting, and an idle window wakes for it no more once it ran.
+    pub fn prepare_text<S: 'static>(&mut self, view: fn(&S, &mut crate::Cx<S>) -> crate::El, size: Option<(f32, f32)>) {
+        PREPARE.with_borrow_mut(|a| *a = Some((Box::new(view), size)));
+    }
+
+    /// Takes `prepare_text`'s request if it is for a window of state `S`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_prepared<S: 'static>() -> Option<(fn(&S, &mut crate::Cx<S>) -> crate::El, Option<(f32, f32)>)> {
+        if !Self::prepare_owed::<S>() { return None; }
+        let (view, size) = PREPARE.with_borrow_mut(Option::take)?;
+        Some((*view.downcast::<fn(&S, &mut crate::Cx<S>) -> crate::El>().ok()?, size))
+    }
+
+    /// Whether `prepare_text` holds a request for a window of state `S`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn prepare_owed<S: 'static>() -> bool {
+        PREPARE.with_borrow(|a| a.as_ref().is_some_and(|(view, _)| view.is::<fn(&S, &mut crate::Cx<S>) -> crate::El>()))
+    }
+
     fn frame_request(&mut self, request: crate::window::frame::FrameRequest) {
         self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
     }
@@ -506,12 +921,18 @@ impl Tx {
     /// live-only only if each says so. It's the handler form of
     /// [`Runtime::update_if`](crate::Runtime::update_if) returning false.
     ///
-    /// ```ignore
+    /// ```
+    /// # use rune::el;
+    /// # struct Camera;
+    /// # impl Camera { fn zoom_about(&mut self, _: f32, _: f32, _: f32) {} }
+    /// # struct Canvas { camera: Camera }
+    /// # let _ = el()
     /// .on_magnify(|s: &mut Canvas, e, tx| {
     ///     s.camera.zoom_about(e.x, e.y, 1.0 + e.delta); // sets Live values only
     ///     tx.live_only();
     ///     true
     /// })
+    /// # ;
     /// ```
     ///
     /// Changing state the view reads and calling this leaves the screen stale until the next
@@ -542,35 +963,34 @@ impl Tx {
     /// An already-running scroll glide is not settled unless this commit replaces it;
     /// use [`Tx::settle`] to land running tracks.
     pub fn instant(&mut self) {
-        self.instant = true;
+        self.commit = self.commit.instant();
     }
     /// Animate this change even where the runtime would apply it at once, as it does a drag's
-    /// moves: the rows a dragged row passes step aside on their springs, while the dragged row
+    /// moves, or a commit no input in this window caused (`El::transition`: those mount and
+    /// unmount at once otherwise): the rows a dragged row passes step aside on their springs, while the dragged row
     /// follows the pointer exactly with `El::offset_motion(Anim::INSTANT)`.
-    /// This clears only this handler's instant flag; another handler's `instant()` in the
-    /// same frame still wins. It neither requests a commit after `live_only()` nor overrides
-    /// `settle()`. `motion()` still chooses the layout spring. The last call to `instant()`
-    /// or `animated()` in this handler wins.
+    /// This clears this handler's snap; another handler's `instant()` in the same frame still
+    /// wins. A `settle()` in the same change keeps its landing of running tracks. It neither
+    /// requests a commit after `live_only()`. `motion()` still chooses the layout spring. The
+    /// last call to `instant()` or `animated()` in this handler wins.
     pub fn animated(&mut self) {
-        self.instant = false;
+        self.commit = self.commit.animated();
+        self.asked_motion = true;
     }
-    /// Animate this change's layout with `spring` instead of each element's own.
+    /// Animate this change's layout with `spring` instead of each element's own. Scroll
+    /// requests keep the spring they name; see [`Self::motion_curve`].
     pub fn motion(&mut self, spring: Spring) {
-        self.motion = Some(spring);
-        self.motion_curve = None;
+        self.motion = Some(MotionSource::Spring(spring));
     }
     /// Animate this change's layout on `anim` instead of each element's own spring: a spring,
     /// or a fixed-duration eased tween to compare against one
     /// (`tx.motion_curve(Curve::tween(0.35, Easing::cubic(0.16, 1.0, 0.3, 1.0)))`). What
-    /// moves with the layout but only takes a spring (scroll requests, matched flights) uses a
-    /// zero-bounce spring of the curve's duration. The last `motion` or `motion_curve` wins.
+    /// moves with the layout but only takes a spring (matched flights) uses a zero-bounce
+    /// spring of the curve's duration. Scroll requests don't follow it: each glides on the
+    /// spring it names, [`Self::scroll_to_with`]'s or `tok::motion::GLIDE`. The last `motion` or
+    /// `motion_curve` wins.
     pub fn motion_curve(&mut self, anim: impl Into<Anim>) {
-        let anim = anim.into();
-        self.motion = Some(match anim.curve {
-            rune_motion::Curve::Spring(s) => s,
-            c => Spring::new(c.logical_duration().max(0.01), 0.0),
-        });
-        self.motion_curve = Some(anim);
+        self.motion = Some(MotionSource::curve(anim.into()));
     }
     /// Rows pinned to a stick-to-bottom viewport's bottom ride its edge through this change:
     /// room the edge frees (a question dock folding back into a composer under a chat) carries
@@ -582,11 +1002,16 @@ impl Tx {
     /// Apply this change with no animation and land every running track: growth, reveals and
     /// follow-the-end (opening or returning to a session, guarantee 8).
     pub fn settle(&mut self) {
-        self.instant = true;
-        self.settle = true;
+        self.commit = Commit::Settle;
     }
     /// Animate this change's colours with `spring` (a theme change uses `tok::motion::CALM`).
     pub fn color_motion(&mut self, spring: Spring) {
         self.color_motion = Some(spring);
     }
+}
+
+thread_local! {
+    /// `Tx::prepare_text`'s latest request on this thread: the view, boxed, and its size in points
+    /// if not the window's.
+    static PREPARE: std::cell::RefCell<Option<(Box<dyn std::any::Any>, Option<(f32, f32)>)>> = const { std::cell::RefCell::new(None) };
 }

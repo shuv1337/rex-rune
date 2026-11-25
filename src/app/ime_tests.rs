@@ -79,6 +79,85 @@ fn assert_rect_near(actual: Option<[f32; 4]>, expected: [f32; 4]) {
 }
 
 #[test]
+fn a_dead_press_is_local_and_space_forwards_only_the_completed_accent() {
+    use rune::{KeyEvent, Mods, PhysicalInput, PhysicalKeyCode as Code};
+    let (mut ws, _host) = tabbed_workspace("single");
+    let (sender, sent) = flume::unbounded();
+    let terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions::default()).unwrap();
+    attach_terminal(&mut ws, "block:a", &sender, &terminal);
+    let mut rt = ime_runtime(ws);
+    let mods = Mods::default();
+    let physical = |key, pressed, text: Option<&str>| PhysicalInput::Key {
+        key,
+        mods,
+        pressed,
+        repeat: false,
+        text: text.map(str::to_owned),
+        consumed_mods: Mods::default(),
+    };
+    let keys = || {
+        sent.try_iter()
+            .filter_map(|command| match command {
+                HostCommand::Terminal {
+                    command: Command::Key(key),
+                    ..
+                } => Some(key),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    for pressed in [true, false] {
+        rt.physical_input(physical(Code::Quote, pressed, None));
+        rt.frame(0.);
+    }
+    assert!(keys().is_empty());
+    rt.physical_key_input(
+        physical(Code::Space, true, Some("´")),
+        KeyEvent {
+            key: Key::Text("´".into()),
+            mods,
+        },
+        Some(' '),
+    );
+    rt.frame(0.);
+    let output = keys();
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0]["key"], "space");
+    assert_eq!(output[0]["action"], "press");
+    assert_eq!(output[0]["text"], "´");
+    assert_eq!(output[0]["composing"], false);
+}
+
+#[test]
+fn alt_space_goes_to_the_pty_instead_of_the_window_menu() {
+    let (mut ws, _host) = tabbed_workspace("single");
+    let (sender, sent) = flume::unbounded();
+    let terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions::default()).unwrap();
+    attach_terminal(&mut ws, "block:a", &sender, &terminal);
+    let mut rt = ime_runtime(ws);
+    let event = rune::KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: rune::Mods {
+            alt: true,
+            ..Default::default()
+        },
+    };
+    rt.update(|s, tx| assert!(crate::app::input::on_key(s, &event, tx)));
+    let output = sent
+        .try_iter()
+        .find_map(|command| match command {
+            HostCommand::Terminal {
+                command: Command::Key(key),
+                ..
+            } => Some(key),
+            _ => None,
+        })
+        .expect("Alt+Space forwarded");
+    assert_eq!(output["key"], "space");
+    assert_eq!(output["mods"], "alt");
+}
+
+#[test]
 fn hidden_cursor_keeps_ime_enabled_renders_preedit_commits_and_clears_on_disable() {
     let (mut ws, _host_rx) = tabbed_workspace("single");
     let (sender, sent) = flume::unbounded();
@@ -105,14 +184,14 @@ fn hidden_cursor_keeps_ime_enabled_renders_preedit_commits_and_clears_on_disable
     assert_rect_near(rect_of(&rt, "gblock:a/ime"), expected);
 
     // An empty preedit outside composition leaves the hidden-cursor anchor enabled.
-    rt.ime(Ime::Preedit(String::new(), None));
+    rt.ime(Ime::Preedit(String::new(), None, vec![]));
     rt.frame(1. / 60.);
     assert_eq!(rt.ime_area, Some(stable_area));
     assert!(rect_of(&rt, "gblock:a/preedit").is_none());
     assert!(sent.try_iter().next().is_none());
 
     // Preedit renders inline at the anchor while the cursor stays hidden.
-    rt.ime(Ime::Preedit("ni".into(), None));
+    rt.ime(Ime::Preedit("ni".into(), None, vec![]));
     rt.frame(1. / 60.);
     let preedit = rt
         .elements()
@@ -148,16 +227,16 @@ fn hidden_cursor_keeps_ime_enabled_renders_preedit_commits_and_clears_on_disable
     assert!(rect_of(&rt, "gblock:a/preedit").is_none());
 
     // Empty preedit and Ime::Disabled both clear open preedit without sending a paste.
-    rt.ime(Ime::Preedit("かん".into(), None));
+    rt.ime(Ime::Preedit("かん".into(), None, vec![]));
     rt.frame(1. / 60.);
     assert!(rect_of(&rt, "gblock:a/preedit").is_some());
-    rt.ime(Ime::Preedit(String::new(), None));
+    rt.ime(Ime::Preedit(String::new(), None, vec![]));
     rt.frame(1. / 60.);
     assert!(rect_of(&rt, "gblock:a/preedit").is_none());
     assert_eq!(rt.ime_area, Some(stable_area));
     assert!(sent.try_iter().next().is_none());
 
-    rt.ime(Ime::Preedit("かん".into(), None));
+    rt.ime(Ime::Preedit("かん".into(), None, vec![]));
     rt.frame(1. / 60.);
     assert!(rect_of(&rt, "gblock:a/preedit").is_some());
     rt.ime(Ime::Disabled);

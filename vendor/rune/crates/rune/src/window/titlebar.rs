@@ -32,6 +32,7 @@ pub(crate) use caption::{BUTTONS_KEY, FRAME_KEY, frame};
 pub struct Titlebar {
     height: f32,
     traffic_lights: Option<(f32, f32)>,
+    controls: bool,
 }
 
 impl Titlebar {
@@ -39,7 +40,7 @@ impl Titlebar {
     pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 
     pub const fn new(height: f32) -> Self {
-        Self { height, traffic_lights: None }
+        Self { height, traffic_lights: None, controls: true }
     }
 
     /// macOS: the close button's top-left, in points from the window's top-left, for this
@@ -47,6 +48,20 @@ impl Titlebar {
     /// the band's middle. Ignored elsewhere and in full screen.
     pub const fn traffic_lights(mut self, x: f32, y: f32) -> Self {
         self.traffic_lights = Some((x, y));
+        self
+    }
+
+    /// Whether the window shows its own caption controls over the titlebar: traffic lights on
+    /// macOS and the minimize/maximize/close buttons on Windows. Defaults to `true`.
+    ///
+    /// When `false`, Windows still installs the custom frame (keeping invisible outer side and
+    /// bottom resize borders, the top inside resize edge, Aero Snap, Alt+Space and right-click
+    /// window menu, and `Tx::minimize()`/`Tx::toggle_maximized()`), macOS hides its traffic
+    /// lights while keeping the full-size content view and `.window_drag()` regions, and
+    /// [`ChromeInsets`] reports zero `leading` and `trailing` insets. Use this when the app
+    /// draws both its own titlebar and its own window controls.
+    pub const fn controls(mut self, shown: bool) -> Self {
+        self.controls = shown;
         self
     }
 
@@ -59,10 +74,18 @@ impl Titlebar {
         self.traffic_lights
     }
 
+    /// Whether the window shows its own caption controls over the titlebar (`true` by default).
+    pub const fn has_controls(&self) -> bool {
+        self.controls
+    }
+
     /// The frame macOS draws for this titlebar over `chrome`: full-size content, drag regions
     /// only, and the traffic lights where this titlebar or the app placed them, else in the
-    /// band's middle.
+    /// band's middle (`None` when [`Self::controls`] is `false`).
     pub(crate) fn mac_chrome(&self, chrome: Chrome) -> Chrome {
+        if !self.controls {
+            return Chrome { full_size_content: true, drag_regions: true, traffic_lights: None };
+        }
         let y = ((self.height - Chrome::TRAFFIC_LIGHT) / 2.0).max(0.0).round();
         let lights = self.traffic_lights.or(chrome.traffic_lights).or(Some((16.0, y)));
         Chrome { full_size_content: true, drag_regions: true, traffic_lights: lights }
@@ -83,6 +106,62 @@ impl TitlebarSet {
         let titlebar = self.titlebar.unwrap_or(base);
         self.height.map_or(titlebar, |height| Titlebar { height, ..titlebar })
     }
+
+    /// Whether the window draws another titlebar for this set than it did for `before`, over
+    /// the app's `base`. A view that sets the titlebar the window opened with changes nothing,
+    /// and without `App::titlebar` nothing the view sets applies.
+    #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn changes(self, before: TitlebarSet, base: Option<Titlebar>) -> bool {
+        base.is_some_and(|base| self.over(base) != before.over(base))
+    }
+}
+
+#[cfg(test)]
+mod set_tests {
+    use super::*;
+
+    #[test]
+    fn a_view_that_sets_the_titlebar_the_window_opened_with_changes_nothing() {
+        let base = Titlebar::new(36.0).traffic_lights(14.0, 15.0);
+        let unset = TitlebarSet::default();
+        let same = TitlebarSet { titlebar: Some(base), height: None };
+        assert!(!same.changes(unset, Some(base)));
+        assert!(!TitlebarSet { titlebar: None, height: Some(36.0) }.changes(unset, Some(base)));
+        assert!(!unset.changes(unset, Some(base)));
+    }
+
+    #[test]
+    fn another_height_or_other_traffic_lights_change_it() {
+        let base = Titlebar::new(48.0).traffic_lights(20.0, 25.0);
+        let unset = TitlebarSet::default();
+        assert!(TitlebarSet { titlebar: Some(Titlebar::new(36.0).traffic_lights(14.0, 15.0)), height: None }.changes(unset, Some(base)));
+        assert!(TitlebarSet { titlebar: Some(Titlebar::new(48.0).traffic_lights(14.0, 15.0)), height: None }.changes(unset, Some(base)));
+        assert!(TitlebarSet { titlebar: None, height: Some(52.0) }.changes(unset, Some(base)));
+        // Lights the titlebar leaves to `App::chrome` against lights it places itself.
+        assert!(TitlebarSet { titlebar: Some(Titlebar::new(48.0)), height: None }.changes(unset, Some(base)));
+    }
+
+    #[test]
+    fn a_window_without_a_titlebar_of_its_own_never_changes() {
+        let set = TitlebarSet { titlebar: Some(Titlebar::new(36.0)), height: Some(40.0) };
+        assert!(!set.changes(TitlebarSet::default(), None));
+    }
+
+    #[test]
+    fn controls_builder_defaults_true_and_is_tracked_by_titlebar_set() {
+        let base = Titlebar::new(36.0);
+        assert!(base.has_controls());
+        let hidden = base.controls(false);
+        assert!(!hidden.has_controls());
+        assert!(hidden.controls(true).has_controls());
+
+        let unset = TitlebarSet::default();
+        let hide_set = TitlebarSet { titlebar: Some(hidden), height: None };
+        assert!(hide_set.changes(unset, Some(base)));
+        assert!(!hide_set.changes(unset, Some(hidden)));
+        assert!(!TitlebarSet { titlebar: None, height: Some(44.0) }.over(hidden).has_controls());
+        assert_eq!(hidden.mac_chrome(Chrome::DEFAULT), Chrome { full_size_content: true, drag_regions: true, traffic_lights: None });
+    }
 }
 
 /// What the window's own controls take of the app's titlebar, in points
@@ -92,11 +171,14 @@ impl TitlebarSet {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct ChromeInsets {
-    /// From the window's leading edge to the end of the controls there: the macOS traffic
-    /// lights (`Cx::titlebar_inset`). 0 in full screen and elsewhere.
+    /// From the window's left edge to the end of the controls there: the macOS traffic lights
+    /// (`Cx::titlebar_inset`), or the Windows caption buttons when the app's language reads right
+    /// to left (`labels::set_direction`), where the traffic lights move to the right instead. 0 in full
+    /// screen and elsewhere.
     pub leading: f32,
-    /// From the window's trailing edge to the start of the controls there: the Windows caption
-    /// buttons. 0 in full screen and elsewhere.
+    /// From the window's right edge to the start of the controls there: the Windows caption
+    /// buttons, unless they're mirrored to the left, or the macOS traffic lights in a right-to-left
+    /// app. 0 in full screen and elsewhere.
     pub trailing: f32,
     /// The titlebar's height as the window draws it: [`Titlebar::height`] where Rune replaced
     /// the native titlebar, 0 where the native frame stays (no `App::titlebar`, Linux, a
@@ -159,11 +241,15 @@ pub(crate) struct Caption {
     pub maximizable: bool,
     /// Full screen: the window draws no buttons, but keeps the frame that hosts them.
     pub hidden: bool,
+    /// The app's language reads right to left (`labels::set_direction`): the buttons sit at the
+    /// window's top-left, Close first, as Windows mirrors a right-to-left window's caption and
+    /// Chrome and Edge draw theirs in Arabic or Hebrew.
+    pub mirrored: bool,
 }
 
 impl Caption {
     pub(crate) fn new(height: f32) -> Self {
-        Self { height, state: CaptionState::Idle, maximized: false, minimizable: true, maximizable: true, hidden: false }
+        Self { height, state: CaptionState::Idle, maximized: false, minimizable: true, maximizable: true, hidden: false, mirrored: crate::labels::rtl() }
     }
 
     /// The buttons drawn, left to right. A window that can neither minimize nor maximize shows
@@ -185,13 +271,15 @@ impl Caption {
         }
     }
 
-    /// The buttons' rects, left to right, in points from the window's top-left for a window
-    /// `width` points wide at `scale`: each a whole number of pixels, flush with the right edge.
+    /// The buttons' rects, in [`Caption::buttons`]' order, in points from the window's top-left for
+    /// a window `width` points wide at `scale`: each a whole number of pixels, flush with the right
+    /// edge, or the left one mirrored (Close leftmost).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn rects(&self, width: f32, scale: f32) -> impl Iterator<Item = (CaptionButton, [f32; 4])> + use<> {
         let (w, h) = caption::size(self.height, scale);
         let buttons = self.buttons();
-        buttons.iter().enumerate().map(move |(i, &b)| (b, [width - w * (buttons.len() - i) as f32, 0.0, w, h]))
+        let (n, mirrored) = (buttons.len(), self.mirrored);
+        buttons.iter().enumerate().map(move |(i, &b)| (b, [if mirrored { w * (n - 1 - i) as f32 } else { width - w * (n - i) as f32 }, 0.0, w, h]))
     }
 
     /// The enabled button at (x, y), in points from the window's top-left, in a window `width`
@@ -204,7 +292,7 @@ impl Caption {
             .filter(|&b| self.enabled(b))
     }
 
-    /// Points the buttons take from the trailing edge at `scale`.
+    /// Points the buttons take from their edge at `scale`: the right, or the left mirrored.
     pub(crate) fn width(&self, scale: f32) -> f32 {
         caption::size(self.height, scale).0 * self.buttons().len() as f32
     }

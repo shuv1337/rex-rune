@@ -9,7 +9,7 @@ use crate::compose::Compositor;
 use crate::edit::{Key, KeyEvent, Mods};
 use crate::el::{El, Tx};
 use crate::render::write_png;
-use crate::runtime::{Cx, Env, Runtime, Waker};
+use crate::runtime::{Cx, Env, Runtime, RuntimeCore, Waker};
 use crate::text::TextSystem;
 
 pub use crate::tooling::headless_run::{HeadlessRun, PointerAction, ScriptEvent, ScriptPoint, TimedEvent, WindowFrame, headless_run};
@@ -24,8 +24,9 @@ pub struct AppSpec<S: 'static> {
     /// Named states for snapshots: each modifies the initial state.
     pub scenes: &'static [(&'static str, fn(&mut S))],
     /// Font files replacing the built-in Inter (empty keeps it), and the sans/mono family names
-    /// (CSS lists; `ui-monospace` stands for [`Family::SystemMono`](crate::Family::SystemMono)'s
-    /// families, so mono spans can be SF Mono).
+    /// (CSS lists; defaults to `("Inter", "ui-monospace")` on native, where `ui-monospace` stands
+    /// for [`Family::SystemMono`](crate::Family::SystemMono)'s families loaded lazily on first
+    /// mono use, and `("Inter", "IBM Plex Mono")` on web when `fonts` is empty).
     pub fonts: &'static [&'static [u8]],
     pub families: (&'static str, &'static str),
     /// Called once with a waker other threads use when new data arrives.
@@ -51,7 +52,7 @@ impl<S: 'static> AppSpec<S> {
             view,
             scenes: &[],
             fonts: &[],
-            families: ("Inter", "Inter"),
+            families: ("Inter", "ui-monospace"),
             setup: None,
             poll: None,
             on_key: None,
@@ -88,11 +89,22 @@ impl Chrome {
     /// Where macOS will draw the three buttons (x, y, w, h in points), assuming macOS 26 metrics
     /// and AppKit's default origin (7, 6) when unpositioned.
     pub fn traffic_light_rects(&self) -> Option<[[f32; 4]; 3]> {
+        self.traffic_light_rects_in(0.0, false)
+    }
+
+    /// Where macOS will draw the three buttons (x, y, w, h in points) inside a window `width`
+    /// points wide; right to left mirrors them to the right edge with Close outermost, matching
+    /// native macOS placement and [`Chrome::titlebar_inset`].
+    pub(crate) fn traffic_light_rects_in(&self, width: f32, rtl: bool) -> Option<[[f32; 4]; 3]> {
         if !self.full_size_content && self.traffic_lights.is_none() {
             return None;
         }
         let (x, y) = self.traffic_lights.unwrap_or((7.0, 6.0));
-        Some(std::array::from_fn(|i| [x + i as f32 * Self::TRAFFIC_PITCH, y, Self::TRAFFIC_LIGHT, Self::TRAFFIC_LIGHT]))
+        Some(std::array::from_fn(|i| {
+            let at = x + i as f32 * Self::TRAFFIC_PITCH;
+            let left = if rtl { width - at - Self::TRAFFIC_LIGHT } else { at };
+            [left, y, Self::TRAFFIC_LIGHT, Self::TRAFFIC_LIGHT]
+        }))
     }
 
     /// The trailing edge of [`Chrome::traffic_light_rects`]' zoom button, or 0 without them:
@@ -114,7 +126,7 @@ static APP_ID: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 /// The application id the window reports to the desktop (Wayland `app_id`, X11 `WM_CLASS`), so
 /// compositors match it to the app's `.desktop` entry, icon and window rules. Call before `run`.
 pub fn set_app_id(id: &'static str) {
-    let _ = APP_ID.set(id);
+    APP_ID.set(id).ok();
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -125,8 +137,9 @@ pub(crate) fn app_id() -> Option<&'static str> {
 /// Command-line arguments Rune didn't recognise, in order, for the app to interpret. Ready
 /// before any window: called before `run` (to pick the file a window opens, say), it reads
 /// Rune's flags from the process's arguments as `run` will, `--help` and a malformed flag
-/// included. The first read wins, so an app that passes `App::args` reads this after `run`
-/// starts.
+/// included. In a release build without Rune's `tooling` feature, Rune parses no process flags
+/// and returns every argument untouched. The first read wins, so an app that passes `App::args`
+/// reads this after `run` starts.
 pub fn extra_args() -> &'static [String] {
     if EXTRA.get().is_none() { Args::parse(); }
     EXTRA.get().map_or(&[], |v| v.as_slice())
@@ -139,11 +152,16 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     let mut rt = Runtime::with_text(state, spec.view, size, env, text);
     rt.poll = spec.poll;
     rt.on_key = spec.on_key;
-    rt.window_title.start(spec.title);
+    rt.motion.enable_motion_needs_cause();
+    rt.host.window_title.start(spec.title);
+    // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`), never the machine's own
+    // settings, so a headless snap shows an app in a contrast theme or under Increase Contrast.
+    rt.set_system_contrast(crate::platform::preferences::contrast_preset());
+    rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_preset());
     rt.set_live_waker(waker.clone());
     #[cfg(feature = "hot")]
     if crate::hot::enabled() {
-        rt.hot = Some(crate::hot::Session::connect(waker.clone()));
+        rt.frame.set_hot(crate::hot::Session::connect(waker.clone()));
     }
     if let Some(f) = spec.setup {
         crate::marks::mark("app.setup");
@@ -159,8 +177,13 @@ mod args;
 mod crop;
 #[path = "tooling/eased_input.rs"]
 mod eased_input;
+pub(crate) use eased_input::step_resize;
+#[path = "tooling/flags.rs"]
+mod flags;
 #[path = "tooling/headless.rs"]
 mod headless;
+#[path = "tooling/loop_check.rs"]
+mod loop_check;
 #[path = "tooling/html.rs"]
 pub(crate) mod html;
 #[path = "tooling/key_names.rs"]
@@ -173,21 +196,24 @@ mod strip;
 mod trace;
 
 pub use args::{Args, is_headless};
+pub use args::{RELAUNCH_DROPS, without_relaunch_drops};
+pub use flags::{FlagSpec, FlagValue, flags};
 pub(crate) use args::*;
 pub use headless::headless;
+#[cfg(not(target_arch = "wasm32"))]
+pub use perf_warn::launch::process_age;
 pub(crate) use headless::*;
-pub(crate) use key_names::{key_named, script_alt_keys, script_key_base, script_mods};
+pub(crate) use key_names::{key_named, script_key_base, script_mods};
 use script::parse_script;
 pub(crate) use strip::*;
-pub(crate) use trace::{FrameTiming, Trace, tree_json};
+#[cfg(test)]
+pub(crate) use trace::tree_json;
+pub(crate) use trace::{FrameTiming, Trace, tree_json_core};
 use trace::r2;
 
 /// Opens the app's window and quits when it closes (`App` for other lifetimes), or renders
 /// headless for the tooling arguments.
 pub fn run<S: 'static>(spec: AppSpec<S>) {
-    #[cfg(feature = "hot")]
-    crate::hot::run(spec, Args::parse());
-    #[cfg(not(feature = "hot"))]
     crate::app::App::new(spec).run();
 }
 
@@ -200,29 +226,78 @@ pub fn run_windows<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(factory: i
 
 /// Run a window factory with process-level options, such as macOS accessory activation.
 pub fn run_windows_with<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> I + 'static) {
-    started(try_run_windows_with(options, factory));
+    finish_start(run_window_factory(options, window_args(None, Args::parse), erase(factory)));
 }
 
-/// `run_windows_with`, returning an error instead of panicking when the event loop can't start
-/// (no display over ssh or in CI, no Wayland or X11 server) or fails.
+/// `run_windows_with`, returning an error instead of exiting when the event loop can't start
+/// (no display over ssh or in CI, no Wayland or X11 server), fails, or no initial window can
+/// be created.
 pub fn try_run_windows_with<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> I + 'static) -> Result<(), String> {
-    run_window_factory(options, window_args(None, Args::parse), erase(factory))
+    run_window_factory(options, window_args(None, Args::parse), erase(factory)).map_err(StartError::message)
 }
 
 /// Run a window factory with explicit Rune arguments, without reading the host CLI.
 /// Pass `[]` to isolate an embedding application's flags before display discovery.
 pub fn run_windows_with_args<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, args: impl IntoIterator<Item = String>, factory: impl FnOnce(&[crate::Display]) -> I + 'static) {
-    started(try_run_windows_with_args(options, args, factory));
+    finish_start(run_window_factory(options, window_args(Some(args.into_iter().collect()), Args::parse), erase(factory)));
 }
 
-/// `run_windows_with_args`, returning an error instead of panicking when the event loop can't
-/// start or fails.
+/// `run_windows_with_args`, returning an error instead of exiting when the event loop can't
+/// start, fails, or no initial window can be created.
 pub fn try_run_windows_with_args<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, args: impl IntoIterator<Item = String>, factory: impl FnOnce(&[crate::Display]) -> I + 'static) -> Result<(), String> {
-    run_window_factory(options, window_args(Some(args.into_iter().collect()), Args::parse), erase(factory))
+    run_window_factory(options, window_args(Some(args.into_iter().collect()), Args::parse), erase(factory)).map_err(StartError::message)
 }
 
-fn started(result: Result<(), String>) {
+/// What `run` says to a release build without the `tooling` feature asked for a headless run.
+#[cfg(not(any(feature = "tooling", debug_assertions)))]
+pub(crate) const WITHOUT_TOOLING: &str = "this build has no agent tooling (--snap, --tree, --script, --trace, --strip, --video, ...): \
+    a release build has it with Rune's `tooling` feature (rune = { ..., features = [\"tooling\"] }); debug builds always do";
+
+/// Distinguishes window startup errors (CLI exit 1) from headless tooling errors (CLI exit 2)
+/// so fallible `try_run*` paths return `Err(String)` without terminating a test process while
+/// CLI `run*` entry points keep their exit codes.
+pub(crate) enum StartError {
+    Window(String),
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Headless(String),
+}
+
+impl StartError {
+    pub(crate) fn message(self) -> String {
+        match self {
+            Self::Window(error) | Self::Headless(error) => error,
+        }
+    }
+}
+
+/// Reports a failed startup and exits the process on native targets. wasm32 has no process
+/// exit, so there it panics.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn started(result: Result<(), String>) {
+    if let Err(error) = result {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn started(result: Result<(), String>) {
     if let Err(error) = result { panic!("{error}"); }
+}
+
+/// Like `started`, preserving exit code 2 for headless tooling failures.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn finish_start(result: Result<(), StartError>) {
+    match result {
+        Ok(()) => {}
+        Err(StartError::Window(error)) => started(Err(error)),
+        Err(StartError::Headless(error)) => die(&error),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn finish_start(result: Result<(), StartError>) {
+    started(result.map_err(StartError::message));
 }
 
 type Factory = Box<dyn FnOnce(&[crate::Display]) -> Vec<crate::AnyWindowSpec>>;
@@ -235,19 +310,26 @@ pub(crate) fn window_args(args: Option<Vec<String>>, process: impl FnOnce() -> A
     args.map_or_else(process, Args::parse_from)
 }
 
-fn run_window_factory(options: crate::RunOptions, args: Args, factory: Factory) -> Result<(), String> {
+fn run_window_factory(options: crate::RunOptions, args: Args, factory: Factory) -> Result<(), StartError> {
     if args.headless() {
-        crate::render::discard_prewarm();
-        let displays = desktop(&args, read_script(&args).as_ref()).displays();
-        headless_window(factory(&displays), &displays, args, options)
+        #[cfg(any(feature = "tooling", debug_assertions))]
+        {
+            crate::render::discard_prewarm();
+            let displays = desktop(&args, read_script(&args).as_ref()).displays();
+            crate::window::displays::reset();
+            crate::window::displays::remember(&displays);
+            headless_window(factory(&displays), &displays, args, options)
+        }
+        #[cfg(not(any(feature = "tooling", debug_assertions)))]
+        Err(StartError::Window(WITHOUT_TOOLING.into()))
     } else {
-        crate::window::run_windows(factory, args, options)
+        crate::window::run_windows(factory, args, options).map_err(StartError::Window)
     }
 }
 
 /// Lists the windows, or renders the one `--window KEY` selects (the first by default) with its
 /// own state. Windows that apps added with `App::window` are selectable too.
-fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Display], args: Args, options: crate::RunOptions) -> Result<(), String> {
+fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Display], args: Args, options: crate::RunOptions) -> Result<(), StartError> {
     let mut windows = crate::windows::flatten(windows);
     crate::windows::validate(&windows).unwrap_or_else(|e| die(&e));
     if args.list_windows {
@@ -261,17 +343,15 @@ fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Displa
     };
     if args.desktop.is_some() {
         crate::tooling::interaction::gate::headless();
-        crate::desktop::run(windows, index, args, options.accessory);
-        return Ok(());
+        return crate::desktop::run(windows, index, args, options.accessory).map_err(StartError::Headless);
     }
     let mut window = windows.remove(index);
     let args = window.resolve_args(args);
     if !args.headless() {
-        return crate::window::run_windows(Box::new(move |_| vec![window]), args, options);
+        return crate::window::run_windows(Box::new(move |_| vec![window]), args, options).map_err(StartError::Window);
     }
     let scale = displays.iter().find(|d| d.primary).unwrap_or(&displays[0]).scale;
-    window.headless(args, scale as f32);
-    Ok(())
+    window.headless(args, scale as f32)
 }
 
 /// `run` with a compositor drawing every frame (see `compose`); `App::compositor` for other lifetimes.
@@ -313,17 +393,25 @@ pub(crate) enum Kind {
     Focus(bool),
     /// The app reopened (macOS: its Dock icon clicked).
     Reopen,
+    /// A user-initiated close request (`App::on_close_request`).
+    CloseRequest,
     /// A link the system opened with the app (`App::on_open_url`).
     OpenUrl(String),
+    /// Files the system opened with the app (`App::on_open_files`).
+    OpenFiles(Vec<PathBuf>),
     Menu(String),
     /// Answers the open pop-up menu: an item's id, or `None` to dismiss it.
     PopupMenu(Option<String>),
     /// Answers the open file dialog: the chosen path, or `None` to cancel it.
     FileDialog(Option<PathBuf>),
+    /// Answers the open file dialog with multiple chosen paths (`{"type": "file-dialog", "paths": [...]}`).
+    FileDialogFiles(Vec<PathBuf>),
     Physical(crate::PhysicalInput),
     /// A registered global shortcut, delivered only to its handler.
     Shortcut(crate::Shortcut),
     Move,
+    /// Relative mouse motion while pointer lock is held (`{"type": "pointer-motion", "dx": …, "dy": …}`).
+    PointerMotion(f32, f32),
     Down,
     Up,
     SecondaryDown,
@@ -331,8 +419,10 @@ pub(crate) enum Kind {
     /// The key and whether it is an auto-repeat.
     Key(KeyEvent, bool),
     /// A key press with its physical code (`{"type": "key", "code": …}`), as a native host sends it.
-    PhysicalKey(crate::PhysicalInput, KeyEvent, Option<char>, crate::AltKeys),
+    PhysicalKey(crate::PhysicalInput, KeyEvent, Option<char>),
     Paste(crate::ClipboardContent),
+    /// An input method's composition or commit.
+    Ime(crate::Ime),
     /// A wheel delta (dx, dy) in points.
     Wheel(f32, f32),
     /// A release velocity (vx, vy) in points per second.
@@ -362,21 +452,94 @@ impl Kind {
     }
 }
 
-/// The canvas input of a script (`canvas_input.rs`) at window point (x, y); false for any
-/// other kind.
-pub(crate) fn canvas_input<S: 'static>(rt: &mut Runtime<S>, kind: &Kind, (x, y): (f32, f32)) -> bool {
+/// Shared script input translation for both headless (`headless.rs`) and virtual-desktop
+/// (`virtual_desktop`) hosts. `(x, y)` is in view points; scroll/wheel/fling deltas are in
+/// window points and divided by `core.zoom()`, matching the desktop window host. Returns false
+/// for orchestration-only kinds (`Mark`, `Reopen`, `OpenUrl`, `Shortcut`, `Menu`, `PopupMenu`,
+/// `FileDialog`, `Resize`).
+pub(crate) fn script_input(
+    core: &mut crate::runtime::RuntimeCore,
+    app: &mut dyn crate::runtime::AppDriver,
+    kind: &Kind,
+    (x, y): (f32, f32),
+) -> bool {
     match kind {
-        Kind::WheelEvent(ev) => rt.wheel_event(ev.at(x, y)),
-        Kind::Magnify(ev) => rt.magnify_event(ev.at(x, y)),
-        Kind::Rotate(ev) => rt.rotate_event(ev.at(x, y)),
-        Kind::SmartMagnify => rt.smart_magnify(x, y),
-        Kind::ButtonDown(b) => rt.button_down(x, y, *b),
-        Kind::ButtonUp(b) => rt.button_up(x, y, *b),
-        Kind::KeyUp(k) => { rt.key_up(k.clone()); }
-        Kind::PhysicalKey(event, k, base, alt) => rt.physical_key_input_alt(*event, k.clone(), *base, *alt),
-        _ => return false,
+        Kind::Focus(focused) => core.window_focus(app, *focused),
+        Kind::Move => core.pointer_move(app, x, y),
+        Kind::PointerMotion(dx, dy) => core.pointer_motion(*dx, *dy),
+        Kind::Down => core.pointer_down(app, x, y),
+        Kind::Up => core.pointer_up(app, x, y),
+        Kind::SecondaryDown => core.secondary_down(x, y),
+        Kind::SecondaryUp => core.secondary_up(app, x, y),
+        Kind::Key(k, false) => core.key(k.clone()),
+        Kind::Key(k, true) => core.repeat_key(k.clone()),
+        Kind::Physical(event) => core.physical_input(event.clone()),
+        Kind::Paste(content) => core.paste_content(content.clone()),
+        Kind::Ime(ime) => core.ime(ime.clone()),
+        Kind::Wheel(dx, dy) => { let z = core.zoom(); wheel(core, (x, y), *dx / z, *dy / z); }
+        Kind::Fling(vx, vy) => { let z = core.zoom(); fling(core, (x, y), *vx / z, *vy / z); }
+        Kind::Files(step) => file_input(core, step, (x, y)),
+        Kind::WheelEvent(ev) => {
+            let z = core.zoom();
+            let mut ev = ev.at(x, y);
+            ev.dx /= z;
+            ev.dy /= z;
+            core.wheel_event(ev);
+        }
+        Kind::Magnify(ev) => core.magnify_event(ev.at(x, y)),
+        Kind::Rotate(ev) => core.rotate_event(ev.at(x, y)),
+        Kind::SmartMagnify => core.smart_magnify(x, y),
+        Kind::ButtonDown(b) => core.button_down(app, x, y, *b),
+        Kind::ButtonUp(b) => core.button_up(app, x, y, *b),
+        Kind::KeyUp(k) => { core.key_up(app, k.clone()); }
+        Kind::PhysicalKey(event, k, base) => core.physical_key_input(app, event.clone(), k.clone(), *base),
+        Kind::Mark(_) | Kind::Reopen | Kind::CloseRequest | Kind::OpenUrl(_) | Kind::OpenFiles(_) | Kind::Menu(_) | Kind::PopupMenu(_)
+        | Kind::FileDialog(_) | Kind::FileDialogFiles(_) | Kind::Shortcut(_) | Kind::Resize(..) => return false,
     }
     true
+}
+
+/// Where a script event lands, in view points: a point over the view's zoom, the centre of the
+/// shown part of an element found when the event runs (`RuntimeCore::find_shown`: an element no
+/// part of which is shown is an error, not an event sent to a point nothing is drawn at), the
+/// pointer for a wheel-like event without a point of its own, or an offset from the last press.
+/// The headless host and `--window-script` both land events here.
+pub(crate) fn script_point(rt: &RuntimeCore, e: &Ev, last_down: (f32, f32)) -> Result<(f32, f32), String> {
+    Ok(match &e.pos {
+        // A script's points are the window's; the view's are over its zoom.
+        Pos::Xy(x, y) => (*x / rt.zoom(), *y / rt.zoom()),
+        Pos::Key(key) => rt.find_shown(key)?,
+        Pos::Rel(_, _) if e.kind.at_pointer() => rt.pointer().unwrap_or((0.0, 0.0)),
+        Pos::Rel(dx, dy) => (last_down.0 + dx, last_down.1 + dy),
+    })
+}
+
+/// The `--window-script` file's events, parsed as `--script` parses its own. An unreadable or
+/// unparsable file ends the process before any window opens.
+pub(crate) fn read_window_script(args: &Args) -> Option<Vec<Ev>> {
+    args.window_script.as_ref().map(|path| {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+        let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+        load_script(&value)
+    })
+}
+
+/// The canvas input of a script (`canvas_input.rs`) at window point (x, y); false for any
+/// other kind.
+#[cfg(test)]
+pub(crate) fn canvas_input(
+    core: &mut crate::runtime::RuntimeCore,
+    app: &mut dyn crate::runtime::AppDriver,
+    kind: &Kind,
+    (x, y): (f32, f32),
+) -> bool {
+    match kind {
+        Kind::WheelEvent(_) | Kind::Magnify(_) | Kind::Rotate(_) | Kind::SmartMagnify
+        | Kind::ButtonDown(_) | Kind::ButtonUp(_) | Kind::KeyUp(_) | Kind::PhysicalKey(..) => {
+            script_input(core, app, kind, (x, y))
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -388,7 +551,7 @@ pub(crate) enum FileStep {
 
 /// A scripted wheel delta: vertical-only ones take the plain vertical path, unless an
 /// `on_wheel` handler may take them.
-pub(crate) fn wheel<S: 'static>(rt: &mut Runtime<S>, (x, y): (f32, f32), dx: f32, dy: f32) {
+pub(crate) fn wheel(rt: &mut RuntimeCore, (x, y): (f32, f32), dx: f32, dy: f32) {
     if dx == 0.0 && !rt.hears_wheel() { rt.wheel(x, y, dy) } else { rt.wheel_xy(x, y, dx, dy) }
 }
 
@@ -402,7 +565,7 @@ fn script_phase(e: &Value) -> crate::GesturePhase {
 }
 
 /// A scripted release velocity: vertical-only ones take the plain vertical path.
-pub(crate) fn fling<S: 'static>(rt: &mut Runtime<S>, (x, y): (f32, f32), vx: f32, vy: f32) {
+pub(crate) fn fling(rt: &mut RuntimeCore, (x, y): (f32, f32), vx: f32, vy: f32) {
     if vx == 0.0 { rt.fling(x, y, vy) } else { rt.fling_xy(x, y, vx, vy) }
 }
 
@@ -426,23 +589,28 @@ impl Ev {
             Kind::Mark(name) => ScriptEvent::Mark(name.clone()),
             Kind::Focus(focused) => ScriptEvent::Focus(*focused),
             Kind::Reopen => ScriptEvent::Reopen,
+            Kind::CloseRequest => ScriptEvent::CloseRequest,
             Kind::OpenUrl(url) => ScriptEvent::OpenUrl(url.clone()),
+            Kind::OpenFiles(paths) => ScriptEvent::OpenFiles(paths.clone()),
             Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
             Kind::PopupMenu(picked) => ScriptEvent::PopupMenu(picked.clone()),
             Kind::FileDialog(path) => ScriptEvent::FileDialog(path.clone()),
-            Kind::Physical(input) => ScriptEvent::Physical(*input),
+            Kind::FileDialogFiles(paths) => ScriptEvent::FileDialogFiles(paths.clone()),
+            Kind::Physical(input) => ScriptEvent::Physical(input.clone()),
             Kind::Shortcut(chord) => ScriptEvent::Shortcut(chord.clone()),
             Kind::Move => pointer(PointerAction::Move),
+            Kind::PointerMotion(dx, dy) => ScriptEvent::PointerMotion { dx: *dx, dy: *dy },
             Kind::Down => pointer(PointerAction::Down),
             Kind::Up => pointer(PointerAction::Up),
             Kind::SecondaryDown => pointer(PointerAction::SecondaryDown),
             Kind::SecondaryUp => pointer(PointerAction::SecondaryUp),
             Kind::Key(key, repeat) => ScriptEvent::Key { key: key.clone(), repeat: *repeat },
-            Kind::PhysicalKey(event, key, ..) => ScriptEvent::Key {
+            Kind::PhysicalKey(event, key, _) => ScriptEvent::Key {
                 key: key.clone(), repeat: matches!(event, crate::PhysicalInput::Key { repeat: true, .. }),
             },
             Kind::Paste(content) if content.is_rich() => ScriptEvent::PasteContent(content.clone()),
             Kind::Paste(content) => ScriptEvent::Paste(content.text().to_owned()),
+            Kind::Ime(ime) => ScriptEvent::Ime(ime.clone()),
             Kind::Wheel(0.0, dy) => pointer(PointerAction::Scroll(*dy)),
             Kind::Wheel(dx, dy) => pointer(PointerAction::ScrollXy(*dx, *dy)),
             Kind::Fling(0.0, v) => pointer(PointerAction::Fling(*v)),
@@ -491,11 +659,11 @@ pub(crate) fn desktop(args: &Args, script: Option<&Value>) -> crate::desktop::di
 }
 
 /// Feeds a script's file drag step to `rt`, at `at` in window points.
-pub(crate) fn file_input<S: 'static>(rt: &mut Runtime<S>, step: &FileStep, at: (f32, f32)) {
+pub(crate) fn file_input(core: &mut crate::runtime::RuntimeCore, step: &FileStep, at: (f32, f32)) {
     match step {
-        FileStep::Hover(paths) => rt.drag_files(paths.clone(), Some(at)),
-        FileStep::Drop(paths) => rt.drop_files(paths.clone(), Some(at)),
-        FileStep::Leave => rt.drag_files_leave(),
+        FileStep::Hover(paths) => core.drag_files(paths.clone(), Some(at)),
+        FileStep::Drop(paths) => core.drop_files(paths.clone(), Some(at)),
+        FileStep::Leave => core.drag_files_leave(),
     }
 }
 
@@ -506,9 +674,14 @@ pub(crate) mod headless_run;
 pub(crate) mod interaction;
 pub(crate) mod perf_warn;
 pub(crate) mod record;
+// Only headless runs use it; a release build without `tooling` keeps the module but not its callers.
+#[cfg_attr(not(any(feature = "tooling", debug_assertions)), allow(dead_code, unused_imports))]
 pub(crate) mod virtual_desktop;
 #[cfg(test)]
 pub(crate) mod test_alloc;
+#[cfg(test)]
+#[path = "tooling/args_tests.rs"]
+mod args_tests;
 #[cfg(test)]
 #[path = "tooling/window_tests.rs"]
 mod window_tests;

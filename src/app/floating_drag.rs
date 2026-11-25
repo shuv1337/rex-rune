@@ -20,7 +20,7 @@ use rex_rune::{
     settings::PaneDensity,
 };
 use rexrs::api::session::{Layer, Window};
-use rune::{Cursor, El, Phase, PointerButton, Tx, WindowEdge, el};
+use rune::{Cursor, El, Phase, PointerButton, Tx, el};
 
 /// Pointer travel in window points before a floating header press turns into a drag-move.
 /// Shorter presses stay clicks (focusing the pane without sending any layer request).
@@ -348,17 +348,13 @@ pub(super) fn attach_drag(
 }
 
 fn edge_cursor(grip: Grip) -> Cursor {
-    Cursor::ResizeEdge(match grip {
-        Grip::North => WindowEdge::North,
-        Grip::South => WindowEdge::South,
-        Grip::East => WindowEdge::East,
-        Grip::West => WindowEdge::West,
-        Grip::NorthEast => WindowEdge::NorthEast,
-        Grip::NorthWest => WindowEdge::NorthWest,
-        Grip::SouthEast => WindowEdge::SouthEast,
-        Grip::SouthWest => WindowEdge::SouthWest,
-        Grip::Move => return Cursor::Default,
-    })
+    match grip {
+        Grip::North | Grip::South => Cursor::ResizeNs,
+        Grip::East | Grip::West => Cursor::ResizeEw,
+        Grip::NorthEast | Grip::SouthWest => Cursor::ResizeNesw,
+        Grip::NorthWest | Grip::SouthEast => Cursor::ResizeNwse,
+        Grip::Move => Cursor::Default,
+    }
 }
 
 /// The 8-way edge and L-shaped corner resize grips for one visible floating layer, emitted

@@ -41,6 +41,10 @@ pub(crate) enum ModalEvent {
     /// The top modal's element is gone. `kept` is focus the closing change already put outside
     /// it (a field the handler focused), which stays.
     TopRemoved { kept: bool },
+    /// The top `removed` modal(s) unmounted in the same commit that `path` mounted in their
+    /// place: `restore` carries the outermost removed layer's focus return forward without
+    /// emitting an intermediate `Return`.
+    Replaced { removed: usize, path: String, restore: Option<String>, opened: Opened },
     /// Focus is outside the top modal (nothing focused, or behind it).
     FocusOutside,
 }
@@ -65,8 +69,16 @@ impl ModalFocus {
         }
     }
 
-    fn holds(&self, path: &str) -> bool {
+    pub(crate) fn holds(&self, path: &str) -> bool {
         matches!(self, Self::Open(layers) if layers.iter().any(|l| l.path == path))
+    }
+
+    /// How many top layers satisfy `gone`, together with the outermost of those layers.
+    pub(crate) fn removed_top(&self, mut gone: impl FnMut(&str) -> bool) -> (usize, Option<&ModalLayer>) {
+        let Self::Open(layers) = self else { return (0, None) };
+        let count = layers.iter().rev().take_while(|l| gone(&l.path)).count();
+        let outermost = (count > 0).then(|| &layers[layers.len() - count]);
+        (count, outermost)
     }
 
     pub(crate) fn step(self, event: ModalEvent) -> (Self, Vec<ModalEffect>) {
@@ -77,6 +89,14 @@ impl ModalFocus {
             }
             (Self::Open(mut layers), ModalEvent::Opened { path, restore, opened }) => {
                 layers.push(ModalLayer { path, restore, opened });
+                (Self::Open(layers), vec![ModalEffect::CancelGestures])
+            }
+            (Self::Open(mut layers), ModalEvent::Replaced { removed, path, restore, opened }) => {
+                let keep = layers.len().saturating_sub(removed);
+                layers.truncate(keep);
+                if !layers.iter().any(|l| l.path == path) {
+                    layers.push(ModalLayer { path, restore, opened });
+                }
                 (Self::Open(layers), vec![ModalEffect::CancelGestures])
             }
             (Self::Open(mut layers), ModalEvent::TopRemoved { kept }) => {
@@ -93,55 +113,121 @@ impl ModalFocus {
     }
 }
 
-impl<S: 'static> Runtime<S> {
+impl focus_machine::KeyboardState {
+    #[inline]
+    pub(super) fn modal_top(&self) -> Option<&str> {
+        self.modal_focus.top()
+    }
+
+    #[inline]
+    pub(super) fn modal_holds(&self, path: &str) -> bool {
+        self.modal_focus.holds(path)
+    }
+
+    #[inline]
+    pub(super) fn modal_removed_top(&self, gone: impl FnMut(&str) -> bool) -> (usize, Option<&ModalLayer>) {
+        self.modal_focus.removed_top(gone)
+    }
+
+    #[inline]
+    pub(super) fn step_modal(&mut self, event: ModalEvent) -> Vec<ModalEffect> {
+        let (state, effects) = std::mem::take(&mut self.modal_focus).step(event);
+        self.modal_focus = state;
+        effects
+    }
+}
+
+impl RuntimeCore {
+    fn is_menu_or_listbox_modal(&self, i: usize) -> bool {
+        let menu = |j: usize| MENU_ROLES.contains(&self.tree.nodes[j].role);
+        menu(i) || (i + 1..self.tree.nodes.len())
+            .take_while(|&j| self.tree.nodes[j].parent.is_some_and(|p| p >= i))
+            .any(|j| self.tree.nodes[j].parent == Some(i) && menu(j))
+    }
+
     /// Feeds the modal focus machine what this commit shows: modals that went (innermost first),
     /// a modal that opened, and focus that left the top modal.
-    pub(super) fn sync_modals(&mut self) {
-        let returned = std::mem::take(&mut self.focus_returned);
-        // Exiting visuals are already inert, so a closing modal counts as gone.
-        while let Some(top) = self.modal_focus.top().map(str::to_owned).filter(|p| self.node(p).is_none()) {
-            let inside = |f: &str| f.strip_prefix(top.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
-            let kept = self.focus.path().is_some_and(|f| !inside(f) && self.node(f).is_some());
-            self.modal_step(ModalEvent::TopRemoved { kept });
+    pub(in crate::runtime) fn sync_modals(&mut self, app: &mut dyn AppDriver) -> bool {
+        let returned = self.kbd.take_focus_returned();
+        let mut cb_dirty = false;
+        // When one or more top modals unmount and a new modal mounts in the same commit,
+        // `modal_scope` already belongs to the replacement modal, so running `Return` against
+        // `can_focus` would reject the original opener behind it. Carry the outermost removed
+        // layer's restore target forward after validating intrinsic focusability, matching
+        // `dialogA.close(); dialogB.showModal()` in the HTML specification.
+        if let Some(i) = self.active_modal() {
+            let path = self.tree.nodes[i].path.clone();
+            if !self.kbd.modal_holds(&path) {
+                let (removed, outermost) = self.kbd.modal_removed_top(|p| self.node(p).is_none());
+                if removed > 0 {
+                    let outermost = outermost.cloned();
+                    let inside = self.focused_index().is_some_and(|j| self.allowed(j));
+                    let carried = outermost.as_ref().and_then(|l| l.restore.as_ref())
+                        .filter(|p| self.node_index(p).is_some_and(|idx| self.can_focus_unblocked(idx)))
+                        .cloned();
+                    let fallback = (!inside && !returned).then(|| self.kbd.focus.owned()).flatten()
+                        .filter(|p| self.node_index(p).is_some_and(|idx| self.can_focus_unblocked(idx)));
+                    let restore = carried.or(fallback);
+                    let is_menu = self.is_menu_or_listbox_modal(i);
+                    let carried_pointer_menu = outermost.is_some_and(|l| l.opened == Opened::PointerMenu);
+                    let opened = if is_menu && (!self.kbd.focus.keyboard() || carried_pointer_menu) {
+                        Opened::PointerMenu
+                    } else {
+                        Opened::Dialog
+                    };
+                    cb_dirty |= self.modal_step(app, ModalEvent::Replaced { removed, path, restore, opened });
+                    if !self.focused_index().is_some_and(|j| self.allowed(j)) {
+                        cb_dirty |= self.modal_step(app, ModalEvent::FocusOutside);
+                    }
+                    return cb_dirty;
+                }
+            }
         }
-        let Some(i) = self.active_modal() else { return };
-        let path = self.nodes[i].path.clone();
+        // Exiting visuals are already inert, so a closing modal counts as gone.
+        while let Some(top) = self.kbd.modal_top().map(str::to_owned).filter(|p| self.node(p).is_none()) {
+            let inside = |f: &str| f.strip_prefix(top.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+            let kept = self.kbd.focus.path().is_some_and(|f| !inside(f) && self.node_index(f).is_some_and(|i| self.can_focus(i)));
+            cb_dirty |= self.modal_step(app, ModalEvent::TopRemoved { kept });
+        }
+        let Some(i) = self.active_modal() else { return cb_dirty };
+        let path = self.tree.nodes[i].path.clone();
         // A field in the modal that asked for focus took it earlier in this commit, or a closing
         // menu handed focus back to its trigger as its pick opened this modal (`Tx::return_focus`,
         // which a web menu does only after the dialog has noted the item): closing returns to
         // what had focus before.
         let inside = self.focused_index().is_some_and(|j| self.allowed(j));
-        let restore = if inside || returned { self.focus_before_commit.clone() } else { self.focus.owned() };
-        let menu = |j: usize| MENU_ROLES.contains(&self.nodes[j].role);
-        let is_menu = menu(i) || (i + 1..self.nodes.len()).take_while(|&j| self.nodes[j].parent.is_some_and(|p| p >= i)).any(|j| self.nodes[j].parent == Some(i) && menu(j));
-        let opened = if is_menu && !self.focus.keyboard() { Opened::PointerMenu } else { Opened::Dialog };
-        self.modal_step(ModalEvent::Opened { path, restore, opened });
+        let restore = if inside || returned { self.kbd.focus_before_commit.clone() } else { self.kbd.focus.owned() };
+        let is_menu = self.is_menu_or_listbox_modal(i);
+        let opened = if is_menu && !self.kbd.focus.keyboard() { Opened::PointerMenu } else { Opened::Dialog };
+        cb_dirty |= self.modal_step(app, ModalEvent::Opened { path, restore, opened });
         if !self.focused_index().is_some_and(|j| self.allowed(j)) {
-            self.modal_step(ModalEvent::FocusOutside);
+            cb_dirty |= self.modal_step(app, ModalEvent::FocusOutside);
         }
+        cb_dirty
     }
 
-    fn modal_step(&mut self, event: ModalEvent) {
-        let (state, effects) = std::mem::take(&mut self.modal_focus).step(event);
-        self.modal_focus = state;
+    fn modal_step(&mut self, app: &mut dyn AppDriver, event: ModalEvent) -> bool {
+        let effects = self.kbd.step_modal(event);
+        let mut cb_dirty = false;
         for effect in effects {
             match effect {
                 ModalEffect::CancelGestures => {
-                    self.press.drop_held();
-                    self.secondary = capture::Secondary::Up;
-                    self.hovered = None;
+                    if !self.cancel_drag() { self.drop_press(); }
+                    self.pointer.clear_secondary();
+                    self.pointer.hovered = None;
                 }
                 ModalEffect::FocusInitial => {
                     if let Some(target) = self.modal_initial_focus() {
-                        self.set_focus(Some(target), self.focus.keyboard());
+                        cb_dirty |= self.set_focus_notifying(app, Some(target), self.kbd.focus.keyboard()).1;
                     }
                 }
                 ModalEffect::Return { restore, ring } => {
-                    let restore = restore.filter(|p| self.node(p).is_some());
-                    self.set_focus(restore, ring && self.focus.keyboard());
+                    let restore = restore.filter(|p| self.node_index(p).is_some_and(|i| self.can_focus(i)));
+                    cb_dirty |= self.set_focus_notifying(app, restore, ring && self.kbd.focus.keyboard()).1;
                 }
             }
         }
+        cb_dirty
     }
 
     /// What the top modal focuses: its `El::autofocus` control, else under `Cx::web_focus` its
@@ -149,13 +235,17 @@ impl<S: 'static> Runtime<S> {
     /// focuses its content (Kobalte's `onOpenAutoFocus` in OpenCode's `Dialog`).
     fn modal_initial_focus(&self) -> Option<String> {
         let i = self.active_modal()?;
-        let inside = |j: usize| self.modal_member(j) && j > i;
-        let autofocus = (i..self.nodes.len()).find(|&j| inside(j) && self.nodes[j].focus.autofocus && self.can_focus(j));
-        let first = if self.defaults.web_focus {
-            (i..self.nodes.len()).find(|&j| inside(j) && self.nodes[j].input.is_some() && self.can_focus(j))
+        let inside = |j: usize| j != i && self.modal_member(j);
+        let autofocus = (0..self.tree.nodes.len()).find(|&j| inside(j) && self.tree.nodes[j].focus.autofocus && self.can_focus(j));
+        let first = if self.commit.defaults.web_focus {
+            (0..self.tree.nodes.len()).find(|&j| inside(j) && self.tree.nodes[j].input.is_some() && self.can_focus(j))
         } else {
             self.tab_order().first().copied()
         };
-        Some(autofocus.or(first).map_or_else(|| self.nodes[i].path.clone(), |j| self.nodes[j].path.clone()))
+        Some(autofocus.or(first).map_or_else(|| self.tree.nodes[i].path.clone(), |j| self.tree.nodes[j].path.clone()))
     }
 }
+
+#[cfg(test)]
+#[path = "modal_focus_tests.rs"]
+mod tests;

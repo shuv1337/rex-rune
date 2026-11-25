@@ -179,10 +179,9 @@ fn keyboard(s: &Workspace) -> El {
                 .iter()
                 .position(|key| *key == s.settings.terminal.option_key)
                 .unwrap_or_default(),
-            |s, i, tx| {
+            |s, i, _| {
                 s.settings.terminal.option_key = OptionKey::ALL[i.min(OptionKey::ALL.len() - 1)];
                 s.save();
-                s.sync_option_key(tx, false);
             },
         )
     });

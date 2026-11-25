@@ -1,5 +1,5 @@
 //! Timestamp-only native spring probe. Run on a worker with a display:
-//! cargo run --profile perf -p rune --example pacing -- --native --trace pacing.jsonl --frames 240
+//! cargo run --profile perf -p rune --features tooling --example pacing -- --native --trace pacing.jsonl --frames 240
 use rune::{App, AppSpec, Color, Cx, El, Spring, el};
 
 fn view(wide: &bool, _: &mut Cx<bool>) -> El {
@@ -9,6 +9,8 @@ fn view(wide: &bool, _: &mut Cx<bool>) -> El {
 }
 
 fn main() {
+    // Work after `run` returns below: the process tears down in order rather than ending at once.
+    rune::orderly_exit();
     let app = App::new(AppSpec::new("Rune pacing", (480.0, 120.0), || false, view));
     let handle = app.handle();
     // Deliberately off-refresh commits, including several retargets in one refresh.

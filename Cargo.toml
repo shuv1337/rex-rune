@@ -21,8 +21,8 @@ ui = [
     "dep:block2",
 ]
 
-# Desktop notifications over D-Bus, with Rune's own zbus build, where the freedesktop
-# service exists: Linux and the BSDs.
+# Desktop notifications over D-Bus on Linux and the BSDs. Keep our Tokio zbus 6
+# separate from Rune's async-io zbus 5.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy"], optional = true }
 
@@ -59,9 +59,11 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 log = "0.4"
 rexrs = { git = "https://github.com/a10y/rexrs", rev = "780be3f9f0455c758273e57199af30bdaa145cf1", default-features = false, features = ["tokio"] }
 # Rune is pre-1.0 and pinned to a `dev` revision.
-rune = { git = "https://github.com/anomalyco/rune.git", rev = "d70929a4dae263d16d2e8088e7bfe53f58f619ad", optional = true }
-rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "d70929a4dae263d16d2e8088e7bfe53f58f619ad", optional = true }
-rune-theme-opencode = { git = "https://github.com/anomalyco/rune.git", rev = "d70929a4dae263d16d2e8088e7bfe53f58f619ad", optional = true }
+# Upstream defaults except Hunspell. These named features also cover the split crates'
+# default features. Keep release acceptance tooling enabled.
+rune = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false, features = ["accessibility", "dbus", "embedded-fonts", "metal-backend", "ogg-audio", "svg", "tooling"], optional = true }
+rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", optional = true }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -108,18 +110,25 @@ path = "src/bin/install_probe.rs"
 name = "rex-update-probe"
 path = "src/bin/update_probe.rs"
 
-# Rune at the pinned revision with Rex's Linux window-chrome additions (vendor/rune/README.md).
+# Local Linux window and GSettings fixes (vendor/rune/README.md).
 [patch."https://github.com/anomalyco/rune.git"]
 rune = { path = "vendor/rune/crates/rune" }
-rune-motion = { path = "vendor/rune/crates/rune-motion" }
-rune-staging = { path = "vendor/rune/crates/rune-staging" }
 
 # Revision-21 generated types and explicit negotiation range (vendor/rexrs/REX-RUNE.md).
 [patch."https://github.com/a10y/rexrs"]
 rexrs = { path = "vendor/rexrs" }
 
-# The pinned C image iterator exposed through a safe Rust render wrapper.
 [patch.crates-io]
+# Rune's upstream workspace patches must also apply in its consumers.
+winit = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+parley_engine = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+naga = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+# The pinned C image iterator exposed through a safe Rust render wrapper.
 ghostty-vt = { path = "vendor/ghostty-vt" }
 
 [[example]]

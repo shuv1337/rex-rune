@@ -58,7 +58,7 @@ impl El {
     /// [`El::scroll_x`] in place.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn set_scroll_x(&mut self) -> &mut Self {
-        self.viewport(ScrollSpec { stick_bottom: false }, ScrollAxes::X, taffy::Overflow::Scroll, taffy::Overflow::Hidden);
+        self.viewport(ScrollSpec::default(), ScrollAxes::X, taffy::Overflow::Scroll, taffy::Overflow::Hidden);
         self
     }
     /// A viewport that scrolls both ways over its children (a wide timeline, a large
@@ -76,30 +76,39 @@ impl El {
     /// [`El::scroll_xy`] in place.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn set_scroll_xy(&mut self) -> &mut Self {
-        let spec = self.cold.scroll.unwrap_or(ScrollSpec { stick_bottom: false });
+        let spec = self.cold.scroll.unwrap_or_default();
         self.viewport(spec, ScrollAxes::Both, taffy::Overflow::Scroll, taffy::Overflow::Scroll);
         self
     }
     /// On a scroll viewport, called with whether it shows its bottom (within a point): once
     /// after its first layout, then only when that changes, never per frame. Pair with
     /// [`Tx::scroll_to_bottom`] for a "jump to latest" button.
-    pub fn on_at_bottom<S: 'static>(mut self, f: impl Fn(&mut S, bool) + 'static) -> Self {
+    pub fn on_at_bottom<S: 'static>(self, f: impl Fn(&mut S, bool) + 'static) -> Self {
+        self.on_at_bottom_if(move |s, at| { f(s, at); true })
+    }
+    /// Like [`Self::on_at_bottom`], but a report that returns false does not rebuild the view.
+    /// The first report after mounting can confirm state the app already drew.
+    pub fn on_at_bottom_if<S: 'static>(mut self, f: impl Fn(&mut S, bool) -> bool + 'static) -> Self {
         self.handlers.on_at_bottom = Some(Rc::new(move |s, at| f(downcast::<S>(s), at)));
         self
     }
     /// On a scroll viewport, called with whether it stands more than its own height, and at
     /// least `min` points, above its bottom: where a chat shows its "jump to latest" button and
     /// hides it again near the end. Once after its first layout, then only when that changes.
-    pub fn on_far_from_bottom<S: 'static>(mut self, min: f32, f: impl Fn(&mut S, bool) + 'static) -> Self {
-        self.handlers.on_far_from_bottom = Some((min, None, Rc::new(move |s, far| f(downcast::<S>(s), far))));
-        self
+    pub fn on_far_from_bottom<S: 'static>(self, min: f32, f: impl Fn(&mut S, bool) + 'static) -> Self {
+        self.on_far_from_bottom_if(min, None, move |s, far| { f(s, far); true })
     }
     /// [`El::on_far_from_bottom`] for a viewport that runs under a frame, the nearest ancestor
     /// keyed `frame` (a chat's pane, with a header and a dock over its scroll): far is more than
     /// the frame's height above the bottom, and at least `min`. The height is measured as it
     /// scrolls, so the view never reads it and a resize re-runs no view.
-    pub fn on_far_from_bottom_under<S: 'static>(mut self, min: f32, frame: &str, f: impl Fn(&mut S, bool) + 'static) -> Self {
-        self.handlers.on_far_from_bottom = Some((min, Some(Rc::from(frame)), Rc::new(move |s, far| f(downcast::<S>(s), far))));
+    pub fn on_far_from_bottom_under<S: 'static>(self, min: f32, frame: &str, f: impl Fn(&mut S, bool) + 'static) -> Self {
+        self.on_far_from_bottom_if(min, Some(frame), move |s, far| { f(s, far); true })
+    }
+    /// Like [`Self::on_far_from_bottom`] (under `frame` if given), but the callback returns
+    /// whether its report changed the view. A stationary viewport still receives its first report.
+    pub fn on_far_from_bottom_if<S: 'static>(mut self, min: f32, frame: Option<&str>, f: impl Fn(&mut S, bool) -> bool + 'static) -> Self {
+        self.handlers.on_far_from_bottom = Some((min, frame.map(Rc::from), Rc::new(move |s, far| f(downcast::<S>(s), far))));
         self
     }
     /// On a scroll viewport, fade its top and bottom edges over `width` points (16–32 reads well),
@@ -133,14 +142,71 @@ impl El {
     }
     /// On a vertical scroll viewport, keep the row at the top of the view where it is when a
     /// commit changes the content above it (rows inserted, removed, grown or reflowed by a new
-    /// width), as CSS `overflow-anchor: auto` does in a browser. The row is the first child
-    /// drawn in the view, or within a child that starts above the view, the first of its
-    /// children, and so on down. It holds only while the viewport is still and scrolled off
-    /// its top, and not following its bottom (`stick_bottom`): at the very top new content
-    /// above shows. A [`Tx::keep_on_screen`] in the same commit wins, and so does a scroll.
-    /// [`El::virtual_rows`] lists already keep their first visible row this way.
+    /// width), as CSS `overflow-anchor: auto` does in a browser. The anchor is the first
+    /// eligible child drawn in the view, or within a child that starts above the view (including
+    /// a tall mounted [`El::virtual_rows`] row), its first surviving visible descendant, and so
+    /// on down. Elements marked [`El::no_scroll_anchor`] and their subtrees are skipped. It
+    /// holds only while the viewport is still and scrolled off its top, and not following its
+    /// bottom (`stick_bottom`): at the very top new content above shows. A
+    /// [`Tx::keep_on_screen`] in the same commit wins, and so does a scroll. Whole-row
+    /// [`El::virtual_rows`] lists keep their first visible row on their own unless opted out
+    /// with [`El::no_scroll_anchor`].
     pub fn scroll_anchor(mut self) -> Self {
-        self.cold_mut().scroll_edges.anchor = true;
+        let edges = &mut self.cold_mut().scroll_edges;
+        edges.anchor = true;
+        edges.no_anchor = false;
+        self
+    }
+    /// Opts this element out of scroll anchoring, like CSS `overflow-anchor: none`.
+    ///
+    /// - On a row or descendant inside an [`El::scroll_anchor`] viewport or a virtual list
+    ///   ([`El::virtual_rows`] / [`El::virtualize`]), excludes this element and its subtree from
+    ///   anchor selection (for example, a top loading placeholder so prepending older rows
+    ///   anchors to the first real row beneath it).
+    /// - On a [`El::virtual_rows`] / [`El::virtualize`] container or its scroll viewport,
+    ///   disables automatic scroll anchoring for that list (for example, a live search list that
+    ///   streams new hits in at the top at offset 0).
+    ///
+    /// ```
+    /// # use rune::{GrowthSpec, ScrollSpec, col, el};
+    /// let loading = el().key("loading").h(32.0).no_scroll_anchor();
+    /// let list = col().scroll(ScrollSpec::default()).child(
+    ///     col().growth(GrowthSpec::default()).no_scroll_anchor().virtualize(32.0).child(loading),
+    /// );
+    /// # let _ = list;
+    /// ```
+    pub fn no_scroll_anchor(mut self) -> Self {
+        let edges = &mut self.cold_mut().scroll_edges;
+        edges.anchor = false;
+        edges.no_anchor = true;
+        self
+    }
+    /// A wheel over this element turns the scroll viewport keyed `key` (or the nearest one
+    /// containing it) instead of starting on what is drawn here: an overlay scroll bar's track,
+    /// which draws over its viewport's edge but sits beside it in the tree, so a wheel there
+    /// would otherwise find no scroller above it. The viewport's wheel is then Chromium's, whose
+    /// scrollbar belongs to its scroller: it scrolls this viewport on the axis the wheel turned,
+    /// and chains on up from it when that one is at its end. A press or drag here still does
+    /// whatever this element's handlers do, and an [`El::on_wheel`] handler under the pointer still
+    /// hears the wheel first: this decides where a wheel the handlers leave scrolls, not who hears
+    /// it, and a handler on the named viewport itself doesn't, since the pointer is over this
+    /// element rather than the viewport.
+    ///
+    /// `key` names an element as [`Cx::layout`](crate::Cx::layout) does, here and in the other
+    /// scroll requests, and is resolved in this element's own place: looked up inside this element
+    /// itself, then inside its parent, then its parent's parent and so on, the first that holds
+    /// such an element wins. So two panes that key their viewports alike (a chat and a sidebar
+    /// both with `list`, or every wide markdown table, each keyed `scroll`) each take the wheel
+    /// over their own bar. Nothing keyed `key` leaves the wheel as it was.
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[inline]
+    pub fn wheel_scrolls(mut self, key: impl Into<String>) -> Self {
+        self.set_wheel_scrolls(key);
+        self
+    }
+    /// [`El::wheel_scrolls`] in place.
+    pub fn set_wheel_scrolls(&mut self, key: impl Into<String>) -> &mut Self {
+        self.cold_mut().wheel_scrolls = Some(key.into().into_boxed_str());
         self
     }
 }
@@ -159,13 +225,16 @@ pub(crate) struct FadeStyle {
     /// strength that follows it.
     pub(crate) feather: bool,
     pub(crate) linear: bool,
+    /// Optional interior `(position, alpha)` stops in `(0, 1)` for a piecewise-linear ramp
+    /// anchored at `(0, 0)` and `(1, 1)` (matching CSS `mask-image: linear-gradient(...)`).
+    pub(crate) stops: Option<[(f32, f32); 3]>,
     /// The top fade starts under the header stuck there, for the rows of that header's section.
     pub(crate) below_sticky: bool,
     /// Only the bottom (or right) edge follows the scroll; the other keeps the viewport's clip.
     pub(crate) end_only: bool,
     /// Points hidden at which a strength fade is full; 0 for 15.
     pub(crate) full_at: f32,
-    /// The end edge's own fade (`ScrollFade::with_end`): its width, linear ramp and full-at.
+    /// The end edge's own fade (`ScrollFade::with_end`): its width, ramp and full-at.
     pub(crate) end: Option<EndFade>,
 }
 
@@ -174,19 +243,35 @@ pub(crate) struct FadeStyle {
 pub(crate) struct EndFade {
     pub(crate) width: f32,
     pub(crate) linear: bool,
+    pub(crate) stops: Option<[(f32, f32); 3]>,
     pub(crate) full_at: f32,
 }
 
 impl FadeStyle {
-    pub(crate) const SMOOTH: FadeStyle = FadeStyle { feather: false, linear: false, below_sticky: false, end_only: false, full_at: 0.0, end: None };
+    pub(crate) const SMOOTH: FadeStyle = FadeStyle { feather: false, linear: false, stops: None, below_sticky: false, end_only: false, full_at: 0.0, end: None };
 
     /// The style and width (points) the edge with `end` set fades by: the end edge's own when
     /// [`ScrollFade::with_end`] gave it one.
     pub(crate) fn edge(self, width: f32, end: bool) -> (FadeStyle, f32) {
         match self.end.filter(|_| end) {
-            Some(e) => (FadeStyle { linear: e.linear, full_at: e.full_at, end: None, ..self }, e.width),
+            Some(e) => (FadeStyle { linear: e.linear, stops: e.stops, full_at: e.full_at, end: None, ..self }, e.width),
             None => (self, width),
         }
+    }
+
+    /// Packs any explicit piecewise-linear stops on this fade or its `end` fade into two exact
+    /// 24-bit `f32` integers for `Globals::flags[2..4]` (`1/200` quantization, exact for CSS
+    /// quarter/percent stops like `(0.25, 0.16), (0.5, 0.5), (0.75, 0.84)`).
+    pub(crate) fn packed_stops(self) -> Option<[f32; 2]> {
+        let end_stops = self.end.and_then(|e| e.stops);
+        if let (Some(a), Some(b)) = (self.stops, end_stops) {
+            debug_assert_eq!(a, b, "ScrollFade::stops supports one explicit stop curve per window; start and end fades differ");
+        }
+        let [(t1, a1), (t2, a2), (t3, a3)] = self.stops.or(end_stops)?;
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 200.0).round() as u32;
+        let lo = q(t1) | (q(a1) << 8) | (q(t2) << 16);
+        let hi = q(a2) | (q(t3) << 8) | (q(a3) << 16);
+        Some([lo as f32, hi as f32])
     }
 }
 
@@ -196,13 +281,13 @@ impl ScrollFade {
     /// `1 - strength`. A viewport at its top (or bottom, or stuck to it) shows that edge hard.
     /// Desktop's search lists fade so (`search-list.tsx`).
     pub fn strength(width: f32) -> Self {
-        ScrollFade { width: width.max(0.0), style: FadeStyle::SMOOTH }
+        ScrollFade { width: width.clamp(0.0, 65504.0), style: FadeStyle::SMOOTH }
     }
     /// Each edge feathers by as much as is hidden under it, up to `max` points, on a linear ramp
     /// from nothing at the edge: CSS `mask-image: linear-gradient(transparent, black
     /// min(max, scrollTop))`, as Desktop's vertical tabs do. It appears and leaves without a jump.
     pub fn feather(max: f32) -> Self {
-        ScrollFade { width: max.max(0.0), style: FadeStyle { feather: true, linear: true, ..FadeStyle::SMOOTH } }
+        ScrollFade { width: max.clamp(0.0, 65504.0), style: FadeStyle { feather: true, linear: true, ..FadeStyle::SMOOTH } }
     }
     /// A [`Self::strength`] fade is full once `points` are hidden, rather than 15: a small value
     /// shows the whole fade as soon as anything is hidden, as a mask a scroll listener toggles
@@ -222,6 +307,37 @@ impl ScrollFade {
     /// on smoothstep.
     pub fn linear(mut self) -> Self {
         self.style.linear = true;
+        self.style.stops = None;
+        self
+    }
+    /// Ramps alpha piecewise-linearly through up to three interior `(position, alpha)` stops in
+    /// `[0, 1]`, anchored at `(0, 0)` (edge) and `(1, 1)` (full width), matching multi-stop CSS
+    /// `mask-image: linear-gradient(...)` masks (such as `[(0.25, 0.16), (0.5, 0.5), (0.75, 0.84)]`).
+    ///
+    /// Stops are sorted by `position` and must have non-decreasing `alpha` (checked with
+    /// `debug_assert!` and clamped monotonically in release builds so partial-strength inversion
+    /// stays exact). All explicit-stop fades active in a window share one per-frame stop curve;
+    /// distinct stop curves in the same tree trigger a `debug_assert!`.
+    pub fn stops(mut self, stops: &[(f32, f32)]) -> Self {
+        let mut pts: Vec<(f32, f32)> = stops
+            .iter()
+            .filter(|&&(t, a)| t.is_finite() && a.is_finite())
+            .map(|&(t, a)| (t.clamp(0.0, 1.0), a.clamp(0.0, 1.0)))
+            .take(3)
+            .collect();
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+        let mut max_a = 0.0f32;
+        for pt in &mut pts {
+            debug_assert!(pt.1 >= max_a, "ScrollFade::stops requires non-decreasing alpha (got {} after {max_a})", pt.1);
+            max_a = max_a.max(pt.1);
+            pt.1 = max_a;
+        }
+        let mut arr = [(1.0, 1.0); 3];
+        for (slot, pt) in arr.iter_mut().zip(pts) {
+            *slot = pt;
+        }
+        self.style.linear = false;
+        self.style.stops = Some(arr);
         self
     }
     /// The top fade starts under the [`El::sticky_top`] header stuck at the viewport's top, for
@@ -239,13 +355,23 @@ impl ScrollFade {
     /// fades its rows 16 points under a stuck header on an eased curve but 24 points at its bottom
     /// on a linear mask (`search-list.css`). Only `end`'s width, ramp and full-at count.
     pub fn with_end(mut self, end: ScrollFade) -> Self {
-        self.style.end = Some(EndFade { width: end.width, linear: end.style.linear, full_at: end.style.full_at });
+        self.style.end = Some(EndFade { width: end.width, linear: end.style.linear, stops: end.style.stops, full_at: end.style.full_at });
         self
     }
 }
 
 /// A vertical scroll viewport.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Use [`ScrollSpec::default`] for a plain vertical scroll view and [`ScrollSpec::stick_bottom`]
+/// for a chat or log transcript that follows its bottom:
+///
+/// ```
+/// # use rune::{ScrollSpec, col};
+/// let list = col().scroll(ScrollSpec::default());
+/// let log = col().scroll(ScrollSpec::stick_bottom());
+/// # let _ = (list, log);
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScrollSpec {
     /// Follow the end: while scrolled to the bottom, growth keeps the bottom in view, and a new
     /// viewport opens at the bottom on its first frame. When the content is a growth stack, room
@@ -255,8 +381,22 @@ pub struct ScrollSpec {
     pub stick_bottom: bool,
 }
 
-/// A scroll viewport's content-aware edges: `El::scroll_edge_fade`, `El::scroll_margin` and
-/// `El::scroll_anchor`.
+impl ScrollSpec {
+    /// A vertical scroll viewport that follows its content's bottom, for chat and log
+    /// transcripts (`ScrollSpec { stick_bottom: true }`).
+    ///
+    /// ```
+    /// # use rune::{ScrollSpec, col};
+    /// let transcript = col().scroll(ScrollSpec::stick_bottom());
+    /// # let _ = transcript;
+    /// ```
+    pub const fn stick_bottom() -> Self {
+        Self { stick_bottom: true }
+    }
+}
+
+/// A scroll viewport's content-aware edges: `El::scroll_edge_fade`, `El::scroll_margin`,
+/// `El::scroll_anchor` and `El::no_scroll_anchor`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ScrollEdges {
     /// Fade width (points) for the top and bottom edges; 0 for none.
@@ -267,6 +407,9 @@ pub(crate) struct ScrollEdges {
     pub(crate) margin: f32,
     /// The viewport keeps its top row where it is when content above it changes.
     pub(crate) anchor: bool,
+    /// Excludes this element and its subtree from anchor selection, or disables automatic scroll
+    /// anchoring on a scroll viewport or virtual list (`El::no_scroll_anchor`).
+    pub(crate) no_anchor: bool,
 }
 
 /// The axes a scroll viewport moves on: `El::scroll` (vertical), `El::scroll_x`, `El::scroll_xy`.
@@ -285,5 +428,9 @@ impl ScrollAxes {
     pub(crate) fn has(self, horizontal: bool) -> bool { if horizontal { self.x() } else { self.y() } }
 }
 
-pub(crate) type AtBottomFn = Rc<dyn Fn(crate::states::States<'_>, bool)>;
+pub(crate) type AtBottomFn = Rc<dyn Fn(crate::states::States<'_>, bool) -> bool>;
 pub(crate) type VisibleRowsFn = Rc<dyn Fn(crate::states::States<'_>, std::ops::Range<usize>) -> bool>;
+
+#[cfg(test)]
+#[path = "scroll_tests.rs"]
+mod tests;

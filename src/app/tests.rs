@@ -266,7 +266,7 @@ fn window_layout_remembers_window_points_not_interface_zoom() {
     rt.state.resized = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
     rt.state.save_window_size();
     assert_eq!(rt.state.settings.window_size, Some([1200., 800.]));
-    rt.set_window_maximized(true);
+    rt.set_maximized(true);
     rt.set_viewport((1600., 1000.), 1.);
     for _ in 0..4 {
         rt.frame(1. / 60.);
@@ -290,7 +290,10 @@ fn a_full_screen_window_keeps_no_size_and_has_no_resize_edges() {
             .count()
     };
     assert_eq!(bands(&rt), 7);
-    rt.set_window_full_screen(true);
+    rt.pointer_down(2., 240.);
+    assert_eq!(rt.take_resize_action(), Some(rune::ResizeEdge::West));
+    rt.pointer_up(2., 240.);
+    rt.set_full_screen(true);
     rt.set_viewport((1920., 1080.), 1.);
     for t in 1..5 {
         rt.frame(f64::from(t));
@@ -301,7 +304,7 @@ fn a_full_screen_window_keeps_no_size_and_has_no_resize_edges() {
         "the screen's size is not the window's"
     );
     assert_eq!(bands(&rt), 0);
-    rt.set_window_full_screen(false);
+    rt.set_full_screen(false);
     rt.set_viewport((1100., 700.), 1.);
     for t in 5..9 {
         rt.frame(f64::from(t));

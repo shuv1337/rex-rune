@@ -1,7 +1,7 @@
 //! What a headless run was asked to do, for the app to read (`tooling::headless_run`).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::RwLock;
 
 use crate::edit::KeyEvent;
 
@@ -113,6 +113,9 @@ pub enum ScriptEvent {
     /// `{"type": "key-up"}`: a logical key's release.
     KeyUp(KeyEvent),
     Paste(String),
+    /// `{"type": "ime", "preedit": ., "cursor": [a, b]}` or `{"type": "ime", "commit": .}`: what an input
+    /// method composes or commits, as the platform's IME hands it over.
+    Ime(crate::Ime),
     /// A paste with HTML or RTF beside the text (`{"paste": {"text": …, "html": …}}`).
     PasteContent(crate::ClipboardContent),
     /// A registered global shortcut chord. Only its handler runs; it never reaches `on_key`.
@@ -120,12 +123,47 @@ pub enum ScriptEvent {
     /// A hardware key or modifier change (`{"physical": …}`).
     Physical(crate::PhysicalInput),
     Pointer { action: PointerAction, at: ScriptPoint },
+    /// `{"type": "pointer-motion", "dx": …, "dy": …}`: relative mouse motion while pointer lock
+    /// is held (`El::pointer_lock`, `Runtime::pointer_motion`).
+    ///
+    /// ```
+    /// # use rune::tooling::ScriptEvent;
+    /// # let event = ScriptEvent::PointerMotion { dx: 40.0, dy: -2.5 };
+    /// # assert!(
+    /// // JSON script event: {"t": 0.2, "type": "pointer-motion", "dx": 40, "dy": -2.5}
+    /// matches!(event, ScriptEvent::PointerMotion { dx, dy } if dx == 40.0 && dy == -2.5)
+    /// # );
+    /// ```
+    PointerMotion { dx: f32, dy: f32 },
     /// The window gaining (true) or losing focus.
     Focus(bool),
     /// `{"reopen": true}`: the app reopened, as a click on its macOS Dock icon does.
     Reopen,
+    /// `{"close_request": true}`: a user-initiated close request (`App::on_close_request`).
+    ///
+    /// ```
+    /// # use rune::tooling::ScriptEvent;
+    /// # let event = ScriptEvent::CloseRequest;
+    /// # assert!(
+    /// // JSON script event: {"t": 0.1, "close_request": true}
+    /// matches!(event, ScriptEvent::CloseRequest)
+    /// # );
+    /// ```
+    CloseRequest,
     /// `{"open_url": …}`: a link the system opened with the app (`App::on_open_url`).
     OpenUrl(String),
+    /// `{"open_files": […]}`: files the system opened with the app (`App::on_open_files`).
+    ///
+    /// ```
+    /// # use std::path::PathBuf;
+    /// # use rune::tooling::ScriptEvent;
+    /// # let event = ScriptEvent::OpenFiles(vec![PathBuf::from("a.torrent"), PathBuf::from("b.torrent")]);
+    /// # assert!(
+    /// // JSON script event: {"t": 0.1, "open_files": ["a.torrent", "b.torrent"]}
+    /// matches!(event, ScriptEvent::OpenFiles(ref paths) if paths.len() == 2)
+    /// # );
+    /// ```
+    OpenFiles(Vec<std::path::PathBuf>),
     /// `{"type": "resize", "dw": …, "dh": …, "dur": …}`: a person resizing the window, one step
     /// a frame, (dw, dh) points from its size when the resize began.
     Resize { dw: f32, dh: f32 },
@@ -136,6 +174,18 @@ pub enum ScriptEvent {
     /// `{"type": "file-dialog", "path": …}`: the file chosen in the open file dialog, or None
     /// for `{"type": "file-dialog-cancel"}`.
     FileDialog(Option<std::path::PathBuf>),
+    /// `{"type": "file-dialog", "paths": […]}`: the files chosen in a multi-file open dialog.
+    ///
+    /// ```
+    /// # use std::path::PathBuf;
+    /// # use rune::tooling::ScriptEvent;
+    /// # let event = ScriptEvent::FileDialogFiles(vec![PathBuf::from("/a.csv"), PathBuf::from("/b.csv")]);
+    /// # assert!(
+    /// // JSON script event: {"t": 0.2, "type": "file-dialog", "paths": ["/a.csv", "/b.csv"]}
+    /// matches!(event, ScriptEvent::FileDialogFiles(ref paths) if paths.len() == 2)
+    /// # );
+    /// ```
+    FileDialogFiles(Vec<std::path::PathBuf>),
     /// `{"drag_files": …}`: a file drag from another app moved over the window.
     DragFiles { paths: Vec<std::path::PathBuf>, at: ScriptPoint },
     /// `{"drop_files": …}`: files dropped on the window.
@@ -179,24 +229,115 @@ pub enum PointerAction {
 pub enum ScriptPoint {
     /// Points from the window's top-left.
     At(f32, f32),
-    /// The centre of the element with this key (or path suffix), found when the event runs.
+    /// The centre of the shown part of the element with this key (or path suffix), found when the
+    /// event runs: its box inside its ancestors' clips and the window. No part shown is an error.
     Element(String),
     /// An offset from the last pointer-down position (drags, the release of a tap).
     FromDown(f32, f32),
 }
 
-static RUN: AtomicPtr<HeadlessRun> = AtomicPtr::new(std::ptr::null_mut());
+static RUN: RwLock<Option<&'static HeadlessRun>> = RwLock::new(None);
 
 /// The headless run this process is rendering, or None in a window. Set before the app's
 /// state is created, so `init`, `setup`, views and handlers can read it; a `run_windows`
 /// factory runs too early to see it.
 pub fn headless_run() -> Option<&'static HeadlessRun> {
-    // SAFETY: only `publish` stores, and it stores leaked boxes that are never freed.
-    unsafe { RUN.load(Ordering::Acquire).as_ref() }
+    *RUN.read().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Makes `run` the process's headless run. Each run leaks its small description so earlier
 /// references stay valid; a process renders one run, or a few in tests.
 pub(crate) fn publish(run: HeadlessRun) {
-    RUN.store(Box::into_raw(Box::new(run)), Ordering::Release);
+    #[cfg(test)]
+    assert!(
+        TEST_TURN_HELD.with(std::cell::Cell::get),
+        "headless runs share the process-wide tooling::headless_run(); take tooling::headless_run::test_turn() before starting one in a test",
+    );
+    *RUN.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(run)));
+}
+
+#[cfg(test)]
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static TEST_TURN_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds the process-wide headless-run turn for a unit test and restores `RUN` on drop.
+#[cfg(test)]
+#[must_use = "hold the returned TestTurn for the duration of the headless test"]
+pub(crate) struct TestTurn {
+    prev: Option<&'static HeadlessRun>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestTurn {
+    fn drop(&mut self) {
+        *RUN.write().unwrap_or_else(|e| e.into_inner()) = self.prev;
+        TEST_TURN_HELD.with(|held| held.set(false));
+    }
+}
+
+/// Serializes unit tests that start a headless run or replace [`headless_run`].
+#[cfg(test)]
+pub(crate) fn test_turn() -> TestTurn {
+    let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    TEST_TURN_HELD.with(|held| held.set(true));
+    TestTurn { prev: headless_run(), _guard: guard }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_run(scale: f32, fps: f64, size: (f32, f32)) -> HeadlessRun {
+        HeadlessRun {
+            script: None,
+            events: Vec::new(),
+            scale,
+            fps,
+            size,
+            start: 0.0,
+            frames: 0,
+            end: 0.0,
+            desktop: None,
+            windows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    #[test]
+    fn publish_replaces_current_run_while_earlier_references_stay_valid() {
+        let _turn = test_turn();
+        publish(sample_run(1.0, 30.0, (320.0, 200.0)));
+        let first: &'static HeadlessRun = headless_run().expect("first run published");
+        assert_eq!((first.scale(), first.fps(), first.size()), (1.0, 30.0, (320.0, 200.0)));
+
+        publish(sample_run(2.0, 60.0, (640.0, 480.0)));
+        let second: &'static HeadlessRun = headless_run().expect("second run published");
+        assert_eq!((second.scale(), second.fps(), second.size()), (2.0, 60.0, (640.0, 480.0)));
+        assert_eq!((first.scale(), first.fps(), first.size()), (1.0, 30.0, (320.0, 200.0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "test_turn()")]
+    fn publish_without_test_turn_panics() {
+        publish(sample_run(1.0, 60.0, (100.0, 100.0)));
+    }
+
+    #[test]
+    fn test_turn_restores_previous_run_and_releases_on_drop() {
+        let before = {
+            let turn = test_turn();
+            let before = headless_run();
+            publish(sample_run(3.0, 120.0, (100.0, 50.0)));
+            assert_eq!(headless_run().unwrap().scale(), 3.0);
+            drop(turn);
+            before
+        };
+        assert!(!TEST_TURN_HELD.with(std::cell::Cell::get));
+        let _turn = test_turn();
+        assert_eq!(headless_run().map(|r| r as *const _), before.map(|r| r as *const _));
+    }
 }

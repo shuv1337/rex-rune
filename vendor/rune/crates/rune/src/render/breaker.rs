@@ -134,19 +134,41 @@ impl Breakers {
         health.step(&mut self.seq, event)
     }
 
-    /// Whether a check is waiting on the browser, which a later frame picks up.
+    /// Whether a check is waiting on the browser, which wakes the web host when answered.
     pub(super) fn checking(&self) -> bool {
         [&self.isolation, &self.plus_lighter, &self.layer_blur].iter().any(|h| matches!(h, Health::Checking { .. }))
+    }
+
+    /// Non-destructive check for whether any pending browser check already has an answer.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn has_answer(&self) -> bool {
+        [&self.isolation, &self.plus_lighter, &self.layer_blur].iter().any(|h| {
+            matches!(h, Health::Checking { answer, .. } if answer.lock().unwrap_or_else(|e| e.into_inner()).is_some())
+        })
     }
 }
 
 const FEATURES: [Feature; 3] = [Feature::Isolation, Feature::PlusLighter, Feature::LayerBlur];
 
 impl Renderer {
-    /// Whether a frame drew a fallback while the browser checks a pipeline; draw another soon, and
-    /// it draws with the pipeline if the device took it.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    pub(crate) fn checking_gpu(&self) -> bool { self.breakers.checking() }
+    /// Whether an async browser error-scope check (primary uber shader or lazy feature breaker)
+    /// is still waiting for `popErrorScope()` to resolve.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(crate) fn checking_gpu(&self) -> bool { self.breakers.checking() || self.uber_check.checking() }
+
+    /// Advances any lazy feature breakers whose async browser error-scope check has answered,
+    /// without encoding a GPU frame. Returns `true` when at least one breaker settled.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(crate) fn poll_breaker_checks(&mut self, device: &wgpu::Device) -> bool {
+        let mut settled = false;
+        for feature in FEATURES {
+            if let Some(answer) = self.breakers.health(feature).answered() {
+                self.run_breaker(device, feature, answer);
+                settled = true;
+            }
+        }
+        settled
+    }
 
     /// Takes the answers that came since the last frame, then builds what `wanted` needs.
     pub(super) fn check_features(&mut self, device: &wgpu::Device, wanted: impl Fn(Feature) -> bool) {
@@ -159,6 +181,7 @@ impl Renderer {
     /// The uber shader changed: the features built from it are built again, and checked again,
     /// when a frame next needs them.
     pub(super) fn shader_changed(&mut self, device: &wgpu::Device) {
+        self.effect_warm.shader_changed();
         for feature in [Feature::Isolation, Feature::PlusLighter] { self.run_breaker(device, feature, Event::ShaderChanged); }
     }
 
@@ -168,7 +191,15 @@ impl Renderer {
         while let Some(effect) = queue.pop_front() {
             match effect {
                 Effect::Build => {
-                    let verdict = checked(device, || self.build_feature(device, feature));
+                    #[cfg(target_arch = "wasm32")]
+                    let wake = self.uber_check_wake.clone();
+                    let verdict = self.harvest_warmed_feature(device, feature)
+                        .unwrap_or_else(|| {
+                            #[cfg(target_arch = "wasm32")]
+                            { checked(device, &wake, || self.build_feature(device, feature)) }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            { checked(device, || self.build_feature(device, feature)) }
+                        });
                     queue.extend(self.breakers.step(feature, Event::Built(verdict)));
                 }
                 Effect::Drop => self.drop_feature(feature),
@@ -178,8 +209,10 @@ impl Renderer {
     }
 
     fn build_feature(&mut self, device: &wgpu::Device, feature: Feature) {
+        // `Rgba8Snorm` never allows `RENDER_ATTACHMENT`, so every pipeline fails validation
+        // regardless of blend state or passthrough bytecode.
         #[cfg(test)]
-        let format = if self.breakers.refuse == Some(feature) { wgpu::TextureFormat::Rgba32Uint } else { FORMAT };
+        let format = if self.breakers.refuse == Some(feature) { wgpu::TextureFormat::Rgba8Snorm } else { FORMAT };
         #[cfg(not(test))]
         let format = FORMAT;
         match feature {
@@ -192,9 +225,13 @@ impl Renderer {
                 for format in formats { self.add_layer_format(device, format); }
             }
             Feature::PlusLighter => {
-                self.layers.additive = Some((
-                    Self::pipeline(device, &self.layout, &self.shader, format, self.vertex_entry, Blend::PlusLighter),
-                    Self::pipeline(device, &self.layout, &self.shader, format, "vs", Blend::PlusLighter)));
+                let primary = Self::pipeline(device, &self.layout, &self.shader, format, self.vertex_entry, Blend::PlusLighter);
+                let composite = if self.vertex_entry == "vs" {
+                    primary.clone()
+                } else {
+                    Self::pipeline(device, &self.layout, &self.shader, format, "vs", Blend::PlusLighter)
+                };
+                self.layers.additive = Some((primary, composite));
             }
             Feature::LayerBlur => self.layers.blur = Some(layer_blur::Pipeline::new(device, format)),
         }
@@ -213,29 +250,39 @@ impl Renderer {
     }
 }
 
+/// Runs `build` inside synchronous error scopes (`wgpu-core`, shared by native and WebGL2),
+/// unconditionally popping all three scopes in reverse order.
+fn checked_sync_scopes(device: &wgpu::Device, build: impl FnOnce()) -> Verdict {
+    let ((), errors) = rune_gpu::health::with_error_scopes(device, build);
+    let error = errors.internal.or(errors.memory).or(errors.validation);
+    Verdict::Now(error.map(|e| e.to_string()))
+}
+
 /// Runs `build` inside error scopes for validation, out-of-memory and internal errors.
 #[cfg(not(target_arch = "wasm32"))]
 fn checked(device: &wgpu::Device, build: impl FnOnce()) -> Verdict {
-    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
-    build();
-    let errors = [internal.pop(), memory.pop(), validation.pop()].map(pollster::block_on);
-    Verdict::Now(errors.into_iter().flatten().next().map(|e| e.to_string()))
+    checked_sync_scopes(device, build)
 }
 
 /// Runs `build` inside the browser's error scopes, which answer later. wgpu's own scopes would
-/// panic on an internal error (`platform::web::health`).
+/// panic on an internal error (`platform::web::health`). On WebGL2 (`wgpu-core`, no JS
+/// `GPUDevice`), wgpu's thread-local scopes resolve synchronously so refused optional pipelines
+/// (such as `Rgba16Float` layers where half-float render targets are absent) still fall back.
 #[cfg(target_arch = "wasm32")]
-fn checked(device: &wgpu::Device, build: impl FnOnce()) -> Verdict {
+fn checked(device: &wgpu::Device, wake: &super::shader_check::WakeSlot, build: impl FnOnce()) -> Verdict {
     let Some(scopes) = crate::platform::web::health::Scopes::push(device) else {
-        build();
-        return Verdict::Now(None);
+        return checked_sync_scopes(device, build);
     };
     build();
     let answer = Answer::default();
     let to = answer.clone();
-    scopes.pop(move |error| *to.lock().unwrap_or_else(|e| e.into_inner()) = Some(error));
+    let wake = wake.clone();
+    scopes.pop(move |error| {
+        *to.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+        if let Some(wake) = wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            wake();
+        }
+    });
     Verdict::Later(answer)
 }
 

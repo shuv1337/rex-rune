@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use parley::PositionedLayoutItem;
 
 use crate::color::{hex, srgb_encode};
-use crate::render::{Gpu, NO_CLIP, OFFSCREEN_FORMAT, Offscreen, Renderer};
+use crate::render::{Gpu, NO_CLIP, OFFSCREEN_FORMAT, OFFSCREEN_FORMAT_LINEAR, Offscreen, Renderer};
 use crate::text::{FontSmoothing, GlyphQuad, TextSystem};
 use crate::tok::{Family, TextStyle};
 
@@ -216,13 +216,13 @@ pub fn font_paths() -> [PathBuf; 2] {
 /// The system font file Rune loads for "System Font", when this machine has one.
 pub fn system_font_path() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") { return None; }
-    super::system_font_files(&["sfnsttf"]).into_iter().next()
+    crate::text::fonts::system_fonts::system_font_files(&["sfnsttf"]).into_iter().next()
 }
 
 /// The SF Mono file `Family::SystemMono` loads, when this machine has one.
 pub fn system_mono_path() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") { return None; }
-    super::system_font_files(&["sfnsmono"]).into_iter().find(|p| !p.to_string_lossy().to_lowercase().contains("italic"))
+    crate::text::fonts::system_fonts::system_font_files(&["sfnsmono"]).into_iter().find(|p| !p.to_string_lossy().to_lowercase().contains("italic"))
 }
 
 fn text_system() -> Result<TextSystem, String> {
@@ -330,7 +330,7 @@ pub fn layout_digest(set: Set, scale: f32) -> Result<String, String> {
 pub fn layout_file(set: Set) -> Result<String, String> {
     let mut out = String::new();
     for scale in SCALES {
-        let _ = writeln!(out, "{scale}x {}", layout_digest(set, scale)?);
+        writeln!(out, "{scale}x {}", layout_digest(set, scale)?).ok();
     }
     Ok(out)
 }
@@ -414,7 +414,7 @@ impl Harness {
         // The coverage exponent a window's paint applies, so the sheets are what an app draws.
         let exponent = self.text.coverage_exponent(fill);
         let instances: Vec<_> = quads.iter().map(|q| { let mut g = crate::runtime::glyph(q, fill, NO_CLIP, [0.0; 4]); g.params[3] = exponent; g }).collect();
-        let format = if srgb_blend { OFFSCREEN_FORMAT.remove_srgb_suffix() } else { OFFSCREEN_FORMAT };
+        let format = if srgb_blend { OFFSCREEN_FORMAT } else { OFFSCREEN_FORMAT_LINEAR };
         let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&self.gpu.device, format));
         renderer.set_format(&self.gpu.device, format);
         renderer.set_srgb_blend(srgb_blend);
@@ -566,7 +566,7 @@ pub fn run(o: Options, mut keep: impl FnMut(Pair, f32, &Image, &Image)) -> Resul
 }
 
 fn line(out: &mut String, label: &str, s: &Stats) {
-    let _ = writeln!(
+    writeln!(
         out,
         "{label:<28} {:>7.2}% {:>7.2}% {:>4} {:>8.3} {:>7.3}",
         100.0 * s.differing_share(),
@@ -574,7 +574,7 @@ fn line(out: &mut String, label: &str, s: &Stats) {
         s.max,
         s.meanabs(),
         s.ink_ratio()
-    );
+    ).ok();
 }
 
 /// The paragraph's stats for `pair` at `scale`, the report's headline numbers.
@@ -597,17 +597,17 @@ const HEAD: &str = "case                           differ       >8  max  meanabs
 pub fn table(o: &Options, rows: &[Row]) -> String {
     let mut out = String::new();
     let against = match o.reference() { Reference::Smoothed => "smoothing on", Reference::Unsmoothed => "smoothing off" };
-    let _ = writeln!(out, "{}: Rune {:?} ({} blending) vs CoreText with {against}", o.set.name(), o.smoothing(), if o.srgb_blend() { "sRGB" } else { "linear" });
+    writeln!(out, "{}: Rune {:?} ({} blending) vs CoreText with {against}", o.set.name(), o.smoothing(), if o.srgb_blend() { "sRGB" } else { "linear" }).ok();
     for scale in SCALES {
         for pair in o.reference().pairs() {
-            let _ = writeln!(out, "\n{} ({} on {}), {scale}x", pair.name, pair.fg, pair.bg);
+            writeln!(out, "\n{} ({} on {}), {scale}x", pair.name, pair.fg, pair.bg).ok();
             out += HEAD;
             for r in rows.iter().filter(|r| r.pair.name == pair.name && r.scale == scale) {
                 line(&mut out, &r.case.name, &r.stats);
             }
         }
     }
-    let _ = writeln!(out, "\nsummary: paragraph (report band) and all sample rows pooled");
+    writeln!(out, "\nsummary: paragraph (report band) and all sample rows pooled").ok();
     out += HEAD;
     for scale in SCALES.iter().rev() {
         for pair in o.reference().pairs() {

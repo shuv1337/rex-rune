@@ -145,6 +145,26 @@ impl El {
         }
         self
     }
+    /// Override the curve this element's own layout frame changes on, accepting any [`Anim`]
+    /// (a spring, a timed [`Curve::tween`](crate::Curve::tween), or [`Anim::INSTANT`]).
+    ///
+    /// Not inherited: descendants keep the commit's [`Tx::motion`](crate::Tx::motion) /
+    /// [`Tx::motion_curve`](crate::Tx::motion_curve) or their own [`motion`](Self::motion).
+    /// Overrides commit motion and skips [`lead`](Self::lead) / [`width_leads`](Self::width_leads)
+    /// on this element. Explicit instant/settle commits, [`instant_changes`](Self::instant_changes),
+    /// window resize steps and Reduce Motion still land immediately.
+    ///
+    /// ```
+    /// use rune::{Anim, Curve, Easing, el};
+    ///
+    /// let eased = el().key("bar").w(120.0).frame_motion(Curve::tween(0.24, Easing::EASE_OUT));
+    /// let snapped = el().key("label").frame_motion(Anim::INSTANT);
+    /// # let _ = (eased, snapped);
+    /// ```
+    pub fn frame_motion(mut self, anim: impl Into<Anim>) -> Self {
+        self.cold_mut().frame_motion = Some(Box::new(anim.into()));
+        self
+    }
     /// Override the curve this element's own opacity changes on, with an optional delay
     /// ([`AnimExt::delay`](crate::AnimExt::delay)). The first paint and explicit
     /// instant/settle transactions still land immediately. A new element's entrance runs on
@@ -182,10 +202,17 @@ impl El {
         self.flags.set(ElFlags::INSTANT_CHANGES, true);
         self
     }
+    /// Stop an ancestor's [`Self::instant_changes`] at this element: it and what it holds enter,
+    /// exit and change on their own motion again. A favicon that fades in as it loads, inside a
+    /// panel whose contents land at once.
+    pub fn animated_changes(mut self) -> Self {
+        self.cold_mut().animated_changes = true;
+        self
+    }
     /// How this element enters and exits when mounted or removed after the first frame
-    /// (default: [`Transition::opacity()`] — a 0.2 s enter and 0.15 s exit fade). Because
+    /// (default: [`Transition::opacity()`] — `SETTLE`: a 0.3 s enter and 0.24 s exit fade). Because
     /// every element has this default fade, removing an element in an animated commit
-    /// (`AppSpec::on_key`, `El::on_key`, `on_submit`, `on_press`) fades it out over 0.15 s,
+    /// (`AppSpec::on_key`, `El::on_key`, `on_submit`, `on_press`) fades it out over 0.24 s,
     /// whereas commits that set [`Tx::instant`] or [`Tx::settle`] (such as typing in a
     /// focused input or clicking into a text field) unmount removed elements in the same
     /// frame. Call `tx.instant()` or `tx.settle()` in the handler when a key or button
@@ -193,8 +220,62 @@ impl El {
     /// open unless they set one, so `.transition(Transition::offset(0.0, 8.0).combined(Transition::opacity()))`
     /// on a row also slides and fades it in. Rows a virtual list remounts on scroll never replay it.
     /// [`enter_delay`](Self::enter_delay) holds the whole entrance, as a staggered list does.
+    ///
+    /// Motion has a cause, in every window an app opens: an entrance or exit plays only in a commit an input in this window
+    /// caused (a click, a key, a drag, a hover, a scroll). A commit nothing in the window's input
+    /// asked for (a poll, a wake, data a server brought, a launch's frames after the first)
+    /// applies as an instant one does: it mounts and unmounts at once, its layout lands (a
+    /// container that grows to fit what arrived doesn't ease), rows new to a growth stack land at
+    /// their height, and text it mounts shows whole. Motion already running keeps running, and
+    /// streaming growth and loops keep moving. A handler that means the motion anyway calls
+    /// [`Tx::animated`](crate::Tx::animated).
     pub fn transition(mut self, t: Transition) -> Self {
         self.cold_mut().transition = Some(Box::new(t));
+        self
+    }
+    /// Override the enter and exit curves for this element's presence [`transition`](Self::transition),
+    /// accepting any [`Anim`] (including timed [`Curve::tween`](crate::Curve::tween) curves and
+    /// [`Anim::INSTANT`]) in place of `Transition::springs`.
+    ///
+    /// Instant/settle commits still mount and unmount at once, and Reduce Motion applies to
+    /// presence tracks as usual (timed curves reduce to a short crossfade; [`Anim::INSTANT`]
+    /// stays instant).
+    ///
+    /// ```
+    /// use rune::{Curve, Easing, Transition, el};
+    ///
+    /// let menu = el()
+    ///     .key("menu")
+    ///     .transition(Transition::opacity())
+    ///     .transition_motion(
+    ///         Curve::tween(0.16, Easing::EASE_OUT),
+    ///         Curve::tween(0.11, Easing::EASE_IN),
+    ///     );
+    /// # let _ = menu;
+    /// ```
+    pub fn transition_motion(mut self, enter: impl Into<Anim>, exit: impl Into<Anim>) -> Self {
+        self.cold_mut().transition_motion = Some(Box::new((enter.into(), exit.into())));
+        self
+    }
+    /// Play this element's entrance [`transition`](Self::transition) even in a
+    /// [`Tx::instant`](crate::Tx::instant) commit, while its layout still snaps immediately and
+    /// removals in an instant commit still unmount at once.
+    ///
+    /// First frames, [`Tx::settle`](crate::Tx::settle), concealing commits, unprompted commits,
+    /// ancestor [`instant_changes`](Self::instant_changes), virtual-list remounts and off-screen
+    /// mounts still land immediately; Reduce Motion applies to the entrance transition as usual.
+    ///
+    /// ```
+    /// use rune::{Transition, el};
+    ///
+    /// let dialog = el()
+    ///     .key("dialog")
+    ///     .transition(Transition::scale(0.95).combined(Transition::opacity()))
+    ///     .enter_in_instant();
+    /// # let _ = dialog;
+    /// ```
+    pub fn enter_in_instant(mut self) -> Self {
+        self.cold_mut().enter_in_instant = true;
         self
     }
     /// Shared-element motion (SwiftUI `matchedGeometryEffect`, Motion `layoutId`). When an
@@ -216,6 +297,27 @@ impl El {
         self.cold_mut().matched = Some(Rc::from(id.into()));
         self
     }
+    /// Override the curve this [`matched`](Self::matched) element flies on, accepting any
+    /// [`Anim`] (a spring, a timed [`Curve::tween`](crate::Curve::tween), or [`Anim::INSTANT`]).
+    ///
+    /// Drives the flight's geometry, corner radius, fill and opacity interpolation, overriding
+    /// [`Tx::motion`](crate::Tx::motion), [`Tx::motion_curve`](crate::Tx::motion_curve) and
+    /// [`motion`](Self::motion). Under Reduce Motion or instant/settle commits, nothing is
+    /// matched as usual.
+    ///
+    /// ```
+    /// use rune::{Curve, Easing, el};
+    ///
+    /// let pill = el()
+    ///     .key("active-pill")
+    ///     .matched("active-pill")
+    ///     .matched_motion(Curve::tween(0.18, Easing::EASE_OUT));
+    /// # let _ = pill;
+    /// ```
+    pub fn matched_motion(mut self, anim: impl Into<Anim>) -> Self {
+        self.cold_mut().matched_motion = Some(Box::new(anim.into()));
+        self
+    }
     /// While this [`matched`](Self::matched) element flies, its children keep their final
     /// layout at their own size, from the moving frame's leading edge and centred on its
     /// height, cropped to it, rather than scaled to cover it: for a row whose width changes as
@@ -223,6 +325,29 @@ impl El {
     /// would otherwise scale up or slide off its leading edge.
     pub fn matched_crop(mut self) -> Self {
         self.vis.cold_mut().flight_crop = true;
+        self
+    }
+    /// Keep this [`matched`](Self::matched) element in its destination's paint order and
+    /// ancestor compositing layers (clips, rounded clips, opacity, blur and turns) while it
+    /// flies, instead of lifting it above the whole window.
+    ///
+    /// Matches SwiftUI `matchedGeometryEffect` hierarchy z-order: a sliding segmented-control
+    /// selection pill stays behind labels painted after it in the same container, and hit
+    /// testing follows the same order. Under Reduce Motion nothing is matched, as with
+    /// [`matched`](Self::matched).
+    ///
+    /// ```
+    /// use rune::{Color, el};
+    ///
+    /// let pill = el()
+    ///     .key("seg-pill")
+    ///     .matched("seg-pill")
+    ///     .matched_in_place()
+    ///     .fill(Color::WHITE);
+    /// # let _ = pill;
+    /// ```
+    pub fn matched_in_place(mut self) -> Self {
+        self.vis.cold_mut().flight_in_place = true;
         self
     }
     /// When an animated commit changes this element's width (a side panel springing open
@@ -254,8 +379,12 @@ impl El {
         self.cold_mut().trace_namespace = Some((class, host));
         self
     }
-    /// A finite opacity/scale sequence on the shared render clock. The final pose holds;
-    /// reduced motion and explicit settle land it immediately. A new key replays it.
+    /// An opacity, scale, translate and rotate keyframe sequence ([`Beat`](rune_motion::Beat))
+    /// on the shared render clock: one-shot by default
+    /// (holding its final pose, landing immediately under Reduce Motion or explicit settle; a new
+    /// key replays it), or looping continuously with
+    /// [`Sequence::repeating`](rune_motion::Sequence::repeating) (holding its calm first pose
+    /// under Reduce Motion and cooling smoothly on removal).
     pub fn sequence(self, frames: rune_motion::Sequence) -> Self {
         self.looping(rune_motion::LoopSpec::sequence(frames))
     }
@@ -263,6 +392,33 @@ impl El {
     /// A renderer-owned periodic or finite presentation track, on the shared clock.
     pub fn looping(mut self, spec: rune_motion::LoopSpec) -> Self {
         self.cold_mut().looping = Some(Box::new(spec));
+        self
+    }
+
+    /// Play a slide loop ([`LoopSpec::slide`](rune_motion::LoopSpec::slide)) `times` periods and
+    /// then rest at its end pose (`to`) instead of repeating forever, matching CSS
+    /// `animation-iteration-count` with `animation-fill-mode: forwards`.
+    ///
+    /// Under Reduce Motion, a finite slide lands immediately at its end pose rather than holding
+    /// its midpoint; `0` rests immediately at `to` with no active frames. Use a new element
+    /// [`key`](Self::key) to replay it. Only slide loops take a count; other loop kinds ignore it
+    /// (matching [`LoopSpec::easing`](rune_motion::LoopSpec::easing)). May be called before or
+    /// after [`Self::looping`].
+    ///
+    /// ```
+    /// use rune::{Easing, LoopSpec, el};
+    ///
+    /// let sweep = el()
+    ///     .key("shimmer-1")
+    ///     .looping(LoopSpec {
+    ///         delay: 0.08,
+    ///         ..LoopSpec::slide(0.55, [-1.0, 0.0], [2.0, 0.0]).easing(Easing::LINEAR)
+    ///     })
+    ///     .loop_times(1);
+    /// # let _ = sweep;
+    /// ```
+    pub fn loop_times(mut self, times: u32) -> Self {
+        self.cold_mut().loop_times = Some(times);
         self
     }
 }

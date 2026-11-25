@@ -336,7 +336,9 @@ impl Workspace {
         }
         // Rune supplies Tx focus for input handlers, but not AppHandle::update.
         // Remote requests arrive through the latter, so inspect mounted search editors too.
-        let field_focused = tx.focused().is_some()
+        let field_focused = tx
+            .focused()
+            .is_some_and(|key| key != super::input::TERMINAL_FOCUS)
             || self.model().window().is_some_and(|window| {
                 rex_rune::layout::placements(window, None)
                     .0

@@ -43,14 +43,18 @@ pub(crate) const FRAME_KEY: &str = "rune-frame";
 /// The row of caption buttons in it.
 pub(crate) const BUTTONS_KEY: &str = "rune-caption";
 
-/// The buttons pinned to the frame's top-right corner, over everything the view drew.
+/// The buttons pinned to the frame's top-right corner (top-left mirrored), over everything the
+/// view drew.
 fn buttons(caption: &Caption, symbol: Color, scale: f32, zoom: f32) -> El {
     // Sized in window points at the window's scale, then drawn in the view's points.
     let window = scale / zoom;
     let (w, h) = size(caption.height, window);
     let (w, h) = (w / zoom, h / zoom);
-    row().key(BUTTONS_KEY).pin(None, Some(0.0), Some(0.0), None)
-        .children(caption.buttons().iter().map(|&button| caption_button(caption, button, symbol, (w, h), (scale, window))))
+    // Mirrored, the row sits at the top-left with Close first (`Caption::rects`).
+    let (left, right) = if caption.mirrored { (Some(0.0), None) } else { (None, Some(0.0)) };
+    let buttons: Vec<El> = caption.buttons().iter().map(|&button| caption_button(caption, button, symbol, (w, h), (scale, window))).collect();
+    let buttons = if caption.mirrored { buttons.into_iter().rev().collect() } else { buttons };
+    row().key(BUTTONS_KEY).dir(crate::Direction::Ltr).pin(left, Some(0.0), right, None).children(buttons)
 }
 
 fn caption_button(caption: &Caption, button: CaptionButton, symbol: Color, (w, h): (f32, f32), scales: (f32, f32)) -> El {
@@ -69,10 +73,10 @@ fn caption_button(caption: &Caption, button: CaptionButton, symbol: Color, (w, h
         _ => (Color::TRANSPARENT, symbol),
     };
     let (key, label) = match button {
-        CaptionButton::Minimize => ("rune-caption-minimize", "Minimize"),
-        CaptionButton::Maximize if caption.maximized => ("rune-caption-maximize", "Restore"),
-        CaptionButton::Maximize => ("rune-caption-maximize", "Maximize"),
-        CaptionButton::Close => ("rune-caption-close", "Close"),
+        CaptionButton::Minimize => ("rune-caption-minimize", caption_label(crate::Label::Minimize)),
+        CaptionButton::Maximize if caption.maximized => ("rune-caption-maximize", caption_label(crate::Label::Restore)),
+        CaptionButton::Maximize => ("rune-caption-maximize", caption_label(crate::Label::Maximize)),
+        CaptionButton::Close => ("rune-caption-close", caption_label(crate::Label::Close)),
     };
     let mut e = el().key(key).role("button").label(label).focusable(false).disabled(!enabled).size(w, h).fill(fill)
         .child(symbol_el(button, caption.maximized, ink, (w, h), scales));
@@ -82,10 +86,19 @@ fn caption_button(caption: &Caption, button: CaptionButton, symbol: Color, (w, h
         e.handlers.on_press = Some(Rc::new(move |_, tx: &mut crate::Tx| match button {
             CaptionButton::Minimize => tx.minimize(),
             CaptionButton::Maximize => tx.toggle_maximized(),
-            CaptionButton::Close => tx.close_window(),
+            CaptionButton::Close => tx.request_user_close(),
         }));
     }
     e
+}
+
+/// Resolves a caption button's accessible name through [`crate::set_labels`], falling back to
+/// English if the app returns `None` or a blank string so the button never becomes unnamed in
+/// assistive technology.
+fn caption_label(label: crate::Label<'_>) -> String {
+    crate::labels::named(label)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::labels::english(label))
 }
 
 /// The symbol, laid out in device pixels so its strokes land on whole pixels: `scale` is device

@@ -388,7 +388,7 @@ fn pane_card(
                     .terminal
                     .cursor_force
                     .then(|| s.settings.terminal.cursor_style.shape()),
-                ime: keyboard && !s.copy_mode_on(&key),
+                ime: (keyboard && !s.copy_mode_on(&key)).then(|| s.terminal_option_as_alt()),
                 colors,
             };
             let (k1, k2, k3) = (key.clone(), key.clone(), key.clone());
@@ -791,22 +791,15 @@ fn pane_card(
         Some(strip) => c.child(strip.pin(None, Some(8.), Some(12.), None)),
         None => c,
     };
-    let c = if !headed && !searching && s.settings.pane_header == PaneHeader::OnHover {
-        c.child(pane_header::reveal_band(
-            block,
-            pane_header::clearance(s, rect),
-        ))
+    let top = pane_header::clearance(s, rect);
+    let floating = (placement == Placement::Floating)
+        .then(|| pane_header::floating(header(s, window, block, rect[2], focused, m), !bleed, top));
+    if !headed && !searching && s.settings.pane_header == PaneHeader::OnHover {
+        // A hover band only sees its own target or descendants. The floating
+        // header stays inside it so showing it does not report a hover leave.
+        c.child(pane_header::reveal_band(block, top).children(floating))
     } else {
-        c
-    };
-    if placement == Placement::Floating {
-        c.child(pane_header::floating(
-            header(s, window, block, rect[2], focused, m),
-            !bleed,
-            pane_header::clearance(s, rect),
-        ))
-    } else {
-        c
+        c.children(floating)
     }
 }
 

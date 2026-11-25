@@ -109,6 +109,12 @@ pub(crate) fn warnings(root: &El) -> Vec<String> {
 /// already taken, so the first keeps its key. Returns each renamed index with its old key.
 pub(crate) fn rename_duplicates<'a>(keys: impl Iterator<Item = &'a mut String>) -> Vec<(usize, String)> {
     let mut keys: Vec<&mut String> = keys.collect();
+    // Unique keys, the usual case, are found so by borrowing them: no copy of each.
+    let mut seen: crate::runtime::HashSet<&str> = crate::runtime::HashSet::with_capacity_and_hasher(keys.len(), Default::default());
+    if keys.iter().all(|k| seen.insert(k.as_str())) {
+        return Vec::new();
+    }
+    drop(seen);
     let mut taken: HashSet<String> = keys.iter().map(|k| k.to_string()).collect();
     let mut kept: HashSet<String> = HashSet::new();
     let mut renamed = Vec::new();
@@ -197,8 +203,8 @@ mod tests {
         fn memo(key: &str, children: Vec<El>) -> El {
             let mut root = el().key(key);
             let duplicate_keys = memo_children_have_duplicates(&root, &children);
-            let children = std::rc::Rc::new(crate::memo::Shared { children, focused_input: false, duplicate_keys, has_virtual: false, reusable: false });
-            root.memo = Some(std::rc::Rc::new(crate::memo::Built { id: 0, reusable: false, root: el(), children }));
+            let children = std::rc::Rc::new(crate::memo::Shared { children, focused_input: false, duplicate_keys, has_virtual: false, reusable: false, has_path_bind: false });
+            root.memo = Some(std::rc::Rc::new(crate::memo::Built { id: 0, reusable: false, has_path_bind: false, region: false, root: el(), children }));
             root
         }
         let clean_memo = || memo("a", vec![el().key("x"), el().key("y").child(el().key("z"))]);
@@ -229,7 +235,7 @@ mod tests {
         let mut tree = col().key("root").children([col().key("rows").children((0..3700).map(row)), el().key("footer")]);
         assert!(repair(&mut tree).is_empty());
         let before = crate::tooling::test_alloc::allocs();
-        let t = std::time::Instant::now();
+        let t = crate::time::now();
         assert!(repair(&mut tree).is_empty());
         let elapsed = t.elapsed();
         assert_eq!(crate::tooling::test_alloc::allocs() - before, 0);

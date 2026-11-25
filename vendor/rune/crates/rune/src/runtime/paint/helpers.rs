@@ -2,13 +2,13 @@
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn emit_block_decorations(
+pub(in crate::runtime) fn emit_block_decorations(
     instances: &mut Vec<Instance>,
     text_sys: &mut TextSystem,
     images: &mut crate::pixels::ImageAtlas,
     glyph_scratch: &mut Vec<crate::text::GlyphQuad>,
     spec: &TextSpec,
-    layout: &Layout<Ink>,
+    layout: TextFlow<'_>,
     origin: [f32; 2],
     (x0, x1): (f32, f32),
     s: f32,
@@ -60,18 +60,13 @@ pub(super) fn emit_block_decorations(
     };
 
     let mut had_lines = false;
-    for line in layout.lines() {
+    for line in layout.block_lines(spec.style.line_px() * s) {
         had_lines = true;
-        let m = line.metrics();
         let blk = spec.cold.blocks.get(para_idx).copied().unwrap_or(Block::Paragraph);
         let is_soft = spec.cold.soft_breaks.binary_search(&(para_idx as u32)).is_ok();
-        let top = origin[1] + m.block_min_coord * tk;
-        let bot = if m.block_max_coord > m.block_min_coord {
-            origin[1] + m.block_max_coord * tk
-        } else {
-            top + line_h_default
-        };
-        let baseline = origin[1] + m.baseline * tk;
+        let top = origin[1] + line.top * tk;
+        let bot = origin[1] + line.bottom * tk;
+        let baseline = origin[1] + line.baseline * tk;
 
         if blk == Block::Code {
             flush_quote(instances, &mut quote_run);
@@ -122,7 +117,7 @@ pub(super) fn emit_block_decorations(
             }
         }
 
-        if line.break_reason() == parley::BreakReason::Explicit {
+        if line.last {
             para_idx += 1;
             first_line_of_para = true;
         } else {
@@ -195,19 +190,82 @@ pub(super) fn emit_block_decorations(
     }
 }
 
+/// Full-width line background fills and left bars ([`El::line_fills`]) under glyphs.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::runtime) fn emit_line_fills(
+    instances: &mut Vec<Instance>,
+    fills: &[crate::el::LineFill],
+    spec: &TextSpec,
+    layout: TextFlow<'_>,
+    origin: [f32; 2],
+    (x0, x1): (f32, f32),
+    s: f32,
+    tk: f32,
+    glide: [f32; 2],
+    o: f32,
+    srgb: bool,
+    clip: [f32; 4],
+    fade: [f32; 4],
+) {
+    let box_w = (x1 - x0).max(layout.full_width() * tk);
+    if box_w <= 0.0 || fills.is_empty() {
+        return;
+    }
+    let line_px = spec.style.line_px() * s;
+    for &fill in fills {
+        if !fill.is_visible() {
+            continue;
+        }
+        let Some((t0, b0)) = layout.line_span(fill.start as usize, fill.end as usize, line_px) else {
+            continue;
+        };
+        let top = origin[1] + t0 * tk;
+        let bot = origin[1] + b0 * tk;
+        let height = bot - top;
+        if height <= 0.0 || top + glide[1] >= clip[3] || bot + glide[1] <= clip[1] {
+            continue;
+        }
+        if let Some(bg) = fill.bg {
+            let radius = (fill.radius * s * tk).min(box_w.min(height) * 0.5);
+            instances.push(rect_inst(
+                [x0 + glide[0], top + glide[1], box_w, height],
+                premul(bg, o, srgb),
+                radius,
+                clip,
+                fade,
+            ));
+        }
+        if let Some((width, color)) = fill.left_bar {
+            let bar_w = if tk == 1.0 { (width * s).round().max(1.0) } else { (width * s * tk).max(1.0 * tk) };
+            let inset_y = (if tk == 1.0 { (2.0 * s).round() } else { 2.0 * s * tk }).min(height * 0.25);
+            let bar_h = (height - 2.0 * inset_y).max(1.0).min(height);
+            instances.push(rect_inst(
+                [x0 + glide[0], top + inset_y + glide[1], bar_w, bar_h],
+                premul(color, o, srgb),
+                bar_w * 0.5,
+                clip,
+                fade,
+            ));
+        }
+    }
+}
+
 /// Pixel caret and logical-point IME area use the same shaped cursor geometry.
-pub(super) fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, gliding: bool, scrolls: &mut HashMap<String, f32>) -> Option<([f32; 4], [f32; 4])> {
-    let (spec, layout, input) = (n.text.as_ref()?, n.text_layout.as_ref()?, n.input.as_ref()?);
+pub(in crate::runtime) fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, gliding: bool, scrolls: &mut HashMap<String, f32>) -> Option<([f32; 4], [f32; 4])> {
+    let (spec, laid, input) = (n.text.as_ref()?, n.text_layout.as_ref()?, n.input.as_ref()?);
+    let layout = laid.view();
     let e = &input.edit;
     let ins = n.inset.map(|v| v * scale * s);
     let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
+    let (y0, y1) = (r[1] + ins[1], r[3] - ins[3]);
     // The text scales with its box, so the caret does too.
-    let mut x = text_x(spec, x0, x1, (layout.full_width() * scale).ceil(), crate::el::Flow::of_layout(layout));
-    if input.single_line { x -= single_line_scroll(scrolls, &n.path, input, &spec.content, layout, s, (x1 - x0) / scale.max(1e-4)) * scale; }
-    let ci = caret_index(e, &spec.content);
-    let cur = Cursor::from_byte_index(layout, ci, Affinity::Downstream);
-    let bb = crate::text::cursor_geometry(&cur, layout, 1.5 * s);
-    let (cx, cy) = (x + bb.x0 as f32 * scale, r[1] + ins[1] + bb.y0 as f32 * scale);
+    let mut x = text_x(spec, x0, x1, text_width(layout.full_width() * scale), layout.flow());
+    let y = text_y(spec, y0, y1, text_height(spec, layout, s) * scale);
+    if input.single_line && let Some(l) = laid.single() {
+        x -= single_line_scroll(scrolls, &n.path, input, &spec.content, l, s, (x1 - x0) / scale.max(1e-4)) * scale;
+    }
+    let bb = layout.caret(caret_index(e, &spec.content), e.affinity, 1.5 * s);
+    let (cx, cy) = (x + bb.x0 as f32 * scale, y + bb.y0 as f32 * scale);
     let h = (if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { spec.style.line_px() * s }) * scale;
     let (caret_x, caret_w) = if (scale - 1.0).abs() <= 1e-5 {
         let gx = if gliding { pixel_snap::text_glide(r[0]) } else { 0.0 };
@@ -215,23 +273,36 @@ pub(super) fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, gliding: bo
     } else {
         (cx, (1.5 * s * scale).max(1.0))
     };
-    Some(([caret_x, cy + h * 0.1, caret_w, h * 0.8], [cx / s, cy / s, 2.0 * scale, h / s]))
+    // The candidate window opens under the clause being converted, its left edge at the
+    // clause's start, as it does in a native field; else at the caret.
+    let area = match (e.preedit_target(), e.range().0) {
+        (Some((ta, tb)), at) => {
+            let len = spec.content.len();
+            let (a, b) = (layout.caret((at + ta).min(len), e.affinity, 0.0), layout.caret((at + tb).min(len), e.affinity, 0.0));
+            let (ax, ay) = (x + a.x0 as f32 * scale, y + a.y0 as f32 * scale);
+            let w = if (b.y0 - a.y0).abs() < 0.5 && b.x0 > a.x0 { (b.x0 - a.x0) as f32 * scale } else { 2.0 * scale * s };
+            [ax / s, ay / s, w / s, h / s]
+        }
+        (None, _) => [cx / s, cy / s, 2.0 * scale, h / s],
+    };
+    Some(([caret_x, cy + h * 0.1, caret_w, h * 0.8], area))
 }
 
 /// Whether `looping`'s sampled value multiplies the element's opacity.
-pub(super) fn fades(looping: Option<rune_motion::LoopSpec>) -> bool {
+pub(in crate::runtime) fn fades(looping: Option<rune_motion::LoopSpec>) -> bool {
     matches!(looping.map(|l| l.kind), Some(rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_)))
 }
 
 /// How many separate things node `n` paints itself (fill, border, gradient, shape, image,
 /// shadows, words), which can lie one over another.
-pub(super) fn own_paints(n: &Node) -> usize {
+pub(in crate::runtime) fn own_paints(n: &Node) -> usize {
     let v = &n.vis;
     [
-        v.fill.a > 0.0,
-        v.border_width() > 0.0 && (v.border().a > 0.0 || v.border_bottom.is_some()),
+        v.fill.a > 0.0 || v.hover_fill.is_some_and(|c| c.a > 0.0) || v.press_fill.is_some_and(|c| c.a > 0.0),
+        v.border_width() > 0.0 && (v.border().a > 0.0 || v.border_bottom.is_some() || v.hover_border.is_some_and(|c| c.a > 0.0) || v.press_border.is_some_and(|c| c.a > 0.0)),
         v.gradient.is_some() || v.radial.is_some() || v.surface.is_some(),
         v.shape.is_some(),
+        v.grid.is_some(),
         v.pixels.is_some(),
         !v.shadows.is_empty(),
         n.text.is_some(),
@@ -242,7 +313,7 @@ pub(super) fn own_paints(n: &Node) -> usize {
 /// corner `radii` `[tl, tr, br, bl]`, so that rounding the mask's corners can't touch it. The
 /// mask is convex, so it's enough that `rect`'s corners are inside; a continuous corner counts
 /// as its whole corner square.
-pub(super) fn inside_rounded(rect: [f32; 4], mask: [f32; 4], radii: [f32; 4]) -> bool {
+pub(in crate::runtime) fn inside_rounded(rect: [f32; 4], mask: [f32; 4], radii: [f32; 4]) -> bool {
     const AA: f32 = 1.0;
     if rect[2] <= rect[0] || rect[3] <= rect[1] { return true; }
     if rect[0] < mask[0] || rect[1] < mask[1] || rect[2] > mask[2] || rect[3] > mask[3] { return false; }
@@ -258,13 +329,13 @@ pub(super) fn inside_rounded(rect: [f32; 4], mask: [f32; 4], radii: [f32; 4]) ->
 }
 
 /// `rect` (x, y, w, h) magnified `k` times from `r_origin` to `origin`.
-pub(super) fn scale_about(rect: [f32; 4], origin: [f32; 2], r_origin: [f32; 2], k: f32) -> [f32; 4] {
+pub(in crate::runtime) fn scale_about(rect: [f32; 4], origin: [f32; 2], r_origin: [f32; 2], k: f32) -> [f32; 4] {
     [origin[0] + (rect[0] - r_origin[0]) * k, origin[1] + (rect[1] - r_origin[1]) * k, rect[2] * k, rect[3] * k]
 }
 
 /// A glyph instance drawn `k` times its rasterized size about `origin`. An alpha glyph keeps
 /// its atlas footprint in `uv.zw`, so the shader samples it filtered.
-pub(super) fn zoom_glyph(mut g: Instance, origin: [f32; 2], r_origin: [f32; 2], k: f32) -> Instance {
+pub(in crate::runtime) fn zoom_glyph(mut g: Instance, origin: [f32; 2], r_origin: [f32; 2], k: f32) -> Instance {
     if k == 1.0 && origin == r_origin { return g; }
     if g.params[1] == KIND_GLYPH && g.radii[3] > 0.0 {
         // An outline glyph (`text::Outline`) magnifies its pen and pixel instead of its mask.
@@ -284,7 +355,7 @@ pub(super) fn zoom_glyph(mut g: Instance, origin: [f32; 2], r_origin: [f32; 2], 
 
 /// A text glyph's instance: alpha-atlas coverage tinted by `fill`, or a colour glyph's image
 /// at `fill`'s alpha. None when the image atlas can't place it.
-pub(super) fn glyph_or_image(q: &GlyphQuad, text: &TextSystem, images: &mut crate::pixels::ImageAtlas, fill: [f32; 4], clip: [f32; 4], fade: [f32; 4]) -> Option<Instance> {
+pub(in crate::runtime) fn glyph_or_image(q: &GlyphQuad, text: &TextSystem, images: &mut crate::pixels::ImageAtlas, fill: [f32; 4], clip: [f32; 4], fade: [f32; 4]) -> Option<Instance> {
     if q.color == 0 {
         let mut g = glyph(q, fill, clip, fade);
         g.params[3] = text.coverage_exponent(fill);
@@ -303,7 +374,7 @@ pub(super) fn glyph_or_image(q: &GlyphQuad, text: &TextSystem, images: &mut crat
     })
 }
 
-pub(super) fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: [f32; 4]) -> Instance {
+pub(in crate::runtime) fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: [f32; 4]) -> Instance {
     Instance {
         rect,
         radii: [radius; 4],
@@ -314,4 +385,28 @@ pub(super) fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32;
         clip,
         fade: crate::render::pack_fade(fade, clip, clip),
     }
+}
+
+/// A misspelled word's marker: Chromium's red, on macOS a row of dots and elsewhere a wavy line.
+/// (Linear light: #FF3B30 on macOS, #FF0000 elsewhere.)
+pub(in crate::runtime) const SPELLING: Color = if cfg!(target_os = "macos") { Color { r: 1.0, g: 0.0437, b: 0.0296, a: 1.0 } } else { Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 } };
+
+/// The spelling marker from device x `x0` to `x1`, its top at `y`, `k` device px a point: on
+/// macOS 3 pt dots every 4 pt, elsewhere Chromium's 1 pt line waving 2 pt down and back every 6 pt.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::runtime) fn push_spelling_marker(out: &mut Vec<Instance>, x0: f32, x1: f32, y: f32, k: f32, color: [f32; 4], clip: [f32; 4], fade: [f32; 4]) {
+    if cfg!(target_os = "macos") {
+        let (d, step) = (3.0 * k, 4.0 * k);
+        let count = ((x1 - x0 - d) / step).floor().max(0.0) as usize + 1;
+        let x = x0 + ((x1 - x0) - (count - 1) as f32 * step - d) / 2.0;
+        out.extend((0..count).map(|n| rect_inst([x + n as f32 * step, y, d, d], color, d / 2.0, clip, fade)));
+        return;
+    }
+    const WAVE: [f32; 6] = [0.0, 1.0, 2.0, 2.0, 1.0, 0.0];
+    let t = k.max(1.0).round();
+    let start = x0.round();
+    out.extend((0..(x1.round() - start).max(0.0) as usize).map(|n| {
+        let wave = WAVE[(n as f32 / k) as usize % WAVE.len()];
+        rect_inst([start + n as f32, (y + wave * k).round(), 1.0, t], color, 0.0, clip, fade)
+    }));
 }

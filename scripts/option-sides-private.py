@@ -9,18 +9,16 @@ group. The session's only pane runs a raw-mode byte dumper instead of a shell, w
 ZDOTDIR and HISTFILE on the private folder, so no shell history is written. The user's own
 server, settings, state and keyboard settings are never touched.
 
-The keys go in through Rune's --script, as the window delivers them after winit has applied the
-Option setting: from an Option that sends Alt, the key's own character with Alt; from one that
-composes, the composed character with Alt. Each carries the Option keys held ("alt_side"), from
-which the client decides, per key, whether Option composed. What winit itself does with real
-NSEvents (rewriting a key from an Option that sends Alt before AppKit sees it) is not exercised.
+Use a Mac already on the U.S. layout and follow the prompts with native keyboard input.
+Rune's headless scripts do not express native Option-side or consumed-modifier metadata.
 
 Checks, for Left sends Alt and its mirror Right sends Alt, of the bytes the program reads:
 1. The Option that sends Alt with B: ESC b.
 2. The other Option with B, composed as ∫ on U.S.: the UTF-8 of ∫.
 3. Both Options with B: ESC b.
 4. The composing Option with the left arrow: ESC [1;3D, Alt in every mode.
-5. A control: the left Option's B under Composes characters is plain b.
+5. Shift with the Alt side and B: ESC B, not bare B.
+6. A control: Left Option+B under Composes characters types ∫.
 """
 import json
 import os
@@ -72,26 +70,32 @@ def rex(*args):
     return subprocess.check_output([SERVER, "--autostart=false", "-S", endpoint, *args], env=server_env, text=True)
 
 
-def key(t, name, side, **mods):
-    return {"t": t, "type": "key", "name": name, "code": "Left" if name == "Left" else "b",
-            "base": None if name == "Left" else "b", "alt": True, "alt_side": side, **mods}
-
-
-def run(name, option_key, steps, at):
-    run_dir = work / "runs" / name
+def run(option_key, steps):
+    run_dir = work / "runs" / option_key
     run_dir.mkdir(parents=True)
     config = run_dir / "workspace.json"
     config.write_text(json.dumps({"hosts": [{"label": "sides", "endpoint": endpoint}], "last_host": endpoint,
                                   "sessions": {endpoint: sid}, "updates": {"check": False},
                                   "notifications": {"system_notifications": False},
                                   "terminal": {"option_key": option_key}}))
-    script = run_dir / "script.json"
-    script.write_text(json.dumps([{k: v for k, v in s.items() if v is not None} for s in steps]))
     env = {"HOME": str(run_dir / "home"), "PATH": PATH, "LANG": "en_US.UTF-8", "USER": server_env["USER"]}
-    done = subprocess.run([str(APP), "--endpoint", endpoint, "--session", sid, "--config", str(config), "--",
-                           "--script", str(script), "--snap", str(run_dir / "snap.png"), "--at", str(at),
-                           "--size", "900x400", "--realtime"], env=env, capture_output=True, text=True, timeout=120)
-    assert done.returncode == 0, f"{name}: exit {done.returncode}\n{done.stderr}"
+    client = subprocess.Popen(
+        [str(APP.resolve()), "--endpoint", endpoint, "--session", sid, "--config", str(config)],
+        env=env, cwd=run_dir,
+    )
+    try:
+        for instruction, expected in steps:
+            before = len(read_bytes())
+            input(f"{option_key}: in the private Rex Rune window, press {instruction}, "
+                  "then return here and press Enter: ")
+            assert client.poll() is None, f"client exited: {client.returncode}"
+            got = " ".join(read_bytes()[before:])
+            assert got == expected, f"{instruction}: the program read {got!r}, not {expected!r}"
+            print(f"PASS {instruction}: {got}")
+    finally:
+        if client.poll() is None:
+            client.terminate()
+            client.wait(timeout=10)
 
 
 def read_bytes():
@@ -118,28 +122,14 @@ try:
         time.sleep(0.1)
 
     for option_key, alt, composes in [("left_sends_alt", "left", "right"), ("right_sends_alt", "right", "left")]:
-        before = len(read_bytes())
-        run(option_key, option_key, [
-            key(2.0, "b", alt),
-            key(2.3, "∫", composes),
-            key(2.6, "b", "both"),
-            key(2.9, "Left", composes),
-        ], 3.6)
-        time.sleep(0.5)
-        got = read_bytes()[before:]
-        want = [ESC_B, INTEGRAL, ESC_B, ALT_LEFT]
-        assert got == want, f"{option_key}: the program read {got}, not {want}"
-        print(f"{option_key}: {alt} Option+B -> ESC b; {composes} Option+B -> ∫ ({INTEGRAL}); "
-              f"both -> ESC b; {composes} Option+Left -> ESC [1;3D")
-
-    # 5. A control: under Composes characters the same left-Option key is plain b, so the
-    # results above come from the saved setting.
-    before = len(read_bytes())
-    run("characters", "characters", [key(2.0, "b", "left")], 2.8)
-    time.sleep(0.5)
-    got = read_bytes()[before:]
-    assert got == ["62"], f"characters: the program read {got}"
-    print("characters (control): the same left Option+B -> b")
+        run(option_key, [
+            (f"{alt} Option+B", ESC_B),
+            (f"{composes} Option+B", INTEGRAL),
+            ("both Options+B", ESC_B),
+            (f"{composes} Option+Left Arrow", ALT_LEFT),
+            (f"{alt} Option+Shift+B", "1b 42"),
+        ])
+    run("characters", [("left Option+B", INTEGRAL)])
 finally:
     os.killpg(server.pid, signal.SIGTERM)
     server.wait(10)

@@ -19,12 +19,13 @@ fn px(v: f32) -> String {
     if v == 0.0 { "0".into() } else { format!("{}px", num(v)) }
 }
 
-/// A length, percentage or `auto`; `None` for what CSS can't take as is (calc, fr).
+/// A length, percentage, `auto` or `fit-content`; `None` for what CSS can't take as is (calc, fr).
 fn len(raw: CompactLength) -> Option<String> {
     match raw.tag() {
         CompactLength::LENGTH_TAG => Some(px(raw.value())),
         CompactLength::PERCENT_TAG => Some(format!("{}%", num(raw.value() * 100.0))),
         CompactLength::AUTO_TAG => Some("auto".into()),
+        CompactLength::FIT_CONTENT_KEYWORD_TAG => Some("fit-content".into()),
         _ => None,
     }
 }
@@ -139,13 +140,37 @@ pub(super) fn layout(s: &Style, root: bool) -> Decls {
 /// Fill, gradients, border, corners, shadows, opacity, blurs and soft clips, for an element
 /// `size` points big.
 pub(super) fn paint(v: &Visual, size: (f32, f32), d: &mut Decls) {
-    // Rune paints the fill, then the vertical gradient, then the radial or angled one: CSS lists
+    // Rune paints the fill, then gradients, then a wrapped/tiled image on top: CSS lists
     // background layers top first, with the colour last.
     let mut layers: Vec<String> = Vec::new();
+    let mut wrapped_bg = false;
+    if let Some(([rx, ry, rw, rh], wrap)) = v.cold.pixels_wrap
+        && rw > 0.0 && rh > 0.0 && rx.is_finite() && ry.is_finite() && rw.is_finite() && rh.is_finite()
+        && let Some(url) = v.cold.pixels.as_ref().and_then(|p| p.source_url())
+    {
+        let repeat = match wrap {
+            crate::PixelsWrap::Repeat => "repeat",
+            crate::PixelsWrap::Mirror | crate::PixelsWrap::Extend => "no-repeat",
+        };
+        let mut safe_url = String::with_capacity(url.len());
+        for c in url.chars() {
+            match c {
+                '\\' => safe_url.push_str("\\\\"),
+                '"' => safe_url.push_str("\\\""),
+                '\n' | '\r' => {}
+                c => safe_url.push(c),
+            }
+        }
+        layers.push(format!("url(\"{safe_url}\") {} {} / {} {} {repeat}", px(rx), px(ry), px(rw), px(rh)));
+        wrapped_bg = true;
+    }
     if let Some(r) = v.cold.radial.as_deref() { layers.push(gradient(r, size)); }
     if let Some(g) = v.cold.gradient.as_deref() { layers.push(format!("linear-gradient({},{})", color(g[0]), color(g[1]))); }
     if v.fill.a > 0.0 { layers.push(color(v.fill)); }
     if !layers.is_empty() { d.push(("background", layers.join(","))); }
+    if wrapped_bg && v.cold.image_filter == crate::ImageFilter::Nearest {
+        d.push(("image-rendering", "pixelated".into()));
+    }
     if let Some(clip) = v.cold.clip { mask(clip, d); }
     let r = v.radii();
     if r.iter().any(|&c| c > 0.0) {
@@ -225,7 +250,10 @@ fn family(f: crate::tok::Family) -> String {
     match f {
         crate::tok::Family::Sans => "var(--rune-sans)".into(),
         crate::tok::Family::Mono | crate::tok::Family::SystemMono => "var(--rune-mono)".into(),
-        crate::tok::Family::Named(name) => format!("\"{}\"", escape(name)),
+        crate::tok::Family::Named(name) => {
+            let clean = crate::runtime::web_a11y::sanitize_font_family(name);
+            if clean.is_empty() { "var(--rune-sans)".into() } else { format!("\"{clean}\"") }
+        }
     }
 }
 
@@ -246,6 +274,12 @@ pub(super) fn text(spec: &TextSpec, d: &mut Decls) {
         crate::el::Align::End => d.push(("text-align", "right".into())),
     }
     if spec.justify { d.push(("text-align", "justify".into())); }
+    match spec.cold.align_y {
+        crate::el::Align::Start => {}
+        crate::el::Align::Center => d.push(("align-content", "center".into())),
+        crate::el::Align::End => d.push(("align-content", "end".into())),
+    }
+    if spec.cold.text_indent != 0.0 { d.push(("text-indent", px(spec.cold.text_indent))); }
     if spec.truncate {
         d.push(("white-space", "pre".into()));
         d.push(("overflow", "hidden".into()));
@@ -253,15 +287,21 @@ pub(super) fn text(spec: &TextSpec, d: &mut Decls) {
     } else {
         d.push(("white-space", if spec.wrap { "pre-wrap" } else { "pre" }.into()));
         if spec.wrap_anywhere { d.push(("overflow-wrap", "anywhere".into())); }
+        if spec.pretty() { d.push(("text-wrap-style", "pretty".into())); }
     }
 }
 
 /// The text with its spans (weight, size, colour, code backgrounds, underlines) and its links.
 pub(super) fn text_html(spec: &TextSpec) -> String {
     let content = &spec.content;
+    let hrefs: Vec<Option<String>> = spec.cold.links.iter()
+        .map(|l| crate::open_url::check_href(&l.id).ok())
+        .collect();
     let mut cuts: Vec<usize> = vec![0, content.len()];
     for s in &spec.spans { cuts.extend([s.start as usize, s.end as usize]); }
-    for l in &spec.cold.links { cuts.extend([l.start as usize, l.end as usize]); }
+    for (k, l) in spec.cold.links.iter().enumerate() {
+        if hrefs[k].is_some() { cuts.extend([l.start as usize, l.end as usize]); }
+    }
     cuts.retain(|&c| c <= content.len() && content.is_char_boundary(c));
     cuts.sort_unstable();
     cuts.dedup();
@@ -269,27 +309,31 @@ pub(super) fn text_html(spec: &TextSpec) -> String {
     let mut open_link: Option<usize> = None;
     for w in cuts.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let link = spec.cold.links.iter().position(|l| (l.start as usize) <= a && b <= l.end as usize);
+        let link = spec.cold.links.iter().enumerate()
+            .find(|&(k, l)| hrefs[k].is_some() && (l.start as usize) <= a && b <= l.end as usize)
+            .map(|(k, _)| k);
         if link != open_link {
             if open_link.is_some() { out.push_str("</a>"); }
-            if let Some(k) = link { let _ = write!(out, "<a href=\"{}\">", escape(&spec.cold.links[k].id)); }
+            if let Some(k) = link && let Some(href) = &hrefs[k] {
+                write!(out, "<a href=\"{}\">", escape(href)).ok();
+            }
             open_link = link;
         }
         let piece = escape(&content[a..b]);
         let mut style = String::new();
         if let Some(s) = spec.spans.iter().rev().find(|s| (s.start as usize) <= a && b <= s.end as usize) {
-            if let Some(w) = s.weight { let _ = write!(style, "font-weight:{};", num(w)); }
+            if let Some(w) = s.weight { write!(style, "font-weight:{};", num(w)).ok(); }
             if s.mono { style.push_str("font-family:var(--rune-mono);"); }
-            if let Some(z) = s.size { let _ = write!(style, "font-size:{};", px(z)); }
-            if let Some(c) = s.color { let _ = write!(style, "color:{};", color(c)); }
-            if let Some(c) = s.bg { let _ = write!(style, "background:{};border-radius:3px;padding:0 {};", color(c), px(s.bg_pad)); }
-            if let Some(c) = s.underline { let _ = write!(style, "text-decoration:underline {};", color(c)); }
+            if let Some(z) = s.size { write!(style, "font-size:{};", px(z)).ok(); }
+            if let Some(c) = s.color { write!(style, "color:{};", color(c)).ok(); }
+            if let Some(c) = s.bg { write!(style, "background:{};border-radius:3px;padding:0 {};", color(c), px(s.bg_pad)).ok(); }
+            if let Some(c) = s.underline { write!(style, "text-decoration:underline {};", color(c)).ok(); }
             if s.italic { style.push_str("font-style:italic;"); }
         }
         if style.is_empty() {
             out.push_str(&piece);
         } else {
-            let _ = write!(out, "<span style=\"{}\">{piece}</span>", style.trim_end_matches(';'));
+            write!(out, "<span style=\"{}\">{piece}</span>", style.trim_end_matches(';')).ok();
         }
     }
     if open_link.is_some() { out.push_str("</a>"); }
@@ -307,21 +351,41 @@ pub(super) fn svg(shape: &crate::Shape, size: (f32, f32)) -> String {
     // Consecutive fills of one colour share a path.
     let mut fill: Option<(Color, String)> = None;
     let flush = |out: &mut String, fill: &mut Option<(Color, String)>| {
-        if let Some((c, d)) = fill.take() { let _ = write!(out, "<path fill=\"{}\" d=\"{d}\"/>", color(c)); }
+        if let Some((c, d)) = fill.take() { write!(out, "<path fill=\"{}\" d=\"{d}\"/>", color(c)).ok(); }
     };
     for op in &shape.ops {
         match op {
             crate::shape::Op::Fill { points: pts, color: c } => {
                 if fill.as_ref().is_some_and(|(fc, _)| fc != c) { flush(&mut out, &mut fill); }
                 let d = &mut fill.get_or_insert_with(|| (*c, String::new())).1;
-                let _ = write!(d, "M{}Z", points(pts).replace(' ', "L"));
+                write!(d, "M{}Z", points(pts).replace(' ', "L")).ok();
+            }
+            crate::shape::Op::FillCompound { .. } | crate::shape::Op::FillArea { .. } => {
+                let (contours, rule, c) = match op {
+                    crate::shape::Op::FillCompound { contours, rule, color } => (contours.as_slice(), *rule, *color),
+                    crate::shape::Op::FillArea { area, color } => (area.contours(), area.rule(), *color),
+                    _ => unreachable!(),
+                };
+                flush(&mut out, &mut fill);
+                let mut d = String::new();
+                for pts in contours {
+                    write!(d, "M{}Z", points(pts).replace(' ', "L")).ok();
+                }
+                if !d.is_empty() {
+                    let attr = if rule == crate::shape::FillRule::EvenOdd {
+                        " fill-rule=\"evenodd\""
+                    } else {
+                        ""
+                    };
+                    write!(out, "<path fill=\"{}\"{attr} d=\"{d}\"/>", color(c)).ok();
+                }
             }
             crate::shape::Op::Stroke { points: pts, closed, width, cap, color: c } => {
                 flush(&mut out, &mut fill);
                 let el = if *closed { "polygon" } else { "polyline" };
                 let cap = if *cap == crate::shape::LineCap::Round { "round" } else { "butt" };
-                let _ = write!(out, "<{el} fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"round\" vector-effect=\"non-scaling-stroke\" points=\"{}\"/>",
-                    color(*c), num(*width), points(pts));
+                write!(out, "<{el} fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"round\" vector-effect=\"non-scaling-stroke\" points=\"{}\"/>",
+                    color(*c), num(*width), points(pts)).ok();
             }
         }
     }

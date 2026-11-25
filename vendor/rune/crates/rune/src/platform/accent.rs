@@ -64,17 +64,19 @@ pub fn system_accent() -> SystemAccent {
 /// Starts following accent changes (`NSSystemColorsDidChangeNotification`), once per process:
 /// each change rereads the colours and asks every window to redraw, which hands them to its
 /// runtime. Main thread.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn watch() {
     #[cfg(target_os = "macos")]
     mac::watch();
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod mac {
     use super::SystemAccent;
     use crate::Color;
-    use objc2::{class, msg_send, msg_send_id, rc::Retained, runtime::{AnyObject, Bool, Sel}, sel};
-    use objc2_foundation::{MainThreadMarker, NSString};
+    use objc2::{MainThreadMarker, class, msg_send, rc::Retained, runtime::{AnyObject, Bool, Sel}, sel};
+    use objc2_foundation::NSString;
     use std::{cell::Cell, rc::Rc, sync::Mutex};
 
     static CURRENT: Mutex<Option<SystemAccent>> = Mutex::new(None);
@@ -153,9 +155,9 @@ mod mac {
         });
         // SAFETY: main thread; the observer lives for the process, so its token is leaked.
         unsafe {
-            let center: Retained<AnyObject> = msg_send_id![class!(NSNotificationCenter), defaultCenter];
+            let center: Retained<AnyObject> = msg_send![class!(NSNotificationCenter), defaultCenter];
             let name = NSString::from_str("NSSystemColorsDidChangeNotification");
-            let token: Option<Retained<AnyObject>> = msg_send_id![&*center, addObserverForName: &*name,
+            let token: Option<Retained<AnyObject>> = msg_send![&*center, addObserverForName: &*name,
                 object: std::ptr::null::<AnyObject>(), queue: std::ptr::null::<AnyObject>(), usingBlock: &*block];
             std::mem::forget(token);
         }

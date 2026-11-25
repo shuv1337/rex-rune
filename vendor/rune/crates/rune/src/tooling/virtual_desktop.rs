@@ -10,8 +10,7 @@ use serde_json::json;
 
 use crate::AnyWindowSpec;
 use crate::desktop::displays::VirtualDesktop;
-use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
-use crate::time::Instant;
+use crate::render::{Gpu, OFFSCREEN_FORMAT_LINEAR, Offscreen, Renderer};
 use crate::tooling::headless_run::WindowFrame;
 use crate::tooling::{Args, Ev, Kind, Pos, Shot, Timeline, Trace, die};
 
@@ -131,7 +130,10 @@ impl Desk {
         let before = self.focus.focused();
         let after = next.focused();
         if before != after {
-            if let Some(i) = before { self.members[i].focus(false); }
+            if let Some(i) = before {
+                if self.pointer == Pointer::Pressed(i) { self.pointer = Pointer::Over(i); }
+                self.members[i].focus(false);
+            }
             if let Some(i) = after { self.members[i].focus(true); }
         }
         self.focus = next;
@@ -313,8 +315,8 @@ impl Desk {
 /// Renders `windows` composited over the `--desktop` backdrop. `selected` is the window
 /// `--scene`, `--tree` and `--trace` describe.
 /// `accessory` is `RunOptions::accessory`: reopening brings back no window.
-pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, accessory: bool) {
-    let launched = Instant::now();
+pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, accessory: bool) -> Result<(), String> {
+    let launched = crate::time::now();
     let backdrop = args.desktop.clone().expect("--desktop");
     if args.list_scenes { die("--list-scenes lists one window's scenes; drop --desktop"); }
     let source = crate::tooling::read_script(&args);
@@ -359,9 +361,16 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
     let initial = desk.topmost_visible();
     desk.focus(initial, true);
 
-    let t0 = Instant::now();
+    let t0 = crate::time::now();
     let features = desk.members.iter().fold(wgpu::Features::empty(), |f, m| f | m.features());
-    let gpu = Gpu::try_with_features(Gpu::instance_for(features), None, features).unwrap_or_else(|e| die(&e));
+    let need_overlay = args.keys.is_some() || args.pointer;
+    let (gpu, overlay_renderer) = Gpu::for_headless_setup(features, |gpu| {
+        let mut renderer = Renderer::try_new_classified(&gpu.device, OFFSCREEN_FORMAT_LINEAR)
+            .map_err(crate::render::SurfaceSetupError::from_shader)?;
+        renderer.set_srgb_blend(false);
+        Ok(need_overlay.then_some(renderer))
+    })
+    .map_err(|e| e.message)?;
     let max = gpu.device.limits().max_texture_dimension_2d;
     let (wp, hp) = pixels(size, scale, max).unwrap_or_else(|| die(&format!(
         "--desktop: the output, {}x{} points at --scale {scale}, must be 1 to {max} pixels a side", size.0, size.1)));
@@ -370,11 +379,15 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
     if let Some(path) = &args.video {
         writer.video(path, fps).unwrap_or_else(|e| die(&e));
     }
-    let target = Offscreen::new(&gpu.device, wp, hp);
+    let target = Offscreen::with_format(&gpu.device, wp, hp, OFFSCREEN_FORMAT_LINEAR);
     let mut readback = crate::tooling::record::Readback::new(&gpu.device, &target, crate::tooling::record::DEPTH);
+    let mut in_flight = crate::tooling::record::InFlight::new(crate::tooling::record::DEPTH);
     let mut slots: Vec<Option<Slot>> = (0..n).map(|_| None).collect();
-    let mut overlay = (args.keys.is_some() || args.pointer)
-        .then(|| (crate::input::keycaps::Overlay::new(size, scale, args.keys, args.keys_theme, args.pointer), Renderer::new(&gpu.device, OFFSCREEN_FORMAT)));
+    let mut overlay = overlay_renderer.map(|renderer| {
+        let mut ov = crate::input::keycaps::Overlay::new(size, scale, args.keys, args.keys_theme, args.pointer);
+        ov.set_srgb_blend(false);
+        (ov, renderer)
+    });
     let dark = args.theme.as_deref() != Some("light");
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
@@ -417,14 +430,14 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
         desk.drain(&desktop, 0.0);
     }
 
-    let wall = Instant::now();
+    let wall = crate::time::now();
     let mut cpu_ms = Vec::new();
     let mut next_ev = 0;
     let mut last_down = (0.0f32, 0.0f32);
     let mut drawn: Vec<(usize, bool)> = Vec::with_capacity(n);
     for k in 0..=last_frame {
         let real_t = k as f64 * dt;
-        let frame_start = Instant::now();
+        let frame_start = crate::time::now();
         while next_ev < script.len() && script[next_ev].t <= real_t + 1e-9 {
             let e = &script[next_ev];
             next_ev += 1;
@@ -439,6 +452,10 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
                 Kind::Mark(_) => {}
                 Kind::Focus(focused) => desk.set_active(*focused),
                 Kind::Reopen => desk.reopen(accessory, &desktop, real_t),
+                Kind::CloseRequest => {
+                    let i = desk.focus.key().unwrap_or(selected);
+                    desk.members[i].close_requested();
+                }
                 Kind::Shortcut(shortcut) => fire(&desk, |m| m.shortcut(shortcut)).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => fire(&desk, |m| m.menu(item)).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::PopupMenu(picked) => {
@@ -451,12 +468,22 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
                     let i = open.or(desk.focus.key()).unwrap_or(selected);
                     desk.members[i].resolve_file_dialog(path.clone()).unwrap_or_else(|e| die(&format!("script file dialog: {e}")));
                 }
+                Kind::FileDialogFiles(paths) => {
+                    let open = desk.focus.key().into_iter().chain(desk.z.iter().rev().copied()).find(|&i| desk.members[i].file_dialog_open());
+                    let i = open.or(desk.focus.key()).unwrap_or(selected);
+                    desk.members[i].resolve_file_dialog_files(Some(paths.clone())).unwrap_or_else(|e| die(&format!("script file dialog: {e}")));
+                }
                 // While another app is active, as after a click on the backdrop, keys go to it.
-                Kind::Key(..) | Kind::KeyUp(_) | Kind::Physical(_) | Kind::PhysicalKey(..) | Kind::Paste(_) => {
+                Kind::Key(..) | Kind::KeyUp(_) | Kind::Physical(_) | Kind::PhysicalKey(..) | Kind::Paste(_) | Kind::Ime(_) | Kind::PointerMotion(..) => {
                     if let Some(i) = desk.focus.focused() { desk.members[i].input(&e.kind, (x, y)); }
                 }
                 Kind::Files(step) => desk.file_input(step, (x, y)),
+                &Kind::Resize(dw, dh) => {
+                    let i = desk.focus.key().unwrap_or(selected);
+                    desk.members[i].resize_by(dw, dh);
+                }
                 Kind::OpenUrl(_) => die("script open_url: a link opens in a single window's run (`--script` without a desktop)"),
+                Kind::OpenFiles(_) => die("script open_files: files open in a single window's run (`--script` without a desktop)"),
                 // The rest are pointer input.
                 kind => {
                     if kind.is_down() { last_down = (x, y); }
@@ -465,7 +492,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
-                    Kind::Key(key, _) | Kind::PhysicalKey(_, key, ..) => ov.key(e.t, key),
+                    Kind::Key(key, _) | Kind::PhysicalKey(_, key, _) => ov.key(e.t, key),
                     Kind::Shortcut(chord) => ov.chord(e.t, chord),
                     &Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed: true, .. }) => {
                         if let Ok(chord) = crate::Shortcut::from_physical_key(key, mods) { ov.chord(e.t, &chord) }
@@ -497,7 +524,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             }
             if slots[i].as_ref().is_none_or(|s| s.px != px) { slots[i] = Some(Slot::new(&gpu.device, &comp, px, scale)); }
             let slot = slots[i].as_ref().unwrap();
-            m.render(&gpu, slot, px, step, update_ms);
+            m.render(&gpu, slot, px, step, update_ms, frame_start);
             let (ox, oy) = desk.origin_px(i);
             let (sigma, offset, opacity) = if key == Some(i) { KEY_SHADOW } else { SHADOW };
             slot.write(&gpu.queue, Uniform {
@@ -514,7 +541,8 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             let app_dark = key.and_then(|i| desk.members[i].backdrop_dark()).unwrap_or(dark);
             let ort = ov.frame(real_t, step, app_dark);
             if !ort.instances.is_empty() {
-                ui.prepare(&gpu.device, &gpu.queue, &mut ort.text.atlas, &ort.instances, (wp, hp));
+                ui.set_fade_stops(ort.fade_stops());
+                ui.prepare_ui(&gpu.device, &gpu.queue, &mut ort.text.atlas, &ort.instances, (wp, hp));
                 ui.draw_over(&mut enc, &target.view);
             }
         }
@@ -531,13 +559,14 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             for (shot, px) in readback.make_room(&gpu.device) { deliver(shot, px); }
             readback.copy(&mut enc, &target, shot);
         }
-        gpu.queue.submit([enc.finish()]);
+        in_flight.push(gpu.queue.submit([enc.finish()]));
         if want_pixels { readback.submitted(); }
         let ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         cpu_ms.push(ms);
         if let Some(tr) = trace.as_mut() { desk.members[selected].trace(tr, real_t * 1000.0, ms); }
         if first_pixels {
             let done = readback.finish(&gpu.device);
+            in_flight.clear();
             let marker = json!({
                 "headless_ms": launched.elapsed().as_secs_f64() * 1000.0, "gpu_init_ms": init_ms, "frame_cpu_ms": ms,
                 "pixel_bytes": done.last().map_or(0, |(_, px)| px.len()),
@@ -547,6 +576,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
         } else if want_pixels {
             for (shot, px) in readback.ready(&gpu.device) { deliver(shot, px); }
         }
+        in_flight.pace(&gpu.device);
         if k == snap_frame && let Some(p) = &args.tree {
             let mut tree = desk.members[selected].tree(real_t);
             tree["windows"] = (0..n).map(|i| {
@@ -558,11 +588,12 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
         }
     }
     for (shot, px) in readback.finish(&gpu.device) { deliver(shot, px); }
+    for m in &mut desk.members { m.flush_interaction(); }
     drop(deliver);
     if let Some(video) = writer.finish().unwrap_or_else(|e| die(&e)) {
         eprintln!("rune: wrote {} ({frames_written} frames at {fps} fps)", video.display());
     }
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+    rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).ok();
     if let Some(p) = &args.strip { crate::tooling::write_strip(p, &strip, (wp, hp), &crops_px, gap, args.cols); }
     let wall = wall.elapsed().as_secs_f64();
     let mean = cpu_ms.iter().sum::<f64>() / cpu_ms.len() as f64;
@@ -570,6 +601,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
     for m in &mut desk.members {
         if let Some(s) = m.summary(&gpu.device) { eprintln!("{s}"); }
     }
+    Ok(())
 }
 
 /// Sends a shortcut or menu pick to the key window's app, else the first other app that knows it.

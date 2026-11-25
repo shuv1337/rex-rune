@@ -119,3 +119,241 @@ fn an_image_source_set_gets_sizes_from_every_width() {
     // `aspect-ratio` or height decides, so the reset sits under every class (`:where`).
     assert!(css.contains(":where([data-rune-static]) img{height:auto}"), "{css}");
 }
+
+#[test]
+fn html_export_blocks_unsafe_hrefs_and_sanitizes_named_fonts() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let bad_urls = [
+            ("bad-js", "javascript:alert(1)"),
+            ("bad-js-case", "JaVaScRiPt:alert(1)"),
+            ("bad-js-ws", "  \tjavascript:alert(1)"),
+            ("bad-js-ctrl", "\x01javascript:alert(1)"),
+            ("bad-data", "data:text/html,<script>alert(1)</script>"),
+            ("bad-data-b64", "DaTa:text/plain;base64,SGk="),
+            ("bad-vbs", "VbScript:msgbox(1)"),
+            ("bad-proto", "//evil.example/x"),
+            ("bad-ctrl-rel", "\x00/docs"),
+        ];
+        let good_urls = [
+            ("good-http", "http://example.com/a"),
+            ("good-https", "  HTTPS://example.com/b  "),
+            ("good-mail", "MAILTO:a@example.com"),
+            ("good-abs", "/docs"),
+            ("good-frag", "#install"),
+            ("good-rel", "notes/42"),
+        ];
+        let mut root = crate::col().key("root").w_full().role("main");
+        for (k, u) in bad_urls {
+            root = root.child(crate::row().key(k).href(u).child(crate::text(k).font(crate::tok::type_::BODY)));
+        }
+        for (k, u) in good_urls {
+            root = root.child(crate::row().key(k).href(u).child(crate::text(k).font(crate::tok::type_::BODY)));
+        }
+        let inline_bad = crate::rich("a b c d e f", vec![]).key("inline-bad").font(crate::tok::type_::BODY)
+            .link(crate::Link::new(0..1, "javascript:alert(1)"))
+            .link(crate::Link::new(2..3, "data:text/html,hi"))
+            .link(crate::Link::new(4..5, "VbScript:1"))
+            .link(crate::Link::new(6..7, " \tJaVaScRiPt:1"))
+            .link(crate::Link::new(8..9, "\x01javascript:1"))
+            .link(crate::Link::new(10..11, "//evil.example/x"));
+        let inline_good = crate::rich("one two three four five", vec![]).key("inline-good").font(crate::tok::type_::BODY)
+            .link(crate::Link::new(0..3, "http://example.com/1"))
+            .link(crate::Link::new(4..7, "HTTPS://example.com/2"))
+            .link(crate::Link::new(8..13, "mailto:a@example.com"))
+            .link(crate::Link::new(14..18, "/guide"))
+            .link(crate::Link::new(19..23, "#top"));
+        let mut bad_font = crate::tok::type_::BODY;
+        bad_font.family = crate::tok::Family::Named("Bad\";\\}\nbody{color:red}</style>");
+        let mut good_font = crate::tok::type_::BODY;
+        good_font.family = crate::tok::Family::Named("Inter");
+        root.child(inline_bad)
+            .child(inline_good)
+            .child(crate::text("bad font").key("bad-font").font(bad_font))
+            .child(crate::text("good font").key("good-font").font(good_font))
+    }
+
+    let mut rt = Runtime::new((), view, (400.0, 600.0), Env::default());
+    rt.page_mode();
+    let nodes = taken(&mut rt, 400.0);
+    let (body, css) = page(&[(400.0, nodes.clone())]);
+
+    let lower_body = body.to_ascii_lowercase();
+    for forbidden in ["javascript:", "data:", "vbscript:", "//evil.example"] {
+        assert!(!lower_body.contains(forbidden), "exported HTML leaked {forbidden}: {body}");
+    }
+    for bad in ["bad-js", "bad-data", "bad-vbs", "bad-proto"] {
+        let node = nodes.iter().find(|n| n.path.ends_with(bad)).expect(bad);
+        assert_ne!(node.tag, "a", "refused href must not export as <a>: {node:?}");
+        assert!(!node.attrs.contains("href="), "refused href must not write href attr: {node:?}");
+    }
+    let ibad = nodes.iter().find(|n| n.path.ends_with("inline-bad")).expect("inline-bad");
+    assert_eq!(ibad.inner, "a b c d e f", "refused inline links export as plain text");
+
+    for expected in [
+        "href=\"http://example.com/a\"",
+        "href=\"https://example.com/b\"",
+        "href=\"mailto:a@example.com\"",
+        "href=\"/docs\"",
+        "href=\"#install\"",
+        "href=\"notes/42\"",
+        "<a href=\"http://example.com/1\">one</a>",
+        "<a href=\"https://example.com/2\">two</a>",
+        "<a href=\"mailto:a@example.com\">three</a>",
+        "<a href=\"/guide\">four</a>",
+        "<a href=\"#top\">five</a>",
+    ] {
+        assert!(body.contains(expected), "missing safe link {expected} in {body}");
+    }
+
+    assert!(css.contains("font-family:\"Inter\""), "normal named font preserved: {css}");
+    assert!(!css.contains("</style>"), "CSS must not contain closing style tag: {css}");
+    assert!(!css.contains('\n'), "CSS must not contain raw newlines: {css}");
+    assert!(!css.contains("body{color:red}"), "CSS must not allow rule breakout: {css}");
+}
+
+#[test]
+fn html_export_omits_secure_fields_labels_and_containers() {
+    struct S {
+        pw: crate::TextEdit,
+        revealed: bool,
+    }
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        crate::col().key("root").w_full().role("main")
+            .child(crate::text("Visible heading").key("hdr"))
+            .child(crate::text_input(&s.pw, crate::tok::type_::BODY).key("pw").single_line().label("Password").w(200.0))
+            .child(crate::text("export-label-secret").key("lbl").secure().revealed(s.revealed))
+            .child(crate::col().key("box").secure().child(crate::text("export-boxed-secret")))
+    }
+    let pw = crate::TextEdit::new("export-field-secret").secure();
+    let mut rt = Runtime::new(S { pw, revealed: false }, view, (400.0, 300.0), Env::default());
+    rt.page_mode();
+    for revealed in [false, true] {
+        rt.update(|s, _| {
+            s.revealed = revealed;
+            s.pw.set_revealed(revealed);
+        });
+        rt.frame(0.0);
+        let nodes = rt.export_nodes();
+        let (body, css) = page(&[(400.0, nodes)]);
+        assert!(body.contains("Visible heading"), "{body}");
+        assert!(!body.contains('•'), "html export leaked mask: {body}");
+        for secret in ["export-field-secret", "export-label-secret", "export-boxed-secret"] {
+            assert!(!body.contains(secret) && !css.contains(secret), "html export leaked {secret}: {body}");
+        }
+    }
+}
+
+#[test]
+fn html_export_emits_fit_content_height_fraction_and_self_auto() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        crate::col().key("root").w_full().h(200.0).role("main")
+            .child(crate::row().key("pill").w_fit().child(crate::text("Badge")))
+            .child(crate::col().key("chip").h_fit().child(crate::text("Chip")))
+            .child(crate::el().key("frac").h_frac(0.4))
+            .child(crate::el().key("fixed").size(20.0, 20.0).self_start())
+            .child(crate::el().key("reset").size(20.0, 20.0).self_start().self_auto())
+    }
+    let mut rt = Runtime::new((), view, (400.0, 200.0), Env::default());
+    rt.page_mode();
+    let nodes = taken(&mut rt, 400.0);
+    let decls = |key: &str| nodes.iter().find(|n| n.path.ends_with(key)).expect(key).decls.clone();
+    assert!(decls("pill").contains(&("width", "fit-content".into())), "{:?}", decls("pill"));
+    assert!(!decls("pill").iter().any(|d| d.0 == "align-self"), "{:?}", decls("pill"));
+    assert!(decls("chip").contains(&("height", "fit-content".into())), "{:?}", decls("chip"));
+    assert!(decls("frac").contains(&("height", "40%".into())), "{:?}", decls("frac"));
+    assert!(decls("fixed").contains(&("align-self", "flex-start".into())), "{:?}", decls("fixed"));
+    assert!(!decls("reset").iter().any(|d| d.0 == "align-self"), "{:?}", decls("reset"));
+}
+
+#[test]
+fn exports_compound_shape_fill_rules_to_svg() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let ring = crate::Path::new()
+            .move_to([0.0, 0.0]).line_to([40.0, 0.0]).line_to([40.0, 40.0]).line_to([0.0, 40.0]).close()
+            .move_to([10.0, 10.0]).line_to([30.0, 10.0]).line_to([30.0, 30.0]).line_to([10.0, 30.0]).close();
+        let a = crate::Path::new()
+            .move_to([0.0, 0.0]).line_to([20.0, 0.0]).line_to([20.0, 20.0]).line_to([0.0, 20.0]).close();
+        let b = crate::Path::new()
+            .move_to([10.0, 10.0]).line_to([30.0, 10.0]).line_to([30.0, 30.0]).line_to([10.0, 30.0]).close();
+        let c = crate::Color::WHITE;
+        crate::col().key("root").w_full().role("main")
+            .child(crate::canvas(crate::Shape::new().fill_path(&ring, c)).key("nz").size(40.0, 40.0))
+            .child(crate::canvas(crate::Shape::new().fill_path_with(&ring, crate::FillRule::EvenOdd, c)).key("eo").size(40.0, 40.0))
+            .child(crate::canvas(crate::Shape::new().fill_path_with(&a, crate::FillRule::EvenOdd, c).fill_path_with(&b, crate::FillRule::EvenOdd, c)).key("two").size(40.0, 40.0))
+            .child(crate::canvas(crate::Shape::new().fill_area(&crate::Area::new(&ring, crate::FillRule::EvenOdd), c)).key("area").size(40.0, 40.0))
+    }
+    let mut rt = Runtime::new((), view, (400.0, 300.0), Env::default());
+    rt.page_mode();
+    let nodes = taken(&mut rt, 400.0);
+    let nz = nodes.iter().find(|n| n.path.ends_with("nz")).expect("nz");
+    assert!(nz.inner.contains("<path fill=\"#ffffff\" d=\"M0,0L40,0L40,40L0,40ZM10,10L30,10L30,30L10,30Z\"/>"), "{}", nz.inner);
+    assert!(!nz.inner.contains("fill-rule"), "default nonzero omits fill-rule: {}", nz.inner);
+    let eo = nodes.iter().find(|n| n.path.ends_with("eo")).expect("eo");
+    assert!(eo.inner.contains("<path fill=\"#ffffff\" fill-rule=\"evenodd\" d=\"M0,0L40,0L40,40L0,40ZM10,10L30,10L30,30L10,30Z\"/>"), "{}", eo.inner);
+    let two = nodes.iter().find(|n| n.path.ends_with("two")).expect("two");
+    assert_eq!(two.inner.matches("<path ").count(), 2, "separate compound fills must not merge into one path: {}", two.inner);
+    let area = nodes.iter().find(|n| n.path.ends_with("area")).expect("area");
+    assert!(area.inner.contains("<path fill=\"#ffffff\" fill-rule=\"evenodd\" d=\"M0,0L40,0L40,40L0,40ZM10,10L30,10L30,30L10,30Z\"/>"), "{}", area.inner);
+}
+
+#[test]
+fn html_export_emits_pixelated_image_rendering_for_nearest_filter() {
+    let cache = crate::ImageCache::new(std::sync::Arc::new(|| {}));
+    let linear_img = cache.url("a.png", 32.0, 1.0);
+    let nearest_img = cache.url("b.png", 32.0, 1.0);
+
+    let mut rt = Runtime::new(
+        (linear_img, nearest_img),
+        |(a, b), _| {
+            crate::col().key("root").w_full().role("main")
+                .child(crate::el().key("lin").size(32.0, 32.0).pixels(a.pixels()))
+                .child(crate::el().key("near").size(32.0, 32.0).pixels(b.pixels()).image_filter(crate::ImageFilter::Nearest))
+        },
+        (400.0, 200.0),
+        Env::default(),
+    );
+    rt.page_mode();
+    rt.set_viewport((400.0, 200.0), 2.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    let nodes = rt.export_nodes();
+    let lin = nodes.iter().find(|n| n.path.ends_with("lin")).expect("lin");
+    let near = nodes.iter().find(|n| n.path.ends_with("near")).expect("near");
+    assert!(!lin.decls.iter().any(|d| d.0 == "image-rendering"), "{:?}", lin.decls);
+    assert!(near.decls.contains(&("image-rendering", "pixelated".into())), "{:?}", near.decls);
+}
+
+#[test]
+fn html_export_emits_background_for_pixels_tile_and_wrap() {
+    let cache = crate::ImageCache::new(std::sync::Arc::new(|| {}));
+    let tile_img = cache.url("tile.png", 24.0, 1.0);
+    let photo_img = cache.url("photo.png", 64.0, 1.0);
+    let plain_img = cache.url("plain.png", 32.0, 1.0);
+
+    let mut rt = Runtime::new(
+        (tile_img, photo_img, plain_img),
+        |(t, p, pl), _| {
+            crate::col().key("root").w_full().role("main")
+                .child(crate::el().key("tiled").size(120.0, 80.0).pixels_tile(t.pixels(), [24.0, 32.0]).image_filter(crate::ImageFilter::Nearest))
+                .child(crate::el().key("mirrored").size(120.0, 80.0).pixels_wrap(p.pixels(), [20.0, 10.0, 64.0, 60.0], crate::PixelsWrap::Mirror))
+                .child(crate::el().key("plain").size(32.0, 32.0).pixels(pl.pixels()))
+        },
+        (400.0, 300.0),
+        Env::default(),
+    );
+    rt.page_mode();
+    rt.set_viewport((400.0, 300.0), 2.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    let nodes = rt.export_nodes();
+    let tiled = nodes.iter().find(|n| n.path.ends_with("tiled")).expect("tiled");
+    let mirrored = nodes.iter().find(|n| n.path.ends_with("mirrored")).expect("mirrored");
+    let plain = nodes.iter().find(|n| n.path.ends_with("plain")).expect("plain");
+    assert_eq!(tiled.tag, "div");
+    assert!(tiled.decls.contains(&("background", "url(\"tile.png\") 0 0 / 24px 32px repeat".into())), "{:?}", tiled.decls);
+    assert!(tiled.decls.contains(&("image-rendering", "pixelated".into())), "{:?}", tiled.decls);
+    assert_eq!(mirrored.tag, "div");
+    assert!(mirrored.decls.contains(&("background", "url(\"photo.png\") 20px 10px / 64px 60px no-repeat".into())), "{:?}", mirrored.decls);
+    assert!(!mirrored.decls.iter().any(|d| d.0 == "image-rendering"), "{:?}", mirrored.decls);
+    assert_eq!(plain.tag, "img");
+}

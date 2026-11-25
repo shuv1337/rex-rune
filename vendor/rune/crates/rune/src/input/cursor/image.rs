@@ -48,7 +48,7 @@ pub(crate) struct Decoded {
 /// clamping its hot spot into the result.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn decode(image: CursorImage, scale: f32) -> Result<Decoded, String> {
-    let src = ::image::load_from_memory_with_format(image.bytes(), ::image::ImageFormat::Png).map_err(|e| e.to_string())?.into_rgba8();
+    let src = crate::image::png_rgba8(image.bytes()).map_err(|e| e.to_string())?;
     let (w, h) = src.dimensions();
     if w > MAX_SIDE || h > MAX_SIDE {
         return Err(format!("{w}×{h} px is over the {MAX_SIDE} px limit"));
@@ -56,7 +56,11 @@ pub(crate) fn decode(image: CursorImage, scale: f32) -> Result<Decoded, String> 
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { SOURCE_SCALE };
     let k = scale / SOURCE_SCALE;
     let (width, height) = (((w as f32 * k).round() as u32).max(1), ((h as f32 * k).round() as u32).max(1));
-    let rgba = if (width, height) == (w, h) { src.into_raw() } else { resample(src, width, height) };
+    let rgba = match ((width, height) == (w, h), image.crisp()) {
+        (true, _) => src.into_raw(),
+        (false, true) => ::image::imageops::resize(&src, width, height, ::image::imageops::FilterType::Nearest).into_raw(),
+        (false, false) => resample(src, width, height),
+    };
     let hot = [(image.hot()[0], width), (image.hot()[1], height)].map(|(p, side)| ((p * scale).floor().max(0.0) as u32).min(side - 1));
     Ok(Decoded { rgba, width, height, hot, scale })
 }

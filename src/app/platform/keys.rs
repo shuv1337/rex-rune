@@ -100,7 +100,7 @@ pub enum WindowMenuKey {
 }
 
 /// Whether Alt is a Mac's Option key, which composes characters unless it is told to act as
-/// Alt (`Tx::set_option_as_alt`). Elsewhere Alt is always Alt.
+/// Alt (the terminal's `ime_option_as_alt_mode`). Elsewhere Alt is always Alt.
 pub const OPTION_COMPOSES: bool = cfg!(target_os = "macos");
 
 /// Whether the keyboard layout in use is U.S. English or ABC. Main thread only. True where

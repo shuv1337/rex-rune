@@ -36,8 +36,8 @@ env = dict(PATH=os.environ["PATH"], HOME=str(work / "home"),
     '<auth>EXTERNAL</auth><policy context="default"><allow own="*"/>'
     '<allow send_destination="*"/><allow receive_sender="*"/></policy></busconfig>')
 source = (ROOT / "vendor/rune/crates/rune/src/platform/preferences.rs").read_text()
-start = source.index('#[cfg(target_os = "linux")]\nunsafe fn gnome_animations()')
-end = source.index('\n#[cfg(not(any(', start)
+start = source.index('#[cfg(target_os = "linux")]\nunsafe fn with_gsettings<T>')
+end = source.index('\n#[cfg(target_os = "linux")]\nunsafe fn gnome_double_click_ms', start)
 (work / "src").mkdir()
 (work / "src/main.rs").write_text(source[start:end] + '''
 fn main() {
@@ -55,10 +55,11 @@ version, = {p["version"] for p in lock["package"] if p["name"] == "libloading"}
     '[package]\nname = "single-read-probe"\nversion = "0.0.0"\nedition = "2024"\n'
     f'[dependencies]\nlibloading = "={version}"\n')
 # Build only in the disk-backed fixture. The repo's lockfile is not changed.
+cargo = os.environ.get("CARGO", "cargo")
 with (work / "build.log").open("w") as log:
-    subprocess.run(["cargo", "generate-lockfile", "--offline", "--manifest-path", str(work / "Cargo.toml")],
+    subprocess.run([cargo, "generate-lockfile", "--offline", "--manifest-path", str(work / "Cargo.toml")],
                    check=True, stdout=log, stderr=subprocess.STDOUT)
-    subprocess.run(["cargo", "build", "--locked", "--offline", "--manifest-path", str(work / "Cargo.toml"),
+    subprocess.run([cargo, "build", "--locked", "--offline", "--manifest-path", str(work / "Cargo.toml"),
                     "--target-dir", str(work / "target")], check=True, stdout=log, stderr=subprocess.STDOUT)
 probe = str(work / "target/debug/single-read-probe")
 owned = []

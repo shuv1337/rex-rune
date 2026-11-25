@@ -14,12 +14,12 @@ fn secure_input_masks_layout_inspector_and_unicode_pointer_indices() {
     assert!(rt.state.is_secure() && rt.has_secure_focus());
     assert!(rt.ime_area.is_none());
     assert!(rt.elements().iter().all(|e| e.text.is_none()));
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
     assert_eq!(n.text.as_ref().unwrap().content, "•••");
     let path = n.path.clone();
-    let layout = rt.focused_layout().unwrap();
+    let layout = rt.focused_layout().and_then(|l| l.single().cloned()).unwrap();
     let caret = Cursor::from_byte_index(&layout, 6, Affinity::Downstream).geometry(&layout, 1.0);
-    rt.queue.push(Action::Focus(path, caret.x0 as f32 + 0.1, ((caret.y0 + caret.y1) * 0.5) as f32));
+    rt.frame.queue.push(Action::Focus(path, caret.x0 as f32 + 0.1, ((caret.y0 + caret.y1) * 0.5) as f32));
     rt.frame(0.0);
     assert_eq!(rt.state.focus, 3);
     rt.paste("界"); rt.frame(0.0);
@@ -52,7 +52,7 @@ fn an_exiting_secure_field_paints_dots_without_its_secret() {
     let painted = rt.instances.iter().filter(|i| i.params[1] == KIND_GLYPH).count();
     rt.update(|s, _| { s.pw.clear(); s.open = false; });
     assert!(rt.frame(1.0 / 60.0));
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).expect("exiting field stays drawn");
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).expect("exiting field stays drawn");
     assert!(rt.is_exiting(n.id));
     let edit = &n.input.as_ref().unwrap().edit;
     assert_eq!(edit.text, "•".repeat(7), "only the mask remains");
@@ -71,13 +71,13 @@ fn an_exiting_secure_field_paints_dots_without_its_secret() {
         Env::new(true, 2.0),
     );
     rt.frame(0.0);
-    let n_open = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).unwrap();
+    let n_open = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).unwrap();
     assert_eq!(n_open.text.as_ref().unwrap().content, "hunter2");
     assert!(!format!("{:?}", n_open.input).contains("hunter2"));
     assert!(!format!("{:?}", n_open.text).contains("hunter2"));
     rt.update(|s, _| { s.pw.clear(); s.open = false; });
     assert!(rt.frame(1.0 / 60.0));
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).expect("exiting field stays drawn");
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).expect("exiting field stays drawn");
     assert!(rt.is_exiting(n.id));
     let edit = &n.input.as_ref().unwrap().edit;
     assert!(!edit.is_revealed(), "conceal resets revealed on exit");
@@ -104,27 +104,27 @@ fn secure_revealed_display_does_not_survive_in_layout_or_raster_caches() {
         (240.0, 100.0), Env::new(true, 1.0));
     let cached = rt.text.cached_layout_count();
     rt.frame(0.0);
-    let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some("secret")).unwrap();
-    let n = &rt.nodes[i];
+    let i = rt.tree.nodes.iter().position(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let n = &rt.tree.nodes[i];
     assert!(!rt.is_selectable(i), "selectable cannot opt secure input into text selection");
     assert_eq!(n.text.as_ref().unwrap().content, "sensitive fixture");
     assert!(n.text.as_ref().unwrap().source.is_none(), "case conversion is ignored on inputs");
-    assert_eq!(Rc::strong_count(n.text_layout.as_ref().unwrap()), 1, "only the node owns the shaped run");
+    assert_eq!(Rc::strong_count(n.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap()), 1, "only the node owns the shaped run");
     assert_eq!(rt.text.cached_layout_count(), cached, "measurement and paint leave no cached run");
-    assert!(rt.node_caches.is_empty(), "an unfocused secret also disables ancestor raster caches");
+    assert!(rt.paint.node_caches.is_empty(), "an unfocused secret also disables ancestor raster caches");
     assert!(rt.text.atlas.resident_caches.is_empty());
     let path = n.path.clone();
     assert!(!rt.selection_menu(&path, 10.0, 10.0), "no context-menu copy");
     rt.set_focus(Some(path), true);
     rt.frame(0.0);
-    let layout = rt.focused_layout().unwrap();
+    let layout = rt.focused_layout().and_then(|l| l.single().cloned()).unwrap();
     assert_eq!(Rc::strong_count(&layout), 1, "input hit testing also bypasses the layout cache");
     drop(layout);
     let mut tx = Tx::default();
     // Application key-up hooks may observe their own events, but Rune must not keep
     // typed secrets in the dev/event log when such a hook handles the release.
-    let root = rt.nodes.iter().position(|n| n.key.as_deref() == Some("cache")).unwrap();
-    rt.nodes[root].focus.key_up = Some(Rc::new(|_, _, _| true));
+    let root = rt.tree.nodes.iter().position(|n| n.key.as_deref() == Some("cache")).unwrap();
+    rt.tree.nodes[root].focus.key_up = Some(Rc::new(|_, _, _| true));
     rt.events.clear();
     assert!(rt.route_key_up(&KeyEvent { key: crate::Key::Text("private fixture".into()), mods: Default::default() }, &mut tx));
     assert!(rt.events.iter().any(|e| e == "key-up [redacted]"));
@@ -134,7 +134,7 @@ fn secure_revealed_display_does_not_survive_in_layout_or_raster_caches() {
     assert_eq!(rt.text.cached_layout_count(), cached);
     rt.update(|s, _| s.clear());
     rt.frame(0.0);
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
     assert!(rt.state.text.is_empty() && n.input.as_ref().unwrap().edit.text.is_empty());
     assert!(n.text.as_ref().unwrap().content.is_empty(), "clearing without exit wipes the display");
     assert_eq!(rt.text.cached_layout_count(), cached);
@@ -170,13 +170,13 @@ fn revealed_secure_input_matches_plain_layout_and_keeps_protections() {
     assert_eq!(plain_el.text.as_deref(), Some("hé🙂 world"));
     assert!(secret_el.text.is_none(), "accessibility text remains None when revealed");
 
-    let np = rt.nodes.iter().find(|n| n.key.as_deref() == Some("plain")).unwrap();
-    let ns = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let np = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("plain")).unwrap();
+    let ns = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
     assert_eq!(ns.text.as_ref().unwrap().content, "hé🙂 world");
     assert!(!format!("{:?}", ns.input).contains("hé🙂"));
     assert!(!format!("{:?}", ns.text).contains("hé🙂"));
-    let lp = np.text_layout.as_ref().unwrap().clone();
-    let ls = ns.text_layout.as_ref().unwrap().clone();
+    let lp = np.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().clone();
+    let ls = ns.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().clone();
     assert_eq!(lp.full_width(), ls.full_width(), "revealed layout width matches plain text");
     let secret_caret = secret_el.caret.expect("focused revealed field has caret");
     let secret_sel: Vec<[f32; 4]> = rt.instances.iter()
@@ -207,7 +207,7 @@ fn revealed_secure_input_matches_plain_layout_and_keeps_protections() {
         assert!(rt.copy_request.is_none(), "⌘{} on revealed field must never write to clipboard", ch.to_uppercase());
         assert_eq!(rt.state.secret.text, "hé🙂 world");
     }
-    rt.ime(Ime::Preedit("comp".into(), Some((0, 4))));
+    rt.ime(Ime::Preedit("comp".into(), Some((0, 4)), Vec::new()));
     rt.ime(Ime::Commit("commit".into()));
     rt.frame(0.0);
     assert_eq!(rt.state.secret.text, "hé🙂 world");
@@ -218,13 +218,13 @@ fn revealed_secure_input_matches_plain_layout_and_keeps_protections() {
     rt.frame(0.0);
     assert_eq!(rt.state.secret.text, "hX world", "no undo on revealed field");
 
-    let revealed_w = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap().text_layout.as_ref().unwrap().full_width();
+    let revealed_w = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap().text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().full_width();
     rt.update(|s, _| { s.secret.set_selection(1, 4); s.secret.set_revealed(false); });
     rt.frame(0.0);
     assert_eq!(rt.state.secret.range(), (1, 4), "toggling revealed keeps selection");
-    let ns = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let ns = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
     assert_eq!(ns.text.as_ref().unwrap().content, "••••••••");
-    let hidden_w = ns.text_layout.as_ref().unwrap().full_width();
+    let hidden_w = ns.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().full_width();
     assert_ne!(revealed_w, hidden_w, "toggling revealed re-layouts the text");
 }
 
@@ -272,12 +272,12 @@ fn multiline_secure_input_hides_length_and_lines_wraps_anywhere_and_conceals_on_
     assert_eq!(el_short.rect, el_long.rect, "hidden multi-line rect must not leak content length or line count");
     assert_eq!(el_short.caret, el_long.caret, "hidden multi-line caret rect must be identical");
 
-    let n_short = rt_short.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
-    let n_long = rt_long.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let n_short = rt_short.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let n_long = rt_long.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
     assert_eq!(n_short.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
     assert_eq!(n_long.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
-    let l_short = n_short.text_layout.as_ref().unwrap();
-    let l_long = n_long.text_layout.as_ref().unwrap();
+    let l_short = n_short.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
+    let l_long = n_long.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
     assert_eq!(l_short.len(), 1);
     assert_eq!(l_long.len(), 1);
     assert_eq!(l_short.full_width(), l_long.full_width());
@@ -295,20 +295,20 @@ fn multiline_secure_input_hides_length_and_lines_wraps_anywhere_and_conceals_on_
     // Revealing wraps unbroken lines at character boundaries within 180pt width.
     rt_long.update(|s, _| s.secret.set_revealed(true));
     rt_long.frame(0.0);
-    let n_rev = rt_long.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
-    let l_rev = n_rev.text_layout.as_ref().unwrap();
+    let n_rev = rt_long.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let l_rev = n_rev.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
     assert!(l_rev.len() > 100, "50 long unbroken lines must wrap into >100 visual lines");
     assert!(l_rev.full_width() <= 180.5, "wrapped unbroken lines must fit within field width (got {})", l_rev.full_width());
 
     // Exiting while revealed conceals back to the fixed multi-line mask on the first exit frame.
     rt_long.update(|s, _| s.open = false);
     rt_long.frame(0.0);
-    let exiting = rt_long.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).expect("exiting node present");
+    let exiting = rt_long.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).expect("exiting node present");
     let exit_edit = &exiting.input.as_ref().unwrap().edit;
     assert!(!exit_edit.is_revealed());
     assert_eq!(exit_edit.text, crate::edit::MULTILINE_SECURE_MASK);
     assert_eq!(exiting.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
-    assert_eq!(exiting.text_layout.as_ref().unwrap().len(), 1);
+    assert_eq!(exiting.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().len(), 1);
     assert!(!format!("{:?}", exiting.input).contains("FAKEPEMLINE"));
     assert!(!format!("{:?}", exiting.text).contains("FAKEPEMLINE"));
 }
@@ -325,22 +325,22 @@ fn secure_multiline_conceal_snaps_geometry_scroll_and_bypasses_caches() {
     let mut rt = Runtime::new(edit, view, (180.0, 200.0), Env::new(true, 1.0));
     rt.frame(0.0);
     assert_eq!(rt.text.cached_layout_count(), 0);
-    assert!(rt.node_caches.is_empty());
-    let scroll_id = rt.nodes.iter().find(|n| n.scroll.is_some()).unwrap().id;
-    assert!(rt.scrolls[&scroll_id].max > 100.0);
-    rt.scrolls.get_mut(&scroll_id).unwrap().offset = 300.0;
+    assert!(rt.paint.node_caches.is_empty());
+    let scroll_id = rt.tree.nodes.iter().find(|n| n.scroll.is_some()).unwrap().id;
+    assert!(rt.scroll.scrolls[&scroll_id].max > 100.0);
+    rt.scroll.scrolls.get_mut(&scroll_id).unwrap().offset = 300.0;
     rt.update(|s, _| s.set_revealed(false)); // No tx.instant(): conceal must do this itself.
     rt.frame(0.0);
-    let st = &rt.scrolls[&scroll_id];
+    let st = &rt.scroll.scrolls[&scroll_id];
     assert_eq!((st.offset, st.max), (0.0, 0.0));
     assert!(st.glide().is_none());
     let elements = rt.elements();
     for e in &elements {
         assert_eq!(e.rect[3], e.target[3], "concealed height must not spring: {}", e.path);
     }
-    let secret = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
-    assert_eq!(secret.text_layout.as_ref().unwrap().len(), 1);
-    assert_eq!(Rc::strong_count(secret.text_layout.as_ref().unwrap()), 1);
+    let secret = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    assert_eq!(secret.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().len(), 1);
+    assert_eq!(Rc::strong_count(secret.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap()), 1);
     assert_eq!(rt.text.cached_layout_count(), 0);
     assert!(rt.ime_area.is_none());
     let info = elements.iter().find(|e| e.key.as_deref() == Some("secret")).unwrap();
@@ -352,7 +352,7 @@ fn secure_multiline_conceal_snaps_geometry_scroll_and_bypasses_caches() {
     }
     let mut narrow = Runtime::new(rt.state.clone(), narrow, (50.0, 100.0), Env::new(true, 1.0));
     narrow.frame(0.0);
-    assert_eq!(narrow.nodes[0].text_layout.as_ref().unwrap().len(), 1);
+    assert_eq!(narrow.tree.nodes[0].text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().len(), 1);
 }
 
 #[test]
@@ -384,18 +384,18 @@ fn wrap_anywhere_wraps_unbroken_tokens_keeps_word_breaks_and_lowers_min_content_
     let mut rt = Runtime::new((), view, (400.0, 500.0), Env::new(true, 1.0));
     rt.frame(0.0);
 
-    let node = |k: &str| rt.nodes.iter().find(|n| n.key.as_deref() == Some(k)).unwrap();
+    let node = |k: &str| rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some(k)).unwrap();
     let el = |k: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(k)).unwrap();
 
     // Default .wrap() does not break inside an unbroken token and keeps its full min-content width.
-    let def_layout = node("default_wrap").text_layout.as_ref().unwrap();
+    let def_layout = node("default_wrap").text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
     assert_eq!(def_layout.len(), 1, "default wrap leaves unbroken base64 on 1 line");
     assert!(def_layout.full_width() > 400.0, "default wrap keeps full unbroken token width");
 
     // .wrap_anywhere() wraps inside the 160pt box and shrinks inside a 160pt flex row with no glyph past the right edge.
     let any_el = el("anywhere_wrap");
     let any_node = node("anywhere_wrap");
-    let any_layout = any_node.text_layout.as_ref().unwrap();
+    let any_layout = any_node.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
     assert!(any_el.rect[2] <= 160.5, "wrap_anywhere fits 160pt box (got {})", any_el.rect[2]);
     assert!(el("row_anywhere").rect[2] <= 160.5, "wrap_anywhere shrinks inside 160pt flex row (got {})", el("row_anywhere").rect[2]);
     assert!(any_layout.len() >= 4, "long base64 wraps across multiple lines (got {})", any_layout.len());
@@ -409,20 +409,20 @@ fn wrap_anywhere_wraps_unbroken_tokens_keeps_word_breaks_and_lowers_min_content_
     }
 
     // Min-content width (max_width = Some(0.0)) shrinks from the full token width to a single character's width.
-    let min_def = rt.text.layout_for_spec(node("default_wrap").text.as_ref().unwrap(), 1.0, Some(0.0), parley::Alignment::Start);
-    let min_any = rt.text.layout_for_spec(any_node.text.as_ref().unwrap(), 1.0, Some(0.0), parley::Alignment::Start);
+    let min_def = rt.text.layout_for_spec(&node("default_wrap").text.as_ref().unwrap().as_text_input(1.0, false), 1.0, Some(0.0), parley::Alignment::Start);
+    let min_any = rt.text.layout_for_spec(&any_node.text.as_ref().unwrap().as_text_input(1.0, false), 1.0, Some(0.0), parley::Alignment::Start);
     assert!(min_def.full_width() > 400.0);
     assert!(min_any.full_width() < 20.0, "wrap_anywhere min-content width is a single grapheme (got {})", min_any.full_width());
 
     // Normal words that fit on a line still break at spaces identically to .wrap().
-    let w_def = node("words_default").text_layout.as_ref().unwrap();
-    let w_any = node("words_anywhere").text_layout.as_ref().unwrap();
+    let w_def = node("words_default").text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
+    let w_any = node("words_anywhere").text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
     let ranges_def: Vec<_> = w_def.lines().map(|l| l.text_range()).collect();
     let ranges_any: Vec<_> = w_any.lines().map(|l| l.text_range()).collect();
     assert_eq!(ranges_def, ranges_any, "normal words break at spaces identically under wrap_anywhere");
 
     // Rich text also supports wrap_anywhere.
-    let rich_layout = node("rich_anywhere").text_layout.as_ref().unwrap();
+    let rich_layout = node("rich_anywhere").text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap();
     assert!(rich_layout.len() >= 4 && rich_layout.full_width() <= 160.5);
 }
 
@@ -494,19 +494,19 @@ fn secure_label_masks_reveals_conceals_and_never_leaks_plaintext() {
     // 1. All hidden labels show the same fixed mask, hiding length and line count.
     let check_no_leak = |rt: &mut Runtime<State>| {
         let tree = crate::tooling::tree_json(rt, 0.0).to_string();
-        let specs: Vec<_> = rt.nodes.iter().map(|n| (&n.text, &n.input)).collect();
+        let specs: Vec<_> = rt.tree.nodes.iter().map(|n| (&n.text, &n.input)).collect();
         let dbg = format!("{:?} {:?}", rt.elements(), specs);
         for needle in ["sk-fictional", "987654", "BEGIN FAKE KEY", "AAAAB3Nza"] {
             assert!(!tree.contains(needle), "--tree leaked {needle}: {tree}");
             assert!(!dbg.contains(needle), "Debug/elements leaked {needle}");
         }
         assert_eq!(rt.text.cached_layout_count(), cached0, "secure labels must bypass TextSystem layout/shape caches");
-        assert!(rt.node_caches.is_empty(), "secure labels must disable ancestor El::cache raster");
+        assert!(rt.paint.node_caches.is_empty(), "secure labels must disable ancestor El::cache raster");
         assert!(rt.text.atlas.resident_caches.is_empty());
         for key in ["single", "trunc", "multi", "clamped"] {
-            let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some(key)).unwrap();
-            let path = rt.nodes[i].path.clone();
-            assert_eq!(Rc::strong_count(rt.nodes[i].text_layout.as_ref().unwrap()), 1, "{key} layout owned only by node");
+            let i = rt.tree.nodes.iter().position(|n| n.key.as_deref() == Some(key)).unwrap();
+            let path = rt.tree.nodes[i].path.clone();
+            assert_eq!(Rc::strong_count(rt.tree.nodes[i].text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap()), 1, "{key} layout owned only by node");
             assert!(!rt.is_selectable(i), "{key} must not be selectable");
             assert!(!rt.selection_menu(&path, 5.0, 5.0), "{key} must not offer Copy menu");
             let info = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
@@ -519,14 +519,14 @@ fn secure_label_masks_reveals_conceals_and_never_leaks_plaintext() {
     };
     check_no_leak(&mut rt);
 
-    let n_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).unwrap();
+    let n_single = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("single")).unwrap();
     assert_eq!(n_single.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
-    let n_multi = rt.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
+    let n_multi = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
     assert_eq!(n_multi.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
-    assert_eq!(n_multi.text_layout.as_ref().unwrap().len(), 1);
-    let n_clamped = rt.nodes.iter().find(|n| n.key.as_deref() == Some("clamped")).unwrap();
+    assert_eq!(n_multi.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().len(), 1);
+    let n_clamped = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("clamped")).unwrap();
     assert_eq!(n_clamped.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
-    assert_eq!(n_clamped.text_layout.as_ref().unwrap().len(), 1);
+    assert_eq!(n_clamped.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().len(), 1);
 
     // Try selecting and copying via pointer + Cmd+C while hidden.
     let single_rect = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("single")).unwrap().rect;
@@ -541,14 +541,14 @@ fn secure_label_masks_reveals_conceals_and_never_leaks_plaintext() {
     rt.frame(0.0);
     check_no_leak(&mut rt);
 
-    let n_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).unwrap();
+    let n_single = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("single")).unwrap();
     assert_eq!(n_single.text.as_ref().unwrap().content, SINGLE_SECRET);
-    let n_trunc = rt.nodes.iter().find(|n| n.key.as_deref() == Some("trunc")).unwrap();
+    let n_trunc = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("trunc")).unwrap();
     assert!(n_trunc.elided.is_some(), "truncate elides overflowing revealed label");
-    let n_multi = rt.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
-    assert!(n_multi.text_layout.as_ref().unwrap().len() >= 4, "wrap_anywhere wraps revealed multi-line label");
-    let n_clamped = rt.nodes.iter().find(|n| n.key.as_deref() == Some("clamped")).unwrap();
-    assert_eq!(n_clamped.text_layout.as_ref().unwrap().len(), 2, "max_lines(2) clamps revealed multi-line label");
+    let n_multi = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
+    assert!(n_multi.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().len() >= 4, "wrap_anywhere wraps revealed multi-line label");
+    let n_clamped = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("clamped")).unwrap();
+    assert_eq!(n_clamped.text_layout.as_ref().and_then(crate::text::TextLayout::single).unwrap().len(), 2, "max_lines(2) clamps revealed multi-line label");
     assert!(n_clamped.elided.is_some());
 
     // Try selecting and copying while revealed: still blocked.
@@ -559,18 +559,18 @@ fn secure_label_masks_reveals_conceals_and_never_leaks_plaintext() {
     assert!(rt.selected_text().is_none() && rt.copy_request.is_none());
 
     // 3. Concealing (revealed(true) -> revealed(false)) wipes plaintext and snaps geometry and scroll without animating.
-    let scroll_id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("scroll")).unwrap().id;
-    assert!(rt.scrolls[&scroll_id].max > 10.0);
-    rt.scrolls.get_mut(&scroll_id).unwrap().offset = 24.0;
+    let scroll_id = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("scroll")).unwrap().id;
+    assert!(rt.scroll.scrolls[&scroll_id].max > 10.0);
+    rt.scroll.scrolls.get_mut(&scroll_id).unwrap().offset = 24.0;
     rt.update(|s, _| s.revealed = false); // No tx.instant(): conceal must snap itself.
     rt.frame(0.0);
     check_no_leak(&mut rt);
-    let st = &rt.scrolls[&scroll_id];
+    let st = &rt.scroll.scrolls[&scroll_id];
     assert_eq!((st.offset, st.max), (0.0, 0.0), "concealing resets ancestor scroll immediately");
     for e in rt.elements() {
         assert_eq!(e.rect[3], e.target[3], "concealed height must not spring: {}", e.path);
     }
-    let n_multi = rt.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
+    let n_multi = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
     assert_eq!(n_multi.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
 
     // 4. Exiting while revealed conceals to the mask on the first exit frame.
@@ -581,7 +581,7 @@ fn secure_label_masks_reveals_conceals_and_never_leaks_plaintext() {
     rt.frame(0.0);
     rt.update(|s, _| s.open = false);
     assert!(rt.frame(1.0 / 60.0));
-    let ex_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).expect("exiting single label");
+    let ex_single = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("single")).expect("exiting single label");
     assert!(rt.is_exiting(ex_single.id));
     assert_eq!(ex_single.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
     assert!(!format!("{:?}", ex_single.text).contains("sk-fictional"));
@@ -647,7 +647,7 @@ fn secure_label_masks_reveals_conceals_and_never_leaks_plaintext() {
                         ),
                 )
         }
-        let gpu = Gpu::headless();
+        let Some(gpu) = Gpu::test_headless() else { return };
         let (w, h) = (840, 460);
         for (name, rev) in [("secure-label-hidden.png", false), ("secure-label-revealed.png", true)] {
             let mut rt = Runtime::new(rev, card_view, (420.0, 230.0), Env::new(true, 2.0));
@@ -676,17 +676,17 @@ fn secure_rich_labels_have_no_links_flights_or_retained_measure_hashes() {
     }
     let mut rt = Runtime::new(true, view, (300.0, 100.0), Env::new(true, 1.0));
     rt.frame(0.0);
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
     assert!(n.text.as_ref().unwrap().cold.links.is_empty());
-    assert_eq!(rt.layout.measure_hash(n.id.0), Some(Some(0)));
+    assert_eq!(rt.commit.layout.measure_hash(n.id.0), Some(Some(0)));
     assert!(rt.element_is_secure(&n.path));
     assert!(!rt.element_is_secure("missing"));
     assert!(!crate::tooling::tree_json(&rt, 0.0).to_string().contains("fictional-"));
     rt.capture_text_flight("secret".into(), "target".into());
-    assert!(rt.flights.is_empty(), "a revealed secret must not survive as flying glyphs");
+    assert!(rt.motion.flights().is_empty(), "a revealed secret must not survive as flying glyphs");
     rt.update(|s, _| *s = false);
     rt.frame(0.0);
-    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+    let n = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
     assert_eq!(n.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
 }
 
@@ -801,4 +801,158 @@ fn hidden_multiline_pristine_composes_with_runtime_and_app_on_change() {
     rt.key(KeyEvent { key: Key::Text("n".into()), mods: Mods::default() });
     rt.frame(0.0);
     assert_eq!(rt.state.secret.text, "n");
+}
+
+#[test]
+fn secure_field_tree_dump_trace_events_and_debug_omit_value_and_length() {
+    use crate::{text_input, Key, KeyEvent, Mods, TextEdit, TextStyle};
+    struct S {
+        single: TextEdit,
+        multi: TextEdit,
+        handled_keys: usize,
+    }
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        col().size(300.0, 200.0)
+            .child(text_input(&s.single, TextStyle::new(16.0, 400.0)).single_line().key("pw-one").label("Password").w(200.0)
+                .on_edit(|s: &mut S| &mut s.single))
+            .child(text_input(&s.multi, TextStyle::new(16.0, 400.0)).key("pw-multi").label("Recovery key").w(200.0)
+                .on_edit(|s: &mut S| &mut s.multi))
+    }
+    const SECRET_ONE: &str = "hunter2secret"; // 13 bytes
+    const SECRET_TWO: &str = "recovery-key-nineteen"; // 21 bytes
+    let mut single = TextEdit::new(SECRET_ONE).secure();
+    single.focused = true;
+    let multi = TextEdit::new(SECRET_TWO).secure().revealed(true);
+    let mut rt = Runtime::new(S { single, multi, handled_keys: 0 }, view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.on_key = Some(|s, _, _| { s.handled_keys += 1; true });
+    rt.frame(0.0);
+
+    // --tree JSON omits password text, mask dots, caret geometry, and selection/length.
+    let tree = crate::tooling::tree_json(&rt, 0.0);
+    let serialized = tree.to_string();
+    assert!(!serialized.contains(SECRET_ONE) && !serialized.contains(SECRET_TWO), "--tree leaked secret: {serialized}");
+    assert!(!serialized.contains('•'), "--tree leaked mask: {serialized}");
+    for key in ["pw-one", "pw-multi"] {
+        let el = tree["elements"].as_array().unwrap().iter().find(|e| e["key"] == key).unwrap();
+        assert_eq!(el["secure"], true);
+        assert!(el.get("text").is_none(), "{key} leaked text in --tree");
+        assert!(el.get("selection").is_none(), "{key} leaked selection in --tree");
+        assert!(el.get("caret").is_none(), "{key} leaked caret in --tree");
+    }
+    assert!(!tree["accessibility"].to_string().contains("\"selection\""), "--tree accessibility leaked selection");
+
+    // Debug output of TextEdit and node specs redacts both value and byte-length offsets.
+    let dbg_single = format!("{:?}", rt.state.single);
+    let dbg_multi = format!("{:?}", rt.state.multi);
+    assert!(!dbg_single.contains(SECRET_ONE) && !dbg_single.contains("13"), "TextEdit Debug leaked secret or length: {dbg_single}");
+    assert!(!dbg_multi.contains(SECRET_TWO) && !dbg_multi.contains("21"), "TextEdit Debug leaked secret or length: {dbg_multi}");
+
+    // Event log / trace redacts keys handled by app.on_key while a secure field has focus.
+    rt.events.clear();
+    rt.key(KeyEvent { key: Key::Command('k'), mods: Mods { cmd: true, ..Mods::default() } });
+    rt.frame(0.0);
+    assert_eq!(rt.state.handled_keys, 1);
+    assert!(rt.events.iter().any(|e| e == "key [redacted]"), "events: {:?}", rt.events);
+    assert!(rt.events.iter().all(|e| !e.contains("Command('k')")), "events leaked key: {:?}", rt.events);
+}
+
+#[test]
+fn secure_focus_sync_wipes_old_text_on_growth_shrink_and_clear() {
+    use crate::tooling::test_alloc::{ReleaseCheck, watch_release};
+    use crate::{text_input, TextEdit, TextStyle};
+
+    struct Form {
+        pw: TextEdit,
+        view_sec: TextEdit,
+        turned_sec: TextEdit,
+        plain: TextEdit,
+    }
+    fn view(s: &Form, _: &mut Cx<Form>) -> El {
+        let style = TextStyle::new(14.0, 400.0);
+        col().size(300.0, 200.0)
+            .child(text_input(&s.pw, style).single_line().key("pw").label("Password").size(200.0, 32.0).on_edit(|s: &mut Form| &mut s.pw))
+            .child(text_input(&s.view_sec, style).single_line().secure().key("view-sec").label("View secret").size(200.0, 32.0).on_edit(|s: &mut Form| &mut s.view_sec))
+            .child(text_input(&s.turned_sec, style).single_line().key("turned-sec").label("Turned secret").size(200.0, 32.0).on_edit(|s: &mut Form| &mut s.turned_sec))
+            .child(text_input(&s.plain, style).single_line().key("plain").label("Plain").size(200.0, 32.0).on_edit(|s: &mut Form| &mut s.plain))
+    }
+    let mut rt = Runtime::new(
+        Form {
+            pw: TextEdit::new("old-secret-value").secure(),
+            view_sec: TextEdit::new("view-marked-secret"),
+            turned_sec: TextEdit::new("turned-secure-secret"),
+            plain: TextEdit::new("plain-draft-buffer-reused"),
+        },
+        view,
+        (300.0, 200.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+
+    let path_of = |rt: &Runtime<Form>, key: &str| {
+        rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap().path.clone()
+    };
+    fn text_of<'a>(rt: &'a Runtime<Form>, key: &str) -> &'a String {
+        &rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap().input.as_ref().unwrap().edit.text
+    }
+
+    let pw_path = path_of(&rt, "pw");
+    let view_sec_path = path_of(&rt, "view-sec");
+    let turned_sec_path = path_of(&rt, "turned-sec");
+    let plain_path = path_of(&rt, "plain");
+
+    // 1. Growing a secure field past its copy's capacity must wipe the old buffer before release.
+    rt.set_focus(Some(pw_path.clone()), true);
+    let (old_ptr, old_len) = {
+        let t = text_of(&rt, "pw");
+        (t.as_ptr(), t.len())
+    };
+    rt.state.pw.replace_text("a-much-longer-replacement-secret-beyond-old-capacity");
+    let (_, check) = watch_release(old_ptr, old_len, || rt.set_focus(None, false));
+    assert_eq!(check, ReleaseCheck::Zeroed, "growing secure field must wipe old buffer before release");
+    assert_eq!(text_of(&rt, "pw"), "a-much-longer-replacement-secret-beyond-old-capacity");
+
+    // 2. Shrinking a secure field must wipe and drop the old buffer rather than leaving tail bytes in spare capacity.
+    let (old_ptr, old_len) = {
+        let t = text_of(&rt, "pw");
+        (t.as_ptr(), t.len())
+    };
+    rt.state.pw.replace_text("tiny");
+    let (_, check) = watch_release(old_ptr, old_len, || rt.set_focus(Some(pw_path.clone()), true));
+    assert_eq!(check, ReleaseCheck::Zeroed, "shrinking secure field must wipe old buffer");
+    assert_eq!((text_of(&rt, "pw").as_str(), text_of(&rt, "pw").capacity()), ("tiny", 4));
+
+    // 3. Clearing a secure field (e.g. after sign-in) must wipe and free the old buffer.
+    let (old_ptr, old_len) = {
+        let t = text_of(&rt, "pw");
+        (t.as_ptr(), t.len())
+    };
+    rt.state.pw.clear();
+    let (_, check) = watch_release(old_ptr, old_len, || rt.set_focus(None, false));
+    assert_eq!(check, ReleaseCheck::Zeroed, "clearing secure field must wipe old buffer");
+    assert_eq!((text_of(&rt, "pw").as_str(), text_of(&rt, "pw").capacity()), ("", 0));
+
+    // 4. A field marked secure on the view element also wipes its old copy on refresh.
+    let (old_ptr, old_len) = {
+        let t = text_of(&rt, "view-sec");
+        (t.as_ptr(), t.len())
+    };
+    rt.state.view_sec.clear();
+    let (_, check) = watch_release(old_ptr, old_len, || rt.set_focus(Some(view_sec_path), true));
+    assert_eq!(check, ReleaseCheck::Zeroed, "view-marked secure field must wipe old buffer on clear");
+
+    // 5. A field whose app-owned model turned secure before sync also wipes its old copy.
+    let (old_ptr, old_len) = {
+        let t = text_of(&rt, "turned-sec");
+        (t.as_ptr(), t.len())
+    };
+    rt.state.turned_sec.set_secure(true);
+    rt.state.turned_sec.clear();
+    let (_, check) = watch_release(old_ptr, old_len, || rt.set_focus(Some(turned_sec_path), true));
+    assert_eq!(check, ReleaseCheck::Zeroed, "field turned secure on model must wipe old buffer");
+
+    // 6. Plain (non-secure) fields still reuse their buffer without reallocating when shrinking.
+    let old_ptr = text_of(&rt, "plain").as_ptr();
+    rt.state.plain.replace_text("plain");
+    rt.set_focus(Some(plain_path), true);
+    assert_eq!(text_of(&rt, "plain").as_ptr(), old_ptr, "plain field should keep reusing its buffer");
 }

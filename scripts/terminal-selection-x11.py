@@ -27,11 +27,12 @@ for tool in ("rex", "Xvfb", "openbox", "xdotool", "import"):
 for name in ("home", "config", "state", "runtime", "cache", "captures"):
     (work / name).mkdir(mode=0o700)
 for name in list(os.environ):
-    if name.startswith(("REX_", "HERDR_")) or name in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
+    if name.startswith(("REX_", "HERDR_")) or name in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XCOMPOSEFILE"):
         del os.environ[name]
 os.environ.update(HOME=str(work / "home"), XDG_CONFIG_HOME=str(work / "config"),
                   XDG_STATE_HOME=str(work / "state"), XDG_RUNTIME_DIR=str(work / "runtime"),
                   XDG_CACHE_HOME=str(work / "cache"), REX_BIN=BINARY,
+                  LC_ALL="C.UTF-8",
                   REX_CAPTURE_OUT=str(work / "captures"), REX_SERVER="unix://" + str(work / "rex.sock"))
 spec = importlib.util.spec_from_file_location("accept", ROOT / "scripts/rune-acceptance-x11.py")
 accept = importlib.util.module_from_spec(spec)
@@ -198,6 +199,28 @@ try:
 
     assert collect("drag", middle_drag) == b""
     print("PASS middle drag does not paste", flush=True)
+
+    # Use a private keyboard map so this drives the native dead-key path, not xdotool's
+    # direct Unicode injection.
+    if shutil.which("setxkbmap"):
+        subprocess.run(["setxkbmap", "-layout", "us", "-variant", "intl"],
+                       env=desk.env, check=True, capture_output=True)
+        dead = collect("dead-key", lambda: desk.key("dead_acute", "space", "dead_acute", "e"))
+        # With en_US.UTF-8, XKB composes dead acute + Space to apostrophe.
+        assert dead == "'é".encode(), repr(dead)
+        print("PASS dead acute followed by Space or E sends only the composed character", flush=True)
+
+    # Rune owns text-field selection independently of the terminal's PRIMARY worker.
+    sentinel()
+    desk.key("ctrl+comma")
+    desk.x("mousemove", "--window", window, 210, 92)  # Settings search at 1024x700.
+    desk.x("click", 1)
+    desk.type("primaryword")
+    desk.x("mousemove", "--window", window, 162, 92)
+    desk.x("click", "--repeat", "2", "--delay", "80", 1)
+    wait(lambda: read("PRIMARY") == "primaryword", "Settings selection did not own PRIMARY")
+    assert read() == "clipboard sentinel"
+    print("PASS Settings selection owns PRIMARY without replacing CLIPBOARD", flush=True)
 finally:
     if board:
         board.destroy()

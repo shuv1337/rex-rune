@@ -7,7 +7,7 @@ mod layout_macos;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use layout_macos::force as force_layout;
 pub use keys::{PhysicalKeyCode, modifier_keycaps};
-pub(crate) use keys::{capital, us_char};
+pub(crate) use keys::us_char;
 mod service;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -19,9 +19,11 @@ mod x11;
 mod x11_repeat;
 #[cfg(all(target_os = "linux", feature = "dbus"))]
 mod wayland;
+#[cfg(any(all(target_os = "linux", feature = "dbus"), test))]
+mod wayland_session;
 
 pub use parse::Shortcut;
-pub(crate) use service::{Hub, Guard};
+pub(crate) use service::{Guard, Hub, HubCore};
 use std::sync::Arc;
 
 /// An opaque registration, unique within this process. It is not an accelerator hash.
@@ -57,9 +59,42 @@ impl std::fmt::Display for ShortcutError {
 }
 impl std::error::Error for ShortcutError {}
 
+/// Optional desktop metadata for a global shortcut (used by Wayland's GlobalShortcuts portal).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ShortcutDetails {
+    pub(super) id: Option<String>,
+    pub(super) description: Option<String>,
+}
+
+impl ShortcutDetails {
+    pub(super) fn named(id: impl Into<String>, description: impl Into<String>) -> Self {
+        let trim = |s: String| {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        };
+        Self { id: trim(id.into()), description: trim(description.into()) }
+    }
+
+    #[cfg(any(all(target_os = "linux", feature = "dbus"), test))]
+    pub(super) fn portal_id(&self, shortcut: &Shortcut) -> String {
+        self.id.clone().unwrap_or_else(|| shortcut.to_string())
+    }
+
+    #[cfg(any(all(target_os = "linux", feature = "dbus"), test))]
+    pub(super) fn portal_description(&self, shortcut: &Shortcut) -> String {
+        self.description.clone().unwrap_or_else(|| format!("Shortcut {shortcut}"))
+    }
+}
+
 type Sink = Arc<dyn Fn(ShortcutId, Option<String>) + Send + Sync>;
 trait Backend {
     fn register(&mut self, id: ShortcutId, shortcut: &Shortcut) -> Result<(), ShortcutError>;
+    fn register_with(&mut self, id: ShortcutId, shortcut: &Shortcut, _details: &ShortcutDetails) -> Result<(), ShortcutError> {
+        self.register(id, shortcut)
+    }
+    fn register_batch(&mut self, items: &[(ShortcutId, Shortcut, ShortcutDetails)]) -> Vec<Result<(), ShortcutError>> {
+        items.iter().map(|(id, shortcut, details)| self.register_with(*id, shortcut, details)).collect()
+    }
     fn unregister(&mut self, id: ShortcutId) -> Result<(), ShortcutError>;
 }
 
@@ -68,6 +103,85 @@ type NativeBackend = Box<dyn Backend + Send>;
 #[cfg(not(target_os = "linux"))]
 type NativeBackend = Box<dyn Backend>;
 
+/// Linux session environment used to choose between the GlobalShortcuts portal and X11 grabs.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LinuxEnv<'a> {
+    /// Whether the app's own event loop is connected to Wayland (false on X11 and XWayland).
+    wayland: bool,
+    session_type: Option<&'a str>,
+    wayland_display: Option<&'a str>,
+    display: Option<&'a str>,
+    dbus: bool,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl LinuxEnv<'_> {
+    /// True when the desktop session is Wayland, including an XWayland app whose own event loop
+    /// is X11. Explicit `XDG_SESSION_TYPE=x11` keeps X11 even if a stale `WAYLAND_DISPLAY` is
+    /// present; an unset or other session type falls back to a non-empty `WAYLAND_DISPLAY`.
+    fn wayland_session(self) -> bool {
+        if self.wayland { return true; }
+        match self.session_type.map(str::trim) {
+            Some(t) if t.eq_ignore_ascii_case("wayland") => true,
+            Some(t) if t.eq_ignore_ascii_case("x11") => false,
+            _ => self.wayland_display.is_some_and(|d| !d.trim().is_empty()),
+        }
+    }
+
+    fn has_x11_display(self) -> bool {
+        self.display.is_some_and(|d| !d.trim().is_empty())
+    }
+}
+
+/// Chooses and opens the Linux global shortcuts backend for `env`. Native Wayland apps require
+/// the GlobalShortcuts portal; an XWayland app in a Wayland session tries the portal first so
+/// shortcuts fire while native Wayland windows have focus, falling back to X11 grabs when the
+/// portal is unavailable or `dbus` is disabled. Real X11 sessions open X11 directly.
+#[cfg(any(test, target_os = "linux"))]
+fn open_linux_backend<T>(
+    env: LinuxEnv<'_>,
+    open_portal: impl FnOnce() -> Result<T, ShortcutError>,
+    open_x11: impl FnOnce() -> Result<T, ShortcutError>,
+) -> Result<T, ShortcutError> {
+    if env.wayland_session() {
+        if env.dbus {
+            match open_portal() {
+                Ok(portal) => return Ok(portal),
+                Err(error) if env.wayland || !env.has_x11_display() => return Err(error),
+                Err(_) => {}
+            }
+        } else if env.wayland {
+            return Err(ShortcutError::Unsupported);
+        }
+    }
+    if env.has_x11_display() { open_x11() } else { Err(ShortcutError::Unsupported) }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_backend(wayland: bool, sink: Sink) -> Result<NativeBackend, ShortcutError> {
+    let session_type = crate::env::var("XDG_SESSION_TYPE");
+    let wayland_display = crate::env::var("WAYLAND_DISPLAY");
+    let display = crate::env::var("DISPLAY");
+    let env = LinuxEnv {
+        wayland,
+        session_type: session_type.as_deref(),
+        wayland_display: wayland_display.as_deref(),
+        display: display.as_deref(),
+        dbus: cfg!(feature = "dbus"),
+    };
+    open_linux_backend(
+        env,
+        || {
+            #[cfg(feature = "dbus")]
+            { Ok(Box::new(wayland::Native::new(sink.clone())?) as NativeBackend) }
+            #[cfg(not(feature = "dbus"))]
+            { Err(ShortcutError::Unsupported) }
+        },
+        || Ok(Box::new(x11::Native::new(sink.clone())?) as NativeBackend),
+    )
+}
+
 fn backend(wayland: bool, sink: Sink) -> Result<NativeBackend, ShortcutError> {
     let _ = wayland;
     #[cfg(target_os = "macos")]
@@ -75,12 +189,7 @@ fn backend(wayland: bool, sink: Sink) -> Result<NativeBackend, ShortcutError> {
     #[cfg(target_os = "windows")]
     return Ok(Box::new(windows::Native::new(sink)?));
     #[cfg(target_os = "linux")]
-    return if wayland {
-        #[cfg(feature = "dbus")]
-        { Ok(Box::new(wayland::Native::new(sink)?)) }
-        #[cfg(not(feature = "dbus"))]
-        { Err(ShortcutError::Unsupported) }
-    } else { Ok(Box::new(x11::Native::new(sink)?)) };
+    return linux_backend(wayland, sink);
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     { let _ = sink; Err(ShortcutError::Unsupported) }
 }
@@ -107,14 +216,36 @@ impl<S: 'static> crate::App<S> {
     /// Register when the app starts, on the same thread and state as its windows.
     /// Errors are reported once to stderr and retained by `AppHandle::take_shortcut_errors`.
     /// Headless scripts register virtually, without connecting to the desktop.
+    ///
+    /// On Wayland, all startup shortcuts bind together in one GlobalShortcuts portal session.
+    /// Each shortcut defaults to its canonical accelerator string as its portal id and
+    /// `"Shortcut <chord>"` as its description; use [`Self::global_shortcut_named`] to give it
+    /// a custom stable id and user-facing description.
     pub fn global_shortcut(self, accelerator: &str, handler: fn(&mut S, &mut crate::Tx)) -> Self {
-        self.shared.shortcuts.pending(accelerator.parse(), Arc::new(handler));
+        self.shared.shortcuts.pending(accelerator.parse(), ShortcutDetails::default(), Arc::new(handler));
+        self
+    }
+
+    /// Register a startup global shortcut with a stable desktop `id` and a user-facing
+    /// `description` shown in Wayland's GlobalShortcuts consent dialog and desktop Settings.
+    ///
+    /// A blank `id` falls back to the canonical accelerator string; a blank `description` falls
+    /// back to `"Shortcut <chord>"`. Other platforms ignore `id` and `description`.
+    pub fn global_shortcut_named(
+        self,
+        accelerator: &str,
+        id: impl Into<String>,
+        description: impl Into<String>,
+        handler: fn(&mut S, &mut crate::Tx),
+    ) -> Self {
+        self.shared.shortcuts.pending(accelerator.parse(), ShortcutDetails::named(id, description), Arc::new(handler));
         self
     }
 
     /// Let `global_shortcut` and `register_shortcut` take a chord without ⌘, ⌃ or ⌥ (Ctrl, Alt
     /// or Super elsewhere), such as Space or ⇧A, which then can't be typed in any app. By
-    /// default those fail with `InvalidAccelerator`; F1–F24 are always allowed alone.
+    /// default those fail with `InvalidAccelerator`; F1–F24 and Print Screen are always allowed
+    /// alone.
     pub fn allow_unmodified_shortcuts(self) -> Self {
         self.shared.shortcuts.allow_unmodified();
         self
@@ -128,7 +259,20 @@ impl<S: 'static> crate::AppHandle<S> {
     /// use a worker for Wayland consent dialogs to keep the UI responsive. Portal consent is
     /// bounded to two minutes and the user may choose a different trigger.
     pub fn register_shortcut(&self, shortcut: Shortcut, handler: impl Fn(&mut S, &mut crate::Tx) + Send + Sync + 'static) -> Result<ShortcutId, ShortcutError> {
-        self.shared.shortcuts.register(shortcut, Arc::new(handler))
+        self.shared.shortcuts.register(shortcut, ShortcutDetails::default(), Arc::new(handler))
+    }
+
+    /// Register a shortcut at runtime with a stable desktop `id` and user-facing `description`
+    /// for Wayland's GlobalShortcuts portal. A blank `id` falls back to the canonical chord and
+    /// a blank `description` falls back to `"Shortcut <chord>"`.
+    pub fn register_shortcut_named(
+        &self,
+        shortcut: Shortcut,
+        id: impl Into<String>,
+        description: impl Into<String>,
+        handler: impl Fn(&mut S, &mut crate::Tx) + Send + Sync + 'static,
+    ) -> Result<ShortcutId, ShortcutError> {
+        self.shared.shortcuts.register(shortcut, ShortcutDetails::named(id, description), Arc::new(handler))
     }
 
     /// Release a registration owned by this app. Already queued activations become no-ops.
@@ -156,3 +300,6 @@ impl crate::Tx {
     /// `AppHandle::activate(token)` to show and focus the quick panel. None on other backends.
     pub fn activation_token(&self) -> Option<&str> { self.shortcut_activation_token.as_deref() }
 }
+
+#[cfg(test)]
+mod tests;

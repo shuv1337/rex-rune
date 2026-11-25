@@ -241,14 +241,14 @@ fn a_window_in_full_screen_keeps_the_size_it_had() {
 #[test]
 fn leaving_full_screen_is_seen_when_only_the_traffic_lights_move() {
     let (mut rt, _rx) = unified(&["single"]);
-    rt.set_window_full_screen(true);
+    rt.set_full_screen(true);
     rt.set_viewport((1512., 982.), 1.);
     rt.set_chrome_insets(lights(0.));
     settle(&mut rt);
     assert!(rt.state.window_full_screen && rt.state.in_full_screen());
     // macOS's last resize out of full screen still says full screen; by the time the
     // traffic lights come back it doesn't, and the window's size doesn't change again.
-    rt.set_window_full_screen(false);
+    rt.set_full_screen(false);
     rt.set_chrome_insets(lights(LIGHTS));
     settle(&mut rt);
     assert!(!rt.state.window_full_screen && !rt.state.in_full_screen());

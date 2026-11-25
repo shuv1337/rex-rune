@@ -2,7 +2,7 @@
 use super::*;
 
 /// The box casting the shadows and how they paint, in device pixels.
-pub(super) struct Caster {
+pub(in crate::runtime) struct Caster {
     pub rect: [f32; 4],
     /// Circular corner radii; shadows keep circular corners.
     pub radii: [f32; 4],
@@ -22,10 +22,13 @@ pub(super) struct Caster {
 }
 
 /// One outer shadow `sh` in colour `c` (straight alpha) under `cast`.
-pub(super) fn push_shadow(out: &mut Vec<Instance>, sh: &crate::el::Shadow, c: Color, cast: &Caster) {
+pub(in crate::runtime) fn push_shadow(out: &mut Vec<Instance>, sh: &crate::el::Shadow, c: Color, cast: &Caster) {
     let [x, y, w, h] = cast.rect;
     let sp = sh.spread * cast.k_px;
     let rect = [x + sh.x * cast.k_px - sp, y + sh.y * cast.k_px - sp, w + 2.0 * sp, h + 2.0 * sp];
+    if rect[2] <= 0.0 || rect[3] <= 0.0 {
+        return;
+    }
     let sradii = cast.radii.map(|v| if v > 0.0 { (v + sp).max(0.0) } else { 0.0 });
     let (clip, fade) = (cast.clip, crate::render::pack_fade(cast.fade, cast.clip, cast.clip));
     let fill = premul(c, cast.opacity, cast.srgb);

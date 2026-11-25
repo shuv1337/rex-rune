@@ -3,16 +3,10 @@
 //! families, for the font pickers in Settings. Where families are found is
 //! [`super::platform::fonts`].
 use super::platform::fonts as system;
-use std::{
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-    sync::OnceLock,
-};
+use std::{collections::BTreeMap, sync::OnceLock};
 
 pub struct Fonts {
     pub files: &'static [&'static [u8]],
-    /// System font files Rune registers by path, without copying them into heap buffers.
-    pub paths: &'static [PathBuf],
     pub families: (&'static str, &'static str),
     /// The resolved primary family, for Settings; the grid uses the mono slot's full stack.
     pub terminal: Option<&'static str>,
@@ -44,6 +38,12 @@ fn leak(s: String) -> &'static str {
 }
 
 fn css_family(family: &str) -> String {
+    if matches!(
+        family,
+        "ui-monospace" | "monospace" | "sans-serif" | "serif"
+    ) {
+        return family.to_owned();
+    }
     format!("'{}'", family.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
@@ -115,12 +115,9 @@ pub fn catalog<'a>(listed: impl IntoIterator<Item = (&'a str, bool)>) -> Vec<Fam
 static CATALOG: OnceLock<Vec<Family>> = OnceLock::new();
 
 /// The families installed on this machine and the bundled ones, read once per run. Without
-/// the platform's list (no `fc-list` on Linux) only the bundled families are listed.
+/// the platform's list, only the bundled families are listed.
 pub fn read_installed() -> &'static [Family] {
-    CATALOG.get_or_init(|| {
-        let listed = system::installed();
-        catalog(listed.iter().map(|(name, mono)| (name.as_str(), *mono)))
-    })
+    CATALOG.get_or_init(|| catalog(system::installed()))
 }
 
 /// [`read_installed`] once it has been read. The first call starts reading it on a thread of
@@ -149,16 +146,18 @@ pub fn installed(ready: impl FnOnce() + Send + 'static) -> Option<&'static [Fami
 /// first time it is drawn: a name can be shown in its own face. A family name has no comma,
 /// so Rune reads it as one literal name. Each name is kept for the life of the process, once.
 pub fn named(family: &str) -> rune::Family {
+    if system::uses_system_mono(family) {
+        return rune::Family::SystemMono;
+    }
     thread_local! {
         static NAMES: std::cell::RefCell<std::collections::HashMap<String, &'static str>> =
             Default::default();
     }
     NAMES.with_borrow_mut(|names| {
-        rune::Family::Named(names.entry(family.to_owned()).or_insert_with(|| {
-            leak(match bundled(family) {
-                Some(name) => name.to_owned(),
-                None => system::stack_name(family),
-            })
+        rune::Family::Named(bundled(family).unwrap_or_else(|| {
+            names
+                .entry(family.to_owned())
+                .or_insert_with(|| leak(family.to_owned()))
         }))
     })
 }
@@ -178,42 +177,31 @@ pub fn stand_in_words() -> String {
 }
 
 pub fn load(terminal_family: &str, fallbacks: &[String]) -> Fonts {
-    let mut paths = Vec::new();
-    let mut seen = HashSet::new();
     let mut names = Vec::new();
     let mut terminal = None;
     let mut stand_in = None;
-    let mut resolve = |family: &str, paths: &mut Vec<PathBuf>| {
+    let resolve = |family: &str| {
         if let Some(name) = bundled(family) {
-            return Some((name.to_owned(), name.to_owned()));
+            return Some((name, name));
         }
-        let found = system::resolve(family)?;
-        for file in found.files {
-            if seen.insert(file.clone()) {
-                paths.push(file);
-            }
-        }
-        Some((found.name, found.stack))
+        system::resolve(family)
     };
     for (index, family) in std::iter::once(terminal_family)
         .chain(fallbacks.iter().map(String::as_str))
         .enumerate()
     {
-        match resolve(family, &mut paths) {
+        match resolve(family) {
             Some((name, stack)) => {
                 if index == 0 {
-                    terminal = Some(leak(name));
+                    terminal = Some(name);
                 }
-                add_name(&mut names, &stack);
+                add_name(&mut names, stack);
             }
             None if index == 0 => {
-                let found = system::STAND_INS
-                    .iter()
-                    .find_map(|family| resolve(family, &mut paths));
+                let found = system::STAND_INS.iter().find_map(|family| resolve(family));
                 let using = match found {
                     Some((name, stack)) => {
-                        add_name(&mut names, &stack);
-                        let name = leak(name);
+                        add_name(&mut names, stack);
                         stand_in = Some(name);
                         name
                     }
@@ -236,7 +224,6 @@ pub fn load(terminal_family: &str, fallbacks: &[String]) -> Fonts {
         .join(", ");
     Fonts {
         files: files(),
-        paths: Box::leak(paths.into_boxed_slice()),
         families: (rune_theme_opencode::FAMILIES.0, leak(mono)),
         terminal,
         stand_in,
@@ -261,7 +248,6 @@ mod tests {
             &fonts.files[..fonts.files.len() - 1],
             rune_theme_opencode::FONTS
         );
-        assert!(fonts.paths.is_empty(), "bundled faces are not re-read");
     }
 
     #[test]
@@ -274,7 +260,6 @@ mod tests {
             fonts.families.1, "'IBM Plex Mono', 'Symbols Nerd Font', 'Inter'",
             "a named place is kept; the bundled copy is not added twice"
         );
-        assert!(fonts.paths.is_empty());
     }
 
     #[test]
@@ -438,8 +423,7 @@ mod tests {
     fn nerd_glyphs_come_from_the_bundled_symbols_font_without_changing_ascii_cells() {
         let fonts = load("IBM Plex Mono", &[]);
         let _families = rune::text::with_families("Inter", fonts.families.1);
-        let mut ts =
-            rune::text::TextSystem::new_with_paths(fonts.files, fonts.paths, fonts.families);
+        let mut ts = rune::text::TextSystem::new(fonts.files, fonts.families);
         let style = rune::TextStyle::new(15., 400.).mono();
         // Branch, Powerline arrow, folder and GitHub: what prompts draw.
         let glyphs = shaped(&mut ts, "\u{e0a0}\u{e0b0}\u{f07b}\u{f113}", style);
@@ -469,38 +453,19 @@ mod tests {
     }
 
     #[test]
-    fn native_font_paths_shape_from_the_file_without_an_embedded_copy() {
-        let _families = rune::text::with_families("Inter", "Inter");
-        const PLEX: &[u8] =
-            include_bytes!("../../vendor/rune/crates/rune/assets/IBMPlexMono-Regular.ttf");
-        let path = std::env::temp_dir().join(format!(
-            "rex-font-path-{}-{}.ttf",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::write(&path, PLEX).unwrap();
+    fn installed_mono_slot_shapes_from_the_system_face() {
+        let Some(family) = ["DejaVu Sans Mono", "Menlo", "Consolas"]
+            .into_iter()
+            .find(|family| system::resolve(family).is_some())
+        else {
+            return;
+        };
+        let fonts = load(family, &[]);
+        let _families = rune::text::with_families(fonts.families.0, fonts.families.1);
+        let mut ts = rune::text::TextSystem::new(fonts.files, fonts.families);
         let style = rune::TextStyle::new(13., 400.).mono();
-        let mut without_path =
-            rune::text::TextSystem::new_with_paths(&[], &[], ("Inter", "IBM Plex Mono"));
-        let fallback_width = without_path
-            .layout_rich("MMMM", &[], style, 1., None)
-            .full_width();
-        let mut with_path = rune::text::TextSystem::new_with_paths(
-            &[],
-            std::slice::from_ref(&path),
-            ("Inter", "IBM Plex Mono"),
-        );
-        let plex_width = with_path
-            .layout_rich("MMMM", &[], style, 1., None)
-            .full_width();
-        std::fs::remove_file(path).unwrap();
-        assert!(
-            (plex_width - fallback_width).abs() > 0.5,
-            "path font was not selected: {plex_width} vs {fallback_width}"
-        );
+        let mut plex = rune::text::TextSystem::new(fonts.files, ("Inter", "IBM Plex Mono"));
+        assert_ne!(shaped(&mut ts, "M0", style), shaped(&mut plex, "M0", style));
     }
 
     #[test]
@@ -508,8 +473,7 @@ mod tests {
     fn fontconfig_cjk_fallback_has_real_glyphs_and_keeps_ascii_metrics() {
         let _families = rune::text::with_families("Inter", "Inter");
         let fonts = load("IBM Plex Mono", &[]);
-        let mut ts =
-            rune::text::TextSystem::new_with_paths(fonts.files, fonts.paths, fonts.families);
+        let mut ts = rune::text::TextSystem::new(fonts.files, fonts.families);
         let style = rune::TextStyle::new(15., 400.).mono();
         let text = rune::text::Run::new("世界 日本語 한글");
         let shaped = ts.run_layout(&text, style, 1.);

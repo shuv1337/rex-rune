@@ -49,7 +49,7 @@ fn nerd_symbols_draw() {
         view,
         size,
         Env::new(true, scale),
-        rune::text::TextSystem::new_with_paths(fonts.files, fonts.paths, fonts.families),
+        rune::text::TextSystem::new(fonts.files, fonts.families),
     );
     for _ in 0..90 {
         rt.frame(1. / 60.);

@@ -1,24 +1,26 @@
 //! Main-thread AppKit adapter. Adds one optional selector to winit's existing delegate;
 //! never replaces the delegate or any existing method. The hook returns nil after teardown.
-use super::{Description, Location, MenuError};
+
+#![allow(unsafe_code)]
+
+use super::{Description, EntryKind, Location, MenuError};
 use std::{cell::{Cell, RefCell}, ffi::{c_char, c_void}, sync::Arc};
-use objc2::{ClassType, DeclaredClass, declare_class, msg_send, msg_send_id, mutability, sel, rc::Retained,
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel, rc::Retained,
     runtime::{AnyClass, AnyObject, Bool, Sel}};
 use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
-use objc2_foundation::{MainThreadMarker, NSObject, NSString};
+use objc2_foundation::{NSObject, NSString};
 
 type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 struct Action { id: String, enabled: bool, keys_first: bool, sink: Sink }
-declare_class!(
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "RuneNativeMenuTarget"]
+    #[ivars = Action]
     struct MenuTarget;
-    unsafe impl ClassType for MenuTarget {
-        type Super = NSObject;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "RuneNativeMenuTarget";
-    }
-    impl DeclaredClass for MenuTarget { type Ivars = Action; }
-    unsafe impl MenuTarget {
-        #[method(runeMenuAction:)]
+
+    impl MenuTarget {
+        #[unsafe(method(runeMenuAction:))]
         fn perform(&self, _sender: &NSMenuItem) {
             let Action { id, enabled, keys_first, sink } = self.ivars();
             if *enabled && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -27,7 +29,7 @@ declare_class!(
                 if !*keys_first || !super::standard_macos::defer_key(run.clone()) { run(); }
             })).is_err() { eprintln!("rune: native menu callback panicked"); }
         }
-        #[method(validateMenuItem:)]
+        #[unsafe(method(validateMenuItem:))]
         fn validate(&self, _sender: &NSMenuItem) -> bool { self.ivars().enabled }
     }
 );
@@ -35,6 +37,8 @@ declare_class!(
 thread_local! {
     static OWNED: Cell<bool> = const { Cell::new(false) };
     static DOCK: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
+    /// The jump list's Dock menu (`set_jump_list`), shown when the app's menus put nothing there.
+    static JUMP: RefCell<Option<(Retained<NSMenu>, Vec<Retained<MenuTarget>>)>> = const { RefCell::new(None) };
     static HOOKED: Cell<*const AnyClass> = const { Cell::new(std::ptr::null()) };
 }
 unsafe extern "C" {
@@ -42,7 +46,41 @@ unsafe extern "C" {
 }
 extern "C" fn dock_menu(_: *mut AnyObject, _: Sel, _: *mut AnyObject) -> *mut AnyObject {
     DOCK.with(|slot| slot.try_borrow().ok().and_then(|s| s.as_ref().map(|m| &**m as *const NSMenu as *mut AnyObject)))
+        .or_else(|| JUMP.with(|slot| slot.try_borrow().ok().and_then(|s| s.as_ref().map(|(m, _)| &**m as *const NSMenu as *mut AnyObject))))
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// The jump list as the Dock menu: its tasks, then each category under a disabled title. A pick
+/// arrives as a link the app opens (`App::on_open_url`), as a Windows jump list entry does.
+pub(crate) fn set_jump_menu(list: &crate::jump_list::JumpList) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    if install_dock_hook(&app).is_err() { return; }
+    let sink: Sink = Arc::new(|argument: &str| crate::open_url::incoming::receive(argument.to_owned()));
+    let menu = NSMenu::new(mtm);
+    let mut targets = Vec::new();
+    // SAFETY: AppKit calls on the main thread; each item's target is kept in JUMP for as long as
+    // the menu holds the item.
+    unsafe {
+        let mut add = |title: &str, argument: Option<&str>| {
+            let item = NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(title), argument.map(|_| sel!(runeMenuAction:)), &NSString::from_str(""));
+            if let Some(argument) = argument {
+                let target: Retained<MenuTarget> = msg_send![super(mtm.alloc().set_ivars(Action { id: argument.to_owned(), enabled: true, keys_first: false, sink: sink.clone() })), init];
+                item.setTarget(Some(&target));
+                targets.push(target);
+            } else {
+                item.setEnabled(false);
+            }
+            menu.addItem(&item);
+        };
+        for task in &list.tasks { add(&task.title, Some(&task.argument)); }
+        for (name, items) in &list.categories {
+            if menu.numberOfItems() > 0 { menu.addItem(&NSMenuItem::separatorItem(mtm)); }
+            add(name, None);
+            for item in items { add(&item.title, Some(&item.argument)); }
+        }
+    }
+    JUMP.with(|slot| *slot.borrow_mut() = Some((menu, targets)));
 }
 fn install_dock_hook(app: &NSApplication) -> Result<(), MenuError> {
     // SAFETY: AppKit calls and Objective-C runtime mutation occur only on the main thread.
@@ -80,9 +118,10 @@ impl Native {
     }
     fn clear(&mut self) {
         for (menu, item) in self.entries.drain(..) {
-            // SAFETY: AppKit's target is non-retaining. Clear it before releasing our target,
-            // even if a currently tracking menu keeps the removed item alive.
-            unsafe { item.setTarget(None); item.setAction(None); menu.removeItem(&item); }
+            // SAFETY: AppKit's target is non-retaining. Clear targets recursively through any
+            // nested submenus before releasing our targets, even if a currently tracking menu
+            // keeps removed items alive.
+            unsafe { clear_item_targets(&item); menu.removeItem(&item); }
         }
         // A menu the standard items joined stays for them.
         for (root, top) in self.tops.drain(..) { super::default_macos::remove_top_if_empty(&root, &top); }
@@ -95,31 +134,28 @@ impl Native {
         // retained from AppKit, indices are bounded, and targets outlive their items.
         unsafe {
         let app = NSApplication::sharedApplication(self.mtm);
-        if descriptions.iter().any(|d| d.location == Location::Dock) { install_dock_hook(&app)?; }
-        // Construct all targets before removing the previous snapshot.
+        if descriptions.iter().any(|d| d.meta.location == Location::Dock) { install_dock_hook(&app)?; }
+        // Construct all items, nested submenus, and targets before removing the previous snapshot.
+        let mut new_targets = Vec::new();
         let prepared: Vec<_> = descriptions.iter().map(|d| {
-            if d.separator { return (d, NSMenuItem::separatorItem(self.mtm), None); }
-            // SAFETY: NSObject initialization follows set_ivars; the main-thread target is
-            // kept alive until its menu item is removed and its non-retaining target cleared.
-            let target: Retained<MenuTarget> = msg_send_id![super(self.mtm.alloc().set_ivars(Action {
-                id: d.id.clone(), enabled: d.enabled, keys_first: d.keys_first, sink: sink.clone(),
-            })), init];
-            let item = NSMenuItem::initWithTitle_action_keyEquivalent(self.mtm.alloc(),
-                &NSString::from_str(&d.title), Some(sel!(runeMenuAction:)), &NSString::from_str(""));
-            item.setTarget(Some(&target));
-            item.setEnabled(d.enabled);
-            item.setState(if d.checked { 1 } else { 0 });
-            super::set_key_equivalent(&item, d.equivalent.as_ref());
-            (d, item, Some(target))
+            let item = build_item(self.mtm, d, true, &sink, &mut new_targets);
+            (d, item)
         }).collect();
         self.clear();
+        // Ensure the default menu bar exists before `adding` releases yieldable keys (including
+        // built-in Quit's ⌘Q), so a custom item claiming ⌘Q never collides with `terminate:`.
+        if descriptions.iter().any(|d| d.meta.location != Location::Dock) {
+            let _ = super::ensure_default_menu(&app);
+        }
         super::default_macos::adding(&app, || {
-            let mut app_index = 0;
+            let mut last_app_item: Option<Retained<NSMenuItem>> = None;
+            let mut custom_about = false;
             // Items placed so far by id, and the last one placed after each anchor.
             let mut placed: Vec<(&str, Retained<NSMenuItem>)> = Vec::new();
             let mut chained: Vec<(&str, Retained<NSMenuItem>)> = Vec::new();
-            for (d, item, target) in prepared {
-                let location = &d.location;
+            for (d, item) in prepared {
+                if d.meta.replaces_about { item.setTag(super::default_macos::ABOUT_REPLACEMENT); }
+                let location = &d.meta.location;
                 let menu = if *location == Location::Dock {
                     DOCK.with(|slot| slot.borrow_mut().get_or_insert_with(|| NSMenu::new(self.mtm)).clone())
                 } else {
@@ -140,31 +176,48 @@ impl Native {
                         Location::Dock => unreachable!(),
                     }
                 };
-                let anchor = d.after.as_deref().and_then(|a| anchor_index(&menu, a, &placed, &chained).map(|i| (a, i)));
-                if let Some((a, index)) = anchor {
+                let anchor = d.meta.after.as_deref().and_then(|a| anchor_index(&menu, a, &placed, &chained).map(|i| (a, i)));
+                if d.meta.replaces_about {
+                    menu.insertItem_atIndex(&item, 0);
+                    custom_about = true;
+                } else if let Some((a, index)) = anchor {
                     menu.insertItem_atIndex(&item, index + 1);
                     chained.retain(|(c, _)| *c != a);
                     chained.push((a, item.clone()));
                 } else if *location == Location::App {
-                    // App items follow the app menu's About item, where AppKit apps list Check
-                    // for Updates… and Settings…; an app menu without one takes them first.
-                    let first = (menu.numberOfItems() > 0).then(|| menu.itemAtIndex(0)).flatten();
-                    let about = first.and_then(|i| i.action()) == Some(sel!(orderFrontStandardAboutPanel:));
-                    menu.insertItem_atIndex(&item, app_index + isize::from(about));
-                    app_index += 1;
+                    // App items follow the app menu's About item (custom or standard), where
+                    // AppKit apps list Check for Updates… and Settings…; an app menu without
+                    // one takes them first.
+                    let index = last_app_item.as_ref()
+                        .map(|prev| menu.indexOfItem(prev))
+                        .filter(|&i| i >= 0)
+                        .map(|i| i + 1)
+                        .unwrap_or_else(|| {
+                            let first = (menu.numberOfItems() > 0).then(|| menu.itemAtIndex(0)).flatten();
+                            let about = custom_about || first.and_then(|i| i.action()) == Some(sel!(orderFrontStandardAboutPanel:));
+                            isize::from(about)
+                        });
+                    menu.insertItem_atIndex(&item, index);
+                    last_app_item = Some(item.clone());
                 } else {
                     menu.addItem(&item);
                 }
-                if !d.separator { placed.push((&d.id, item.clone())); }
-                self.entries.push((menu, item)); self.targets.extend(target);
+                if !matches!(d.kind, EntryKind::Separator) { placed.push((&d.meta.id, item.clone())); }
+                self.entries.push((menu, item));
             }
         });
+        self.targets = new_targets;
         // Each menu reads the app's way; the bar keeps the system's order of its menus.
         if let Some(root) = app.mainMenu() {
             for top in (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i)).filter_map(|i| i.submenu()) {
                 super::set_layout_direction(&top);
             }
         }
+        DOCK.with(|slot| {
+            if let Some(dock) = slot.borrow().as_ref() {
+                super::set_layout_direction(dock);
+            }
+        });
         Ok(())
         }
     }
@@ -175,17 +228,103 @@ impl Native {
     }
 }
 
+/// Builds one `NSMenuItem` (leaf action, separator, or recursive submenu), appending every
+/// created `MenuTarget` to `targets`. `ancestors_enabled` is false whenever an enclosing submenu
+/// is disabled, so nested targets refuse to validate or fire even via key equivalents.
+unsafe fn build_item(
+    mtm: MainThreadMarker,
+    d: &Description,
+    ancestors_enabled: bool,
+    sink: &Sink,
+    targets: &mut Vec<Retained<MenuTarget>>,
+) -> Retained<NSMenuItem> {
+    // SAFETY: caller holds a main-thread marker; every MenuTarget is pushed into `targets`
+    // and kept alive until `clear_item_targets` detaches it.
+    unsafe {
+        match &d.kind {
+            EntryKind::Separator => NSMenuItem::separatorItem(mtm),
+            EntryKind::Action => {
+                let effective_enabled = ancestors_enabled && d.meta.enabled;
+                let target: Retained<MenuTarget> = msg_send![super(mtm.alloc().set_ivars(Action {
+                    id: d.meta.id.clone(),
+                    enabled: effective_enabled,
+                    keys_first: d.meta.keys_first,
+                    sink: sink.clone(),
+                })), init];
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    mtm.alloc(),
+                    &NSString::from_str(&d.meta.title),
+                    Some(sel!(runeMenuAction:)),
+                    &NSString::from_str(""),
+                );
+                item.setTarget(Some(&target));
+                item.setEnabled(effective_enabled);
+                item.setState(if d.meta.checked { 1 } else { 0 });
+                item.setAlternate(d.meta.alternate);
+                super::set_key_equivalent(&item, d.meta.equivalent.as_ref());
+                targets.push(target);
+                item
+            }
+            EntryKind::Submenu(children) => {
+                let effective_enabled = ancestors_enabled && d.meta.enabled;
+                let title = NSString::from_str(&d.meta.title);
+                let submenu = NSMenu::new(mtm);
+                submenu.setTitle(&title);
+                submenu.setAutoenablesItems(false);
+                let mut placed: Vec<(&str, Retained<NSMenuItem>)> = Vec::new();
+                let mut chained: Vec<(&str, Retained<NSMenuItem>)> = Vec::new();
+                for child in children {
+                    let ns_child = build_item(mtm, child, effective_enabled, sink, targets);
+                    let anchor = child.meta.after.as_deref()
+                        .and_then(|a| anchor_index(&submenu, a, &placed, &chained).map(|i| (a, i)));
+                    if let Some((a, index)) = anchor {
+                        submenu.insertItem_atIndex(&ns_child, index + 1);
+                        chained.retain(|(c, _)| *c != a);
+                        chained.push((a, ns_child.clone()));
+                    } else {
+                        submenu.addItem(&ns_child);
+                    }
+                    if !matches!(child.kind, EntryKind::Separator) {
+                        placed.push((&child.meta.id, ns_child));
+                    }
+                }
+                let item = NSMenuItem::new(mtm);
+                item.setTitle(&title);
+                item.setSubmenu(Some(&submenu));
+                item.setEnabled(effective_enabled);
+                item.setState(if d.meta.checked { 1 } else { 0 });
+                item.setAlternate(d.meta.alternate);
+                item
+            }
+        }
+    }
+}
+
+/// Detaches targets and actions recursively through any nested submenus before releasing
+/// `Native::targets`.
+unsafe fn clear_item_targets(item: &NSMenuItem) {
+    // SAFETY: main-thread AppKit items; indices are bounded by `numberOfItems`.
+    unsafe {
+        if let Some(submenu) = item.submenu() {
+            for i in 0..submenu.numberOfItems() {
+                if let Some(child) = submenu.itemAtIndex(i) {
+                    clear_item_targets(&child);
+                }
+            }
+        }
+        item.setTarget(None);
+        item.setAction(None);
+    }
+}
+
 /// Where `MenuItem::after`'s `anchor` is in `menu`: the last item already placed after it, else
 /// this app's item with that id, else a native item with that AppKit action.
 fn anchor_index(menu: &NSMenu, anchor: &str, placed: &[(&str, Retained<NSMenuItem>)], chained: &[(&str, Retained<NSMenuItem>)]) -> Option<isize> {
-    // SAFETY: reading retained menus and items on the main thread, as `Native::set` does.
-    unsafe {
-        let index_of = |item: &NSMenuItem| Some(menu.indexOfItem(item)).filter(|&i| i >= 0);
-        let find = |list: &[(&str, Retained<NSMenuItem>)]| list.iter().filter(|(a, _)| *a == anchor).find_map(|(_, item)| index_of(item));
-        find(chained).or_else(|| find(placed)).or_else(|| {
-            (0..menu.numberOfItems()).find(|&i| menu.itemAtIndex(i).and_then(|item| item.action()).is_some_and(|a| a.name() == anchor))
-        })
-    }
+    let index_of = |item: &NSMenuItem| Some(menu.indexOfItem(item)).filter(|&i| i >= 0);
+    let find = |list: &[(&str, Retained<NSMenuItem>)]| list.iter().filter(|(a, _)| *a == anchor).find_map(|(_, item)| index_of(item));
+    find(chained).or_else(|| find(placed)).or_else(|| {
+        (0..menu.numberOfItems()).find(|&i| menu.itemAtIndex(i).and_then(|item| item.action()).is_some_and(|a| a.name().to_str() == Ok(anchor)))
+    })
 }
 impl Drop for Native {
     fn drop(&mut self) {

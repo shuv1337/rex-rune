@@ -6,14 +6,13 @@ use rune::{
     text::TextSystem,
 };
 use rune_motion::{AnimationStore, NodeId, Prop, PropClass, Spring};
-use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 fn buffer(device: &wgpu::Device, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false })
 }
 fn read(device: &wgpu::Device, b: &wgpu::Buffer) -> Vec<u8> {
-    b.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    b.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let bytes = b.slice(..).get_mapped_range().unwrap().to_vec();
     b.unmap();
@@ -261,6 +260,7 @@ fn bench(gpu: &Gpu, timing: bool) {
         let mut cpu = Renderer::new(d, OFFSCREEN_FORMAT);
         let mut fast = Renderer::with_springs(d, OFFSCREEN_FORMAT, &nodes, &ids);
         let mut atlas = TextSystem::default().atlas;
+    atlas.data.resize((rune::text::ATLAS_SIZE * rune::text::ATLAS_SIZE) as usize, 0);
         fast.prepare(d, q, &mut atlas, &base, (512, 512));
         let mut results: [Vec<(f64, f64)>; 2] = [vec![], vec![]];
         for run in 0..if timing { 8 } else { 0 } {
@@ -270,7 +270,7 @@ fn bench(gpu: &Gpu, timing: bool) {
                 let mut gpu_times = Vec::new();
                 for frame in 0..120 {
                     let now = frame as f64 / 120.0;
-                    let start = Instant::now();
+                    let start = rune::time::now();
                     let renderer = if path == 0 {
                         store.tick_at(now);
                         for (i, inst) in instances.iter_mut().enumerate() {
@@ -393,6 +393,7 @@ fn primitive_pixels(gpu: &Gpu) {
     image_atlas.invalidate();
     fast.upload_images(d, q, &mut image_atlas);
     let mut atlas = TextSystem::default().atlas;
+    atlas.data.resize((rune::text::ATLAS_SIZE * rune::text::ATLAS_SIZE) as usize, 0);
     // A real opaque glyph footprint, independently uploaded to both renderers.
     atlas.data[0] = 255;
     atlas.data[1] = 192;

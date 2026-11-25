@@ -618,7 +618,7 @@ fn a_key_an_input_method_is_composing_with_is_not_a_shortcut() {
     rt.update(|s, tx| {
         assert!(crate::app::input::on_ime(
             s,
-            &rune::Ime::Preedit("に".into(), None),
+            &rune::Ime::Preedit("に".into(), None, vec![]),
             tx
         ));
     });
@@ -896,7 +896,7 @@ fn cancelling_composition_keeps_a_late_commit_out_of_the_terminal() {
     let mut rt = open(ws);
     reach(&mut rt, "shortcut-key:pane.zoom:0");
     rt.update(|s, tx| {
-        crate::app::input::on_ime(s, &rune::Ime::Preedit("に".into(), None), tx);
+        crate::app::input::on_ime(s, &rune::Ime::Preedit("に".into(), None, vec![]), tx);
     });
     press(&mut rt, Key::Escape);
     rt.update(|s, tx| {
@@ -1091,6 +1091,8 @@ fn physical(
             mods: event.mods,
             pressed,
             repeat,
+            text: None,
+            consumed_mods: rune::Mods::default(),
         },
         event,
         None,
@@ -1116,7 +1118,7 @@ fn recorder_presses_repeats_releases_and_ime_never_leak_then_the_new_key_targets
     physical(&mut rt, Code::KeyJ, event.clone(), false, false);
     assert_eq!(typed(&rt), ["ctrl+shift+j"]);
     rt.update(|s, tx| {
-        crate::app::input::on_ime(s, &rune::Ime::Preedit("に".into(), None), tx);
+        crate::app::input::on_ime(s, &rune::Ime::Preedit("に".into(), None, vec![]), tx);
         crate::app::input::on_ime(s, &rune::Ime::Commit("に".into()), tx);
     });
     let enter = KeyEvent {
@@ -1185,7 +1187,7 @@ fn escape_cancels_during_composition_and_invalid_references_never_offer_recordin
     }
     reach(&mut rt, "shortcut-key:pane.zoom:0");
     rt.update(|s, tx| {
-        crate::app::input::on_ime(s, &rune::Ime::Preedit("に".into(), None), tx);
+        crate::app::input::on_ime(s, &rune::Ime::Preedit("に".into(), None, vec![]), tx);
     });
     press(&mut rt, Key::Escape);
     assert!(rt.state.recorder.is_none());

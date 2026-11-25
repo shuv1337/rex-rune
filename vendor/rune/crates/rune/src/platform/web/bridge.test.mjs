@@ -1,0 +1,2922 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+class FakeNode {
+    constructor(tagName) {
+        this.tagName = tagName.toUpperCase();
+        this.style = { cssText: '', setProperty() {} };
+        this._attrs = new Map();
+        this.listeners = new Map();
+        this.children = [];
+        this.parentElement = null;
+        this.tabIndex = 0;
+        this._inert = false;
+        this.inputMode = '';
+        this.type = '';
+        this.wrap = '';
+        this.autocomplete = '';
+        this.spellcheck = true;
+        this._value = '';
+        this.selectionStart = 0;
+        this.selectionEnd = 0;
+        this.selectionDirection = 'forward';
+        this.onFocus = null;
+    }
+
+    get inert() { return this._inert; }
+    set inert(next) {
+        this._inert = Boolean(next);
+        if (this._inert && globalThis.document?.activeElement === this) {
+            globalThis.document.activeElement = globalThis.document.body;
+            this.dispatchEvent({ type: 'blur' });
+        }
+    }
+
+    get value() { return this._value; }
+    set value(next) {
+        // HTML <textarea> normalizes CRLF and lone CR to LF in its API value.
+        this._value = this.tagName === 'TEXTAREA' ? String(next).replace(/\r\n?/g, '\n') : String(next);
+        this.selectionStart = this._value.length;
+        this.selectionEnd = this._value.length;
+        this.selectionDirection = 'forward';
+    }
+
+    get attributes() { return [...this._attrs].map(([name, value]) => ({ name, value })); }
+    setAttribute(name, value) { this._attrs.set(name, String(value)); }
+    removeAttribute(name) { this._attrs.delete(name); }
+    getAttribute(name) { return this._attrs.get(name) ?? null; }
+
+    get firstElementChild() { return this.children[0] ?? null; }
+    get nextElementSibling() {
+        if (!this.parentElement) return null;
+        const i = this.parentElement.children.indexOf(this);
+        return i >= 0 ? (this.parentElement.children[i + 1] ?? null) : null;
+    }
+
+    insertBefore(node, ref) {
+        if (node.parentElement) node.remove();
+        node.parentElement = this;
+        const i = ref ? this.children.indexOf(ref) : -1;
+        if (i >= 0) this.children.splice(i, 0, node);
+        else this.children.push(node);
+        return node;
+    }
+
+    replaceChildren(...nodes) {
+        for (const child of this.children) child.parentElement = null;
+        this.children = [];
+        this.append(...nodes);
+    }
+
+    addEventListener(name, handler) {
+        let list = this.listeners.get(name);
+        if (!list) { list = []; this.listeners.set(name, list); }
+        list.push(handler);
+    }
+
+    removeEventListener(name, handler) {
+        const list = this.listeners.get(name);
+        if (!list) return;
+        const i = list.indexOf(handler);
+        if (i >= 0) list.splice(i, 1);
+    }
+
+    dispatchEvent(event) {
+        event.target ??= this;
+        for (const handler of [...(this.listeners.get(event.type) ?? [])]) handler(event);
+    }
+
+    append(...nodes) {
+        for (const node of nodes) {
+            node.parentElement = this;
+            this.children.push(node);
+        }
+    }
+
+    after(node) {
+        if (this.parentElement) this.parentElement.append(node);
+    }
+
+    replaceWith(node) {
+        if (this.parentElement) this.parentElement.append(node);
+    }
+
+    remove() {
+        if (!this.parentElement) return;
+        if (globalThis.document?.activeElement && this.contains(globalThis.document.activeElement)) {
+            globalThis.document.activeElement = globalThis.document.body;
+        }
+        const i = this.parentElement.children.indexOf(this);
+        if (i >= 0) this.parentElement.children.splice(i, 1);
+        this.parentElement = null;
+    }
+
+    querySelectorAll(selector) {
+        const parts = selector.split(',').map(s => s.trim());
+        const out = [];
+        const walk = node => {
+            for (const child of node.children) {
+                if (parts.some(sel => {
+                    if (sel === 'a[target="_blank"]') return child.tagName === 'A' && child.target === '_blank';
+                    return child.tagName === sel.toUpperCase();
+                })) out.push(child);
+                walk(child);
+            }
+        };
+        walk(this);
+        return out;
+    }
+
+    getBoundingClientRect() {
+        return { left: 0, top: 0, right: 160, bottom: 80, width: 160, height: 80 };
+    }
+
+    contains(node) {
+        let cur = node;
+        while (cur) {
+            if (cur === this) return true;
+            cur = cur.parentElement;
+        }
+        return false;
+    }
+
+    setSelectionRange(start, end, direction = 'forward') {
+        const len = this._value.length;
+        this.selectionStart = Math.max(0, Math.min(start, len));
+        this.selectionEnd = Math.max(this.selectionStart, Math.min(end, len));
+        this.selectionDirection = direction;
+        if (this.selectionStart !== this.selectionEnd) {
+            this.dispatchEvent({ type: 'select' });
+        }
+    }
+
+    focus() {
+        if (this._inert) return;
+        const prev = globalThis.document.activeElement;
+        if (prev === this) return;
+        globalThis.document.activeElement = this;
+        if (prev) prev.dispatchEvent({ type: 'blur' });
+        if (this.onFocus) this.onFocus();
+    }
+}
+
+let coarsePointer = false;
+
+function installDom() {
+    const body = new FakeNode('body');
+    const head = new FakeNode('head');
+    const doc = new FakeNode('#document');
+    doc.body = body;
+    doc.head = head;
+    doc.documentElement = new FakeNode('html');
+    doc.activeElement = body;
+    doc.hidden = false;
+    doc.title = '';
+    doc.createElement = tag => new FakeNode(tag);
+    doc.createTextNode = text => Object.assign(new FakeNode('#text'), { textContent: String(text) });
+
+    const win = new FakeNode('window');
+    Object.defineProperty(globalThis, 'Node', { value: FakeNode, configurable: true });
+    Object.defineProperty(globalThis, 'document', { value: doc, configurable: true });
+    Object.defineProperty(globalThis, 'window', { value: win, configurable: true });
+    Object.defineProperty(globalThis, 'navigator', {
+        value: { platform: 'Linux x86_64', standalone: false },
+        configurable: true,
+    });
+    Object.defineProperty(globalThis, 'matchMedia', {
+        value: query => ({ matches: query === '(pointer: coarse)' ? coarsePointer : false }),
+        configurable: true,
+    });
+    Object.defineProperty(globalThis, 'getComputedStyle', {
+        value: () => ({ position: 'relative', direction: 'ltr' }),
+        configurable: true,
+    });
+    Object.defineProperty(globalThis, 'innerWidth', { value: 800, writable: true, configurable: true });
+    Object.defineProperty(globalThis, 'innerHeight', { value: 844, writable: true, configurable: true });
+    return { doc, win, body };
+}
+
+installDom();
+const bridge = await import('./bridge.js');
+
+function setup({ embedded = false, fitHeight = false, page = false, coarse = false } = {}) {
+    coarsePointer = coarse;
+    const { doc, win, body } = installDom();
+    globalThis.innerWidth = 800;
+    const canvas = doc.createElement('canvas');
+    body.append(canvas);
+    const events = [];
+    const h = bridge.mount(canvas, msg => events.push(JSON.parse(msg)), embedded, fitHeight, page);
+    return { doc, win, body, canvas, events, h };
+}
+
+function insertAtCaret(textarea, text) {
+    const before = textarea.value.slice(0, textarea.selectionStart);
+    const after = textarea.value.slice(textarea.selectionEnd);
+    const nextCaret = before.length + text.length;
+    textarea.value = before + text + after;
+    textarea.setSelectionRange(nextCaret, nextCaret, 'forward');
+    textarea.dispatchEvent({ type: 'input', isComposing: false });
+}
+
+test('sync reclaims DOM focus and selection from canvas after a one-frame blur', async () => {
+    const { doc, canvas, events, h } = setup();
+    await Promise.resolve();
+    assert.equal(doc.activeElement, canvas);
+
+    // Focus field at end of "hello" via click.
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+
+    // Frame blurs all fields (e.g. pressing an El::window_drag() element).
+    bridge.sync(h, '', '', 0, 0, 0, false);
+    assert.equal(doc.activeElement, canvas);
+    assert.equal(h.textarea.value, '');
+
+    // Next frame restores Rune focus to the field without activate() (sync_input(false)).
+    // Simulate a browser collapsing the textarea selection when it takes focus.
+    h.textarea.onFocus = () => {
+        h.textarea.selectionStart = 0;
+        h.textarea.selectionEnd = 0;
+        h.textarea.selectionDirection = 'none';
+    };
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    h.textarea.onFocus = null;
+
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+    assert.equal(h.textarea.selectionDirection, 'forward');
+
+    // Text inserted via IME / browser text services lands at the end, not index 0.
+    insertAtCaret(h.textarea, '!');
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: 'hello',
+        start: 5,
+        end: 5,
+        text: '!',
+        anchor: 6,
+        focus: 6,
+    });
+    bridge.destroy(h);
+});
+
+test('activate restores saved selection when sync is skipped after Chrome collapsed it to 0', () => {
+    const { doc, canvas, events, h } = setup();
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+
+    // DOM focus moved back to canvas and Chrome collapsed the unfocused textarea's selection to 0.
+    canvas.focus();
+    h.textarea.selectionStart = 0;
+    h.textarea.selectionEnd = 0;
+    h.textarea.selectionDirection = 'none';
+
+    // User clicks back at the exact same caret: mirror did not change, so sync() is skipped
+    // and only activate() runs.
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+    assert.equal(h.textarea.selectionDirection, 'forward');
+
+    insertAtCaret(h.textarea, ' world');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].start, 5);
+    assert.equal(events[0].end, 5);
+    assert.equal(events[0].text, ' world');
+    bridge.destroy(h);
+});
+
+test('activate restores backward non-collapsed selection without echoing a selection event', () => {
+    const { doc, canvas, events, h } = setup();
+    bridge.sync(h, 'field', 'hello', 0, 5, 1, false);
+    bridge.activate(h);
+    assert.equal(events.length, 0);
+
+    canvas.focus();
+    h.textarea.selectionStart = 0;
+    h.textarea.selectionEnd = 0;
+    h.textarea.selectionDirection = 'forward';
+
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.selectionStart, 1);
+    assert.equal(h.textarea.selectionEnd, 5);
+    assert.equal(h.textarea.selectionDirection, 'backward');
+    assert.equal(events.length, 0, 'reselect must not echo a spurious selection event');
+    bridge.destroy(h);
+});
+
+test('sync keeps inputMode none on coarse pointers when reclaiming focus from canvas', async () => {
+    const { doc, canvas, h } = setup({ coarse: true });
+    await Promise.resolve();
+    assert.equal(doc.activeElement, canvas);
+    assert.equal(h.textarea.inputMode, 'none');
+
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.inputMode, 'none');
+    assert.equal(h.textarea.selectionStart, 5);
+
+    // An explicit tap activates the soft keyboard.
+    bridge.activate(h);
+    assert.equal(h.textarea.inputMode, 'text');
+    bridge.destroy(h);
+});
+
+test('sync does not steal focus from outside elements, and activate still restores selection', () => {
+    const { doc, body, h } = setup({ embedded: true });
+    const outside = doc.createElement('button');
+    body.append(outside);
+    outside.focus();
+
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    assert.equal(doc.activeElement, outside);
+
+    h.textarea.selectionStart = 0;
+    h.textarea.selectionEnd = 0;
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+    bridge.destroy(h);
+});
+
+test('activate leaves selection alone during IME composition', () => {
+    const { doc, canvas, h } = setup();
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+
+    h.textarea.dispatchEvent({ type: 'compositionstart' });
+    h.textarea.value = 'helloni';
+    h.textarea.setSelectionRange(5, 7, 'forward');
+
+    canvas.focus();
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 7);
+    bridge.destroy(h);
+});
+
+test('sync reclaims focus from canvas for secure fields without touching textarea selection', async () => {
+    const { doc, canvas, h } = setup();
+    await Promise.resolve();
+    assert.equal(doc.activeElement, canvas);
+
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    assert.equal(doc.activeElement, h.password);
+    assert.equal(h.textarea.value, '');
+    bridge.destroy(h);
+});
+
+test('standalone launch focuses the synced field whether sync runs before or after mount microtask', async () => {
+    const first = setup();
+    bridge.sync(first.h, 'field', 'hello', 0, 5, 5, false);
+    await Promise.resolve();
+    assert.equal(first.doc.activeElement, first.h.textarea);
+    assert.equal(first.h.textarea.selectionStart, 5);
+    assert.equal(first.h.textarea.selectionEnd, 5);
+    bridge.destroy(first.h);
+
+    const second = setup();
+    await Promise.resolve();
+    assert.equal(second.doc.activeElement, second.canvas);
+    bridge.sync(second.h, 'field', 'hello', 0, 5, 5, false);
+    assert.equal(second.doc.activeElement, second.h.textarea);
+    assert.equal(second.h.textarea.selectionStart, 5);
+    assert.equal(second.h.textarea.selectionEnd, 5);
+    bridge.destroy(second.h);
+});
+
+test('mount keeps both hidden editing proxies inert until a field is focused', async () => {
+    for (const opts of [{}, { embedded: true }, { page: true }]) {
+        const { h } = setup(opts);
+        assert.equal(h.textarea.inert, true);
+        assert.equal(h.password.inert, true);
+        await Promise.resolve();
+        assert.equal(h.textarea.inert, true);
+        assert.equal(h.password.inert, true);
+        bridge.destroy(h);
+    }
+});
+
+test('sync exposes only the active editing proxy and returns both to inert on blur', async () => {
+    const { doc, canvas, h } = setup();
+    await Promise.resolve();
+    assert.equal(doc.activeElement, canvas);
+    assert.equal(h.textarea.inert, true);
+    assert.equal(h.password.inert, true);
+
+    // Focusing a plain text field clears inert on textarea only before focusing it.
+    bridge.sync(h, 'plain', 'hello', 0, 5, 5, false);
+    assert.equal(h.textarea.inert, false);
+    assert.equal(h.password.inert, true);
+    assert.equal(doc.activeElement, h.textarea);
+
+    // Switching directly from plain text to password focuses password before making textarea inert.
+    const textareaBlurTargets = [];
+    h.textarea.addEventListener('blur', () => textareaBlurTargets.push(doc.activeElement));
+    const passwordBlurTargets = [];
+    h.password.addEventListener('blur', () => passwordBlurTargets.push(doc.activeElement));
+
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    assert.deepEqual(textareaBlurTargets, [h.password], 'focus must move to password before textarea becomes inert');
+    assert.equal(doc.activeElement, h.password);
+    assert.equal(h.textarea.inert, true);
+    assert.equal(h.password.inert, false);
+
+    // Switching directly from password back to plain text focuses textarea before making password inert.
+    bridge.sync(h, 'plain', 'hello', 0, 5, 5, false);
+    assert.deepEqual(passwordBlurTargets, [h.textarea], 'focus must move to textarea before password becomes inert');
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.inert, false);
+    assert.equal(h.password.inert, true);
+
+    // Blurring returns focus to the canvas before making both proxies inert.
+    bridge.sync(h, '', '', 0, 0, 0, false);
+    assert.deepEqual(textareaBlurTargets, [h.password, canvas], 'focus must return to canvas before textarea becomes inert');
+    assert.equal(doc.activeElement, canvas);
+    assert.equal(h.textarea.inert, true);
+    assert.equal(h.password.inert, true);
+
+    // Blurring from a password field also returns focus to the canvas before making both inert.
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    assert.equal(doc.activeElement, h.password);
+    assert.equal(h.textarea.inert, true);
+    assert.equal(h.password.inert, false);
+    bridge.sync(h, '', '', 0, 0, 0, false);
+    assert.deepEqual(passwordBlurTargets, [h.textarea, canvas], 'focus must return to canvas before password becomes inert');
+    assert.equal(doc.activeElement, canvas);
+    assert.equal(h.textarea.inert, true);
+    assert.equal(h.password.inert, true);
+
+    bridge.destroy(h);
+});
+
+function dispatchKeydown(target, props) {
+    let prevented = false;
+    target.dispatchEvent({
+        type: 'keydown',
+        code: '',
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        repeat: false,
+        isComposing: false,
+        keyCode: 0,
+        preventDefault() { prevented = true; },
+        ...props,
+    });
+    return prevented;
+}
+
+function dispatchBeforeInput(target, props) {
+    let prevented = false;
+    target.dispatchEvent({
+        type: 'beforeinput',
+        isComposing: false,
+        preventDefault() { prevented = true; },
+        ...props,
+    });
+    return prevented;
+}
+
+test('keydown forwards Backspace at offset 0 with empty selection on textarea', () => {
+    const { events, h } = setup();
+
+    // Empty field: caret at 0..0.
+    bridge.sync(h, 'field', '', 0, 0, 0, false);
+    bridge.activate(h);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Backspace', code: 'Backspace', keyCode: 8 }), true);
+    assert.deepEqual(events, [{
+        kind: 'key',
+        key: 'Backspace',
+        code: 'Backspace',
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+        repeat: false,
+    }]);
+
+    // Non-empty field with caret at offset 0: modifiers and repeat pass through.
+    events.length = 0;
+    bridge.sync(h, 'field', 'hello', 0, 0, 0, false);
+    assert.equal(dispatchKeydown(h.textarea, {
+        key: 'Backspace',
+        code: 'Backspace',
+        altKey: true,
+        repeat: true,
+        keyCode: 8,
+    }), true);
+    assert.deepEqual(events, [{
+        kind: 'key',
+        key: 'Backspace',
+        code: 'Backspace',
+        shift: false,
+        ctrl: false,
+        alt: true,
+        meta: false,
+        repeat: true,
+    }]);
+
+    bridge.destroy(h);
+});
+
+test('keydown leaves Backspace to browser editing past offset 0, with a selection, or while composing', () => {
+    const { events, h } = setup();
+
+    // Caret after text: browser deletes via input event.
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Backspace', code: 'Backspace', keyCode: 8 }), false);
+    assert.equal(events.length, 0);
+
+    // Non-empty forward selection starting at 0.
+    bridge.sync(h, 'field', 'hello', 0, 0, 3, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Backspace', code: 'Backspace', keyCode: 8 }), false);
+    assert.equal(events.length, 0);
+
+    // Non-empty backward selection ending at 0.
+    bridge.sync(h, 'field', 'hello', 0, 3, 0, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Backspace', code: 'Backspace', keyCode: 8 }), false);
+    assert.equal(events.length, 0);
+
+    // IME composition at offset 0 must not be intercepted.
+    bridge.sync(h, 'field', '', 0, 0, 0, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Backspace', code: 'Backspace', isComposing: true, keyCode: 8 }), false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Backspace', code: 'Backspace', keyCode: 229 }), false);
+    h.textarea.dispatchEvent({ type: 'compositionstart' });
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Backspace', code: 'Backspace', keyCode: 8 }), false);
+    assert.equal(events.length, 0);
+
+    bridge.destroy(h);
+});
+
+test('beforeinput forwards backward delete at offset 0 when soft keyboard bypasses keydown', () => {
+    const { events, h } = setup();
+
+    bridge.sync(h, 'field', 'hello', 0, 0, 0, false);
+    bridge.activate(h);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentBackward' }), true);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteWordBackward' }), true);
+    assert.deepEqual(events, [
+        { kind: 'key', key: 'Backspace', code: 'Backspace', shift: false, ctrl: false, alt: false, meta: false, repeat: false },
+        { kind: 'key', key: 'Backspace', code: 'Backspace', shift: false, ctrl: false, alt: true, meta: false, repeat: false },
+    ]);
+
+    // Must not intercept forward delete, non-zero caret, selection, or composition.
+    events.length = 0;
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward' }), false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentBackward', isComposing: true }), false);
+    bridge.sync(h, 'field', 'hello', 0, 1, 1, false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentBackward' }), false);
+    bridge.sync(h, 'field', 'hello', 0, 0, 2, false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentBackward' }), false);
+    bridge.sync(h, 'field', '', 0, 0, 0, false);
+    h.textarea.dispatchEvent({ type: 'compositionstart' });
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentBackward' }), false);
+    assert.equal(events.length, 0);
+
+    bridge.destroy(h);
+});
+
+test('keydown forwards Delete at end of value with empty selection on textarea', () => {
+    const { events, h } = setup();
+
+    // Empty field: caret is at both start (0) and end (0).
+    bridge.sync(h, 'field', '', 0, 0, 0, false);
+    bridge.activate(h);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), true);
+    assert.deepEqual(events, [{
+        kind: 'key',
+        key: 'Delete',
+        code: 'Delete',
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+        repeat: false,
+    }]);
+
+    // Non-empty field with caret at the end: modifiers and repeat pass through.
+    events.length = 0;
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    assert.equal(dispatchKeydown(h.textarea, {
+        key: 'Delete',
+        code: 'Delete',
+        altKey: true,
+        repeat: true,
+        keyCode: 46,
+    }), true);
+    assert.deepEqual(events, [{
+        kind: 'key',
+        key: 'Delete',
+        code: 'Delete',
+        shift: false,
+        ctrl: false,
+        alt: true,
+        meta: false,
+        repeat: true,
+    }]);
+
+    // CRLF text: raw length is 7 while the LF-normalized textarea mirror has length 5.
+    events.length = 0;
+    const crlf = 'a\r\nb\r\nc';
+    bridge.sync(h, 'field', crlf, 0, crlf.length, crlf.length, false);
+    assert.equal(h.textarea.value.length, 5);
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), true);
+    assert.deepEqual(events, [{
+        kind: 'key',
+        key: 'Delete',
+        code: 'Delete',
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+        repeat: false,
+    }]);
+
+    bridge.destroy(h);
+});
+
+test('keydown leaves Delete to browser editing before end, with a selection, or while composing', () => {
+    const { events, h } = setup();
+
+    // Caret at start or middle: browser deletes via input event.
+    bridge.sync(h, 'field', 'hello', 0, 0, 0, false);
+    bridge.activate(h);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), false);
+    bridge.sync(h, 'field', 'hello', 0, 2, 2, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), false);
+    assert.equal(events.length, 0);
+
+    // Caret before last character in CRLF text (raw 6 -> DOM 4 < 5).
+    const crlf = 'a\r\nb\r\nc';
+    bridge.sync(h, 'field', crlf, 0, 6, 6, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), false);
+    assert.equal(events.length, 0);
+
+    // Non-empty forward selection ending at the end.
+    bridge.sync(h, 'field', 'hello', 0, 2, 5, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), false);
+    assert.equal(events.length, 0);
+
+    // Non-empty backward selection starting at the end.
+    bridge.sync(h, 'field', 'hello', 0, 5, 2, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), false);
+    assert.equal(events.length, 0);
+
+    // IME composition at the end must not be intercepted.
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', isComposing: true, keyCode: 46 }), false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 229 }), false);
+    h.textarea.dispatchEvent({ type: 'compositionstart' });
+    assert.equal(dispatchKeydown(h.textarea, { key: 'Delete', code: 'Delete', keyCode: 46 }), false);
+    assert.equal(events.length, 0);
+
+    bridge.destroy(h);
+});
+
+test('beforeinput forwards forward delete at end of value when soft keyboard bypasses keydown', () => {
+    const { events, h } = setup();
+
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward' }), true);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteWordForward' }), true);
+    assert.deepEqual(events, [
+        { kind: 'key', key: 'Delete', code: 'Delete', shift: false, ctrl: false, alt: false, meta: false, repeat: false },
+        { kind: 'key', key: 'Delete', code: 'Delete', shift: false, ctrl: false, alt: true, meta: false, repeat: false },
+    ]);
+
+    // Empty field and CRLF field at end also forward deleteContentForward.
+    events.length = 0;
+    bridge.sync(h, 'field', '', 0, 0, 0, false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward' }), true);
+    const crlf = 'a\r\nb';
+    bridge.sync(h, 'field', crlf, 0, crlf.length, crlf.length, false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward' }), true);
+    assert.deepEqual(events, [
+        { kind: 'key', key: 'Delete', code: 'Delete', shift: false, ctrl: false, alt: false, meta: false, repeat: false },
+        { kind: 'key', key: 'Delete', code: 'Delete', shift: false, ctrl: false, alt: false, meta: false, repeat: false },
+    ]);
+
+    // Must not intercept backward delete at end, non-end caret, selection, or composition.
+    events.length = 0;
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentBackward' }), false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward', isComposing: true }), false);
+    bridge.sync(h, 'field', 'hello', 0, 4, 4, false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward' }), false);
+    bridge.sync(h, 'field', 'hello', 0, 3, 5, false);
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward' }), false);
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    h.textarea.dispatchEvent({ type: 'compositionstart' });
+    assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'deleteContentForward' }), false);
+    assert.equal(events.length, 0);
+
+    bridge.destroy(h);
+});
+
+test('password input uses current-password autocomplete and classifies keystrokes vs autofill', () => {
+    const { events, h } = setup();
+    assert.equal(h.password.autocomplete, 'current-password');
+
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    bridge.activate(h);
+
+    // Single-grapheme keystrokes (ASCII, accented, combining mark, ZWJ emoji) go as 'secure'.
+    for (const ch of ['a', 'é', 'e\u0301', '👨‍👩‍👧‍👦']) {
+        events.length = 0;
+        h.password.value = ch;
+        h.password.dispatchEvent({ type: 'input', inputType: 'insertText', data: ch });
+        assert.equal(h.password.value, '', 'password input must be emptied after every event');
+        assert.deepEqual(events, [{ kind: 'secure', key: 'secret', text: ch }]);
+    }
+
+    // Empty typing sends nothing.
+    events.length = 0;
+    h.password.value = '';
+    h.password.dispatchEvent({ type: 'input', inputType: 'insertText', data: '' });
+    assert.equal(events.length, 0);
+
+    // Missing inputType (plain Event) is a fill, including an empty clear.
+    events.length = 0;
+    h.password.value = 'filled-pw-123';
+    h.password.dispatchEvent({ type: 'input' });
+    assert.equal(h.password.value, '');
+    assert.deepEqual(events, [{ kind: 'secure_replace', key: 'secret', text: 'filled-pw-123' }]);
+
+    events.length = 0;
+    h.password.value = '';
+    h.password.dispatchEvent({ type: 'input' });
+    assert.deepEqual(events, [{ kind: 'secure_replace', key: 'secret', text: '' }]);
+
+    // insertReplacementText is always a fill.
+    events.length = 0;
+    h.password.value = 'replacement-pw';
+    h.password.dispatchEvent({ type: 'input', inputType: 'insertReplacementText', data: 'replacement-pw' });
+    assert.equal(h.password.value, '');
+    assert.deepEqual(events, [{ kind: 'secure_replace', key: 'secret', text: 'replacement-pw' }]);
+
+    // Multi-grapheme insertText (via data or via value when data is null) is a fill.
+    events.length = 0;
+    h.password.value = 'multi-char';
+    h.password.dispatchEvent({ type: 'input', inputType: 'insertText', data: 'multi-char' });
+    assert.equal(h.password.value, '');
+    assert.deepEqual(events, [{ kind: 'secure_replace', key: 'secret', text: 'multi-char' }]);
+
+    events.length = 0;
+    h.password.value = 'from-value';
+    h.password.dispatchEvent({ type: 'input', inputType: 'insertText', data: null });
+    assert.equal(h.password.value, '');
+    assert.deepEqual(events, [{ kind: 'secure_replace', key: 'secret', text: 'from-value' }]);
+
+    // An element matching :autofill or :-webkit-autofill is a fill even for 1 char.
+    for (const sel of [':autofill', ':-webkit-autofill']) {
+        events.length = 0;
+        h.password.matches = s => s === sel;
+        h.password.value = 'x';
+        h.password.dispatchEvent({ type: 'input', inputType: 'insertText', data: 'x' });
+        assert.equal(h.password.value, '');
+        assert.deepEqual(events, [{ kind: 'secure_replace', key: 'secret', text: 'x' }]);
+    }
+    delete h.password.matches;
+
+    // Nothing is sent while no Rune field has focus, and the DOM input is still emptied.
+    events.length = 0;
+    bridge.sync(h, '', '', 0, 0, 0, false);
+    h.password.value = 'leaked';
+    h.password.dispatchEvent({ type: 'input' });
+    assert.equal(h.password.value, '');
+    assert.equal(events.length, 0);
+
+    bridge.destroy(h);
+});
+
+test('typing at the end of CRLF text emits a pure insertion without rewriting existing CRLFs', () => {
+    const { events, h } = setup();
+    const before = 'a\r\nb\r\nc';
+    bridge.sync(h, 'field', before, 0, before.length, before.length, false);
+    bridge.activate(h);
+    assert.equal(h.textarea.value, 'a\nb\nc');
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+
+    insertAtCaret(h.textarea, 'x');
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: before,
+        start: 7,
+        end: 7,
+        text: 'x',
+        anchor: 8,
+        focus: 8,
+    });
+    const after = before.slice(0, events[0].start) + events[0].text + before.slice(events[0].end);
+    assert.equal(after, 'a\r\nb\r\ncx');
+    bridge.destroy(h);
+});
+
+test('CRLF edits translate middle insertions, CRLF deletions, replacements, and trailing selections', () => {
+    const { events, h } = setup();
+    const before = 'a\r\nb\r\nc';
+
+    // Insert after 'b' (raw offset 4 -> DOM offset 3).
+    bridge.sync(h, 'field', before, 0, 4, 4, false);
+    bridge.activate(h);
+    assert.equal(h.textarea.selectionStart, 3);
+    assert.equal(h.textarea.selectionEnd, 3);
+    insertAtCaret(h.textarea, 'x');
+    assert.deepEqual(events.pop(), {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: before,
+        start: 4,
+        end: 4,
+        text: 'x',
+        anchor: 5,
+        focus: 5,
+    });
+
+    // Delete the first CRLF via Backspace after it (raw offset 3 -> DOM offset 2).
+    bridge.sync(h, 'field', before, 0, 3, 3, false);
+    h.textarea.value = 'ab\nc';
+    h.textarea.setSelectionRange(1, 1, 'forward');
+    h.textarea.dispatchEvent({ type: 'input', isComposing: false });
+    const del = events.pop();
+    assert.deepEqual(del, {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: before,
+        start: 1,
+        end: 3,
+        text: '',
+        anchor: 1,
+        focus: 1,
+    });
+    assert.equal(before.slice(0, del.start) + del.text + before.slice(del.end), 'ab\r\nc');
+
+    // Replace across the first CRLF ('a\r\nb', raw 0..4 -> DOM 0..3) while leaving the second intact.
+    bridge.sync(h, 'field', before, 0, 0, 4, false);
+    assert.equal(h.textarea.selectionStart, 0);
+    assert.equal(h.textarea.selectionEnd, 3);
+    insertAtCaret(h.textarea, 'Z');
+    const rep = events.pop();
+    assert.deepEqual(rep, {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: before,
+        start: 0,
+        end: 4,
+        text: 'Z',
+        anchor: 1,
+        focus: 1,
+    });
+    assert.equal(before.slice(0, rep.start) + rep.text + before.slice(rep.end), 'Z\r\nc');
+
+    // Replacement before a trailing selection keeps anchor/focus aligned in post-edit raw coordinates.
+    bridge.sync(h, 'field', before, 0, 4, 7, false);
+    h.textarea.value = 'AA\nb\nc';
+    h.textarea.setSelectionRange(4, 6, 'backward');
+    h.textarea.dispatchEvent({ type: 'input', isComposing: false });
+    assert.deepEqual(events.pop(), {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: before,
+        start: 0,
+        end: 1,
+        text: 'AA',
+        anchor: 8,
+        focus: 5,
+    });
+
+    bridge.destroy(h);
+});
+
+test('CRLF selection sync, reselect, and DOM select events translate offsets cleanly', () => {
+    const { canvas, events, h } = setup();
+    const before = 'a\r\nb\r\nc';
+
+    bridge.sync(h, 'field', before, 0, 7, 3, false);
+    bridge.activate(h);
+    assert.equal(h.textarea.selectionStart, 2);
+    assert.equal(h.textarea.selectionEnd, 5);
+    assert.equal(h.textarea.selectionDirection, 'backward');
+    assert.equal(events.length, 0);
+
+    // Chrome blur collapses textarea selection; activate() restores the DOM-translated range.
+    canvas.focus();
+    h.textarea.selectionStart = 0;
+    h.textarea.selectionEnd = 0;
+    h.textarea.selectionDirection = 'forward';
+    bridge.activate(h);
+    assert.equal(h.textarea.selectionStart, 2);
+    assert.equal(h.textarea.selectionEnd, 5);
+    assert.equal(h.textarea.selectionDirection, 'backward');
+    assert.equal(events.length, 0);
+
+    // User selects all in the hidden textarea: selection event maps back to raw UTF-16 offsets.
+    h.textarea.setSelectionRange(0, 5, 'forward');
+    assert.deepEqual(events.pop(), {
+        kind: 'selection',
+        key: 'field',
+        base: 0,
+        expected: before,
+        anchor: 0,
+        focus: 7,
+    });
+
+    h.textarea.setSelectionRange(1, 4, 'backward');
+    assert.deepEqual(events.pop(), {
+        kind: 'selection',
+        key: 'field',
+        base: 0,
+        expected: before,
+        anchor: 6,
+        focus: 1,
+    });
+
+    bridge.destroy(h);
+});
+
+test('lone CR, consecutive CRLFs, surrogate pairs, and IME preedit preserve untouched breaks', async () => {
+    const { events, h } = setup();
+
+    // Lone CR normalizes 1-to-1 in <textarea> without rewriting it on edit.
+    const loneCr = 'a\rb';
+    bridge.sync(h, 'field', loneCr, 0, 3, 3, false);
+    bridge.activate(h);
+    assert.equal(h.textarea.value, 'a\nb');
+    insertAtCaret(h.textarea, 'x');
+    assert.deepEqual(events.pop(), {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: loneCr,
+        start: 3,
+        end: 3,
+        text: 'x',
+        anchor: 4,
+        focus: 4,
+    });
+
+    // Consecutive CRLFs and mixed lone CR + CRLF map offsets accurately.
+    const mixed = '\r\r\n\r\n';
+    bridge.sync(h, 'field', mixed, 0, 3, 5, false);
+    assert.equal(h.textarea.value, '\n\n\n');
+    assert.equal(h.textarea.selectionStart, 2);
+    assert.equal(h.textarea.selectionEnd, 3);
+    insertAtCaret(h.textarea, 'k');
+    assert.deepEqual(events.pop(), {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: mixed,
+        start: 3,
+        end: 5,
+        text: 'k',
+        anchor: 4,
+        focus: 4,
+    });
+
+    // Mixed lone CR + CRLF and surrogate pairs keep UTF-16 boundaries aligned.
+    const emojiCrlf = '🦀\r\n🦀';
+    bridge.sync(h, 'field', emojiCrlf, 0, 6, 6, false);
+    assert.equal(h.textarea.selectionStart, 5);
+    h.textarea.value = '🦀\n🦁';
+    h.textarea.setSelectionRange(5, 5, 'forward');
+    h.textarea.dispatchEvent({ type: 'input', isComposing: false });
+    const emojiEdit = events.pop();
+    assert.deepEqual(emojiEdit, {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: emojiCrlf,
+        start: 4,
+        end: 6,
+        text: '🦁',
+        anchor: 6,
+        focus: 6,
+    });
+    assert.equal(emojiCrlf.slice(0, emojiEdit.start) + emojiEdit.text + emojiCrlf.slice(emojiEdit.end), '🦀\r\n🦁');
+
+    // IME composition at the end of CRLF text emits translated preedit and commit ranges.
+    const crlf = 'a\r\nb\r\nc';
+    bridge.sync(h, 'field', crlf, 0, crlf.length, crlf.length, false);
+    h.textarea.dispatchEvent({ type: 'compositionstart' });
+    h.textarea.value = 'a\nb\ncに';
+    h.textarea.setSelectionRange(6, 6, 'forward');
+    h.textarea.dispatchEvent({ type: 'compositionupdate', data: 'に' });
+    await Promise.resolve();
+    assert.deepEqual(events.pop(), {
+        kind: 'preedit',
+        key: 'field',
+        base: 0,
+        expected: crlf,
+        start: 7,
+        end: 7,
+        text: 'に',
+        anchor: 8,
+        focus: 8,
+    });
+    h.textarea.dispatchEvent({ type: 'compositionend' });
+    assert.deepEqual(events.shift(), {
+        kind: 'edit',
+        key: 'field',
+        base: 0,
+        expected: crlf,
+        start: 7,
+        end: 7,
+        text: 'に',
+        anchor: 8,
+        focus: 8,
+    });
+    assert.deepEqual(events.shift(), { kind: 'sync' });
+
+    bridge.destroy(h);
+});
+
+test('syncA11y writes aria-pressed, aria-checked, and aria-selected cleanly across updates', () => {
+    const { h } = setup();
+
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'button', p: 'wrap', r: [0, 0, 80, 24], t: 'Wrap', pr: 'false' },
+        { k: 'button', p: 'mixed', r: [0, 28, 80, 24], t: 'Bold', pr: 'mixed' },
+        { k: 'button', p: 'check', r: [0, 56, 80, 24], t: 'All', o: 'checkbox', c: 'mixed' },
+        { k: 'button', p: 'sw', r: [0, 84, 80, 24], t: 'Switch', o: 'switch', c: 'true' },
+        { k: 'button', p: 'tab', r: [0, 112, 80, 24], t: 'Files', o: 'tab', se: true },
+    ]));
+
+    const wrap = h.a11yNodes.get('button:wrap');
+    assert.equal(wrap.getAttribute('role'), null);
+    assert.equal(wrap.getAttribute('aria-pressed'), 'false');
+    assert.equal(wrap.getAttribute('aria-checked'), null);
+    assert.equal(wrap.getAttribute('aria-selected'), null);
+
+    const mixed = h.a11yNodes.get('button:mixed');
+    assert.equal(mixed.getAttribute('aria-pressed'), 'mixed');
+    assert.equal(mixed.getAttribute('aria-checked'), null);
+
+    const check = h.a11yNodes.get('button:check');
+    assert.equal(check.getAttribute('role'), 'checkbox');
+    assert.equal(check.getAttribute('aria-checked'), 'mixed');
+    assert.equal(check.getAttribute('aria-pressed'), null);
+
+    const sw = h.a11yNodes.get('button:sw');
+    assert.equal(sw.getAttribute('role'), 'switch');
+    assert.equal(sw.getAttribute('aria-checked'), 'true');
+    assert.equal(sw.getAttribute('aria-pressed'), null);
+
+    const tab = h.a11yNodes.get('button:tab');
+    assert.equal(tab.getAttribute('role'), 'tab');
+    assert.equal(tab.getAttribute('aria-selected'), 'true');
+    assert.equal(tab.getAttribute('aria-checked'), null);
+    assert.equal(tab.getAttribute('aria-pressed'), null);
+
+    // Flip toggle button to pressed=true, then clear pressed, and switch checkbox to toggle button.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'button', p: 'wrap', r: [0, 0, 80, 24], t: 'Wrap', pr: 'true' },
+        { k: 'button', p: 'mixed', r: [0, 28, 80, 24], t: 'Bold' },
+        { k: 'button', p: 'check', r: [0, 56, 80, 24], t: 'All', pr: 'false' },
+    ]));
+    assert.equal(wrap.getAttribute('aria-pressed'), 'true');
+    assert.equal(mixed.getAttribute('aria-pressed'), null);
+    assert.equal(check.getAttribute('role'), null);
+    assert.equal(check.getAttribute('aria-checked'), null);
+    assert.equal(check.getAttribute('aria-pressed'), 'false');
+
+    bridge.destroy(h);
+});
+
+test('syncA11y sets aria-description on inline link anchors while preserving text and href', () => {
+    const { h } = setup();
+
+    bridge.syncA11y(h, JSON.stringify([
+        {
+            k: 'text',
+            p: 'root/p',
+            r: [0, 0, 240, 20],
+            u: [
+                { t: 'Open ' },
+                { t: 'Local app', h: 'http://localhost:8123/', p: 'root/p', i: 0, d: 'This address opens on your device.' },
+                { t: ' or ' },
+                { t: 'notes', h: '/notes', p: 'root/p', i: 1, d: 'Local notes' },
+                { t: ' or ' },
+                { t: 'plain', h: 'https://example.com/', p: 'root/p', i: 2 },
+            ],
+        },
+    ]));
+
+    const p = h.a11yNodes.get('p:root/p');
+    const anchors = p.children.filter(c => c.tagName === 'A');
+    assert.equal(anchors.length, 3);
+
+    assert.equal(anchors[0].textContent, 'Local app');
+    assert.equal(anchors[0].href, 'http://localhost:8123/');
+    assert.equal(anchors[0].target, '_blank');
+    assert.equal(anchors[0].getAttribute('aria-description'), 'This address opens on your device.');
+    assert.equal(anchors[0].getAttribute('title'), null);
+
+    assert.equal(anchors[1].textContent, 'notes');
+    assert.equal(anchors[1].href, '#');
+    assert.equal(anchors[1].getAttribute('aria-description'), 'Local notes');
+
+    assert.equal(anchors[2].textContent, 'plain');
+    assert.equal(anchors[2].href, 'https://example.com/');
+    assert.equal(anchors[2].getAttribute('aria-description'), null);
+
+    // Updating or clearing a run description rebuilds the anchor attributes cleanly.
+    bridge.syncA11y(h, JSON.stringify([
+        {
+            k: 'text',
+            p: 'root/p',
+            r: [0, 0, 240, 20],
+            u: [
+                { t: 'Local app', h: 'http://localhost:8123/', p: 'root/p', i: 0 },
+            ],
+        },
+    ]));
+    const updated = p.children.filter(c => c.tagName === 'A');
+    assert.equal(updated.length, 1);
+    assert.equal(updated[0].textContent, 'Local app');
+    assert.equal(updated[0].href, 'http://localhost:8123/');
+    assert.equal(updated[0].getAttribute('aria-description'), null);
+
+    bridge.destroy(h);
+});
+
+test('focusA11y writes aria-pressed on focused toggle buttons and keeps aria-checked/aria-selected separate', () => {
+    const { h } = setup();
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'button', t: 'Wrap', pr: 'true' }));
+    let proxy = h.focusProxies[h.focusTurn];
+    assert.equal(proxy.getAttribute('role'), 'button');
+    assert.equal(proxy.getAttribute('aria-pressed'), 'true');
+    assert.equal(proxy.getAttribute('aria-checked'), null);
+    assert.equal(proxy.getAttribute('aria-selected'), null);
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'checkbox', t: 'All', c: 'mixed' }));
+    proxy = h.focusProxies[h.focusTurn];
+    assert.equal(proxy.getAttribute('role'), 'checkbox');
+    assert.equal(proxy.getAttribute('aria-checked'), 'mixed');
+    assert.equal(proxy.getAttribute('aria-pressed'), null);
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'tab', t: 'Files', s: true }));
+    proxy = h.focusProxies[h.focusTurn];
+    assert.equal(proxy.getAttribute('role'), 'tab');
+    assert.equal(proxy.getAttribute('aria-selected'), 'true');
+    assert.equal(proxy.getAttribute('aria-checked'), null);
+    assert.equal(proxy.getAttribute('aria-pressed'), null);
+
+    bridge.destroy(h);
+});
+
+test('focusA11y exposes combobox values via textContent, range values via aria-valuetext, and clears stale values', () => {
+    const { h } = setup();
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'combobox', t: 'Message content preset', x: false, v: 'Balanced' }));
+    const first = h.focusProxies[h.focusTurn];
+    assert.equal(first.getAttribute('role'), 'combobox');
+    assert.equal(first.getAttribute('aria-label'), 'Message content preset');
+    assert.equal(first.getAttribute('aria-expanded'), 'false');
+    assert.equal(first.getAttribute('aria-valuetext'), null);
+    assert.equal(first.textContent, 'Balanced');
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'slider', t: 'Volume', v: '50%' }));
+    const second = h.focusProxies[h.focusTurn];
+    assert.equal(second.getAttribute('role'), 'slider');
+    assert.equal(second.getAttribute('aria-label'), 'Volume');
+    assert.equal(second.getAttribute('aria-valuetext'), '50%');
+    assert.equal(second.textContent, '');
+
+    // Reusing the first proxy slot for a control without a value clears the old textContent.
+    bridge.focusA11y(h, JSON.stringify({ o: 'button', t: 'Save' }));
+    assert.equal(h.focusProxies[h.focusTurn], first);
+    assert.equal(first.getAttribute('role'), 'button');
+    assert.equal(first.getAttribute('aria-label'), 'Save');
+    assert.equal(first.getAttribute('aria-valuetext'), null);
+    assert.equal(first.textContent, '');
+
+    // Reusing the second proxy slot clears aria-valuetext too.
+    bridge.focusA11y(h, JSON.stringify({ o: 'combobox', t: 'Message content preset', x: false }));
+    assert.equal(h.focusProxies[h.focusTurn], second);
+    assert.equal(second.getAttribute('role'), 'combobox');
+    assert.equal(second.getAttribute('aria-label'), 'Message content preset');
+    assert.equal(second.getAttribute('aria-valuetext'), null);
+    assert.equal(second.textContent, '');
+
+    bridge.destroy(h);
+});
+
+test('syncA11y mirrors combobox name in aria-label and selected value in textContent across updates', () => {
+    const { h } = setup();
+
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'button', p: 'preset', r: [0, 0, 140, 28], t: 'Message content preset', o: 'combobox', x: false, v: 'Balanced' },
+    ]));
+    const el = h.a11yNodes.get('button:preset');
+    assert.equal(el.getAttribute('role'), 'combobox');
+    assert.equal(el.getAttribute('aria-label'), 'Message content preset');
+    assert.equal(el.getAttribute('aria-expanded'), 'false');
+    assert.equal(el.textContent, 'Balanced');
+
+    // Updating the selected value updates textContent while preserving the label.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'button', p: 'preset', r: [0, 0, 140, 28], t: 'Message content preset', o: 'combobox', x: false, v: 'Everything' },
+    ]));
+    assert.equal(el.getAttribute('aria-label'), 'Message content preset');
+    assert.equal(el.textContent, 'Everything');
+
+    // Clearing the value empties textContent without turning the label into the value.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'button', p: 'preset', r: [0, 0, 140, 28], t: 'Message content preset', o: 'combobox', x: false },
+    ]));
+    assert.equal(el.getAttribute('aria-label'), 'Message content preset');
+    assert.equal(el.textContent, '');
+
+    // Changing back to a plain button clears aria-label and restores label textContent.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'button', p: 'preset', r: [0, 0, 140, 28], t: 'Apply' },
+    ]));
+    assert.equal(el.getAttribute('role'), null);
+    assert.equal(el.getAttribute('aria-label'), null);
+    assert.equal(el.textContent, 'Apply');
+
+    bridge.destroy(h);
+});
+
+test('secureKind falls back to typing when Intl.Segmenter is unavailable', () => {
+    const fakeInput = { value: '👨‍👩‍👧‍👦', matches: () => false };
+    assert.equal(bridge.secureKind({ inputType: 'insertText', data: '👨‍👩‍👧‍👦' }, fakeInput, null), 'secure');
+    assert.equal(bridge.secureKind({ inputType: 'insertText', data: 'ab' }, fakeInput, null), 'secure');
+    assert.equal(bridge.secureKind({ inputType: 'insertReplacementText', data: 'ab' }, fakeInput, null), 'secure_replace');
+    assert.equal(bridge.secureKind({}, fakeInput, null), 'secure_replace');
+    assert.equal(
+        bridge.secureKind({ inputType: 'insertText', data: 'x' }, { value: 'x', matches: s => s === ':autofill' }, null),
+        'secure_replace',
+    );
+});
+
+test('syncA11y preserves status/alert roles and aria-live, keeps node identity, and skips unchanged writes', () => {
+    const { h } = setup();
+
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'text', p: '#0/save-status', r: [0, 0, 120, 20], t: 'Changes saved', o: 'status', lv: 'polite' },
+        { k: 'text', p: '#0/err', r: [0, 24, 120, 20], t: 'Failed', o: 'alert', lv: 'assertive' },
+        { k: 'text', p: '#0/muted', r: [0, 48, 120, 20], t: 'Muted', o: 'alert', lv: 'off' },
+        { k: 'text', p: '#0/live-only', r: [0, 72, 120, 20], t: 'Hint', lv: 'assertive' },
+        { k: 'group', g: 'div', p: '#0/toast', r: [0, 96, 200, 40], t: 'Notice', o: 'status', lv: 'polite' },
+        { k: 'text', p: '#0/toast/body', r: [0, 100, 180, 20], t: '3 files written', a: 4 },
+    ]));
+
+    const statusEl = h.a11yNodes.get('p:#0/save-status');
+    assert.equal(statusEl.getAttribute('role'), 'status');
+    assert.equal(statusEl.getAttribute('aria-live'), 'polite');
+    assert.equal(statusEl.textContent, 'Changes saved');
+
+    const alertEl = h.a11yNodes.get('p:#0/err');
+    assert.equal(alertEl.getAttribute('role'), 'alert');
+    assert.equal(alertEl.getAttribute('aria-live'), 'assertive');
+    assert.equal(alertEl.textContent, 'Failed');
+
+    const mutedEl = h.a11yNodes.get('p:#0/muted');
+    assert.equal(mutedEl.getAttribute('role'), 'alert');
+    assert.equal(mutedEl.getAttribute('aria-live'), 'off');
+
+    const liveOnlyEl = h.a11yNodes.get('p:#0/live-only');
+    assert.equal(liveOnlyEl.getAttribute('role'), null);
+    assert.equal(liveOnlyEl.getAttribute('aria-live'), 'assertive');
+
+    const toastEl = h.a11yNodes.get('div:#0/toast');
+    assert.equal(toastEl.getAttribute('role'), 'status');
+    assert.equal(toastEl.getAttribute('aria-live'), 'polite');
+    assert.equal(toastEl.getAttribute('aria-label'), 'Notice');
+    assert.equal(toastEl.children.length, 1);
+    assert.equal(toastEl.children[0].textContent, '3 files written');
+
+    // Spy on textContent writes and replaceChildren calls to prove unchanged repaints do not rewrite.
+    let textWrites = 0;
+    let replaceCalls = 0;
+    let currentText = statusEl.textContent;
+    Object.defineProperty(statusEl, 'textContent', {
+        get() { return currentText; },
+        set(v) { textWrites += 1; currentText = v; },
+        configurable: true,
+    });
+    const origReplace = statusEl.replaceChildren.bind(statusEl);
+    statusEl.replaceChildren = (...args) => { replaceCalls += 1; return origReplace(...args); };
+
+    // Repaint with unchanged status text (only another node changed): no rewrite.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'text', p: '#0/save-status', r: [0, 0, 120, 20], t: 'Changes saved', o: 'status', lv: 'polite' },
+        { k: 'text', p: '#0/err', r: [0, 24, 120, 20], t: 'Retry failed', o: 'alert', lv: 'assertive' },
+    ]));
+    assert.equal(h.a11yNodes.get('p:#0/save-status'), statusEl);
+    assert.equal(textWrites, 0, 'unchanged status text must not be rewritten on repaint');
+    assert.equal(replaceCalls, 0, 'unchanged status node must not call replaceChildren on repaint');
+    assert.equal(h.a11yNodes.get('p:#0/err'), alertEl);
+    assert.equal(alertEl.textContent, 'Retry failed');
+
+    // Update status text: same DOM node, single textContent write.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'text', p: '#0/save-status', r: [0, 0, 120, 20], t: 'All changes saved', o: 'status', lv: 'polite' },
+    ]));
+    assert.equal(h.a11yNodes.get('p:#0/save-status'), statusEl, 'status updates must keep the same DOM node');
+    assert.equal(statusEl.textContent, 'All changes saved');
+    assert.equal(textWrites, 1);
+    assert.equal(replaceCalls, 0, 'plain text status update writes textContent directly without extra replaceChildren');
+
+    // Dropping role and live removes the attributes cleanly.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'text', p: '#0/save-status', r: [0, 0, 120, 20], t: 'All changes saved' },
+    ]));
+    assert.equal(h.a11yNodes.get('p:#0/save-status'), statusEl);
+    assert.equal(statusEl.getAttribute('role'), null);
+    assert.equal(statusEl.getAttribute('aria-live'), null);
+
+    bridge.destroy(h);
+});
+
+test('syncA11y mirrors radiogroup container with child radios and determinate/indeterminate progressbar', () => {
+    const { h } = setup();
+
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'group', g: 'div', p: '#0/theme', r: [0, 0, 200, 60], o: 'radiogroup', t: 'Theme' },
+        { k: 'button', p: '#0/theme/r0', r: [0, 0, 100, 24], o: 'radio', t: 'Light', c: 'true', a: 0 },
+        { k: 'button', p: '#0/theme/r1', r: [0, 28, 100, 24], o: 'radio', t: 'Dark', c: 'false', a: 0 },
+        { k: 'progressbar', p: '#0/usage', r: [0, 68, 240, 24], o: 'progressbar', t: '5 hours plan usage', rg: [0, 1, 0.42], vt: '42%' },
+        { k: 'progressbar', p: '#0/loading', r: [0, 100, 240, 24], o: 'progressbar', t: 'Syncing' },
+    ]));
+
+    const group = h.a11yNodes.get('div:#0/theme');
+    assert.equal(group.getAttribute('role'), 'radiogroup');
+    assert.equal(group.getAttribute('aria-label'), 'Theme');
+    assert.equal(group.children.length, 2);
+    assert.equal(group.children[0].getAttribute('role'), 'radio');
+    assert.equal(group.children[0].getAttribute('aria-checked'), 'true');
+    assert.equal(group.children[1].getAttribute('role'), 'radio');
+    assert.equal(group.children[1].getAttribute('aria-checked'), 'false');
+
+    const usage = h.a11yNodes.get('div:#0/usage');
+    assert.equal(usage.getAttribute('role'), 'progressbar');
+    assert.equal(usage.getAttribute('aria-label'), '5 hours plan usage');
+    assert.equal(usage.getAttribute('aria-valuemin'), '0');
+    assert.equal(usage.getAttribute('aria-valuemax'), '1');
+    assert.equal(usage.getAttribute('aria-valuenow'), '0.42');
+    assert.equal(usage.getAttribute('aria-valuetext'), '42%');
+    assert.equal(usage.textContent, undefined);
+
+    const loading = h.a11yNodes.get('div:#0/loading');
+    assert.equal(loading.getAttribute('role'), 'progressbar');
+    assert.equal(loading.getAttribute('aria-label'), 'Syncing');
+    assert.equal(loading.getAttribute('aria-valuemin'), null);
+    assert.equal(loading.getAttribute('aria-valuemax'), null);
+    assert.equal(loading.getAttribute('aria-valuenow'), null);
+    assert.equal(loading.getAttribute('aria-valuetext'), null);
+
+    // Update progressbar value in-place, then switch it to indeterminate.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'progressbar', p: '#0/usage', r: [0, 68, 240, 24], o: 'progressbar', t: '5 hours plan usage', rg: [0, 1, 0.75], vt: '75%' },
+    ]));
+    assert.equal(h.a11yNodes.get('div:#0/usage'), usage);
+    assert.equal(usage.getAttribute('aria-valuenow'), '0.75');
+    assert.equal(usage.getAttribute('aria-valuetext'), '75%');
+
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'progressbar', p: '#0/usage', r: [0, 68, 240, 24], o: 'progressbar', t: '5 hours plan usage' },
+    ]));
+    assert.equal(h.a11yNodes.get('div:#0/usage'), usage);
+    assert.equal(usage.getAttribute('aria-valuemin'), null);
+    assert.equal(usage.getAttribute('aria-valuemax'), null);
+    assert.equal(usage.getAttribute('aria-valuenow'), null);
+    assert.equal(usage.getAttribute('aria-valuetext'), null);
+
+    bridge.destroy(h);
+});
+
+test('keydown forwards non-browser function keys on focused textarea and password fields', () => {
+    const { events, h } = setup();
+
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+
+    // Every F1–F24 except browser-reserved F5 and F12 is prevented and forwarded.
+    for (let n = 1; n <= 24; n++) {
+        if (n === 5 || n === 12) continue;
+        const name = `F${n}`;
+        events.length = 0;
+        assert.equal(dispatchKeydown(h.textarea, { key: name, code: name }), true, `${name} should be prevented`);
+        assert.deepEqual(events, [{
+            kind: 'key',
+            key: name,
+            code: name,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+            repeat: false,
+        }]);
+    }
+
+    // Shift/Alt modifiers and repeat pass through for non-chord function keys.
+    events.length = 0;
+    assert.equal(dispatchKeydown(h.textarea, { key: 'F10', code: 'F10', shiftKey: true }), true);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'F8', code: 'F8', altKey: true, repeat: true }), true);
+    assert.deepEqual(events, [
+        { kind: 'key', key: 'F10', code: 'F10', shift: true, ctrl: false, alt: false, meta: false, repeat: false },
+        { kind: 'key', key: 'F8', code: 'F8', shift: false, ctrl: false, alt: true, meta: false, repeat: true },
+    ]);
+
+    // Focused password fields forward non-browser function keys too.
+    events.length = 0;
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    bridge.activate(h);
+    assert.equal(dispatchKeydown(h.password, { key: 'F8', code: 'F8' }), true);
+    assert.deepEqual(events, [{
+        kind: 'key',
+        key: 'F8',
+        code: 'F8',
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+        repeat: false,
+    }]);
+
+    bridge.destroy(h);
+});
+
+test('keydown leaves browser-reserved function keys, non-function keys, and composing function keys untouched', () => {
+    const { events, h } = setup();
+
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+
+    // Browser-reserved F5 and F12 stay un-prevented and unforwarded on both fields.
+    for (const key of ['F5', 'F12']) {
+        assert.equal(dispatchKeydown(h.textarea, { key, code: key }), false);
+        assert.equal(dispatchKeydown(h.textarea, { key, code: key, shiftKey: true }), false);
+    }
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    bridge.activate(h);
+    for (const key of ['F5', 'F12']) {
+        assert.equal(dispatchKeydown(h.password, { key, code: key }), false);
+    }
+
+    // Out-of-range F-names and regular keys must not be intercepted.
+    bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+    for (const key of ['F', 'f8', 'F0', 'F01', 'F25', 'Fn', 'a']) {
+        assert.equal(dispatchKeydown(h.textarea, { key, code: key }), false);
+    }
+
+    // IME composition owns function keys (e.g. Japanese kana conversion F6–F10).
+    assert.equal(dispatchKeydown(h.textarea, { key: 'F8', code: 'F8', isComposing: true }), false);
+    assert.equal(dispatchKeydown(h.textarea, { key: 'F8', code: 'F8', keyCode: 229 }), false);
+    h.textarea.dispatchEvent({ type: 'compositionstart' });
+    assert.equal(dispatchKeydown(h.textarea, { key: 'F8', code: 'F8' }), false);
+
+    assert.equal(events.length, 0);
+    bridge.destroy(h);
+});
+
+test('page mode mouse release focusing a field via sync + activate focuses textarea and restores selection', () => {
+    const { doc, body, events, h } = setup({ page: true });
+    assert.equal(doc.activeElement, body);
+
+    // PrimaryDown on a button in page mode calls activate() with no focused field; it leaves
+    // document.activeElement on the page (not the canvas).
+    bridge.activate(h);
+    assert.equal(doc.activeElement, body);
+
+    // Without activate() (sync_input(false)), sync() updates value/selection but leaves textarea
+    // unfocused because activeElement is not canvas.
+    bridge.sync(h, 'editor', 'Recalled text', 0, 13, 13, false);
+    assert.equal(doc.activeElement, body);
+    assert.equal(h.textarea.inert, false);
+    assert.equal(h.textarea.value, 'Recalled text');
+
+    // Simulate Chrome collapsing an unfocused textarea's selection to 0 when focus moves to it.
+    h.textarea.onFocus = () => {
+        h.textarea.selectionStart = 0;
+        h.textarea.selectionEnd = 0;
+        h.textarea.selectionDirection = 'none';
+    };
+    bridge.activate(h);
+    h.textarea.onFocus = null;
+
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.inputMode, 'text');
+    assert.equal(h.textarea.selectionStart, 13);
+    assert.equal(h.textarea.selectionEnd, 13);
+    assert.equal(h.textarea.selectionDirection, 'forward');
+
+    insertAtCaret(h.textarea, '!');
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], {
+        kind: 'edit',
+        key: 'editor',
+        base: 0,
+        expected: 'Recalled text',
+        start: 13,
+        end: 13,
+        text: '!',
+        anchor: 14,
+        focus: 14,
+    });
+
+    // Blur back to body and focus a secure field on release.
+    bridge.sync(h, '', '', 0, 0, 0, false);
+    body.focus();
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    assert.equal(doc.activeElement, body);
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.password);
+    assert.equal(h.password.inert, false);
+    assert.equal(h.password.inputMode, 'text');
+    bridge.destroy(h);
+});
+
+test('coarse pointer release focusing a field via sync + activate restores inputMode text', async () => {
+    const { doc, canvas, h } = setup({ coarse: true });
+    await Promise.resolve();
+    assert.equal(doc.activeElement, canvas);
+
+    // Blur resets inputMode to none on coarse pointers.
+    bridge.sync(h, '', '', 0, 0, 0, false);
+    assert.equal(h.textarea.inputMode, 'none');
+
+    // sync() alone reclaims focus from canvas but keeps inputMode none; activate() sets text.
+    bridge.sync(h, 'editor', 'Recalled text', 0, 13, 13, false);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.inputMode, 'none');
+
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.inputMode, 'text');
+    assert.equal(h.textarea.selectionStart, 13);
+    assert.equal(h.textarea.selectionEnd, 13);
+    bridge.destroy(h);
+});
+
+function snapshotDom(node) {
+    const attrs = [...node._attrs.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    return {
+        tag: node.tagName,
+        attrs,
+        cssText: node.style.cssText,
+        transform: node.style.transform ?? '',
+        text: node.children.length === 0 ? (node.textContent ?? '') : '',
+        children: node.children.map(snapshotDom),
+    };
+}
+
+function parseCssPx(css, prop) {
+    const m = new RegExp('(?:^|;)' + prop + ':(-?\\d+(?:\\.\\d+)?)px').exec(css);
+    return m ? Number(m[1]) : 0;
+}
+
+function parseTranslate3d(tr) {
+    if (!tr) return [0, 0];
+    const m = /translate3d\((-?\d+(?:\.\d+)?)px,\s*(-?\d+(?:\.\d+)?)px/.exec(tr);
+    return m ? [Number(m[1]), Number(m[2])] : [0, 0];
+}
+
+function collectScreenBounds(node, origin = [0, 0], out = []) {
+    const [tx, ty] = parseTranslate3d(node.style.transform);
+    const x = Math.round((origin[0] + parseCssPx(node.style.cssText, 'left') + tx) * 10) / 10;
+    const y = Math.round((origin[1] + parseCssPx(node.style.cssText, 'top') + ty) * 10) / 10;
+    const w = parseCssPx(node.style.cssText, 'width');
+    const h = parseCssPx(node.style.cssText, 'height');
+    if (node.getAttribute('data-rune-scroll-content') === null) {
+        out.push({ tag: node.tagName, text: node.children.length === 0 ? (node.textContent ?? '') : '', rect: [x, y, w, h] });
+    }
+    for (const child of node.children) {
+        if (child.tagName === '#TEXT' || child.tagName === 'STYLE') continue;
+        collectScreenBounds(child, [x, y], out);
+    }
+    return out;
+}
+
+function makePatcher() {
+    let sent = new Map();
+    let orders = new Map();
+    const TAGS = { heading: null, button: 'button', link: 'a', image: 'div', progressbar: 'div', text: 'p', scroll_x: 'div' };
+    const keyOf = item => {
+        const tag = item.k === 'group' ? (item.g || 'div') : item.k === 'heading' ? `h${item.l || 2}` : (TAGS[item.k] ?? 'p');
+        return `${tag}:${item.p}`;
+    };
+    const r1 = v => { const r = Math.round(v * 10) / 10; return r === 0 ? 0 : r; };
+    return items => {
+        const keys = items.map(keyOf);
+        const nextSent = new Map();
+        const nextOrders = new Map();
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const key = keys[i];
+            const parentKey = item.a === undefined ? '' : keys[item.a];
+            const origin = item.a === undefined ? [0, 0] : items[item.a].r;
+            const rel = { ...item, r: [r1(item.r[0] - origin[0]), r1(item.r[1] - origin[1]), item.r[2], item.r[3]] };
+            delete rel.a;
+            nextSent.set(key, JSON.stringify(rel));
+            if (!nextOrders.has(parentKey)) nextOrders.set(parentKey, []);
+            nextOrders.get(parentKey).push(key);
+        }
+        const d = [...sent.keys()].filter(k => !nextSent.has(k));
+        const u = [];
+        for (const [k, raw] of nextSent) {
+            if (sent.get(k) !== raw) u.push(JSON.parse(raw));
+        }
+        const o = {};
+        for (const [pk, list] of nextOrders) {
+            const prev = orders.get(pk);
+            if (!prev || prev.length !== list.length || prev.some((v, idx) => v !== list[idx])) o[pk] = list;
+        }
+        sent = nextSent;
+        orders = nextOrders;
+        if (!d.length && !u.length && !Object.keys(o).length) return null;
+        const patch = { p: 1 };
+        if (d.length) patch.d = d;
+        if (u.length) patch.u = u;
+        if (Object.keys(o).length) patch.o = o;
+        return patch;
+    };
+}
+
+test('syncA11y incremental patches match full rebuild across virtual shifts, reparenting, tag changes, and sticky headers without mutating staying siblings', () => {
+    const { h } = setup();
+    const diff = makePatcher();
+
+    const compareWithFull = items => {
+        const patch = diff(items);
+        if (patch) bridge.syncA11y(h, JSON.stringify(patch));
+        const fresh = setup();
+        bridge.syncA11y(fresh.h, JSON.stringify(items));
+        assert.deepEqual(snapshotDom(h.a11y), snapshotDom(fresh.h.a11y));
+        assert.deepEqual(collectScreenBounds(h.a11y), collectScreenBounds(fresh.h.a11y));
+        bridge.destroy(fresh.h);
+        return patch;
+    };
+
+    // Step 1: initial virtual scroll pane with sticky header + 4 rows.
+    compareWithFull([
+        { k: 'group', g: 'div', p: '#0/pane', r: [0, 20, 300, 200], sc: [0, 0] },
+        { k: 'heading', l: 2, p: '#0/pane/sticky', r: [0, 20, 300, 28], t: 'Section', a: 0 },
+        { k: 'text', p: '#0/pane/r0', r: [0, 48, 300, 32], t: 'Row 0', a: 0 },
+        { k: 'text', p: '#0/pane/r1', r: [0, 80, 300, 32], t: 'Row 1', a: 0 },
+        { k: 'text', p: '#0/pane/r2', r: [0, 112, 300, 32], t: 'Row 2', a: 0 },
+        { k: 'text', p: '#0/pane/r3', r: [0, 144, 300, 32], t: 'Row 3', a: 0 },
+    ]);
+
+    // Spy on staying sibling r1 and r2 to prove zero mutations during scroll + virtual window shift.
+    const r1 = h.a11yNodes.get('p:#0/pane/r1');
+    const r2 = h.a11yNodes.get('p:#0/pane/r2');
+    let r1Writes = 0;
+    let r2Writes = 0;
+    let r1Css = r1.style.cssText;
+    let r2Css = r2.style.cssText;
+    Object.defineProperty(r1.style, 'cssText', { get() { return r1Css; }, set(v) { r1Writes++; r1Css = v; }, configurable: true });
+    Object.defineProperty(r2.style, 'cssText', { get() { return r2Css; }, set(v) { r2Writes++; r2Css = v; }, configurable: true });
+
+    // Step 2: scroll down 64px, cull r0, mount r4, counter-shift sticky header by +64px.
+    const scrollPatch = compareWithFull([
+        { k: 'group', g: 'div', p: '#0/pane', r: [0, 20, 300, 200], sc: [0, 64] },
+        { k: 'heading', l: 2, p: '#0/pane/sticky', r: [0, 84, 300, 28], t: 'Section', a: 0 },
+        { k: 'text', p: '#0/pane/r1', r: [0, 80, 300, 32], t: 'Row 1', a: 0 },
+        { k: 'text', p: '#0/pane/r2', r: [0, 112, 300, 32], t: 'Row 2', a: 0 },
+        { k: 'text', p: '#0/pane/r3', r: [0, 144, 300, 32], t: 'Row 3', a: 0 },
+        { k: 'text', p: '#0/pane/r4', r: [0, 176, 300, 32], t: 'Row 4', a: 0 },
+    ]);
+    assert.deepEqual(scrollPatch.d, ['p:#0/pane/r0']);
+    assert.equal(r1Writes, 0, 'staying row r1 must not rewrite cssText on scroll');
+    assert.equal(r2Writes, 0, 'staying row r2 must not rewrite cssText on scroll');
+    assert.equal(h.a11yNodes.get('div:#0/pane')._scrollContent.style.transform, 'translate3d(0px,-64px,0)');
+
+    // Check transformed screen bounds: sticky stays at y=20, r1 is at 80-64=16.
+    const bounds = collectScreenBounds(h.a11y);
+    assert.deepEqual(bounds.find(b => b.text === 'Section').rect, [0, 20, 300, 28]);
+    assert.deepEqual(bounds.find(b => b.text === 'Row 1').rect, [0, 16, 300, 32]);
+
+    // Step 3: reparent r2 out of pane into a new group, change sticky heading h2 -> h3,
+    // and change r3 from text to button at the same path.
+    compareWithFull([
+        { k: 'group', g: 'section', p: '#0/box', r: [10, 0, 280, 100], t: 'Pinned' },
+        { k: 'text', p: '#0/pane/r2', r: [14, 24, 260, 32], t: 'Row 2', a: 0 },
+        { k: 'group', g: 'div', p: '#0/pane', r: [0, 20, 300, 200], sc: [0, 64] },
+        { k: 'heading', l: 3, p: '#0/pane/sticky', r: [0, 84, 300, 28], t: 'Section', a: 2 },
+        { k: 'text', p: '#0/pane/r1', r: [0, 80, 300, 32], t: 'Row 1', a: 2 },
+        { k: 'button', p: '#0/pane/r3', r: [0, 144, 300, 32], t: 'Row 3 Action', a: 2 },
+        { k: 'text', p: '#0/pane/r4', r: [0, 176, 300, 32], t: 'Row 4', a: 2 },
+    ]);
+    assert.equal(r1Writes, 0, 'staying row r1 still unmutated when sibling reparents/morphs');
+
+    // Step 4: delete #0/box while reparenting r2 back to root, and toggle pane scroll wrapper off.
+    compareWithFull([
+        { k: 'text', p: '#0/pane/r2', r: [0, 0, 260, 32], t: 'Row 2' },
+        { k: 'group', g: 'div', p: '#0/pane', r: [0, 20, 300, 200] },
+        { k: 'text', p: '#0/pane/r1', r: [0, 80, 300, 32], t: 'Row 1', a: 1 },
+        { k: 'button', p: '#0/pane/r3', r: [0, 144, 300, 32], t: 'Row 3 Action', a: 1 },
+    ]);
+    assert.equal(h.a11yNodes.get('div:#0/pane')._scrollContent, null);
+
+    // Step 5: toggle pane scroll wrapper back on and reorder children.
+    compareWithFull([
+        { k: 'group', g: 'div', p: '#0/pane', r: [0, 20, 300, 200], sc: [12, 30] },
+        { k: 'button', p: '#0/pane/r3', r: [0, 144, 300, 32], t: 'Row 3 Action', a: 0 },
+        { k: 'text', p: '#0/pane/r1', r: [0, 80, 300, 32], t: 'Row 1', a: 0 },
+    ]);
+
+    // Step 6: 60 deterministic randomized transitions exercising virtual shifts, sticky headers,
+    // reparenting (including out of deleted parents), tag morphing, and scroll wrapper toggles.
+    let rng = 0x12345678;
+    const next = () => { rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0; return rng; };
+    for (let step = 0; step < 60; step++) {
+        const items = [];
+        const hasBox = (next() % 2) === 0;
+        let boxIdx;
+        if (hasBox) {
+            boxIdx = items.length;
+            items.push({ k: 'group', g: (next() % 2) ? 'section' : 'div', p: '#0/box', r: [10, 10, 280, 60], t: 'Box' });
+        }
+        const paneIdx = items.length;
+        const paneScroll = (next() % 4) !== 0;
+        const sy = (next() % 30) * 16;
+        const pane = { k: 'group', g: 'div', p: '#0/pane', r: [0, 80, 320, 240] };
+        if (paneScroll) pane.sc = [(next() % 3) * 8, sy];
+        items.push(pane);
+        if ((next() % 3) !== 0) {
+            items.push({ k: 'heading', l: 1 + (next() % 3), p: '#0/pane/sticky', r: [0, 80 + (paneScroll ? sy : 0), 300, 24], t: `H${step % 3}`, a: paneIdx });
+        }
+        const start = next() % 6;
+        const len = next() % 6;
+        const rows = Array.from({ length: len }, (_, k) => start + k);
+        if (rows.length >= 2 && (next() % 2)) {
+            const a = next() % rows.length;
+            const b = next() % rows.length;
+            [rows[a], rows[b]] = [rows[b], rows[a]];
+        }
+        for (const r of rows) {
+            items.push({ k: 'text', p: `#0/pane/r${r}`, r: [8, 120 + r * 32, 300, 28], t: `R${r}-${(next() % 3) === 0 ? step : 0}`, a: paneIdx });
+        }
+        const morphParent = (next() % 3 === 0 && boxIdx !== undefined) ? boxIdx : (next() % 2 === 0 ? paneIdx : undefined);
+        const mode = next() % 4;
+        const morph = mode === 0
+            ? { k: 'button', p: '#0/morph', r: [12, 90, 100, 24], o: 'combobox', t: 'Preset', x: (next() % 2) === 0, v: `V${next() % 3}` }
+            : mode === 1
+                ? { k: 'text', p: '#0/morph', r: [12, 90, 100, 24], o: 'status', lv: 'polite', t: `S${step % 2}` }
+                : mode === 2
+                    ? { k: 'progressbar', p: '#0/morph', r: [12, 90, 100, 24], o: 'progressbar', t: 'Load', rg: [0, 1, 0.5], vt: '50%' }
+                    : { k: 'image', p: '#0/morph', r: [12, 90, 100, 24], t: 'Icon' };
+        if (morphParent !== undefined) morph.a = morphParent;
+        items.push(morph);
+        compareWithFull(items);
+    }
+
+    bridge.destroy(h);
+});
+
+test('consumer demand triggers flush the mirror and timer helpers pass attempt and cancel cleanly', () => {
+    const { win, canvas, events, h } = setup();
+
+    // focusin inside h.a11y flushes immediately.
+    h.a11y.dispatchEvent({ type: 'focusin' });
+    assert.deepEqual(events.pop(), { kind: 'a11y_flush' });
+
+    // beforeprint flushes immediately.
+    win.dispatchEvent({ type: 'beforeprint' });
+    assert.deepEqual(events.pop(), { kind: 'a11y_flush' });
+
+    // Ctrl+F / Cmd+F flushes immediately.
+    win.dispatchEvent({ type: 'keydown', key: 'f', ctrlKey: true, metaKey: false, altKey: false, target: canvas });
+    assert.deepEqual(events.pop(), { kind: 'a11y_flush' });
+    win.dispatchEvent({ type: 'keydown', key: 'F', ctrlKey: false, metaKey: true, altKey: false, target: canvas });
+    assert.deepEqual(events.pop(), { kind: 'a11y_flush' });
+
+    // Right-click armMenu flushes synchronously before secondary_browser.
+    events.length = 0;
+    win.dispatchEvent({ type: 'pointerup', button: 2, pointerType: 'mouse', target: canvas, clientX: 10, clientY: 10, shiftKey: false });
+    assert.deepEqual(events.filter(e => e.kind !== 'mods'), [{ kind: 'a11y_flush' }, { kind: 'secondary_browser' }]);
+    win.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'mouse', target: canvas });
+
+    // scheduleA11y / scheduleA11yIdle / cancelA11y carry attempt and cancel cleanly.
+    const timers = [];
+    const origSetTimeout = globalThis.setTimeout;
+    const origClearTimeout = globalThis.clearTimeout;
+    const origRic = globalThis.requestIdleCallback;
+    const origCic = globalThis.cancelIdleCallback;
+    let nextId = 1;
+    const active = new Map();
+    globalThis.setTimeout = (fn, ms) => { const id = nextId++; active.set(id, { fn, ms }); timers.push({ kind: 'timeout', id, ms }); return id; };
+    globalThis.clearTimeout = id => { active.delete(id); };
+    globalThis.requestIdleCallback = (fn, opts) => { const id = nextId++; active.set(id, { fn, opts }); timers.push({ kind: 'idle', id, opts }); return id; };
+    globalThis.cancelIdleCallback = id => { active.delete(id); };
+    try {
+        events.length = 0;
+        bridge.scheduleA11y(h, 4, 150);
+        assert.equal(timers.at(-1).kind, 'timeout');
+        assert.equal(timers.at(-1).ms, 150);
+        const settleId = timers.at(-1).id;
+        active.get(settleId).fn();
+        assert.deepEqual(events.pop(), { kind: 'a11y_settle', attempt: 4 });
+
+        bridge.scheduleA11yIdle(h, 5, 100);
+        assert.equal(timers.at(-1).kind, 'idle');
+        assert.deepEqual(timers.at(-1).opts, { timeout: 100 });
+        const idleId = timers.at(-1).id;
+        bridge.cancelA11y(h);
+        assert.equal(active.has(idleId), false, 'cancelA11y cancels pending requestIdleCallback');
+
+        bridge.scheduleA11yIdle(h, 6, 100);
+        const idleId2 = timers.at(-1).id;
+        active.get(idleId2).fn();
+        assert.deepEqual(events.pop(), { kind: 'a11y_idle', attempt: 6 });
+    } finally {
+        globalThis.setTimeout = origSetTimeout;
+        globalThis.clearTimeout = origClearTimeout;
+        globalThis.requestIdleCallback = origRic;
+        globalThis.cancelIdleCallback = origCic;
+    }
+
+    bridge.destroy(h);
+});
+
+test('showMenu blocks activate while open and restores focus and selection to active field on close', () => {
+    const { doc, win, body, events, h } = setup({ coarse: true });
+    const spec = JSON.stringify({
+        items: [
+            { id: 'copy', title: 'Copy' },
+            { id: 'paste', title: 'Paste' },
+        ],
+    });
+
+    bridge.sync(h, 'editor', 'hello', 0, 5, 5, false);
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.textarea);
+
+    bridge.showMenu(h, spec, 20, 40, 160, false);
+    const menu = body.children.find(el => el.getAttribute('data-rune-menu') !== null);
+    assert.ok(menu, 'popup menu should be mounted');
+    assert.equal(doc.activeElement, menu);
+
+    // Chrome collapses an unfocused textarea's selection to 0.
+    h.textarea.selectionStart = 0;
+    h.textarea.selectionEnd = 0;
+    h.textarea.selectionDirection = 'none';
+
+    // A stray activate() while the menu is open (such as lifting a finger after a long press)
+    // must keep DOM focus in the menu.
+    bridge.activate(h);
+    assert.equal(doc.activeElement, menu);
+
+    // Viewport resize dismisses the menu and must return DOM focus + selection to h.textarea.
+    win.dispatchEvent({ type: 'resize' });
+    assert.equal(body.children.find(el => el.getAttribute('data-rune-menu') !== null), undefined);
+    assert.deepEqual(events, [{ kind: 'menu', id: null }]);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.inputMode, 'text');
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+    assert.equal(h.textarea.selectionDirection, 'forward');
+
+    // Picking a menu item also returns DOM focus + selection to h.textarea.
+    events.length = 0;
+    bridge.showMenu(h, spec, 20, 40, 160, false);
+    const menu2 = body.children.find(el => el.getAttribute('data-rune-menu') !== null);
+    assert.equal(doc.activeElement, menu2);
+    h.textarea.selectionStart = 0;
+    h.textarea.selectionEnd = 0;
+    menu2.children[0].dispatchEvent({ type: 'click', preventDefault() {} });
+    assert.deepEqual(events, [{ kind: 'menu', id: 'copy' }]);
+    assert.equal(doc.activeElement, h.textarea);
+    assert.equal(h.textarea.selectionStart, 5);
+    assert.equal(h.textarea.selectionEnd, 5);
+
+    // Secure field: dismissing the menu returns DOM focus to h.password.
+    events.length = 0;
+    bridge.sync(h, 'secret', '', 0, 0, 0, true);
+    bridge.activate(h);
+    assert.equal(doc.activeElement, h.password);
+    bridge.showMenu(h, spec, 20, 40, 160, false);
+    assert.notEqual(doc.activeElement, h.password);
+    doc.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    assert.deepEqual(events, [{ kind: 'menu', id: null }]);
+    assert.equal(doc.activeElement, h.password);
+    assert.equal(h.password.inputMode, 'text');
+
+    bridge.destroy(h);
+});
+
+test('showMenu dismissal falls back to canvas only when no field is focused and respects page mode', () => {
+    const spec = JSON.stringify({ items: [{ id: 'a', title: 'Action' }] });
+    const escape = () => ({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
+
+    // Standalone/app mode without a focused field: dismissal focuses the canvas.
+    {
+        const { doc, canvas, events, h } = setup();
+        bridge.showMenu(h, spec, 10, 10, 160, false);
+        assert.notEqual(doc.activeElement, canvas);
+        doc.dispatchEvent(escape());
+        assert.deepEqual(events, [{ kind: 'menu', id: null }]);
+        assert.equal(doc.activeElement, canvas);
+        bridge.destroy(h);
+    }
+
+    // Page mode without a focused field: dismissal must not focus the canvas.
+    {
+        const { doc, body, canvas, events, h } = setup({ page: true });
+        bridge.showMenu(h, spec, 10, 10, 160, false);
+        doc.dispatchEvent(escape());
+        assert.deepEqual(events, [{ kind: 'menu', id: null }]);
+        assert.notEqual(doc.activeElement, canvas);
+        assert.equal(doc.activeElement, body);
+        bridge.destroy(h);
+    }
+
+    // Page mode with a focused field: dismissal restores DOM focus and selection to h.textarea.
+    {
+        const { doc, events, h } = setup({ page: true });
+        bridge.sync(h, 'editor', 'hello', 0, 2, 5, false);
+        bridge.activate(h);
+        bridge.showMenu(h, spec, 10, 10, 160, false);
+        h.textarea.selectionStart = 0;
+        h.textarea.selectionEnd = 0;
+        doc.dispatchEvent(escape());
+        assert.deepEqual(events, [{ kind: 'menu', id: null }]);
+        assert.equal(doc.activeElement, h.textarea);
+        assert.equal(h.textarea.selectionStart, 2);
+        assert.equal(h.textarea.selectionEnd, 5);
+        bridge.destroy(h);
+    }
+});
+
+test('showMenu keeps its defaults without a style and draws with what a style sets', () => {
+    const items = [{ id: 'a', title: 'Action' }, { separator: true }, { id: 'b', title: 'Off', enabled: false }];
+    const { body, h } = setup();
+    const mounted = () => body.children.find(el => el.getAttribute('data-rune-menu') !== null);
+
+    bridge.showMenu(h, JSON.stringify({ items }), 10, 10, 160, true);
+    let menu = mounted();
+    assert.match(menu.style.cssText, /padding:4px;/);
+    assert.match(menu.style.cssText, /background:#2b2b2b;/);
+    assert.match(menu.style.cssText, /border-radius:8px;/);
+    assert.match(menu.style.cssText, /font:13px\/18px system-ui,sans-serif;/);
+    assert.match(menu.children[0].style.cssText, /border-radius:4px;/);
+    bridge.hideMenu(h);
+
+    const style = { bg: '#102030ff', fg: '#fafafaff', muted: '#808080ff', line: '#334455ff', fontFamily: 'Inter, sans-serif',
+        fontSize: 15, lineHeight: 22, padding: 6, radius: 0, itemRadius: 2 };
+    bridge.showMenu(h, JSON.stringify({ items, style }), 10, 10, 160, false);
+    menu = mounted();
+    assert.match(menu.style.cssText, /padding:6px;/);
+    assert.match(menu.style.cssText, /background:#102030ff;color:#fafafaff;border:1px solid #334455ff;border-radius:0px;/);
+    assert.match(menu.style.cssText, /font:13px\/18px system-ui,sans-serif;user-select:none;/);
+    assert.equal(menu.style.fontSize, '15px');
+    assert.equal(menu.style.lineHeight, '22px');
+    assert.equal(menu.style.fontFamily, 'Inter, sans-serif');
+    assert.match(menu.children[0].style.cssText, /border-radius:2px;.*color:#fafafaff;/);
+    assert.match(menu.children[1].style.cssText, /background:#334455ff/);
+    assert.match(menu.children[2].style.cssText, /color:#808080ff;/);
+    assert.equal(menu.getAttribute('role'), 'menu');
+    // An unset colour keeps the light default.
+    menu.children[0].dispatchEvent({ type: 'pointerenter' });
+    assert.equal(menu.children[0].style.background, '#ebebeb');
+    bridge.hideMenu(h);
+
+    // A family with an unclosed quote or comment stays out of cssText, so it can't swallow the
+    // declarations after it; zero font sizes and colours that aren't `#rrggbbaa` keep defaults.
+    for (const fontFamily of ['"Inter', "/* Inter"]) {
+        bridge.showMenu(h, JSON.stringify({ items, style: { fontFamily, fontSize: 0, lineHeight: 0, bg: 'red;x:y' } }), 10, 10, 160, false);
+        menu = mounted();
+        assert.ok(!menu.style.cssText.includes(fontFamily));
+        assert.match(menu.style.cssText, /background:#ffffff;/);
+        assert.match(menu.style.cssText, /font:13px\/18px system-ui,sans-serif;user-select:none;-webkit-user-select:none;outline:none$/);
+        assert.equal(menu.style.fontFamily, fontFamily);
+        assert.equal(menu.style.fontSize, undefined);
+        assert.equal(menu.style.lineHeight, undefined);
+        bridge.hideMenu(h);
+    }
+    bridge.destroy(h);
+});
+
+test('takeTouchTimestamp captures PointerEvent.timeStamp in FIFO order, expands coalesced moves, clamps and bounds to 64', () => {
+    const { win, canvas, h } = setup();
+    const origPerf = globalThis.performance;
+    let perfNow = 1000;
+    Object.defineProperty(globalThis, 'performance', {
+        value: { now: () => perfNow },
+        configurable: true,
+    });
+    try {
+        // Non-touch and non-canvas events are ignored.
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'mouse', pointerId: 1, timeStamp: 100 });
+        win.dispatchEvent({ type: 'pointerdown', target: {}, pointerType: 'touch', pointerId: 1, timeStamp: 100 });
+        assert.ok(Number.isNaN(bridge.takeTouchTimestamp(h, 1)));
+
+        // Coalesced pointermove expands in order; chorded button !== -1 is skipped.
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'touch', pointerId: 7, timeStamp: 200 });
+        win.dispatchEvent({
+            type: 'pointermove',
+            target: canvas,
+            pointerType: 'touch',
+            pointerId: 7,
+            button: -1,
+            timeStamp: 230,
+            getCoalescedEvents: () => [{ timeStamp: 210 }, { timeStamp: 220 }],
+        });
+        win.dispatchEvent({ type: 'pointermove', target: canvas, pointerType: 'touch', pointerId: 7, button: 0, timeStamp: 225 });
+        win.dispatchEvent({ type: 'pointerup', target: canvas, pointerType: 'touch', pointerId: 7, timeStamp: 1500 });
+        assert.equal(bridge.takeTouchTimestamp(h, 7), 200);
+        assert.equal(bridge.takeTouchTimestamp(h, 7), 210);
+        assert.equal(bridge.takeTouchTimestamp(h, 7), 220);
+        // Future timestamp (1500 > perfNow 1000) is clamped to performance.now().
+        assert.equal(bridge.takeTouchTimestamp(h, 7), 1000);
+        assert.ok(Number.isNaN(bridge.takeTouchTimestamp(h, 7)));
+
+        // Malformed / non-positive timestamps return NaN.
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'touch', pointerId: 9, timeStamp: 0 });
+        win.dispatchEvent({ type: 'pointerup', target: canvas, pointerType: 'touch', pointerId: 9, timeStamp: -5 });
+        assert.ok(Number.isNaN(bridge.takeTouchTimestamp(h, 9)));
+        assert.ok(Number.isNaN(bridge.takeTouchTimestamp(h, 9)));
+
+        // Bounded FIFO (max 64): pushing 70 drops the oldest 6.
+        for (let i = 1; i <= 70; i++) {
+            win.dispatchEvent({ type: 'pointermove', target: canvas, pointerType: 'touch', pointerId: 3, button: -1, timeStamp: i * 10 });
+        }
+        assert.equal(bridge.takeTouchTimestamp(h, 3), 70);
+    } finally {
+        Object.defineProperty(globalThis, 'performance', { value: origPerf, configurable: true });
+        bridge.destroy(h);
+    }
+});
+
+test('scheduleTouchHoldConfirm uses background postTask, re-yields up to 2 turns on isInputPending, and cancels cleanly', async () => {
+    const { events, h } = setup();
+    const origScheduler = globalThis.scheduler;
+    const origNav = globalThis.navigator;
+    const tasks = [];
+    let pendingChecks = 0;
+    let inputPendingCalls = 0;
+    Object.defineProperty(globalThis, 'scheduler', {
+        value: {
+            postTask(fn, opts) {
+                const entry = { fn, opts, aborted: false };
+                opts?.signal?.addEventListener?.('abort', () => { entry.aborted = true; });
+                tasks.push(entry);
+                return new Promise((resolve, reject) => {
+                    entry.run = () => {
+                        if (entry.aborted) { reject(new Error('aborted')); return; }
+                        fn();
+                        resolve();
+                    };
+                });
+            },
+        },
+        configurable: true,
+    });
+    Object.defineProperty(globalThis, 'navigator', {
+        value: {
+            ...origNav,
+            scheduling: {
+                isInputPending(opts) {
+                    assert.deepEqual(opts, { includeContinuous: true });
+                    inputPendingCalls += 1;
+                    return pendingChecks-- > 0;
+                },
+            },
+        },
+        configurable: true,
+    });
+    try {
+        // Re-yields at most 2 times when input stays pending, then confirms on turn 3.
+        pendingChecks = 5;
+        bridge.scheduleTouchHoldConfirm(h, 42);
+        assert.equal(tasks.length, 1);
+        assert.equal(tasks[0].opts.priority, 'background');
+        tasks[0].run();
+        assert.equal(events.length, 0);
+        assert.equal(tasks.length, 2);
+        tasks[1].run();
+        assert.equal(events.length, 0);
+        assert.equal(tasks.length, 3);
+        tasks[2].run();
+        assert.deepEqual(events, [{ kind: 'touch_hold_confirm', attempt: 42 }]);
+        assert.equal(inputPendingCalls, 2);
+
+        // Simulated 700 ms stall where queued pointerup drains and cancels confirmation before it runs.
+        events.length = 0;
+        tasks.length = 0;
+        pendingChecks = 0;
+        bridge.scheduleTouchHoldConfirm(h, 43);
+        assert.equal(tasks.length, 1);
+        bridge.cancelTouchHoldConfirm(h);
+        assert.equal(tasks[0].aborted, true);
+        tasks[0].run();
+        assert.deepEqual(events, []);
+    } finally {
+        Object.defineProperty(globalThis, 'scheduler', { value: origScheduler, configurable: true });
+        Object.defineProperty(globalThis, 'navigator', { value: origNav, configurable: true });
+        bridge.destroy(h);
+    }
+});
+
+test('scheduleTouchHoldConfirm falls back to setTimeout(0) when scheduler.postTask is unavailable and clears on destroy', async () => {
+    const { events, h } = setup();
+    const origScheduler = globalThis.scheduler;
+    Object.defineProperty(globalThis, 'scheduler', { value: undefined, configurable: true });
+    try {
+        bridge.scheduleTouchHoldConfirm(h, 7);
+        assert.equal(events.length, 0, 'must not confirm synchronously');
+        await new Promise(resolve => setTimeout(resolve, 15));
+        assert.deepEqual(events, [{ kind: 'touch_hold_confirm', attempt: 7 }]);
+
+        // destroy cancels any in-flight fallback timer.
+        events.length = 0;
+        bridge.scheduleTouchHoldConfirm(h, 8);
+        bridge.destroy(h);
+        await new Promise(resolve => setTimeout(resolve, 15));
+        assert.deepEqual(events, []);
+    } finally {
+        Object.defineProperty(globalThis, 'scheduler', { value: origScheduler, configurable: true });
+    }
+});
+
+test('supportsLiveTouchContextMenu classifies Android/Linux/ChromeOS vs Windows/iOS/iPadOS/macOS', () => {
+    const cases = [
+        [{ userAgentData: { platform: 'Android' }, platform: 'Linux armv8l', userAgent: 'Mozilla/5.0 (Linux; Android 15)' }, true],
+        [{ userAgentData: { platform: 'Chrome OS' }, platform: 'Linux x86_64', userAgent: 'Mozilla/5.0 (X11; CrOS x86_64)' }, true],
+        [{ userAgentData: { platform: 'Linux' }, platform: 'Linux x86_64', userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' }, true],
+        [{ platform: 'Linux armv8l', userAgent: 'Mozilla/5.0 (Android 14; Mobile; rv:130.0)' }, true],
+        // Windows Chrome defers touch contextmenu until finger lift -> false.
+        [{ userAgentData: { platform: 'Windows' }, platform: 'Win32', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }, false],
+        // Spoofed Android UA on Windows Chrome where userAgentData still reports Windows -> false.
+        [{ userAgentData: { platform: 'Windows' }, platform: 'Linux armv8l', userAgent: 'Mozilla/5.0 (Linux; Android 14)' }, false],
+        // iOS / iPadOS (including iPadOS desktop mode MacIntel + maxTouchPoints > 1) -> false.
+        [{ platform: 'iPhone', userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', maxTouchPoints: 5 }, false],
+        [{ platform: 'MacIntel', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 5 }, false],
+        // macOS -> false.
+        [{ userAgentData: { platform: 'macOS' }, platform: 'MacIntel', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 0 }, false],
+        // Missing / empty navigator -> false.
+        [null, false],
+        [{}, false],
+    ];
+    for (const [nav, want] of cases) {
+        assert.equal(bridge.supportsLiveTouchContextMenu(nav), want, JSON.stringify(nav));
+    }
+});
+
+test('document contextmenu forwards touch_hold only while a canvas touch is active and leaves mouse right-click alone', () => {
+    const { doc, win, canvas, events, h } = setup();
+    try {
+        // Stray contextmenu with no active touch on canvas sends no touch_hold.
+        let prevented = false;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, pointerType: 'touch', pointerId: 5, button: 0, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true);
+        assert.deepEqual(events, []);
+
+        // Active touch on canvas: contextmenu prevents default and forwards touch_hold with pointerId.
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'touch', pointerId: 11, timeStamp: 100 });
+        prevented = false;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, pointerType: 'touch', pointerId: 11, button: -1, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true);
+        assert.deepEqual(events, [{ kind: 'touch_hold', id: 11 }]);
+
+        // Mouse right-click contextmenu while touch is active is NOT treated as touch_hold.
+        events.length = 0;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, pointerType: 'mouse', pointerId: 1, button: 2, preventDefault() {} });
+        assert.deepEqual(events, []);
+
+        // After pointerup clears activeTouchId, a deferred post-lift contextmenu sends no touch_hold.
+        win.dispatchEvent({ type: 'pointerup', target: canvas, pointerType: 'touch', pointerId: 11, timeStamp: 900 });
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, pointerType: 'touch', pointerId: 11, button: 0, preventDefault() {} });
+        assert.deepEqual(events, []);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('keydown leaves media keys untouched until syncMediaKeys(true), then prevents and forwards them', () => {
+    const { canvas, events, h } = setup();
+    const mediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaTrackNext', 'MediaTrackPrevious', 'MediaStop', 'MediaFastForward', 'MediaRewind'];
+    try {
+        // Off by default: neither canvas nor focused fields prevent default or forward media keys.
+        for (const name of mediaKeys) {
+            assert.equal(dispatchKeydown(canvas, { key: name, code: name }), false, `canvas opt-out ${name}`);
+        }
+        bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
+        bridge.activate(h);
+        for (const name of mediaKeys) {
+            assert.equal(dispatchKeydown(h.textarea, { key: name, code: name }), false, `textarea opt-out ${name}`);
+        }
+        assert.deepEqual(events, []);
+
+        // Opted in: canvas prevents default and focused textarea/password forward every media key.
+        bridge.syncMediaKeys(h, true);
+        for (const name of mediaKeys) {
+            events.length = 0;
+            assert.equal(dispatchKeydown(canvas, { key: name, code: name }), true, `canvas opt-in ${name}`);
+            assert.equal(dispatchKeydown(h.textarea, { key: name, code: name }), true, `textarea opt-in ${name}`);
+            assert.deepEqual(events, [{
+                kind: 'key',
+                key: name,
+                code: name,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+                repeat: false,
+            }]);
+        }
+        events.length = 0;
+        bridge.sync(h, 'secret', '', 0, 0, 0, true);
+        bridge.activate(h);
+        assert.equal(dispatchKeydown(h.password, { key: 'MediaPlayPause', code: 'MediaPlayPause' }), true);
+        assert.equal(events.length, 1);
+        assert.equal(events[0].key, 'MediaPlayPause');
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('scheduleTouchHoldConfirm waits two animation frames before confirming so pointerup delivered after raf1 cancels the hold', () => {
+    const { events, h } = setup();
+    const origRAF = globalThis.requestAnimationFrame;
+    const origCAF = globalThis.cancelAnimationFrame;
+    const origScheduler = globalThis.scheduler;
+    const origNav = globalThis.navigator;
+    let nextRafId = 1;
+    const rafs = new Map();
+    const tasks = [];
+    Object.defineProperty(globalThis, 'requestAnimationFrame', {
+        value: cb => { const id = nextRafId++; rafs.set(id, cb); return id; },
+        configurable: true,
+    });
+    Object.defineProperty(globalThis, 'cancelAnimationFrame', {
+        value: id => { rafs.delete(id); },
+        configurable: true,
+    });
+    Object.defineProperty(globalThis, 'scheduler', {
+        value: {
+            postTask(fn, opts) {
+                const entry = { fn, opts, aborted: false };
+                opts?.signal?.addEventListener?.('abort', () => { entry.aborted = true; });
+                tasks.push(entry);
+                return new Promise((resolve, reject) => {
+                    entry.run = () => {
+                        if (entry.aborted) { reject(new Error('aborted')); return; }
+                        fn();
+                        resolve();
+                    };
+                });
+            },
+        },
+        configurable: true,
+    });
+    Object.defineProperty(globalThis, 'navigator', {
+        value: { ...origNav, scheduling: { isInputPending: () => false } },
+        configurable: true,
+    });
+    const flushOneRaf = () => {
+        const batch = [...rafs.entries()];
+        rafs.clear();
+        for (const [, cb] of batch) cb(performance.now());
+    };
+    const flushTasks = () => {
+        const batch = tasks.splice(0);
+        for (const t of batch) t.run();
+    };
+    try {
+        // Reproduce the measured Chromium post-stall order:
+        // 1. Stale rAF schedules confirmation.
+        // 2. Background tasks + raf1 + post-raf1 tasks all run with isInputPending() === false.
+        // 3. Waiting pointerup arrives AFTER raf1 and calls cancelTouchHoldConfirm(h).
+        // 4. raf2 + trailing tasks run: touch_hold_confirm must NOT have fired.
+        bridge.scheduleTouchHoldConfirm(h, 99);
+        flushTasks();
+        assert.deepEqual(events, [], 'must not confirm on a background task before raf1');
+        flushOneRaf(); // raf1 (overdue post-stall frame)
+        flushTasks();
+        assert.deepEqual(events, [], 'must not confirm after only raf1 before fresh post-stall raf2');
+
+        // Waiting pointerup arrives after raf1 commits and cancels the hold.
+        bridge.cancelTouchHoldConfirm(h);
+        assert.equal(rafs.size, 0, 'cancelling must cancel pending raf2 so idle page sleeps');
+        flushOneRaf();
+        flushTasks();
+        assert.deepEqual(events, []);
+
+        // Genuine hold (no pointerup): confirms after raf1 -> raf2 -> background task.
+        bridge.scheduleTouchHoldConfirm(h, 100);
+        flushOneRaf(); // raf1
+        assert.deepEqual(events, []);
+        flushOneRaf(); // raf2
+        assert.deepEqual(events, [], 'must wait for trailing background task after raf2');
+        flushTasks();
+        assert.deepEqual(events, [{ kind: 'touch_hold_confirm', attempt: 100 }]);
+        assert.equal(rafs.size, 0);
+    } finally {
+        Object.defineProperty(globalThis, 'requestAnimationFrame', { value: origRAF, configurable: true });
+        Object.defineProperty(globalThis, 'cancelAnimationFrame', { value: origCAF, configurable: true });
+        Object.defineProperty(globalThis, 'scheduler', { value: origScheduler, configurable: true });
+        Object.defineProperty(globalThis, 'navigator', { value: origNav, configurable: true });
+        bridge.destroy(h);
+    }
+});
+
+test('syncA11y mirrors container roles, aria-disabled without HTML disabled, aria-busy, aria-level, and range controls', () => {
+    const { events, h } = setup();
+
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'group', g: 'div', p: '#0/menu', r: [0, 0, 180, 80], o: 'menu', t: 'Actions' },
+        { k: 'button', p: '#0/menu/open', r: [0, 0, 180, 28], o: 'menuitem', t: 'Open', a: 0 },
+        { k: 'button', p: '#0/menu/off', r: [0, 28, 180, 28], o: 'menuitem', t: 'Disabled item', dis: true, a: 0 },
+        { k: 'group', g: 'div', p: '#0/tree', r: [0, 90, 240, 80], o: 'tree', t: 'Files', b: true },
+        { k: 'button', p: '#0/tree/src', r: [0, 90, 240, 28], o: 'treeitem', t: 'src', x: true, b: true, l: 1, se: false, a: 3 },
+        { k: 'group', g: 'div', p: '#0/panel', r: [0, 180, 240, 60], o: 'tabpanel', t: 'Day' },
+        { k: 'button', p: '#0/panel/vol', r: [0, 184, 140, 24], o: 'slider', t: 'Volume', rg: [0, 100, 40], vt: '40%', a: 5 },
+        { k: 'button', p: '#0/panel/retries', r: [0, 212, 140, 24], o: 'spinbutton', t: 'Retries', rg: [1, 10, 3], vt: '3 retries', dis: true, a: 5 },
+    ]));
+
+    const menu = h.a11yNodes.get('div:#0/menu');
+    assert.equal(menu.getAttribute('role'), 'menu');
+    assert.equal(menu.getAttribute('aria-label'), 'Actions');
+    assert.equal(menu.children.length, 2);
+
+    const open = h.a11yNodes.get('button:#0/menu/open');
+    assert.equal(open.getAttribute('role'), 'menuitem');
+    assert.equal(open.getAttribute('aria-disabled'), null);
+    assert.equal(open.disabled, undefined);
+    open.dispatchEvent({ type: 'click', preventDefault() {} });
+    assert.deepEqual(events.pop(), { kind: 'a11y_press', path: '#0/menu/open' });
+
+    const off = h.a11yNodes.get('button:#0/menu/off');
+    assert.equal(off.getAttribute('role'), 'menuitem');
+    assert.equal(off.getAttribute('aria-disabled'), 'true');
+    assert.equal(off.disabled, undefined, 'disabled mirror controls stay discoverable without HTML disabled');
+    events.length = 0;
+    off.dispatchEvent({ type: 'click', preventDefault() {} });
+    assert.deepEqual(events, [], 'clicking an aria-disabled mirror button sends no a11y_press');
+
+    const tree = h.a11yNodes.get('div:#0/tree');
+    assert.equal(tree.getAttribute('role'), 'tree');
+    assert.equal(tree.getAttribute('aria-label'), 'Files');
+    assert.equal(tree.getAttribute('aria-busy'), 'true');
+
+    const src = h.a11yNodes.get('button:#0/tree/src');
+    assert.equal(src.getAttribute('role'), 'treeitem');
+    assert.equal(src.getAttribute('aria-expanded'), 'true');
+    assert.equal(src.getAttribute('aria-busy'), 'true');
+    assert.equal(src.getAttribute('aria-level'), '1');
+    assert.equal(src.getAttribute('aria-selected'), 'false');
+
+    const panel = h.a11yNodes.get('div:#0/panel');
+    assert.equal(panel.getAttribute('role'), 'tabpanel');
+    assert.equal(panel.getAttribute('aria-label'), 'Day');
+
+    const vol = h.a11yNodes.get('button:#0/panel/vol');
+    assert.equal(vol.getAttribute('role'), 'slider');
+    assert.equal(vol.getAttribute('aria-label'), 'Volume');
+    assert.equal(vol.getAttribute('aria-valuemin'), '0');
+    assert.equal(vol.getAttribute('aria-valuemax'), '100');
+    assert.equal(vol.getAttribute('aria-valuenow'), '40');
+    assert.equal(vol.getAttribute('aria-valuetext'), '40%');
+    assert.equal(vol.textContent, '');
+
+    const retries = h.a11yNodes.get('button:#0/panel/retries');
+    assert.equal(retries.getAttribute('role'), 'spinbutton');
+    assert.equal(retries.getAttribute('aria-label'), 'Retries');
+    assert.equal(retries.getAttribute('aria-valuemin'), '1');
+    assert.equal(retries.getAttribute('aria-valuemax'), '10');
+    assert.equal(retries.getAttribute('aria-valuenow'), '3');
+    assert.equal(retries.getAttribute('aria-valuetext'), '3 retries');
+    assert.equal(retries.getAttribute('aria-disabled'), 'true');
+    assert.equal(retries.textContent, '');
+
+    // Updating clears aria-disabled, aria-busy, aria-level, and range attributes cleanly in-place.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'group', g: 'div', p: '#0/menu', r: [0, 0, 180, 80], o: 'menu', t: 'Actions' },
+        { k: 'button', p: '#0/menu/off', r: [0, 28, 180, 28], o: 'menuitem', t: 'Enabled item', a: 0 },
+        { k: 'group', g: 'div', p: '#0/tree', r: [0, 90, 240, 80], o: 'tree', t: 'Files' },
+        { k: 'button', p: '#0/tree/src', r: [0, 90, 240, 28], o: 'treeitem', t: 'src', x: false, se: true, a: 2 },
+        { k: 'group', g: 'div', p: '#0/panel', r: [0, 180, 240, 60], o: 'tabpanel', t: 'Day' },
+        { k: 'button', p: '#0/panel/vol', r: [0, 184, 140, 24], t: 'Mute', a: 4 },
+    ]));
+    assert.equal(h.a11yNodes.get('button:#0/menu/off'), off);
+    assert.equal(off.getAttribute('aria-disabled'), null);
+    assert.equal(tree.getAttribute('aria-busy'), null);
+    assert.equal(src.getAttribute('aria-busy'), null);
+    assert.equal(src.getAttribute('aria-level'), null);
+    assert.equal(vol.getAttribute('role'), null);
+    assert.equal(vol.getAttribute('aria-label'), null);
+    assert.equal(vol.getAttribute('aria-valuenow'), null);
+    assert.equal(vol.getAttribute('aria-valuetext'), null);
+    assert.equal(vol.textContent, 'Mute');
+
+    bridge.destroy(h);
+});
+
+test('focusA11y sets and clears aria-disabled, aria-busy, and numeric range attributes on the focus proxy', () => {
+    const { h } = setup();
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'slider', t: 'Volume', rg: [0, 100, 65], v: '65%', dis: true, b: true }));
+    const first = h.focusProxies[h.focusTurn];
+    assert.equal(first.getAttribute('role'), 'slider');
+    assert.equal(first.getAttribute('aria-label'), 'Volume');
+    assert.equal(first.getAttribute('aria-valuemin'), '0');
+    assert.equal(first.getAttribute('aria-valuemax'), '100');
+    assert.equal(first.getAttribute('aria-valuenow'), '65');
+    assert.equal(first.getAttribute('aria-valuetext'), '65%');
+    assert.equal(first.getAttribute('aria-disabled'), 'true');
+    assert.equal(first.getAttribute('aria-busy'), 'true');
+    assert.equal(first.textContent, '');
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'spinbutton', t: 'Retries', rg: [1, 10, 4], vt: '4 retries' }));
+    const second = h.focusProxies[h.focusTurn];
+    assert.equal(second.getAttribute('role'), 'spinbutton');
+    assert.equal(second.getAttribute('aria-valuemin'), '1');
+    assert.equal(second.getAttribute('aria-valuemax'), '10');
+    assert.equal(second.getAttribute('aria-valuenow'), '4');
+    assert.equal(second.getAttribute('aria-valuetext'), '4 retries');
+    assert.equal(second.getAttribute('aria-disabled'), null);
+    assert.equal(second.getAttribute('aria-busy'), null);
+
+    // Reusing the first proxy slot clears disabled, busy, and range attributes.
+    bridge.focusA11y(h, JSON.stringify({ o: 'button', t: 'Apply' }));
+    assert.equal(h.focusProxies[h.focusTurn], first);
+    assert.equal(first.getAttribute('role'), 'button');
+    assert.equal(first.getAttribute('aria-label'), 'Apply');
+    assert.equal(first.getAttribute('aria-disabled'), null);
+    assert.equal(first.getAttribute('aria-busy'), null);
+    assert.equal(first.getAttribute('aria-valuemin'), null);
+    assert.equal(first.getAttribute('aria-valuemax'), null);
+    assert.equal(first.getAttribute('aria-valuenow'), null);
+    assert.equal(first.getAttribute('aria-valuetext'), null);
+
+    bridge.destroy(h);
+});
+
+test('syncA11y applies root dir/lang, per-item dir overrides, and logical text-align across patches', () => {
+    const { h } = setup();
+
+    bridge.syncA11y(h, JSON.stringify({
+        p: 1,
+        dir: 'rtl',
+        lang: 'ar-EG',
+        u: [
+            { k: 'text', p: '#0/rtl', r: [0, 0, 200, 24], t: 'مرحبا', f: ['sans', 400, 20, 0, false, 'start'] },
+            { k: 'text', p: '#0/end', r: [0, 28, 200, 24], t: 'نهاية', f: ['sans', 400, 20, 0, false, 'end'] },
+            { k: 'text', p: '#0/island', r: [0, 56, 200, 24], t: 'README.md', dir: 'ltr', f: ['mono', 400, 20, 0, false, 'start'] },
+            { k: 'group', g: 'div', p: '#0/bar', r: [0, 84, 200, 32], o: 'toolbar', t: 'Actions', dir: 'ltr' },
+            { k: 'text', p: '#0/bar/inner', r: [0, 0, 80, 24], t: 'إرسال', dir: 'rtl' },
+        ],
+        o: {
+            '': ['p:#0/rtl', 'p:#0/end', 'p:#0/island', 'div:#0/bar'],
+            'div:#0/bar': ['p:#0/bar/inner'],
+        },
+    }));
+
+    assert.equal(h.a11y.getAttribute('dir'), 'rtl');
+    assert.equal(h.a11y.getAttribute('lang'), 'ar-EG');
+    const rtl = h.a11yNodes.get('p:#0/rtl');
+    const end = h.a11yNodes.get('p:#0/end');
+    const island = h.a11yNodes.get('p:#0/island');
+    const bar = h.a11yNodes.get('div:#0/bar');
+    const inner = h.a11yNodes.get('p:#0/bar/inner');
+    assert.equal(rtl.getAttribute('dir'), null);
+    assert.match(rtl.style.cssText, /text-align:start;/);
+    assert.match(end.style.cssText, /text-align:end;/);
+    assert.equal(island.getAttribute('dir'), 'ltr');
+    assert.equal(bar.getAttribute('dir'), 'ltr');
+    assert.equal(inner.getAttribute('dir'), 'rtl');
+
+    // Flip root to ltr, update lang, and clear island/bar dir when they match the new parent.
+    bridge.syncA11y(h, JSON.stringify({
+        p: 1,
+        dir: 'ltr',
+        lang: 'en-US',
+        u: [
+            { k: 'text', p: '#0/island', r: [0, 56, 200, 24], t: 'README.md', f: ['mono', 400, 20, 0, false, 'start'] },
+            { k: 'group', g: 'div', p: '#0/bar', r: [0, 84, 200, 32], o: 'toolbar', t: 'Actions' },
+        ],
+    }));
+    assert.equal(h.a11y.getAttribute('dir'), 'ltr');
+    assert.equal(h.a11y.getAttribute('lang'), 'en-US');
+    assert.equal(island.getAttribute('dir'), null);
+    assert.equal(bar.getAttribute('dir'), null);
+    assert.equal(inner.getAttribute('dir'), 'rtl');
+
+    // Clearing lang with an empty string removes the attribute cleanly.
+    bridge.syncA11y(h, JSON.stringify({ p: 1, lang: '' }));
+    assert.equal(h.a11y.getAttribute('dir'), 'ltr');
+    assert.equal(h.a11y.getAttribute('lang'), null);
+
+    bridge.destroy(h);
+});
+
+test('syncA11y and focusA11y mirror, patch, and clear aria-autocomplete on mirror nodes, proxy, and textarea', () => {
+    const { h } = setup();
+
+    // Full snapshot sets aria-autocomplete on a mirrored combobox.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'button', p: '#0/fruit', r: [0, 0, 200, 28], t: 'Fruit', o: 'combobox', x: false, hp: 'listbox', ac: 'list', v: 'Ap' },
+    ]));
+    const combo = h.a11yNodes.get('button:#0/fruit');
+    assert.equal(combo.getAttribute('role'), 'combobox');
+    assert.equal(combo.getAttribute('aria-autocomplete'), 'list');
+    assert.equal(combo.getAttribute('aria-haspopup'), 'listbox');
+    assert.equal(combo.textContent, 'Ap');
+
+    // Incremental patch updates aria-autocomplete to both, then clears it when omitted.
+    bridge.syncA11y(h, JSON.stringify({
+        p: 1,
+        u: [
+            { k: 'button', p: '#0/fruit', r: [0, 0, 200, 28], t: 'Fruit', o: 'combobox', x: true, hp: 'listbox', ct: 'fruit-list', ac: 'both', v: 'Ap' },
+        ],
+    }));
+    assert.equal(combo.getAttribute('aria-autocomplete'), 'both');
+    assert.equal(combo.getAttribute('aria-expanded'), 'true');
+    assert.equal(combo.getAttribute('aria-controls'), 'fruit-list');
+
+    bridge.syncA11y(h, JSON.stringify({
+        p: 1,
+        u: [
+            { k: 'button', p: '#0/fruit', r: [0, 0, 200, 28], t: 'Fruit', o: 'combobox', x: false, hp: 'listbox', v: 'Ap' },
+        ],
+    }));
+    assert.equal(combo.getAttribute('aria-autocomplete'), null);
+
+    // focusA11y sets aria-autocomplete on both focus proxy and hidden textarea for combobox/textbox.
+    bridge.focusA11y(h, JSON.stringify({ o: 'combobox', t: 'Fruit', x: false, hp: 'listbox', ac: 'inline' }));
+    let proxy = h.focusProxies[h.focusTurn];
+    assert.equal(proxy.getAttribute('aria-autocomplete'), 'inline');
+    assert.equal(h.textarea.getAttribute('aria-autocomplete'), 'inline');
+
+    // Active descendant focus keeps the field's aria-autocomplete (f.fac) on textarea while option proxy omits it.
+    bridge.focusA11y(h, JSON.stringify({ o: 'option', t: 'Apple', f: 'Search fruit', fac: 'list' }));
+    proxy = h.focusProxies[h.focusTurn];
+    assert.equal(proxy.getAttribute('role'), 'option');
+    assert.equal(proxy.getAttribute('aria-autocomplete'), null);
+    assert.equal(h.textarea.getAttribute('aria-label'), 'Search fruit');
+    assert.equal(h.textarea.getAttribute('aria-autocomplete'), 'list');
+
+    // Focusing an unrelated button clears textarea aria-autocomplete; clearing focus also removes it.
+    bridge.focusA11y(h, JSON.stringify({ o: 'button', t: 'Save' }));
+    assert.equal(h.textarea.getAttribute('aria-autocomplete'), null);
+    bridge.focusA11y(h, JSON.stringify({ o: 'textbox', t: 'Filter', ac: 'both' }));
+    assert.equal(h.textarea.getAttribute('aria-autocomplete'), 'both');
+    bridge.focusA11y(h, '');
+    assert.equal(h.textarea.getAttribute('aria-autocomplete'), null);
+
+    bridge.destroy(h);
+});
+
+test('focusA11y mirrors read-only caret-browsing selection onto proxy attributes and DOM Selection', () => {
+    const { h } = setup();
+    let baseAndExtent = null;
+    let cleared = 0;
+    const prevGetSelection = globalThis.getSelection;
+    globalThis.getSelection = () => ({
+        anchorNode: baseAndExtent ? baseAndExtent[0] : null,
+        setBaseAndExtent(an, ao, fn, fo) { baseAndExtent = [an, ao, fn, fo]; },
+        removeAllRanges() { cleared++; baseAndExtent = null; },
+    });
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'text', p: '#0/doc/p1', r: [0, 0, 200, 20], t: 'Hello world' },
+            { k: 'text', p: '#0/doc/p2', r: [0, 24, 200, 20], t: 'Second line' },
+        ]));
+        const p1 = h.a11yByPath.get('#0/doc/p1');
+        const p2 = h.a11yByPath.get('#0/doc/p2');
+        p1.childNodes = [{ nodeType: 3, nodeValue: 'Hello world' }];
+        p2.childNodes = [{ nodeType: 3, nodeValue: 'Second line' }];
+
+        bridge.focusA11y(h, JSON.stringify({
+            o: 'group', t: 'Document', ro: true,
+            sel: { ap: '#0/doc/p1', a: 5, fp: '#0/doc/p1', f: 5 },
+        }));
+        let proxy = h.focusProxies[h.focusTurn];
+        assert.equal(proxy.getAttribute('aria-readonly'), 'true');
+        assert.deepEqual(JSON.parse(proxy.getAttribute('data-rune-selection')), {
+            ap: '#0/doc/p1', a: 5, fp: '#0/doc/p1', f: 5,
+        });
+        assert.deepEqual(baseAndExtent, [p1.childNodes[0], 5, p1.childNodes[0], 5]);
+
+        bridge.focusA11y(h, JSON.stringify({
+            o: 'group', t: 'Document', ro: true,
+            sel: { ap: '#0/doc/p1', a: 5, fp: '#0/doc/p2', f: 6 },
+        }));
+        proxy = h.focusProxies[h.focusTurn];
+        assert.deepEqual(baseAndExtent, [p1.childNodes[0], 5, p2.childNodes[0], 6]);
+
+        const origContains = h.a11y.contains;
+        h.a11y.contains = node => node === p1.childNodes[0] || origContains.call(h.a11y, node);
+        bridge.focusA11y(h, '');
+        assert.equal(cleared, 1);
+        assert.equal(baseAndExtent, null);
+    } finally {
+        globalThis.getSelection = prevGetSelection;
+        bridge.destroy(h);
+    }
+});
+
+test('armed external link forwards wheel scroll and Ctrl+wheel pinch to canvas and disarms when scrolled away', () => {
+    const { win, canvas, events, h } = setup();
+    const wheels = [];
+    // Simulate winit's wheel listener registered before bridge.mount by putting it at the front.
+    const canvasWheels = canvas.listeners.get('wheel') ?? [];
+    canvasWheels.unshift(ev => wheels.push({ dx: ev.deltaX, dy: ev.deltaY, mode: ev.deltaMode, ctrl: ev.ctrlKey }));
+    canvas.listeners.set('wheel', canvasWheels);
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            {
+                k: 'group', g: 'div', p: '#0/sc', r: [0, 0, 320, 140], sc: [0, 0],
+            },
+            {
+                k: 'text', p: '#0/sc/t', a: 0, r: [12, 24, 160, 20], t: 'Open docs',
+                u: [{ t: 'Open ' }, { t: 'docs', h: 'https://example.com/docs', p: '#0/sc/t', i: 0 }],
+            },
+        ]));
+        const sc = h.a11yNodes.get('div:#0/sc');
+        sc.style.overflow = 'hidden';
+        sc.getBoundingClientRect = () => ({ left: 0, top: 0, right: 320, bottom: 140, width: 320, height: 140 });
+        const a = h.a11y.querySelectorAll('a[target="_blank"]')[0];
+        assert.ok(a, 'external link mirrored as a[target="_blank"]');
+        let linkRect = { left: 60, top: 24, right: 100, bottom: 44, width: 40, height: 20 };
+        a.getClientRects = () => [linkRect];
+
+        // Hover arms the external link so browser status bar / clicks work.
+        canvas.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', buttons: 0, clientX: 80, clientY: 32 });
+        assert.equal(h.hoverLink, a);
+        assert.equal(a.style.pointerEvents, 'auto');
+
+        // Normal wheel over the armed link forwards to canvas and prevents default.
+        let prevented = false;
+        h.a11y.dispatchEvent({
+            type: 'wheel', target: a, deltaX: 0, deltaY: 240, deltaZ: 0, deltaMode: 0,
+            clientX: 80, clientY: 32, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
+            preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, true);
+        assert.deepEqual(wheels, [{ dx: 0, dy: 240, mode: 0, ctrl: false }]);
+
+        // Ctrl+wheel (pinch) leaves browser zoom un-prevented when Rune did not consume it,
+        // and prevents default when Rune sets syncWheel(h, true).
+        wheels.length = 0;
+        prevented = false;
+        bridge.syncWheel(h, false);
+        h.a11y.dispatchEvent({
+            type: 'wheel', target: a, deltaX: 0, deltaY: -12, deltaZ: 0, deltaMode: 0,
+            clientX: 80, clientY: 32, ctrlKey: true,
+            preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, false, 'unhandled Ctrl+wheel stays with browser zoom');
+        assert.deepEqual(wheels, [{ dx: 0, dy: -12, mode: 0, ctrl: true }]);
+
+        wheels.length = 0;
+        prevented = false;
+        bridge.syncWheel(h, true);
+        h.a11y.dispatchEvent({
+            type: 'wheel', target: a, deltaX: 0, deltaY: -12, deltaZ: 0, deltaMode: 0,
+            clientX: 80, clientY: 32, ctrlKey: true,
+            preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, true, 'Rune-handled Ctrl+wheel prevents browser zoom');
+
+        // DOM_DELTA_PAGE (deltaMode === 2) also forwards wheel_page through canvas.
+        events.length = 0;
+        prevented = false;
+        h.a11y.dispatchEvent({
+            type: 'wheel', target: a, deltaX: 0, deltaY: 1, deltaZ: 0, deltaMode: 2,
+            clientX: 80, clientY: 32,
+            preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, true);
+        assert.ok(events.some(e => e.kind === 'wheel_page' && e.dy === -1));
+
+        // After scroll moves the link out from under the stationary pointer, syncA11yPatch disarms it.
+        linkRect = { left: 60, top: -200, right: 100, bottom: -180, width: 40, height: 20 };
+        bridge.syncA11y(h, JSON.stringify({ p: 1, u: [{ k: 'group', g: 'div', p: '#0/sc', r: [0, 0, 320, 140], sc: [0, 224] }] }));
+        assert.equal(h.hoverLink, null);
+        assert.equal(a.style.pointerEvents, 'none');
+
+        // Re-arm and verify window blur clears hoverLink cleanly.
+        linkRect = { left: 60, top: 24, right: 100, bottom: 44, width: 40, height: 20 };
+        canvas.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', buttons: 0, clientX: 80, clientY: 32 });
+        assert.equal(h.hoverLink, a);
+        win.dispatchEvent({ type: 'blur' });
+        assert.equal(h.hoverLink, null);
+        assert.equal(a.style.pointerEvents, 'none');
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('armed external link keeps clicks/middle/modified/right-click with browser, promotes primary drag and forwards touch to canvas', () => {
+    const { win, canvas, h } = setup();
+    canvas.getBoundingClientRect = () => ({ left: 10, top: 20, right: 330, bottom: 260, width: 320, height: 240 });
+    const canvasPtr = [];
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+        canvas.addEventListener(type, ev => {
+            canvasPtr.push({
+                type: ev.type, pointerType: ev.pointerType, button: ev.button,
+                ox: ev.offsetX, oy: ev.offsetY, id: ev.pointerId,
+                coalesced: typeof ev.getCoalescedEvents === 'function' ? ev.getCoalescedEvents().length : 0,
+            });
+        });
+    }
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            {
+                k: 'text', p: '#0/t', r: [10, 20, 200, 20], t: 'Open docs',
+                u: [{ t: 'Open ' }, { t: 'docs', h: 'https://example.com/docs', p: '#0/t', i: 0 }],
+            },
+            {
+                k: 'link', p: '#0/dis', r: [10, 50, 100, 20], t: 'Disabled', h: 'https://example.com/dis', dis: true,
+            },
+        ]));
+        // Disabled block El::href uses pointer-events:none.
+        const dis = h.a11yNodes.get('a:#0/dis');
+        assert.match(dis.style.cssText, /pointer-events:none;/);
+
+        const a = h.a11y.querySelectorAll('a[target="_blank"]')[0];
+        a.getClientRects = () => [{ left: 70, top: 40, right: 110, bottom: 60, width: 40, height: 20 }];
+
+        // 1. Plain primary click (<= 4px travel) stays with the browser: canvas sees nothing and click is un-prevented.
+        canvas.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', buttons: 0, clientX: 80, clientY: 50 });
+        canvasPtr.length = 0;
+        assert.equal(h.hoverLink, a);
+        h.a11y.dispatchEvent({ type: 'pointerdown', target: a, pointerType: 'mouse', pointerId: 1, button: 0, buttons: 1, clientX: 80, clientY: 50 });
+        win.dispatchEvent({ type: 'pointermove', target: a, pointerType: 'mouse', pointerId: 1, button: -1, buttons: 1, clientX: 82, clientY: 51 });
+        win.dispatchEvent({ type: 'pointerup', target: a, pointerType: 'mouse', pointerId: 1, button: 0, buttons: 0, clientX: 82, clientY: 51 });
+        let clickPrevented = false;
+        h.a11y.dispatchEvent({ type: 'click', target: a, preventDefault() { clickPrevented = true; } });
+        assert.deepEqual(canvasPtr, [], 'plain click must not forward to canvas');
+        assert.equal(clickPrevented, false, 'plain click must stay un-prevented for browser navigation');
+
+        // 2. Middle click, Ctrl+click, Meta+click, and right-click stay with the browser.
+        for (const ev of [
+            { button: 1, buttons: 4 },
+            { button: 0, buttons: 1, ctrlKey: true },
+            { button: 0, buttons: 1, metaKey: true },
+            { button: 2, buttons: 2 },
+        ]) {
+            h.a11y.dispatchEvent({ type: 'pointerdown', target: a, pointerType: 'mouse', pointerId: 2, clientX: 80, clientY: 50, ...ev });
+            win.dispatchEvent({ type: 'pointermove', target: a, pointerType: 'mouse', pointerId: 2, clientX: 120, clientY: 50, ...ev });
+            win.dispatchEvent({ type: 'pointerup', target: a, pointerType: 'mouse', pointerId: 2, clientX: 120, clientY: 50, ...ev });
+        }
+        assert.deepEqual(canvasPtr, [], 'middle, modified, and secondary presses stay with browser');
+
+        // 3. Primary drag (> 4px travel) promotes to canvas (with canvas-relative offsetX/Y), blocks dragstart,
+        //    disarms link, and suppresses the trailing click.
+        let dragPrevented = false;
+        h.a11y.dispatchEvent({ type: 'dragstart', target: a, preventDefault() { dragPrevented = true; } });
+        assert.equal(dragPrevented, true);
+        h.a11y.dispatchEvent({ type: 'pointerdown', target: a, pointerType: 'mouse', pointerId: 3, button: 0, buttons: 1, clientX: 80, clientY: 50 });
+        win.dispatchEvent({ type: 'pointermove', target: a, pointerType: 'mouse', pointerId: 3, button: -1, buttons: 1, clientX: 100, clientY: 50 });
+        win.dispatchEvent({ type: 'pointerup', target: a, pointerType: 'mouse', pointerId: 3, button: 0, buttons: 0, clientX: 100, clientY: 50 });
+        assert.equal(h.hoverLink, null, 'drag promotion disarms link');
+        assert.deepEqual(canvasPtr, [
+            { type: 'pointerdown', pointerType: 'mouse', button: 0, ox: 70, oy: 30, id: 3, coalesced: 0 },
+            { type: 'pointermove', pointerType: 'mouse', button: -1, ox: 90, oy: 30, id: 3, coalesced: 1 },
+            { type: 'pointerup', pointerType: 'mouse', button: 0, ox: 90, oy: 30, id: 3, coalesced: 0 },
+        ]);
+        clickPrevented = false;
+        h.a11y.dispatchEvent({ type: 'click', target: a, preventDefault() { clickPrevented = true; } });
+        assert.equal(clickPrevented, true, 'trailing click after promoted drag is suppressed');
+
+        // 4. Touch starting on an armed link disarms it, prevents touchstart, and forwards to canvas.
+        canvas.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', buttons: 0, clientX: 80, clientY: 50 });
+        assert.equal(h.hoverLink, a);
+        canvasPtr.length = 0;
+        let touchPrevented = false;
+        h.a11y.dispatchEvent({ type: 'touchstart', target: a, preventDefault() { touchPrevented = true; } });
+        assert.equal(touchPrevented, true);
+        h.a11y.dispatchEvent({ type: 'pointerdown', target: a, pointerType: 'touch', pointerId: 9, button: 0, buttons: 1, clientX: 80, clientY: 50, preventDefault() {} });
+        assert.equal(h.hoverLink, null, 'touch down disarms mouse hoverLink');
+        h.a11y.dispatchEvent({ type: 'pointermove', target: a, pointerType: 'touch', pointerId: 9, button: -1, buttons: 1, clientX: 80, clientY: 110 });
+        h.a11y.dispatchEvent({ type: 'pointerup', target: a, pointerType: 'touch', pointerId: 9, button: 0, buttons: 0, clientX: 80, clientY: 110 });
+        assert.deepEqual(canvasPtr, [
+            { type: 'pointerdown', pointerType: 'touch', button: 0, ox: 70, oy: 30, id: 9, coalesced: 0 },
+            { type: 'pointermove', pointerType: 'touch', button: -1, ox: 70, oy: 90, id: 9, coalesced: 1 },
+            { type: 'pointerup', pointerType: 'touch', button: 0, ox: 70, oy: 90, id: 9, coalesced: 0 },
+        ]);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('requestPointerLock handles unadjustedMovement fallback, motion delivery, Escape exit, and refusal', async () => {
+    const { events, doc, canvas, h } = setup();
+    const flushMicrotasks = () => new Promise(r => queueMicrotask(r));
+    const calls = [];
+    let exitCalls = 0;
+    doc.pointerLockElement = null;
+    doc.exitPointerLock = () => {
+        exitCalls++;
+        if (doc.pointerLockElement) {
+            doc.pointerLockElement = null;
+            doc.dispatchEvent({ type: 'pointerlockchange' });
+        }
+    };
+    try {
+        // 1. NotSupportedError on { unadjustedMovement: true } ignores intermediate pointerlockerror
+        // and retries plain requestPointerLock(), caching the fallback for later locks.
+        canvas.requestPointerLock = opts => {
+            calls.push(opts);
+            if (opts && opts.unadjustedMovement) {
+                // Reproduce Chromium firing pointerlockerror alongside NotSupportedError rejection.
+                doc.dispatchEvent({ type: 'pointerlockerror' });
+                const err = new Error('not supported');
+                err.name = 'NotSupportedError';
+                return Promise.reject(err);
+            }
+            return Promise.resolve().then(() => {
+                doc.pointerLockElement = canvas;
+                doc.dispatchEvent({ type: 'pointerlockchange' });
+            });
+        };
+        bridge.requestPointerLock(h);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        await flushMicrotasks();
+        assert.deepEqual(calls, [{ unadjustedMovement: true }, undefined]);
+        assert.deepEqual(events, [{ kind: 'pointer_lock', locked: true }]);
+
+        // 2. While locked, mouse pointermove sends movementX/movementY; touch and zero deltas are ignored.
+        events.length = 0;
+        doc.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', movementX: 12, movementY: -4 });
+        doc.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', movementX: 0, movementY: 0 });
+        doc.dispatchEvent({ type: 'pointermove', pointerType: 'touch', movementX: 9, movementY: 9 });
+        assert.deepEqual(events, [{ kind: 'pointer_motion', dx: 12, dy: -4 }]);
+
+        // 3. Browser exits lock (Escape / tab switch): pointerlockchange sends locked: false,
+        // and subsequent pointermove sends nothing.
+        events.length = 0;
+        doc.pointerLockElement = null;
+        doc.dispatchEvent({ type: 'pointerlockchange' });
+        doc.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', movementX: 25, movementY: 5 });
+        assert.deepEqual(events, [{ kind: 'pointer_lock', locked: false }]);
+
+        // 4. Subsequent request skips unadjustedMovement (cached), and SecurityError refusal
+        // (e.g. Chrome cooldown or unfocused document) reports locked: false without retrying.
+        calls.length = 0;
+        events.length = 0;
+        canvas.requestPointerLock = opts => {
+            calls.push(opts);
+            const err = new Error('cooldown');
+            err.name = 'SecurityError';
+            return Promise.reject(err);
+        };
+        bridge.requestPointerLock(h);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        assert.deepEqual(calls, [undefined]);
+        assert.deepEqual(events, [{ kind: 'pointer_lock', locked: false, refused: true }]);
+
+        // 5. Legacy non-Promise browser: pointerlockerror reports refusal.
+        events.length = 0;
+        canvas.requestPointerLock = () => undefined;
+        bridge.requestPointerLock(h);
+        doc.dispatchEvent({ type: 'pointerlockerror' });
+        assert.deepEqual(events, [{ kind: 'pointer_lock', locked: false, refused: true }]);
+
+        // 6. exitPointerLock cancels a pending request so a stale late grant exits immediately,
+        // and destroy() exits an active lock.
+        events.length = 0;
+        canvas.requestPointerLock = () => new Promise(() => {});
+        bridge.requestPointerLock(h);
+        bridge.exitPointerLock(h);
+        doc.pointerLockElement = canvas;
+        doc.dispatchEvent({ type: 'pointerlockchange' });
+        assert.equal(exitCalls, 1, 'stale grant after exitPointerLock must exit immediately');
+        assert.deepEqual(events, []);
+
+        // Active lock is released on destroy().
+        doc.pointerLockElement = canvas;
+        h.pointerLocked = true;
+    } finally {
+        bridge.destroy(h);
+    }
+    assert.equal(doc.pointerLockElement, null);
+});

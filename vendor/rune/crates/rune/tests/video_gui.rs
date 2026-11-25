@@ -8,7 +8,7 @@ use rune::*;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 struct Gui;
 
@@ -24,7 +24,7 @@ fn view(_: &Gui, _: &mut Cx<Gui>) -> El {
 }
 
 fn wait(what: &str, limit: Duration, f: impl Fn() -> bool) {
-    let start = Instant::now();
+    let start = rune::time::now();
     while !f() {
         assert!(
             start.elapsed() < limit,
@@ -39,7 +39,7 @@ fn wait(what: &str, limit: Duration, f: impl Fn() -> bool) {
 }
 
 fn wait_for(what: &str, limit: Duration, f: impl Fn() -> bool) {
-    let start = Instant::now();
+    let start = rune::time::now();
     while !f() {
         assert!(start.elapsed() < limit, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(5));
@@ -61,7 +61,8 @@ fn main() {
         std::process::exit(2)
     });
     clip().surface().set_observer(Arc::new(|t| {
-        FRAMES.lock().unwrap().insert(t.frame_id);
+        // Runs in wgpu's work-done callback: no panic there, even on a poisoned lock.
+        FRAMES.lock().unwrap_or_else(|e| e.into_inner()).insert(t.frame_id);
     }));
     let app = App::new(AppSpec::new("video gui", (320.0, 180.0), || Gui, view)).args(Vec::new());
     let main = app.handle();
@@ -157,8 +158,14 @@ fn main() {
             assert!(wakes.load(Ordering::Relaxed) >= 2, "the waker heard the load and the end");
             assert_eq!(clip.surface().counts(), draws, "audio drew nothing");
 
-            let ogg = Player::audio("https://example.com/clip.ogg");
-            assert!(matches!(ogg.state(), PlayerState::Failed(e) if e.contains(".ogg")), "{:?}", ogg.state());
+            // AVFoundation reads no Ogg video, whatever the features.
+            let ogv = Player::audio("https://example.com/clip.ogv");
+            assert!(matches!(ogv.state(), PlayerState::Failed(e) if e.contains(".ogv")), "{:?}", ogv.state());
+            #[cfg(feature = "ogg-audio")]
+            {
+                let ogg = Player::audio(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-vorbis.ogg"));
+                wait_for("ogg audio opens", secs(5), || ogg.state() == PlayerState::Ready);
+            }
             println!("video_gui: audio played {duration:.2} s to the end, muted");
         });
         *out.lock().unwrap() = Some(run.is_ok());

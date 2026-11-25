@@ -147,7 +147,7 @@ fn icon_rotation_springs_and_jumps_under_reduced_motion() {
                 .key("chevron")
                 .color(Color::WHITE)
                 .icon_rotation(if s.open { 0.0 } else { -std::f32::consts::FRAC_PI_2 })
-                .motion(motion::DEFAULT),
+                .motion(crate::tok::motion::DEFAULT),
         )
     }
     fn turn(rt: &Runtime<S>) -> f32 {
@@ -279,8 +279,8 @@ fn a_faded_text_that_runs_past_its_box_reads_as_cut() {
     let mut rt = Runtime::new(S { w: 60.0 }, view, (400.0, 100.0), Env::new(true, 2.0));
     rt.set_native_help(true);
     rt.frame(0.0);
-    let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some("cell")).unwrap();
-    assert!(rt.nodes[i].text_cut(2.0) && rt.nodes[i].elided.is_none(), "a fade cuts nothing out of the layout");
+    let i = rt.tree.nodes.iter().position(|n| n.key.as_deref() == Some("cell")).unwrap();
+    assert!(rt.tree.nodes[i].text_cut(2.0) && rt.tree.nodes[i].elided.is_none(), "a fade cuts nothing out of the layout");
     assert_eq!(rt.help_regions().len(), 1, "faded out, the cell offers its whole text");
     assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("cell")).unwrap().help.as_deref(), Some("A rather long file name.rs"));
     rt.update(|s, _| s.w = 380.0);
@@ -308,8 +308,8 @@ fn scroll_into_view_in_reveals_only_inside_its_scope() {
     let mut rt = Runtime::new((), twins, (200.0, 200.0), Env::new(true, 1.0));
     rt.frame(0.0);
     let offset = |rt: &Runtime<()>, scope: &str| {
-        let id = rt.path_ids[&format!("#0/{scope}/viewport")];
-        rt.scrolls[&id].offset
+        let id = rt.tree.path_ids[&format!("#0/{scope}/viewport")];
+        rt.scroll.scrolls[&id].offset
     };
     rt.update(|_, tx| tx.scroll_into_view_in("b", "r500"));
     rt.frame(0.0);
@@ -318,6 +318,76 @@ fn scroll_into_view_in_reveals_only_inside_its_scope() {
     rt.update(|_, tx| tx.scroll_into_view_in("a", "r900"));
     rt.frame(0.0);
     assert!(offset(&rt, "a") > 17_000.0 && offset(&rt, "b") < 10_100.0, "{} {}", offset(&rt, "a"), offset(&rt, "b"));
+}
+
+#[test]
+fn scroll_into_view_in_does_not_scroll_viewports_outside_its_scope() {
+    // Vertical columns inside a horizontal strip: revealing inside column 3 must not jump the strip.
+    fn columns(_: &(), _: &mut Cx<()>) -> El {
+        col().w_full().h_full().child(
+            row().key("strip").size(900.0, 400.0).scroll_x().children((0..4).map(|c| {
+                col().key(format!("c{c}")).size(300.0, 400.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(
+                    col().key(format!("list{c}")).w_full().growth(crate::GrowthSpec::default())
+                        .virtual_rows(100, 20.0, move |_: &(), i| std::borrow::Cow::Owned(format!("row-{c}-{i}")), |_: &(), _| el().w_full().h(20.0)),
+                )
+            })),
+        )
+    }
+    let mut rt = Runtime::new((), columns, (900.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    for _ in 0..5 { rt.frame(0.016); }
+    let x_of = |rt: &Runtime<()>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect[0]);
+    let scroll_x = |rt: &Runtime<()>, path: &str| rt.scroll.scrolls[&rt.tree.path_ids[path]].x.offset;
+    let scroll_y = |rt: &Runtime<()>, path: &str| rt.scroll.scrolls[&rt.tree.path_ids[path]].offset;
+
+    assert_eq!(x_of(&rt, "c3"), Some(900.0));
+    rt.update_if(|_, tx| { tx.scroll_into_view_in("c3", "row-3-2"); false });
+    rt.frame(0.016);
+    assert_eq!(scroll_x(&rt, "#0/strip"), 0.0, "strip outside scope c3 must stay put");
+    assert_eq!(x_of(&rt, "c3"), Some(900.0), "column 3 stays where it was horizontally");
+
+    // Revealing an unmounted row in c3 while gliding the strip in the same frame scrolls c3 vertically
+    // and lets the strip glide instead of jumping it to 300.
+    rt.update_if(|_, tx| {
+        tx.scroll_into_view_in("c3", "row-3-80");
+        tx.scroll_to("strip", 300.0, 0.0);
+        false
+    });
+    rt.frame(0.016);
+    assert!(scroll_y(&rt, "#0/strip/c3") > 1000.0, "c3 still revealed row-3-80 vertically: {}", scroll_y(&rt, "#0/strip/c3"));
+    let mid_x = scroll_x(&rt, "#0/strip");
+    assert!(mid_x > 0.0 && mid_x < 250.0, "strip glides instead of jumping at once: {mid_x}");
+
+    // Scoping to the strip itself still reveals horizontally through it.
+    let mut rt2 = Runtime::new((), columns, (900.0, 400.0), Env::new(true, 1.0));
+    rt2.frame(0.0);
+    rt2.update_if(|_, tx| { tx.scroll_into_view_in("strip", "row-3-2"); false });
+    rt2.frame(0.016);
+    assert_eq!(scroll_x(&rt2, "#0/strip"), 300.0, "scoping to strip reveals c3 horizontally");
+
+    // Symmetric vertical case: a horizontal strip and a virtual list inside an outer vertical
+    // scroll viewport must not scroll that outer viewport when scoped inside it.
+    fn nested_y(_: &(), _: &mut Cx<()>) -> El {
+        let tabs = row().key("tabs").size(300.0, 40.0).scroll_x().children((0..10).map(|i| {
+            el().key(format!("t{i}")).size(100.0, 40.0)
+        }));
+        let inner_list = col().key("inner_list").w_full().growth(crate::GrowthSpec::default())
+            .virtual_rows(100, 20.0, |_: &(), i| std::borrow::Cow::Owned(format!("v{i}")), |_: &(), _| el().w_full().h(20.0));
+        col().key("page").size(300.0, 200.0).scroll(crate::ScrollSpec { stick_bottom: false })
+            .child(el().w_full().h(300.0))
+            .child(tabs)
+            .child(inner_list)
+    }
+    let mut rt3 = Runtime::new((), nested_y, (300.0, 200.0), Env::new(true, 1.0));
+    rt3.frame(0.0);
+    rt3.update_if(|_, tx| { tx.scroll_into_view_in("tabs", "t8"); false });
+    rt3.frame(0.016);
+    assert!(scroll_x(&rt3, "page/tabs") > 500.0, "tabs still scrolls horizontally inside its scope: {}", scroll_x(&rt3, "page/tabs"));
+    assert_eq!(scroll_y(&rt3, "page"), 0.0, "outer vertical viewport outside scope tabs must stay put");
+
+    rt3.update_if(|_, tx| { tx.scroll_into_view_in("inner_list", "v50"); false });
+    rt3.frame(0.016);
+    assert_eq!(scroll_y(&rt3, "page"), 0.0, "outer vertical viewport outside virtual list scope must stay put");
 }
 
 #[test]

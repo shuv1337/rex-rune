@@ -361,11 +361,10 @@ headless compositor; `wayland-seat-smoke.py` opens its window on the compositor
 Three dependencies are vendored with small, documented patches and wired in
 through `[patch]` in [`Cargo.toml`](../Cargo.toml):
 
-- [`vendor/rune/`](../vendor/rune/README.md): the `rune`, `rune-motion`,
-  `rune-staging`, `rune-taffy` and `procwatch` crates from `anomalyco/rune` at
-  `d70929a` (MIT), with dead-key forwarding and window-chrome additions for a
-  borderless Linux window (maximized state, minimize, edge resize, window menu,
-  native window icon).
+- [`vendor/rune/`](../vendor/rune/README.md): just the `rune` crate from
+  `anomalyco/rune` at `983e33b9` (MIT), with local Linux window and GSettings
+  fixes. The other Rune crates and upstream registry patches stay at the same
+  pinned git revision.
 - [`vendor/rexrs/`](../vendor/rexrs/REX-RUNE.md): `a10y/rexrs` at `780be3f` (MIT
   OR Apache-2.0), plus revision-21 generated types, explicit API-revision range
   negotiation and preservation of an empty `attach_session_ids`.

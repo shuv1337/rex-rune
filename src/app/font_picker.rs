@@ -589,7 +589,7 @@ pub fn popup(s: &Workspace, viewport: [f32; 2]) -> El {
                         .key("font-family-sample")
                         .font(rune::TextStyle::new(16., 400.).family(fonts::named(&family.name)))
                         .color(rgb(ink()))
-                        .no_wrap(),
+                        .nowrap(),
                 ),
         );
     } else {

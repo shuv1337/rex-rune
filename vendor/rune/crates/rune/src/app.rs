@@ -7,7 +7,12 @@
 //! (macOS, Windows, X11) and destroys it on Wayland, where a hidden toplevel doesn't exist;
 //! the GPU device and renderer stay either way.
 //!
-//! ```ignore
+//! ```no_run
+//! # use rune::{AppSpec, el};
+//! # struct State { snapshot: String }
+//! # enum Request { Activate(String), Snapshot(String), Quit }
+//! # fn requests() -> Vec<Request> { Vec::new() }
+//! # let spec = AppSpec::new("App", (640.0, 480.0), || State { snapshot: String::new() }, |_, _| el());
 //! let app = rune::App::new(spec).windowless().keep_running();
 //! let handle = app.handle();
 //! std::thread::spawn(move || {
@@ -22,8 +27,7 @@
 //! app.run();
 //! ```
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::el::Tx;
 use crate::tooling::{AppSpec, Args};
@@ -33,21 +37,73 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::with_font;
 
-type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) -> bool + Send>;
+pub(crate) type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) -> bool + Send>;
 /// `App::on_window`'s hook, run after each native window creation.
 pub(crate) type OnWindow = Box<dyn FnMut(&crate::WindowHandle)>;
+/// `App::on_display_close`'s hook, run once on the UI thread before the event loop drops windows
+/// and closes the native display connection.
+pub(crate) type OnDisplayClose = Box<dyn FnOnce()>;
+
+/// Decision returned by [`App::on_close_request`] and
+/// [`WindowSpec::on_close_request`](crate::WindowSpec::on_close_request) when a native window
+/// receives a close request (`WindowEvent::CloseRequested`).
+///
+/// ```no_run
+/// use rune::{App, AppSpec, CloseResponse, el};
+///
+/// let spec = AppSpec::new("Draft", (480.0, 320.0), || true, |_, _| el());
+/// App::new(spec)
+///     .on_close_request(|has_unsaved, _| {
+///         if *has_unsaved { CloseResponse::Defer } else { CloseResponse::Close }
+///     })
+///     .run();
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseResponse {
+    /// Proceed with closing the window as usual (running [`App::on_close`], and finishing or
+    /// hiding the window according to [`App::keep_running`]).
+    Close,
+    /// Keep the window open and commit any state or [`Tx`] changes made in the hook. Close the
+    /// window later with [`Tx::close_window`], [`AppHandle::close`], or
+    /// [`WindowHandle::close`](crate::WindowHandle::close).
+    Defer,
+}
 
 /// `App::turn_scope`'s hooks.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct TurnScope<S> {
     pub(crate) enter: fn(&mut S),
     pub(crate) leave: fn(&mut S),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> Clone for TurnScope<S> {
     fn clone(&self) -> Self { *self }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> Copy for TurnScope<S> {}
+
+/// Normalizes an opt-in frame-rate cap (Hz): positive finite values clamp to at least `1.0` Hz,
+/// while zero, negative, NaN and infinite values normalize to `0.0` (uncapped display rate).
+#[inline]
+pub(crate) fn normalize_fps_cap(fps: f32) -> f32 {
+    if fps.is_finite() && fps > 0.0 {
+        fps.max(1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Converts an opt-in `ambient_fps` rate (Hz) into its target frame period, or `None` when
+/// uncapped (zero, negative, non-finite, or so large that its period rounds to zero).
+#[inline]
+pub(crate) fn ambient_period_from_fps(fps: f32) -> Option<std::time::Duration> {
+    let hz = normalize_fps_cap(fps);
+    (hz > 0.0)
+        .then(|| std::time::Duration::from_secs_f64(1.0 / f64::from(hz)))
+        .filter(|period| !period.is_zero())
+}
 
 /// An `AppSpec` with its lifetime: by default it opens one window and quits when it closes,
 /// like `rune::run`.
@@ -59,30 +115,49 @@ pub struct App<S: 'static> {
     argv: Option<Vec<String>>,
     pub(crate) open: bool,
     pub(crate) release_gpu: bool,
+    pub(crate) cpu_first: crate::CpuFirst,
+    pub(crate) prewarm_effects: crate::PrewarmEffects,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) accessory: bool,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) standard_menus: bool,
     pub(crate) keep_running: bool,
+    pub(crate) on_close_request: Option<fn(&mut S, &mut Tx) -> CloseResponse>,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) on_quit: Option<fn(&mut S, &mut Tx)>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) turn_scope: Option<TurnScope<S>>,
-    pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
-    pub(crate) on_mods: Option<fn(&mut S, crate::Mods, &mut Tx)>,
-    pub(crate) on_visibility: Option<fn(&mut S, bool, &mut Tx)>,
-    pub(crate) on_ime: Option<fn(&mut S, &crate::Ime, &mut Tx) -> bool>,
+    pub(crate) on_rest: Option<fn(&mut S, &mut Tx) -> bool>,
     pub(crate) on_reopen: Option<fn(&mut S, bool, &mut Tx) -> bool>,
     pub(crate) on_open_url: Option<crate::open_url::incoming::OnOpenUrl<S>>,
+    pub(crate) on_open_files: Option<crate::open_url::incoming::OnOpenFiles<S>>,
     pub(crate) shared: Arc<Shared<S>>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) has_overlays: bool,
     pub(crate) windows: Vec<crate::AnyWindowSpec>,
     pub(crate) on_window: Option<OnWindow>,
     pub(crate) on_ready: Option<OnWindow>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) on_window_geometry: Option<crate::window::geometry::OnWindowGeometry<S>>,
+    pub(crate) on_display_close: Option<OnDisplayClose>,
     pub(crate) on_frame_encoded: Option<crate::frame::encoded::OnFrameEncoded>,
+    pub(crate) on_frame_presented: Option<crate::frame::presented::OnFramePresented>,
     pub(crate) on_frame_drawn: Option<crate::frame::encoded::OnFrameDrawn<S>>,
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) ambient_period: Option<std::time::Duration>,
+    /// `App::layout_seed`'s seed and keeper; only desktop windows use them.
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", target_os = "android"), allow(dead_code))]
+    pub(crate) layout_seed: Option<crate::LayoutSeed>,
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", target_os = "android"), allow(dead_code))]
+    pub(crate) keep_layout: Option<Box<dyn FnMut(crate::LayoutSeed)>>,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) same_tab_router: Option<Box<dyn Fn(&str) -> bool>>,
     pub(crate) macos_window: crate::MacWindowOptions,
+    pub(crate) windows_window: crate::WindowsWindowOptions,
+    pub(crate) exclude_from_capture: Option<bool>,
+    pub(crate) color_scheme: crate::ColorScheme,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
     pub(crate) canvas_id: Option<String>,
@@ -92,17 +167,19 @@ pub struct App<S: 'static> {
     /// `App::font_url`'s fonts, which a web app fetches before its first frame.
     #[cfg(target_arch = "wasm32")]
     pub(crate) font_urls: Vec<String>,
+    /// `App::font_url_later`'s fonts, which a web app fetches after its first frame.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) late_font_urls: Vec<String>,
     pub(crate) float_on_open: bool,
     /// `App::open_inactive`: the first open leaves focus where it is.
     pub(crate) open_inactive: bool,
-    /// `App::maximized`: the window opens maximized.
-    pub(crate) maximized: bool,
-    pub(crate) modifier_keys: bool,
-    pub(crate) tab_visits_controls: bool,
-    pub(crate) srgb_blend: bool,
-    pub(crate) font_smoothing: crate::FontSmoothing,
-    pub(crate) dev_stats: Option<fn() -> String>,
+    /// `App::maximized`, `App::full_screen`: how the window's first open shows it.
+    pub(crate) open_as: crate::windows::OpenAs,
+    pub(crate) runtime: RuntimeConfig<S>,
     pub(crate) playground: Option<crate::Playground<S>>,
+    /// `playground::attach`, set by `App::playground`: a window calls it through this, so an app
+    /// without a playground doesn't link it.
+    pub(crate) attach_playground: Option<crate::playground::Attach<S>>,
 }
 
 impl<S: 'static> App<S> {
@@ -117,27 +194,42 @@ impl<S: 'static> App<S> {
             argv: None,
             open: true,
             release_gpu: false,
+            cpu_first: crate::CpuFirst::Auto,
+            prewarm_effects: crate::PrewarmEffects::NONE,
             accessory: false,
             standard_menus: false,
             keep_running: false,
+            on_close_request: None,
             on_close: None,
             on_quit: None,
+            #[cfg(not(target_arch = "wasm32"))]
             turn_scope: None,
-            on_focus: None,
-            on_mods: None,
-            on_visibility: None,
-            on_ime: None,
+            on_rest: None,
             on_reopen: None,
             on_open_url: None,
+            on_open_files: None,
             shared,
+            #[cfg(not(target_arch = "wasm32"))]
             overlays: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            has_overlays: false,
             windows: Vec::new(),
             on_window: None,
             on_ready: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            on_window_geometry: None,
+            on_display_close: None,
             on_frame_encoded: None,
+            on_frame_presented: None,
             on_frame_drawn: None,
+            ambient_period: None,
+            layout_seed: None,
+            keep_layout: None,
             same_tab_router: None,
             macos_window: crate::MacWindowOptions::default(),
+            windows_window: crate::WindowsWindowOptions::default(),
+            exclude_from_capture: None,
+            color_scheme: crate::ColorScheme::System,
             compositor: None,
             window_options: crate::WindowOptions::default(),
             canvas_id: None,
@@ -146,15 +238,14 @@ impl<S: 'static> App<S> {
             web_document: false,
             #[cfg(target_arch = "wasm32")]
             font_urls: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            late_font_urls: Vec::new(),
             float_on_open: false,
             open_inactive: false,
-            maximized: false,
-            modifier_keys: false,
-            tab_visits_controls: false,
-            srgb_blend: true,
-            font_smoothing: crate::FontSmoothing::default(),
-            dev_stats: None,
+            open_as: crate::windows::OpenAs::Normal,
+            runtime: RuntimeConfig::default(),
             playground: None,
+            attach_playground: None,
         }
     }
 
@@ -163,16 +254,92 @@ impl<S: 'static> App<S> {
     /// backgrounds, as CoreText does. On by default. With a `Compositor`, `Frame::srgb_blend`
     /// says which encoding its passes must match.
     pub fn srgb_blend(mut self, enabled: bool) -> Self {
-        self.srgb_blend = enabled;
+        self.runtime.srgb_blend = enabled;
         self
     }
 
-    /// How this app's windows rasterise and place glyphs (see [`crate::FontSmoothing`]):
-    /// `On` by default on macOS and in a Mac's browser, `Off` elsewhere (CoreGraphics' pipeline
-    /// without font smoothing's dilation, as `-webkit-font-smoothing: antialiased` draws).
+    /// Maximum number of native `El::system_material` views this window may host at once
+    /// (default [`crate::MAX_NATIVE_MATERIALS`], clamped to 64).
+    ///
+    /// Visible material elements past this limit draw their fallback fill (or neutral tint),
+    /// report [`ElementInfo::material_fallback`](crate::ElementInfo::material_fallback), emit
+    /// `"materialFallback": true` in `--tree` JSON, and log a one-time notice to stderr when
+    /// native materials are active. Passing `0` disables native material views for this window.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// App::new(AppSpec::new("Notifications", (360.0, 520.0), || (), |_, _| el()))
+    ///     .max_native_materials(8)
+    ///     .run();
+    /// ```
+    pub fn max_native_materials(mut self, max: usize) -> Self {
+        self.runtime.max_native_materials = crate::system_material::clamp_max_native_materials(max);
+        self
+    }
+
+    /// Cap the wake rate (Hz) used when `El::reveal` word fades are the only active animation
+    /// (`0.0`, default = full display rate; positive finite values clamp to at least `1.0` Hz,
+    /// non-positive or non-finite values normalize to `0.0`).
+    ///
+    /// `30.0` Hz is recommended because it divides both 60 Hz and 120 Hz displays cleanly without
+    /// beat judder (Apple WWDC21 Session 10147), though any positive rate (such as `40.0`) is
+    /// accepted. When another animation runs alongside a word fade, the fade rides along at that
+    /// animation's full rate; once the fade finishes, the runtime clears its wake and draws
+    /// nothing at rest. Applies across macOS, Windows, Linux, and web.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, text};
+    ///
+    /// let spec = AppSpec::new("Chat", (720.0, 540.0), String::new, |s, _| {
+    ///     text(s.as_str()).wrap().reveal(0.2)
+    /// });
+    /// App::new(spec).reveal_fps(30.0).run();
+    /// ```
+    pub fn reveal_fps(mut self, fps: f32) -> Self {
+        self.runtime.reveal_fps = RuntimeConfig::<S>::normalize_reveal_fps(fps);
+        self
+    }
+
+    /// How this app's windows and overlays rasterise and place glyphs (see [`crate::FontSmoothing`]):
+    /// `On` by default on macOS and in a Mac's browser, `WindfoilChromium` elsewhere.
+    /// `ConfiguredOverlay::font_smoothing` overrides it per overlay, and
     /// `Tx::set_font_smoothing` switches it while running.
     pub fn font_smoothing(mut self, mode: crate::FontSmoothing) -> Self {
-        self.font_smoothing = mode;
+        self.runtime.font_smoothing = mode;
+        #[cfg(not(target_arch = "wasm32"))]
+        for overlay in &mut self.overlays {
+            overlay.inherit_font_smoothing(mode);
+        }
+        self
+    }
+
+    /// Opt-in preferred colour emoji font family (or comma-separated CSS family list) tried first
+    /// for emoji graphemes (`Emoji_Presentation`, `U+FE0F`, ZWJ sequences, keycaps, skin tones,
+    /// and regional-indicator flags) across every text slot (`Family::Sans`, `Family::Mono`,
+    /// `Family::SystemMono`, `Family::Named`, and inline mono spans).
+    ///
+    /// Precedence for emoji graphemes is: this explicit `emoji_family` first, then any colour
+    /// emoji font explicitly named in the active family stack (`AppSpec::families`,
+    /// `Tx::set_font_families`, or `Family::Named`), then the lazily loaded system emoji font,
+    /// then the active text stack. Plain text symbols without `U+FE0F` (such as `❤` or
+    /// `☺\u{FE0E}`) keep their monochrome text faces. Uncovered emoji still fall back to the
+    /// system emoji font, and the system emoji font is not loaded when every emoji in a string is
+    /// already covered.
+    ///
+    /// Passing an empty or whitespace-only string normalizes to `None` (default system emoji
+    /// fallback). Switch or clear at runtime with [`Tx::set_emoji_family`] or
+    /// [`Runtime::set_emoji_family`](crate::Runtime::set_emoji_family).
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// let spec = AppSpec::new("Chat", (640.0, 480.0), || (), |_, _| el());
+    /// App::new(spec).emoji_family("Twemoji").run();
+    /// ```
+    pub fn emoji_family(mut self, family: impl Into<String>) -> Self {
+        let family = family.into();
+        self.runtime.emoji_family = crate::text::normalize_emoji_family(Some(&family));
         self
     }
 
@@ -227,7 +394,15 @@ impl<S: 'static> App<S> {
     /// Open the window maximized, as a window saved maximized reopens. The size it opens at
     /// stays what restoring it returns to.
     pub fn maximized(mut self, maximized: bool) -> Self {
-        self.maximized = maximized;
+        self.open_as = self.open_as.maximized(maximized);
+        self
+    }
+
+    /// Open the window full screen, as a window saved full screen reopens (Electron's
+    /// `setFullScreen(true)`): borderless over the display it opens on, on Windows and Linux.
+    /// Leaving full screen returns to the frame it opened at, maximized if `maximized` is on too.
+    pub fn full_screen(mut self, full_screen: bool) -> Self {
+        self.open_as = self.open_as.full_screen(full_screen);
         self
     }
 
@@ -235,7 +410,36 @@ impl<S: 'static> App<S> {
     /// to `on_key` and the focused input's key handler, for hold-to-talk on Fn or Right Option,
     /// or a Shift tap. Off by default, since handlers written without it may act on any key.
     pub fn modifier_keys(mut self) -> Self {
-        self.modifier_keys = true;
+        self.runtime.modifier_keys = true;
+        self
+    }
+
+    /// Opt into hardware media transport keys ([`Key::Media`](crate::Key::Media): Play/Pause,
+    /// Play, Pause, Next, Previous, Stop, Fast Forward, Rewind) in `on_key`, `El::on_key`,
+    /// `El::on_key_preview`, `El::on_key_up`, and `Chord`.
+    ///
+    /// Off by default so apps that do not control media playback receive no new keys and, on
+    /// macOS, never install the local `NSEventTypeSystemDefined` monitor that claims system
+    /// media keys while the window is key. Text fields ignore media keys so they still reach
+    /// `on_key` while typing.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, Key, MediaKey, el};
+    ///
+    /// let spec = AppSpec {
+    ///     on_key: Some(|playing: &mut bool, ev, _| {
+    ///         if ev.key == Key::Media(MediaKey::PlayPause) {
+    ///             *playing = !*playing;
+    ///             return true;
+    ///         }
+    ///         false
+    ///     }),
+    ///     ..AppSpec::new("Player", (480.0, 320.0), || false, |_, _| el())
+    /// };
+    /// App::new(spec).media_keys().run();
+    /// ```
+    pub fn media_keys(mut self) -> Self {
+        self.runtime.media_keys = true;
         self
     }
 
@@ -243,7 +447,7 @@ impl<S: 'static> App<S> {
     /// keyboard navigation setting. Off (the default), Tab follows macOS: with Keyboard
     /// navigation off it visits only text fields and lists.
     pub fn tab_visits_controls(mut self, on: bool) -> Self {
-        self.tab_visits_controls = on;
+        self.runtime.tab_visits_controls = on;
         self
     }
 
@@ -251,6 +455,7 @@ impl<S: 'static> App<S> {
     pub fn configured_options(mut self, options: crate::ConfiguredWindowOptions) -> Self {
         self.window_options = options.options;
         self.macos_window = options.native;
+        self.windows_window = options.windows;
         self
     }
 
@@ -260,10 +465,68 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// Win32 native window policy, retained across recreation and ignored on other platforms.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, WindowsWindowOptions, el};
+    ///
+    /// App::new(AppSpec::new("Panel", (320.0, 200.0), || (), |_, _| el()))
+    ///     .windows_window(WindowsWindowOptions::default().no_activate(true).tool_window(true))
+    ///     .run();
+    /// ```
+    pub fn windows_window(mut self, options: crate::WindowsWindowOptions) -> Self {
+        self.windows_window = options;
+        self
+    }
+
+    /// Excludes this window from screen captures on Windows (`WDA_EXCLUDEFROMCAPTURE`) and macOS
+    /// (`NSWindowSharingNone`), applied before the window first shows and reapplied on native
+    /// recreation. `false` explicitly restores normal capture visibility. Ignored on Linux and web.
+    ///
+    /// When set, this takes precedence over `WindowsWindowOptions::exclude_from_capture` and
+    /// `MacWindowOptions::exclude_from_capture`; when unset, those platform options still apply.
+    /// Toggle at runtime with [`WindowHandle::set_exclude_from_capture`](crate::WindowHandle::set_exclude_from_capture).
+    /// Capture exclusion is native best effort, not a security boundary.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// App::new(AppSpec::new("Private Notes", (480.0, 360.0), || (), |_, _| el()))
+    ///     .exclude_from_capture(true)
+    ///     .run();
+    /// ```
+    pub fn exclude_from_capture(mut self, exclude: bool) -> Self {
+        self.exclude_from_capture = Some(exclude);
+        self
+    }
+
+    /// Preferred native light or dark chrome for this window, applied on creation and retained
+    /// across native recreation. Defaults to [`ColorScheme::System`](crate::ColorScheme::System).
+    ///
+    /// On Windows this controls the native titlebar (`DWMWA_USE_IMMERSIVE_DARK_MODE`), on macOS
+    /// `NSWindow.appearance`, on Wayland client-side decorations, and on X11
+    /// `_GTK_THEME_VARIANT`. Update at runtime with
+    /// [`Tx::set_color_scheme`](crate::Tx::set_color_scheme) or
+    /// [`WindowHandle::set_color_scheme`](crate::WindowHandle::set_color_scheme), or override
+    /// the whole app with [`AppHandle::set_color_scheme`](crate::AppHandle::set_color_scheme).
+    /// Ignored on web and headless.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, ColorScheme, el};
+    ///
+    /// App::new(AppSpec::new("Notes", (480.0, 360.0), || (), |_, _| el()))
+    ///     .color_scheme(ColorScheme::Dark)
+    ///     .run();
+    /// ```
+    pub fn color_scheme(mut self, scheme: crate::ColorScheme) -> Self {
+        self.color_scheme = scheme;
+        self
+    }
+
     /// Called once per native focus transition, including while hidden or occluded.
     /// Headless scripts deliver the same callback with `{"focus": false}`.
     pub fn on_focus(mut self, f: fn(&mut S, bool, &mut Tx)) -> Self {
-        self.on_focus = Some(f);
+        self.runtime.on_focus = Some(f);
         self
     }
 
@@ -274,11 +537,17 @@ impl<S: 'static> App<S> {
     /// session's worktree and branch while Alt is down. Return nothing: it can't take the key
     /// from anyone, and [`Tx::live_only`] says the view reads nothing that changed.
     ///
-    /// ```ignore
+    /// ```
+    /// # use rune::{AppSpec, el};
+    /// # struct App { alt_held: bool }
+    /// # let spec = AppSpec::new("App", (640.0, 480.0), || App { alt_held: false }, |_, _| el());
+    /// # let app = rune::App::new(spec);
+    /// # let _ =
     /// app.on_modifiers(|s: &mut App, mods, _| s.alt_held = mods.alt)
+    /// # ;
     /// ```
     pub fn on_modifiers(mut self, f: fn(&mut S, crate::Mods, &mut Tx)) -> Self {
-        self.on_mods = Some(f);
+        self.runtime.on_mods = Some(f);
         self
     }
 
@@ -286,9 +555,19 @@ impl<S: 'static> App<S> {
     /// where the system says so) and come back, with whether it shows now, as a web page's
     /// `visibilitychange` hears `document.hidden` change: for work that should wait while no
     /// one can see it, such as a notification's timer. Called once per change after the first
-    /// frame. Native windows only.
+    /// frame; a poll reads the same with [`Tx::window_visible`].
     pub fn on_visibility(mut self, f: fn(&mut S, bool, &mut Tx)) -> Self {
-        self.on_visibility = Some(f);
+        self.runtime.on_visibility = Some(f);
+        self
+    }
+
+    /// Runs when a window rests: it has drawn nothing for 10 s (1 s while the system says memory
+    /// is low), or it was hidden, minimised or covered whole. By then its renderer and Rune's
+    /// own caches have given back what they keep for frames to come (`window::rest`); this is
+    /// for the app's caches of what isn't on screen. Return whether state the view reads changed
+    /// (normally false: nothing on screen should).
+    pub fn on_rest(mut self, f: fn(&mut S, &mut Tx) -> bool) -> Self {
+        self.on_rest = Some(f);
         self
     }
 
@@ -304,18 +583,56 @@ impl<S: 'static> App<S> {
     /// CJK conversion, the emoji picker, dictation), as for `text_input`. While a composition
     /// is open, Return and Escape go to the input method, not `on_key`. Native windows only.
     pub fn on_ime(mut self, f: fn(&mut S, &crate::Ime, &mut Tx) -> bool) -> Self {
-        self.on_ime = Some(f);
+        self.runtime.on_ime = Some(f);
+        self
+    }
+
+    /// Fallback handler for a text field's context menu (right-click, Menu key, Shift+F10) on
+    /// platforms where [`crate::popup_menu_supported`] is false (such as Linux).
+    ///
+    /// When set and `!popup_menu_supported()`, Rune hands the ready-built
+    /// [`crate::FieldMenuRequest`] to `f` instead of queuing a native pop-up menu, so the app
+    /// can render it in-window (for example with `rune_kit::Menu`) and answer with
+    /// [`Tx::resolve_field_menu`]. On macOS and Windows (`popup_menu_supported()` is true),
+    /// native field menus continue to open as usual and `f` is not called.
+    ///
+    /// ```
+    /// use rune::{App, AppSpec, FieldMenuRequest, Tx, el};
+    ///
+    /// struct S { menu: Option<FieldMenuRequest> }
+    /// let _app = App::new(AppSpec::new("Notes", (480.0, 320.0), || S { menu: None }, |_, _| el()))
+    ///     .on_field_menu(|s: &mut S, req: FieldMenuRequest, _tx: &mut Tx| {
+    ///         s.menu = Some(req);
+    ///     });
+    /// ```
+    pub fn on_field_menu(mut self, f: fn(&mut S, crate::FieldMenuRequest, &mut Tx)) -> Self {
+        self.runtime.on_field_menu = Some(f);
         self
     }
 
     /// Adds a transparent overlay with its own state, hidden until `OverlayHandle::show`.
     /// Bare specs preserve primary-display edge placement and never request key focus;
     /// `OverlaySpec::options` selects displays, placement and native input policy.
-    /// Uses this app's fonts. Headless runs don't draw overlays.
+    /// Uses this app's fonts and font smoothing (`ConfiguredOverlay::font_smoothing` overrides it).
+    /// Headless runs don't draw overlays.
     pub fn overlay<T: 'static>(&mut self, spec: impl Into<crate::ConfiguredOverlay<T>>, state: T) -> crate::overlay::OverlayHandle<T> {
-        let (overlay, handle) = crate::overlay::Overlay::new(spec.into(), state, &self.spec);
-        self.overlays.push(Box::new(overlay));
-        handle
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut configured = spec.into();
+            if configured.runtime.emoji_family.is_none() {
+                configured.runtime.emoji_family = self.runtime.emoji_family.clone();
+            }
+            let (mut overlay, handle) = crate::overlay::OverlayHost::new(configured, state, &self.spec, self.runtime.font_smoothing);
+            overlay.set_prewarm_effects(self.prewarm_effects);
+            self.overlays.push(Box::new(overlay));
+            handle
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (spec, state);
+            self.has_overlays = true;
+            crate::overlay::OverlayHandle::disconnected()
+        }
     }
 
     /// Adds an ordinary window with its own state type to this app's event loop, such as a
@@ -357,8 +674,8 @@ impl<S: 'static> App<S> {
         self
     }
 
-    /// Closing the window keeps the app, its state and its event loop running until
-    /// `AppHandle::quit` or `Tx::quit`.
+    /// Closing the window, or a failed window creation, keeps the app and event loop running
+    /// until `AppHandle::quit` or `Tx::quit` (for tray apps and apps that retry on `window_error`).
     pub fn keep_running(mut self) -> Self {
         self.keep_running = true;
         self
@@ -372,6 +689,65 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// Controls CPU-first startup and GPU handover for this app's window ([`crate::CpuFirst`]).
+    ///
+    /// Defaults to [`crate::CpuFirst::Auto`], which opens opaque Windows/Linux windows and
+    /// full-window web pages on `CpuPainter` before handing over to the GPU in the background.
+    /// [`crate::CpuFirst::Only`] keeps opaque windows on `CpuPainter` without starting background
+    /// GPU handover on idle (on Windows and Linux, a frame that hits a GPU-only feature still
+    /// triggers GPU handover so it can render; on web, stays on the 2D canvas without requesting
+    /// WebGPU/WebGL2). [`crate::CpuFirst::Off`] skips CPU-first startup and opens directly on the
+    /// GPU without falling back to the CPU renderer. Transparent windows always open on the GPU
+    /// on Windows and whenever a GPU surface can be made on Linux; on Linux under `Auto` or `Only`
+    /// (with automatic adapter selection), a visible transparent window whose pre-swapchain GPU
+    /// startup fails falls back to `CpuPainter` with alpha buffers (or 24-bit opaque if X11 gives
+    /// no 32-bit visual). Ignored on macOS, iOS, headless runs, and inline/document web pages.
+    ///
+    /// `RUNE_CPU_FIRST` (or `globalThis.RUNE_CPU_FIRST` on web) overrides this setting without a
+    /// rebuild (`0`/`off`, `only`, `auto`), matching `RUNE_GPU_BACKEND`.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, CpuFirst, el};
+    ///
+    /// App::new(AppSpec::new("Plan", (960.0, 640.0), || (), |_, _| el()))
+    ///     .cpu_first(CpuFirst::Only)
+    ///     .run();
+    /// ```
+    pub fn cpu_first(mut self, mode: crate::CpuFirst) -> Self {
+        self.cpu_first = mode;
+        self
+    }
+
+    /// Names the optional effect GPU pipelines this app's windows and overlays compile in the
+    /// background before their first use ([`PrewarmEffects`](crate::PrewarmEffects)): isolated
+    /// layers (`Rgba16Float`), `Blend::PlusLighter`, Gaussian layer blur, and
+    /// `El::backdrop_blur`. `true` names all four.
+    ///
+    /// Defaults to none, so an app pays no background pipeline-compile CPU, driver memory, or
+    /// worker thread for effects it never draws. Name the effects the app does draw so that
+    /// the first frame that shows one (a frosted button fading in mid-scroll) does not stall
+    /// while the driver compiles its pipelines: they compile on a low-priority thread once
+    /// the window has drawn its first frames and rests, and a frame that needs one sooner
+    /// compiles it as before, once. Ignored on `wasm32`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, PrewarmEffects, el};
+    ///
+    /// App::new(AppSpec::new("Frosted", (640.0, 480.0), || (), |_, _| el()))
+    ///     .prewarm_effects(PrewarmEffects::BACKDROP_BLUR)
+    ///     .run();
+    /// ```
+    pub fn prewarm_effects(mut self, effects: impl Into<crate::PrewarmEffects>) -> Self {
+        self.prewarm_effects = effects.into();
+        #[cfg(not(target_arch = "wasm32"))]
+        for overlay in &mut self.overlays {
+            overlay.set_prewarm_effects(self.prewarm_effects);
+        }
+        self
+    }
+
     /// Draws with `backend` on macOS. Without a call, a Mac app draws with Rune's native Metal
     /// backend (the `metal-backend` feature, on by default), so `GpuBackend::Wgpu` opts out;
     /// `GpuBackend::Metal` needs the feature. `RUNE_GPU_BACKEND=wgpu` or `=metal` overrides it
@@ -381,7 +757,37 @@ impl<S: 'static> App<S> {
     /// `prewarm_gpu()` to avoid the restart. An iOS app, which embeds a `LayerHost` instead,
     /// calls `rune::prewarm_gpu_on`. Does nothing elsewhere.
     pub fn gpu_backend(self, backend: crate::GpuBackend) -> Self {
-        crate::gpu::backend::choose(backend);
+        crate::render::choose_gpu_backend(backend);
+        self
+    }
+
+    /// Sets the startup GPU suballocation policy for wgpu devices ([`crate::GpuMemoryPolicy`]).
+    ///
+    /// Without a call, Rune uses [`crate::GpuMemoryPolicy::MemoryUsage`]. Call this (or
+    /// [`crate::set_gpu_memory_policy`] before [`crate::prewarm_gpu`], [`crate::warm_gpu`], or
+    /// [`crate::warm_gpu_cache`]) to pick [`crate::GpuMemoryPolicy::Performance`] or a
+    /// [`crate::GpuMemoryPolicy::Manual`] block-size range before windows or overlays create
+    /// their GPU devices.
+    ///
+    /// Applies process-wide to every wgpu device created from here on, and restarts or discards
+    /// any prewarmed or parked device built under a different policy. Honored by D3D12 (Windows)
+    /// and Vulkan (Linux); ignored by Rune's native Metal backend, wgpu's Metal backend, and
+    /// web backends. Resources larger than a `Manual` block range still succeed via dedicated
+    /// allocations.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, GpuMemoryPolicy, el};
+    ///
+    /// App::new(AppSpec::new("Low memory", (640.0, 480.0), || (), |_, _| el()))
+    ///     .gpu_memory_policy(GpuMemoryPolicy::Manual {
+    ///         block_size: (4 * 1024 * 1024)..(8 * 1024 * 1024),
+    ///     })
+    ///     .run();
+    /// ```
+    pub fn gpu_memory_policy(self, policy: crate::GpuMemoryPolicy) -> Self {
+        crate::render::set_gpu_memory_policy(policy);
         self
     }
 
@@ -411,6 +817,46 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// Intercepts a user-initiated window-close request (the native close button, Alt+F4, the
+    /// window menu's Close, macOS unhandled ⌘W / Window › Close, and assistive activation of the
+    /// custom close button) before the window hides, changes lifecycle or first-frame state, or
+    /// runs [`App::on_close`].
+    ///
+    /// Runs inside a normal update transaction so the callback may update state or issue [`Tx`]
+    /// requests (for example showing an unsaved-changes confirmation dialog). Returning
+    /// [`CloseResponse::Defer`] keeps the window open, commits those changes, and requests a
+    /// redraw; close the window later with [`Tx::close_window`], [`AppHandle::close`], or
+    /// [`WindowHandle::close`](crate::WindowHandle::close). Returning [`CloseResponse::Close`]
+    /// proceeds with closing as usual (running [`App::on_close`]).
+    ///
+    /// Programmatic close (`Tx::close_window`, `AppHandle::close`, `WindowHandle::close`),
+    /// application quit/relaunch, teardown, and an already-exiting event loop bypass this hook
+    /// so an approved close completes without re-asking. Apps that do not register this hook
+    /// keep the existing close behaviour. Headless scripts deliver it with
+    /// `{"close_request": true}`. Ignored on web.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, CloseResponse, el};
+    ///
+    /// struct Draft { dirty: bool, confirm_close: bool }
+    ///
+    /// let spec = AppSpec::new("Draft", (480.0, 320.0), || Draft { dirty: true, confirm_close: false }, |_, _| el());
+    /// App::new(spec)
+    ///     .on_close_request(|draft, _| {
+    ///         if draft.dirty {
+    ///             draft.confirm_close = true;
+    ///             CloseResponse::Defer
+    ///         } else {
+    ///             CloseResponse::Close
+    ///         }
+    ///     })
+    ///     .run();
+    /// ```
+    pub fn on_close_request(mut self, f: fn(&mut S, &mut Tx) -> CloseResponse) -> Self {
+        self.on_close_request = Some(f);
+        self
+    }
+
     /// Runs whenever the window closes (close button, `Tx::close_window`, `AppHandle::close`,
     /// macOS Quit from the menu, Cmd-Q or the Dock), before it goes: flush drafts, stop previews.
     /// Its `Tx::quit` quits.
@@ -420,15 +866,17 @@ impl<S: 'static> App<S> {
     }
 
     /// Runs once in every open window when the app starts to quit, before any window closes
-    /// for it: `Tx::quit` or `AppHandle::quit` from any window, the last window closing (in the
-    /// windows still open), macOS Quit (⌘Q, the Dock, logout, restart and shutdown), and a
-    /// Windows logoff or shutdown (`WM_QUERYENDSESSION`, or `WM_ENDSESSION` when no query came
-    /// first), as Electron's `before-quit` and `session-end` do between them. Save what must
-    /// survive the quit here, synchronously: a Windows session may end the process once the
-    /// hooks returned. From then on [`crate::quitting`] holds, so an `on_close` that follows
-    /// (macOS, the end of a Windows session) can tell the app ending from its window closing
-    /// alone. A Windows shutdown another app refuses clears it, and a later quit runs this again.
-    /// What it asks of its `Tx` beyond state is moot once the loop ends. Native windows only.
+    /// for it, and in the last main window whose close ends the app (after its `on_close`):
+    /// `Tx::quit` or `AppHandle::quit` from any window, the last main window closing, macOS
+    /// Quit (⌘Q, the Dock, logout, restart and shutdown), and a Windows logoff or shutdown
+    /// (`WM_QUERYENDSESSION`, or `WM_ENDSESSION` when no query came first), as Electron's
+    /// `before-quit` and `session-end` do between them. Save what must survive the quit here,
+    /// synchronously: a Windows session may end the process once the hooks returned. From then
+    /// on [`crate::quitting`] holds, so an `on_close` that follows (macOS, the end of a Windows
+    /// session, or another window closing for the quit) can tell the app ending from its window
+    /// closing alone. A Windows shutdown another app refuses clears it, and a later quit runs
+    /// this again. What it asks of its `Tx` beyond state is moot once the loop ends. Native
+    /// windows only.
     pub fn on_quit(mut self, f: fn(&mut S, &mut Tx)) -> Self {
         self.on_quit = Some(f);
         self
@@ -438,8 +886,12 @@ impl<S: 'static> App<S> {
     /// (an event, a wake, a frame, a hook), and `leave` after it, so state the app's windows
     /// share can move into the state of the window whose turn it is and back. The windows of
     /// one event loop take turns, never two at once. Native windows only.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     pub fn turn_scope(mut self, enter: fn(&mut S), leave: fn(&mut S)) -> Self {
-        self.turn_scope = Some(TurnScope { enter, leave });
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.turn_scope = Some(TurnScope { enter, leave }); }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (enter, leave);
         self
     }
 
@@ -474,10 +926,41 @@ impl<S: 'static> App<S> {
     /// Windows: the links among the launch arguments (`scheme://…`), as Windows passes a link to
     /// the process it starts, and with `rune::single_instance` the links of every later launch,
     /// which that launch hands to this process instead of opening a window. The app registers its
-    /// scheme itself (`HKEY_CURRENT_USER\Software\Classes\<scheme>`, usually at install). Never
-    /// called on other platforms (Linux passes links to a new process as arguments).
+    /// scheme itself (`HKEY_CURRENT_USER\Software\Classes\<scheme>`, usually at install), and
+    /// names it with `rune::url_schemes` so only arguments on it are links: without that a flag's
+    /// URL value (`--server http://localhost:4096`) is one too. Never called on other platforms
+    /// (Linux passes links to a new process as arguments).
     pub fn on_open_url(mut self, f: fn(&mut S, &str, &mut Tx)) -> Self {
         self.on_open_url = Some(f);
+        self
+    }
+
+    /// macOS: runs on the main thread with each batch of files the system opens with this app
+    /// (Finder double-click or "Open With", files dropped on the Dock icon, or `open -a MyApp
+    /// file.ext`), including the `kAEOpenDocuments` (`'odoc'`) Apple Event that launched it,
+    /// which runs before the window's first frame. Each batch runs in arrival order as an
+    /// `AppHandle::update`, so a window it opens through a handle opens in the same turn. Never
+    /// called with an empty slice (non-file URLs in the event are skipped). Paths come from
+    /// outside the app, so validate them before acting. Bringing a window forward is up to the app
+    /// (`AppHandle::open`). The app's bundle must declare its document types
+    /// (`CFBundleDocumentTypes`, see the README). With several windows whose apps have the hook,
+    /// the first still running receives files.
+    ///
+    /// Never called on Windows or Linux, which pass opened files to a new process as launch
+    /// arguments. Headless scripts deliver it with `{"open_files": ["a.torrent"]}`.
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// let spec = AppSpec::new("Viewer", (640.0, 420.0), Vec::<PathBuf>::new, |_, _| el());
+    /// let app = App::new(spec).on_open_files(|opened, paths, _| {
+    ///     opened.extend(paths.iter().cloned());
+    /// });
+    /// let _ = app;
+    /// ```
+    pub fn on_open_files(mut self, f: fn(&mut S, &[std::path::PathBuf], &mut Tx)) -> Self {
+        self.on_open_files = Some(f);
         self
     }
 
@@ -502,9 +985,38 @@ impl<S: 'static> App<S> {
     /// hidden, after GPU completion of its cached surface frame. A window that isn't on screen
     /// (covered, occluded, hidden or on another Space) doesn't wait to draw: this runs at its
     /// first frame skipped for that, or a second after it opens with no frame at all.
-    /// Not called by headless tooling. May queue a show through the supplied handle.
+    /// Headless tooling skips this unless `--realtime` is passed, which runs it after
+    /// the first frame. May queue a show through the supplied handle.
     pub fn on_ready(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
         self.on_ready = Some(Box::new(f));
+        self
+    }
+
+    /// Runs once on the UI thread immediately before the event loop drops windows and tears down
+    /// the native display connection, after any `on_close` and `on_quit` hooks have run.
+    ///
+    /// Pair this with [`WindowHandle::with_raw_display_handle`](crate::WindowHandle::with_raw_display_handle)
+    /// to destroy foreign protocol proxies or event queues bound on winit's display (such as
+    /// Wayland objects created via `Backend::from_foreign_display`) before the display closes.
+    /// Runs on normal quits, OS-initiated termination, fast exit, and display or startup error
+    /// exits; closing one window while another window or `keep_running` keeps the event loop
+    /// alive does not run it until the loop itself exits. Native windows only (ignored on
+    /// headless and web).
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// App::new(AppSpec::new("Display", (320.0, 200.0), || (), |_, _| el()))
+    ///     .on_window(|window| {
+    ///         let _ = window.with_raw_display_handle(|d| format!("{:?}", d.as_raw()));
+    ///     })
+    ///     .on_display_close(|| {
+    ///         // Destroy foreign display proxies before the event loop closes the display.
+    ///     })
+    ///     .run();
+    /// ```
+    pub fn on_display_close(mut self, f: impl FnOnce() + 'static) -> Self {
+        self.on_display_close = Some(Box::new(f));
         self
     }
 
@@ -524,13 +1036,110 @@ impl<S: 'static> App<S> {
         self
     }
 
-    /// Runs on the UI thread after each `Drawn` frame of the app's window, with the runtime as
-    /// that frame presented it (`Runtime::elements`, `Runtime::state`), for an app that watches
-    /// its own motion. Pair it with [`last_input`](crate::last_input) to tell motion the user
-    /// caused from motion they didn't. Like `on_frame_encoded`, it changes nothing about when
-    /// or what the window draws, and only desktop windows call it.
+    /// Runs on the UI thread in submission order once a `Drawn` frame actually reaches the screen
+    /// (or is skipped by the system, reported as
+    /// [`FramePresented::presented_at`](crate::FramePresented::presented_at) returning `None`).
+    ///
+    /// [`FramePresented::seq`](crate::FramePresented::seq) matches
+    /// [`FrameEncoded::seq`](crate::FrameEncoded::seq) for the same `Drawn` frame, and
+    /// `on_frame_encoded` always runs before `on_frame_presented` for a given sequence number.
+    /// Pair them to measure real input-to-photon latency or detect missed vsyncs against
+    /// [`FrameEncoded::presents_at`](crate::FrameEncoded::presents_at).
+    ///
+    /// Only platforms with reliable actual presentation timestamps call it (currently macOS
+    /// Metal, via `MTLDrawable::addPresentedHandler`). Windows, Linux, the web, overlays, and
+    /// headless runs never call it, matching
+    /// [`FrameEncoded::presents_at`](crate::FrameEncoded::presents_at). Without it, no layer
+    /// hook is attached and each frame pays only an `Option` check; once in-flight drawables
+    /// finish presenting, the watch clears automatically so an idle window never wakes or draws.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// let spec = AppSpec::new("Demo", (320.0, 240.0), || (), |_, _| el());
+    /// App::new(spec)
+    ///     .on_frame_presented(|p| {
+    ///         let _ = (p.seq(), p.window(), p.presented_at());
+    ///     })
+    ///     .run();
+    /// ```
+    pub fn on_frame_presented(mut self, f: impl FnMut(&crate::FramePresented) + 'static) -> Self {
+        self.on_frame_presented = Some(Box::new(f));
+        self
+    }
+
+    /// Runs on the UI thread after each `Drawn` frame of the app's window (desktop windows and
+    /// the web runner, and never on unchanged or skipped frames), with the runtime as that frame
+    /// presented it (`Runtime::elements`, `Runtime::state`), for an app that watches its own
+    /// motion or waits for presented frames. Pair it with [`last_input`](crate::last_input) to
+    /// tell motion the user caused from motion they didn't. Like `on_frame_encoded`, it changes
+    /// nothing about when or what the window draws.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// let spec = AppSpec::new("Demo", (320.0, 240.0), || 0u32, |_, _| el());
+    /// App::new(spec)
+    ///     .on_frame_drawn(|rt| {
+    ///         let _count = rt.elements().len();
+    ///     })
+    ///     .run();
+    /// ```
     pub fn on_frame_drawn(mut self, f: impl FnMut(&crate::Runtime<S>) + 'static) -> Self {
         self.on_frame_drawn = Some(Box::new(f));
+        self
+    }
+
+    /// Cap frame pacing (Hz) for motion no recent user input is steering (`0.0`, default =
+    /// uncapped at the display's refresh rate; positive finite values clamp to at least `1.0` Hz,
+    /// and zero, negative, or non-finite values clear the cap back to uncapped).
+    ///
+    /// **What counts as steered.** Any live key, pointer, mouse-wheel, touch, trackpad gesture,
+    /// or file drag-and-drop event that reaches the window lifts the cap immediately on the very
+    /// next display refresh. Motion stays steered at the display's full rate for 600 ms after the
+    /// last input, and up to 2 s after that input while an unbroken run of presented frames
+    /// started within 100 ms of the input and keeps presenting with gaps of at most 100 ms.
+    /// Continuous pointer drags, wheel or trackpad scrolls, typing, and springs following a finger
+    /// keep refreshing the input timestamp and never cap. Motion that starts after a pause (such
+    /// as a streaming reply beginning after a wait) or continues past 2 s with no new input paces
+    /// at `fps`, and when motion ends the link coasts for ~150 ms and stops with zero idle draws.
+    ///
+    /// **Interaction with other caps.** When multiple caps apply, the lower rate (longer frame
+    /// period) wins: Low Power Mode (60 Hz on built-in ProMotion panels) always bounds both
+    /// steered and ambient frames, and combining this with `App::reveal_fps` lets reveal-only
+    /// tails wake on their timer at `reveal_fps` while any concurrent unsteered animation (such as
+    /// timeline growth or scroll following a stream) paces at `ambient_fps`.
+    ///
+    /// Enforced on macOS `DisplayLink` windows today; Windows, Linux, web, overlays, and
+    /// headless runs ignore it (matching [`App::on_frame_presented`] and
+    /// [`App::exclude_from_capture`]).
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, text};
+    ///
+    /// let spec = AppSpec::new("Chat", (720.0, 540.0), String::new, |s, _| text(s.as_str()).wrap());
+    /// App::new(spec)
+    ///     .ambient_fps(60.0)
+    ///     .run();
+    /// ```
+    pub fn ambient_fps(mut self, fps: f32) -> Self {
+        self.ambient_period = ambient_period_from_fps(fps);
+        self
+    }
+
+    /// Keep the view's layout reads across launches, so the window's first frame builds the
+    /// view once. A view that reads a rect ([`Cx::layout`](crate::Cx::layout), `layout_with`,
+    /// `layout_size`) gets nothing in a window's first commit and runs again once layout knows
+    /// it. `keep` is given what the window's first view read (its first frame's reads, as layout
+    /// settled them: what the next launch's first frame reads again), once, when the window
+    /// rests, closes or quits, unless they are the seed's own: save it with the window's own
+    /// state, and pass it back here as `seed` at the next launch. The first view is then given
+    /// those rects, and runs once when layout agrees with them. A seed for another window size
+    /// or scale isn't used, and one from another state costs what no seed costs: every read is
+    /// still checked against the layout. Desktop windows only.
+    pub fn layout_seed(mut self, seed: Option<crate::LayoutSeed>, keep: impl FnMut(crate::LayoutSeed) + 'static) -> Self {
+        self.layout_seed = seed;
+        self.keep_layout = Some(Box::new(keep));
         self
     }
 
@@ -552,7 +1161,7 @@ impl<S: 'static> App<S> {
     /// in a native trace's summary. Keep it cheap. For example, with the `procwatch`
     /// crate: `.dev_stats(|| procwatch::snapshot().map_or_else(String::new, |s| format!("{} MB, {} fds", s.footprint >> 20, s.fds)))`.
     pub fn dev_stats(mut self, stats: fn() -> String) -> Self {
-        self.dev_stats = Some(stats);
+        self.runtime.dev_stats = Some(stats);
         self
     }
 
@@ -569,18 +1178,25 @@ impl<S: 'static> App<S> {
             self = self.menu_item(item);
         }
         self.playground = Some(playground);
+        self.attach_playground = Some(crate::playground::attach::<S>);
         self
     }
 
     /// Runs until the app quits. Agent-tooling arguments (`--snap`, `--tree`, ...) render
     /// headless instead: the window requests are ignored there, and updates apply each frame.
-    /// Panics when the app can't start, such as without a display; `try_run` returns that error.
+    /// Prints the error to stderr and exits 1 when the app can't start (no display, or the first
+    /// window can't be created) or loses its display connection, or exits 2 when a headless
+    /// tooling run (`--snap`, `--tree`, ...) fails (panics on wasm32); use [`App::try_run`] to
+    /// receive the error instead of exiting. See `keep_running`.
     pub fn run(self) {
-        if let Err(error) = self.try_run() { panic!("{error}"); }
+        #[cfg(target_arch = "wasm32")]
+        crate::tooling::started(self.try_run());
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::tooling::finish_start(self.try_run_start());
     }
 
-    /// `run`, returning an error instead of panicking when the event loop can't start (no
-    /// display over ssh or in CI, no Wayland or X11 server) or fails.
+    /// `run`, returning an error instead of exiting when the event loop can't start or fails, or
+    /// the first window can't be created (unless `keep_running` or `windowless` is set).
     #[cfg(target_arch = "wasm32")]
     pub fn try_run(mut self) -> Result<(), String> {
         if let Some(argv) = self.argv.take() {
@@ -590,16 +1206,29 @@ impl<S: 'static> App<S> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn try_run(mut self) -> Result<(), String> {
+    pub fn try_run(self) -> Result<(), String> {
+        self.try_run_start().map_err(crate::tooling::StartError::message)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_run_start(mut self) -> Result<(), crate::tooling::StartError> {
+        // Windows' word dictionaries start loading now, on their own thread (`rune_text::segmenter`).
+        #[cfg(all(target_os = "windows", not(feature = "segmenter-dictionaries")))]
+        rune_text::segmenter::install();
         let args = match self.argv.take() {
             Some(argv) => Args::parse_from(argv),
             None => Args::parse(),
         };
         if args.headless() {
-            crate::render::discard_prewarm();
-            crate::tooling::try_headless(self, args)
+            #[cfg(any(feature = "tooling", debug_assertions))]
+            {
+                crate::render::discard_prewarm();
+                crate::tooling::try_headless(self, args)
+            }
+            #[cfg(not(any(feature = "tooling", debug_assertions)))]
+            Err(crate::tooling::StartError::Window(crate::tooling::WITHOUT_TOOLING.into()))
         } else {
-            crate::window::run(self, args)
+            crate::window::run(self, args).map_err(crate::tooling::StartError::Window)
         }
     }
 }
@@ -616,12 +1245,12 @@ impl<S: 'static> App<S> {
         self.canvas_id.is_some() && (self.fit_content_height || !self.full_viewport)
     }
 
-    pub(crate) fn into_parts(self, scene: Option<&str>) -> (AppSpec<S>, S, Arc<Shared<S>>) {
+    pub(crate) fn into_parts(self, scene: Option<&str>) -> (AppSpec<S>, S, Arc<Shared<S>>, RuntimeConfig<S>) {
         let state = crate::tooling::perf_warn::launch::init(|| match self.init {
             Some(init) => crate::tooling::with_scene(&self.spec, init(), scene),
             None => crate::tooling::initial_state(&self.spec, scene),
         });
-        (self.spec, state, self.shared)
+        (self.spec, state, self.shared, self.runtime)
     }
 }
 
@@ -642,70 +1271,60 @@ impl<S> Clone for AppHandle<S> {
 impl<S: 'static> AppHandle<S> {
     /// Wake the event loop so `AppSpec::poll` runs, also while the window is hidden; for a
     /// background thread that queued work for `poll` to drain.
-    pub fn wake(&self) {
-        self.request(|q| q.woken = true);
-    }
+    #[inline]
+    pub fn wake(&self) { self.shared.core.wake_app(); }
 
     /// Show the window (creating it if needed), restore it if minimized, and activate the app
     /// with it in front, including the first open of a window that doesn't exist yet. A
     /// nonactivating panel takes keys without activating. The window open at launch doesn't
     /// activate the app beyond what the platform does at launch.
-    pub fn open(&self) {
-        self.request(|q| { q.window = Some(WindowRequest::Open(None)); q.minimize = false; });
-    }
+    #[inline]
+    pub fn open(&self) { self.shared.core.open(); }
 
     /// Show or recreate the window without requesting focus. A minimized window stays minimized;
     /// open() also restores and activates it. Window-manager policy still applies.
-    pub fn show(&self) {
-        self.request(|q| q.window = Some(WindowRequest::Show));
-    }
+    #[inline]
+    pub fn show(&self) { self.shared.core.show(); }
 
     /// Hide the window, retaining its host and state. Does not invoke the close callback.
-    pub fn hide(&self) {
-        self.request(|q| { q.window = Some(WindowRequest::Hide); q.minimize = false; });
-    }
+    #[inline]
+    pub fn hide(&self) { self.shared.core.hide(); }
 
     /// Focus/activate an already-visible window, restoring it if minimized.
     /// On Wayland this requests attention; use activate(token) for compositor-authorized focus.
-    pub fn focus(&self) {
-        self.request(|q| { q.focus = true; q.minimize = false; });
-    }
+    #[inline]
+    pub fn focus(&self) { self.shared.core.focus(); }
 
     /// Set the outer position in physical desktop pixels (negative coordinates are valid).
     /// Retained across recreation. Wayland does not support application window placement.
-    pub fn set_position(&self, position: (i32, i32)) {
-        self.request(|q| { q.position = Some(position); q.place = None; });
-    }
+    #[inline]
+    pub fn set_position(&self, position: (i32, i32)) { self.shared.core.set_position(position); }
 
     /// Place in display-local points. UnderPointer samples the pointer at this call;
     /// disconnected displays fall back to primary when the UI thread applies the request.
     /// Wayland does not permit application placement.
+    #[inline]
     pub fn place(&self, display: crate::DisplayTarget, placement: crate::OverlayPlacement) {
-        let place = crate::windows::PlaceRequest::new(display, placement);
-        self.request(|q| { q.place = Some(place); q.position = None; });
+        self.shared.core.place(display, placement);
     }
 
     /// Show and focus the window with an activation token another process forwarded
     /// (`XDG_ACTIVATION_TOKEN` on Wayland, `DESKTOP_STARTUP_ID` on X11), so the compositor
     /// lets it take focus. Where tokens don't exist this is `open`.
-    pub fn activate(&self, token: impl Into<String>) {
-        let token = token.into();
-        self.request(|q| { q.window = Some(WindowRequest::Open(Some(token).filter(|t| !t.is_empty()))); q.minimize = false; });
-    }
+    #[inline]
+    pub fn activate(&self, token: impl Into<String>) { self.shared.core.activate(token.into()); }
 
     /// Close the window as the close button would (`App::on_close` runs; without
     /// `keep_running` the app quits).
-    pub fn close(&self) {
-        self.request(|q| { q.window = Some(WindowRequest::Close); q.minimize = false; });
-    }
+    #[inline]
+    pub fn close(&self) { self.shared.core.close(); }
 
     /// Minimize the window, as `Tx::minimize` does from a handler. Does nothing for a hidden
     /// window, a panel or launcher, or one that can't minimize. After a `show` it minimizes
     /// the shown window; a later `open`, `focus`, `hide` or `close` cancels it, and it cancels
     /// an earlier `focus`.
-    pub fn minimize(&self) {
-        self.request(|q| { q.minimize = true; q.focus = false; });
-    }
+    #[inline]
+    pub fn minimize(&self) { self.shared.core.minimize(); }
 
     /// Quit the app: every open window's `App::on_quit` runs, the window closes without
     /// `on_close`, and `run` returns.
@@ -715,35 +1334,49 @@ impl<S: 'static> AppHandle<S> {
     /// is removed, while one passed in with [`App::canvas_id`] stays, restyled as it was, for
     /// its owner. Another app may start straight away; it mounts once this one has gone. An
     /// app quit before it mounts never does.
-    pub fn quit(&self) {
-        self.shared.quitting.store(true, Ordering::Release);
-        self.request(|q| q.quit = q.quit.max(Some(crate::quit::After::Exit)));
-    }
+    #[inline]
+    pub fn quit(&self) { self.shared.core.quit(); }
 
     /// Quit the app as [`AppHandle::quit`] does, then start it again with the same arguments
     /// once this process has exited ([`Tx::relaunch`]). Web: as `quit`.
-    pub fn relaunch(&self) {
-        self.shared.quitting.store(true, Ordering::Release);
-        self.request(|q| q.quit = Some(crate::quit::After::Relaunch));
-    }
+    #[inline]
+    pub fn relaunch(&self) { self.shared.core.relaunch(); }
 
     /// macOS: show or hide the app's Dock icon (and app menu) while it runs, switching between
     /// the regular and accessory activation policies. Does nothing elsewhere.
-    pub fn set_dock_icon(&self, visible: bool) {
-        self.request(|q| q.dock = Some(visible));
-    }
+    #[inline]
+    pub fn set_dock_icon(&self, visible: bool) { self.shared.core.set_dock_icon(visible); }
+
+    /// Override the native light or dark appearance across the whole application.
+    ///
+    /// On macOS this sets `NSApplication.sharedApplication.appearance` (`nil` for
+    /// [`ColorScheme::System`](crate::ColorScheme::System), `NSAppearanceNameAqua` for `Light`,
+    /// `NSAppearanceNameDarkAqua` for `Dark`), so native menus, open/save panels, traffic lights,
+    /// system materials, and windows with no per-window override follow it. On Windows and Linux
+    /// this applies to every window whose own color scheme is `ColorScheme::System`, including
+    /// windows created or recreated later. Windows with an explicit per-window `Light` or `Dark`
+    /// override keep their own scheme. Safe to call from any thread; no-op on web and headless.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, ColorScheme, el};
+    ///
+    /// let app = App::new(AppSpec::new("Notes", (480.0, 360.0), || (), |_, _| el()));
+    /// let handle = app.handle();
+    /// handle.set_color_scheme(ColorScheme::Dark);
+    /// app.run();
+    /// ```
+    #[inline]
+    pub fn set_color_scheme(&self, scheme: crate::ColorScheme) { self.shared.core.set_color_scheme(scheme); }
 
     /// Whether the window is on screen (shown, not hidden or closed). Minimized and occluded
     /// windows count as shown.
-    pub fn is_visible(&self) -> bool {
-        self.shared.visible.load(Ordering::Acquire)
-    }
+    #[inline]
+    pub fn is_visible(&self) -> bool { self.shared.core.is_visible() }
 
-    /// Why the window couldn't be created the last time it was asked for (no display, no GPU
-    /// adapter or device), until a later creation succeeds. The app keeps running windowless.
-    pub fn window_error(&self) -> Option<String> {
-        self.shared.window_error.lock().unwrap().clone()
-    }
+    /// Why the window couldn't be created last time (no display, no GPU adapter or device),
+    /// until a later creation succeeds. Needs `keep_running` or `windowless` to stay alive.
+    #[inline]
+    pub fn window_error(&self) -> Option<String> { self.shared.core.window_error() }
 
     /// Change the state from this thread: `f` runs on the UI thread, in call order, even while no
     /// window shows, and the next frame commits it with the motion its `Tx` asks for.
@@ -760,550 +1393,14 @@ impl<S: 'static> AppHandle<S> {
     /// Returning false after changing state the view reads leaves the screen stale until the
     /// next change.
     pub fn update_if(&self, f: impl FnOnce(&mut S, &mut Tx) -> bool + Send + 'static) {
-        self.request(|q| q.updates.push(Box::new(f)));
-    }
-
-    fn request(&self, f: impl FnOnce(&mut Requests<S>)) {
-        f(&mut self.shared.requests.lock().unwrap());
-        self.shared.wake();
+        self.shared.push_update(Box::new(f));
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WindowRequest {
-    /// Show and focus, with an activation token when one was forwarded.
-    Open(Option<String>),
-    Show,
-    Hide,
-    Close,
-}
-
-pub(crate) struct Requests<S> {
-    pub window: Option<WindowRequest>,
-    pub dock: Option<bool>,
-    pub focus: bool,
-    /// `AppHandle::minimize`, after `window`. It and `focus` are last-wins.
-    pub minimize: bool,
-    pub position: Option<(i32, i32)>,
-    pub place: Option<crate::windows::PlaceRequest>,
-    /// `AppHandle::quit` or `AppHandle::relaunch`, and what follows the exit.
-    pub quit: Option<crate::quit::After>,
-    /// `AppHandle::wake` asked for `poll`.
-    pub woken: bool,
-    pub updates: Vec<Update<S>>,
-}
-
-impl<S> Requests<S> {
-    /// Asks something of the window itself: show, hide or close it, focus or minimize it, or
-    /// move it. A request added here reaches both `only_updates` and `Shared::window_pending`.
-    fn asks_window(&self) -> bool {
-        self.window.is_some() || self.focus || self.minimize || self.position.is_some() || self.place.is_some()
-    }
-
-    /// Nothing but updates: no wake for `poll`, no window, focus or geometry request.
-    pub(crate) fn only_updates(&self) -> bool {
-        !self.woken && !self.asks_window()
-    }
-}
-
-impl<S> Default for Requests<S> {
-    fn default() -> Self {
-        Requests {
-            window: None,
-            dock: None,
-            focus: false,
-            minimize: false,
-            position: None,
-            place: None,
-            quit: None,
-            woken: false,
-            updates: Vec::new(),
-        }
-    }
-}
-
-pub(crate) struct Shared<S> {
-    pub(crate) menus: crate::native_menu::Hub<S>,
-    pub(crate) shortcuts: crate::shortcuts::Hub<S>,
-    requests: Mutex<Requests<S>>,
-    wake: Mutex<Option<crate::runtime::Waker>>,
-    /// Published by the window host for `AppHandle::is_visible` / `window_error`.
-    pub(crate) visible: AtomicBool,
-    /// `AppHandle::quit` was called, or the web app is ending.
-    pub(crate) quitting: AtomicBool,
-    pub(crate) window_error: Mutex<Option<String>>,
-}
-
-impl<S> Default for Shared<S> {
-    fn default() -> Self {
-        Shared {
-            menus: crate::native_menu::Hub::default(),
-            shortcuts: crate::shortcuts::Hub::default(),
-            requests: Mutex::default(),
-            wake: Mutex::new(None),
-            visible: AtomicBool::new(false),
-            quitting: AtomicBool::new(false),
-            window_error: Mutex::new(None),
-        }
-    }
-}
-
-impl<S> Shared<S> {
-    /// Installs the event loop's wake-up and wakes it once for requests made before it existed.
-    pub fn connect(&self, wake: crate::runtime::Waker) {
-        *self.wake.lock().unwrap() = Some(wake);
-        self.wake();
-    }
-
-    pub fn wake(&self) {
-        let wake = self.wake.lock().unwrap().clone();
-        if let Some(wake) = wake {
-            wake();
-        }
-    }
-
-    pub fn take(&self) -> Requests<S> {
-        std::mem::take(&mut self.requests.lock().unwrap())
-    }
-
-    /// The queued updates alone; the other requests stay.
-    pub(crate) fn take_updates(&self) -> Vec<Update<S>> {
-        std::mem::take(&mut self.requests.lock().unwrap().updates)
-    }
-
-    /// Runs the queued updates with `run`, then takes the other requests, so a window an update
-    /// opens (or shows, focuses, places, quits) applies in this turn. Updates the updates queue
-    /// wait for the next turn, which their wake brings.
-    pub(crate) fn drain(&self, mut run: impl FnMut(Update<S>)) -> Requests<S> {
-        for f in self.take_updates() { run(f); }
-        let mut requests = self.requests.lock().unwrap();
-        let later = std::mem::take(&mut requests.updates);
-        std::mem::replace(&mut *requests, Requests { updates: later, ..Requests::default() })
-    }
-
-    /// Queues `f` for the next `take`, as `AppHandle::update_if` does, without waking the loop.
-    pub(crate) fn queue_update(&self, f: Update<S>) {
-        self.requests.lock().unwrap().updates.push(f);
-    }
-
-    /// A request a `--desktop` run applies to the window (dock and quit aside) waits for `take`.
-    pub(crate) fn window_pending(&self) -> bool {
-        let r = self.requests.lock().unwrap();
-        r.asks_window() || !r.updates.is_empty()
-    }
-
-    pub fn take_place(&self) -> Option<crate::windows::PlaceRequest> {
-        self.requests.lock().unwrap().place.take()
-    }
-}
+mod config;
+pub(crate) use config::RuntimeConfig;
+mod requests;
+pub(crate) use requests::{window_request_order, Activation, Shared, SharedCore, WindowRequest, WindowRequests};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::el::{El, Shell, el};
-
-    use crate::runtime::{Cx, Env, Runtime};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn spec() -> AppSpec<u32> {
-        AppSpec::new("test", (100.0, 100.0), || 0, |_: &u32, _: &mut Cx<u32>| el())
-    }
-
-    #[test]
-    fn a_named_web_canvas_sits_inline_unless_it_covers_the_viewport() {
-        assert!(!App::new(spec()).web_inline(), "Rune's own canvas covers the viewport");
-        assert!(!App::new(spec()).full_viewport().web_inline());
-        assert!(App::new(spec()).canvas_id("view").web_inline(), "canvas_id alone stays inline");
-        assert!(App::new(spec()).canvas_id("view").fit_content_height().web_inline());
-        assert!(!App::new(spec()).canvas_id("route").full_viewport().web_inline());
-        assert!(App::new(spec()).canvas_id("view").full_viewport().fit_content_height().web_inline(),
-            "sizing to content wins over covering the viewport");
-    }
-
-    #[test]
-    fn window_panel_placement_and_pixel_position_are_last_request_wins() {
-        let app = App::new(spec());
-        let handle = app.handle();
-        handle.set_position((10, 20));
-        handle.place(crate::DisplayTarget::Primary, crate::OverlayPlacement::FullScreen);
-        let q = app.shared.take();
-        assert!(q.position.is_none());
-        assert_eq!(q.place.unwrap().placement, crate::OverlayPlacement::FullScreen);
-        handle.place(crate::DisplayTarget::Primary, crate::OverlayPlacement::FullScreen);
-        handle.set_position((-10, 20));
-        let q = app.shared.take();
-        assert!(q.place.is_none());
-        assert_eq!(q.position, Some((-10, 20)));
-    }
-
-    #[test]
-    fn window_panel_focus_is_local_deduplicated_and_runs_without_frames() {
-        let mut rt = Runtime::new(Vec::new(), |_: &Vec<bool>, _: &mut Cx<Vec<bool>>| el(), (100.0, 100.0), Env::default());
-        rt.on_focus = Some(|seen, focused, tx| { seen.push(focused); if !focused { tx.close_window(); } });
-        let mut other = Runtime::new(Vec::new(), |_: &Vec<bool>, _: &mut Cx<Vec<bool>>| el(), (100.0, 100.0), Env::default());
-        other.on_focus = rt.on_focus;
-        rt.window_focus(true);
-        rt.window_focus(true);
-        rt.window_focus(false);
-        rt.window_focus(false);
-        assert_eq!(rt.state, [true, false]);
-        assert_eq!(rt.shell_request, Some(Shell::Close));
-        assert!(other.state.is_empty());
-        other.window_focus(false);
-        assert_eq!(other.state, [false]);
-        other.on_focus = None;
-        other.frame(0.0);
-        assert!(!other.stale());
-        other.window_focus(true);
-        assert!(!other.stale(), "focus on a committed view without on_window_focus asks for no extra frame");
-    }
-
-    #[test]
-    fn handles_report_the_window_the_host_publishes() {
-        let app = App::new(spec());
-        let handle = app.handle();
-        assert!(!handle.is_visible() && handle.window_error().is_none());
-        app.shared.visible.store(true, Ordering::Release);
-        *app.shared.window_error.lock().unwrap() = Some("no GPU adapter".into());
-        assert!(handle.is_visible());
-        assert_eq!(handle.window_error().as_deref(), Some("no GPU adapter"));
-    }
-
-    #[test]
-    fn handles_cross_threads_whatever_the_state() {
-        fn send_sync<T: Send + Sync + Clone>() {}
-        send_sync::<AppHandle<std::rc::Rc<()>>>();
-    }
-
-    #[test]
-    fn init_closures_replace_the_spec_init_and_scenes_apply_on_top() {
-        let mut spec = spec();
-        spec.scenes = &[("big", |n| *n += 100)];
-        let captured = 7;
-        let (_, state, _) = App::new(spec).init(move || captured).into_parts(Some("big"));
-        assert_eq!(state, 107);
-        let (_, state, _) = App::new(self::spec()).into_parts(None);
-        assert_eq!(state, 0);
-    }
-
-    #[test]
-    fn handle_requests_queue_before_the_loop_and_wake_it_after() {
-        let app = App::new(spec()).windowless();
-        assert!(!app.open && app.keep_running);
-        let handle = app.handle();
-        let other = handle.clone();
-        std::thread::spawn(move || {
-            other.update(|n, _| *n += 1);
-            other.activate("token");
-        })
-        .join()
-        .unwrap();
-        handle.update(|n, _| *n *= 10);
-        handle.close();
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let w = wakes.clone();
-        app.shared.connect(Arc::new(move || {
-            w.fetch_add(1, Ordering::SeqCst);
-        }));
-        assert_eq!(
-            wakes.load(Ordering::SeqCst),
-            1,
-            "connecting wakes once for queued requests"
-        );
-        let requests = app.shared.take();
-        assert_eq!(
-            requests.window,
-            Some(WindowRequest::Close),
-            "window requests collapse to the latest"
-        );
-        assert!(requests.quit.is_none());
-        let mut n = 0;
-        for f in requests.updates {
-            f(&mut n, &mut Tx::default());
-        }
-        assert_eq!(n, 10, "updates apply in call order");
-        handle.activate("");
-        assert_eq!(wakes.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            app.shared.take().window,
-            Some(WindowRequest::Open(None)),
-            "an empty token is no token"
-        );
-    }
-
-    #[test]
-    fn a_window_an_update_opens_applies_in_the_same_drain() {
-        let app = App::new(spec()).windowless();
-        let handle = app.handle();
-        let inner = handle.clone();
-        handle.update(move |n, _| {
-            *n += 1;
-            inner.open();
-            inner.update(|n, _| *n += 10);
-        });
-        let mut n = 0;
-        let requests = app.shared.drain(|f| { f(&mut n, &mut Tx::default()); });
-        assert_eq!(n, 1);
-        assert_eq!(requests.window, Some(WindowRequest::Open(None)), "the open applies this turn");
-        let next = app.shared.take();
-        assert_eq!(next.updates.len(), 1, "an update's own update waits for the next turn");
-        assert!(next.window.is_none());
-    }
-
-    #[test]
-    fn tray_requests_keep_show_focus_and_geometry_together() {
-        let app = App::new(spec()).windowless();
-        let handle = app.handle();
-        std::thread::spawn(move || {
-            handle.set_position((10, 20));
-            handle.hide();
-            handle.set_position((-300, 40));
-            handle.show();
-            handle.focus();
-        }).join().unwrap();
-        let requests = app.shared.take();
-        assert_eq!(requests.window, Some(WindowRequest::Show), "focus must not overwrite show");
-        assert!(requests.focus);
-        assert_eq!(requests.position, Some((-300, 40)));
-        let drained = app.shared.take();
-        assert!(!drained.focus && drained.window.is_none() && drained.position.is_none());
-    }
-
-    #[test]
-    fn updates_commit_on_the_next_frame_and_carry_shell_requests() {
-        fn view(n: &u32, _: &mut Cx<u32>) -> El {
-            crate::el::row().child(el().key("box").size(10.0 + *n as f32, 10.0))
-        }
-        let mut rt = Runtime::new(
-            0u32,
-            view,
-            (200.0, 200.0),
-            Env {
-                system_dark: true,
-                scale: 1.0,
-            },
-        );
-        rt.frame(0.0);
-        rt.update(|n, tx| {
-            *n = 30;
-            tx.instant();
-        });
-        assert!(rt.shell_request.is_none());
-        rt.frame(1.0 / 120.0);
-        let b = rt
-            .elements()
-            .into_iter()
-            .find(|e| e.key.as_deref() == Some("box"))
-            .unwrap();
-        assert_eq!(b.rect[2], 40.0, "the update's instant commit lands at once");
-        rt.update(|_, tx| tx.close_window());
-        rt.update(|_, tx| tx.quit());
-        rt.update(|_, tx| tx.close_window());
-        assert_eq!(rt.shell_request.take(), Some(Shell::Quit), "quit outranks close");
-    }
-
-    #[test]
-    fn minimize_reaches_the_shell_from_handlers_updates_and_handles() {
-        let mut rt = Runtime::new(0u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env::default());
-        rt.on_focus = Some(|_, focused, tx| if !focused { tx.minimize(); });
-        rt.window_focus(true);
-        assert!(!rt.minimize_request);
-        rt.window_focus(false);
-        assert!(rt.minimize_request && rt.shell_request.is_none(), "a handler's minimize is latched for the shell");
-        rt.ignore_minimize("a test");
-        assert!(!rt.minimize_request, "a shell that can't minimize takes the request");
-        rt.update(|_, tx| tx.minimize());
-        assert!(rt.minimize_request);
-        let app = App::new(spec());
-        app.handle().minimize();
-        let requests = app.shared.take();
-        assert!(requests.minimize && requests.window.is_none());
-    }
-
-    #[test]
-    fn a_handles_minimize_and_focus_are_last_wins_and_hide_close_or_open_cancel_it() {
-        let app = App::new(spec());
-        let h = app.handle();
-        let after = |calls: &dyn Fn()| { calls(); let r = app.shared.take(); (r.window, r.focus, r.minimize) };
-        assert_eq!(after(&|| { h.focus(); h.minimize(); }), (None, false, true), "focus then minimize stays minimized");
-        assert_eq!(after(&|| { h.minimize(); h.focus(); }), (None, true, false));
-        assert_eq!(after(&|| { h.show(); h.minimize(); }), (Some(WindowRequest::Show), false, true), "shows, then minimizes");
-        assert_eq!(after(&|| { h.minimize(); h.show(); }), (Some(WindowRequest::Show), false, true));
-        assert_eq!(after(&|| { h.minimize(); h.hide(); }), (Some(WindowRequest::Hide), false, false));
-        assert_eq!(after(&|| { h.minimize(); h.close(); }), (Some(WindowRequest::Close), false, false));
-        assert_eq!(after(&|| { h.minimize(); h.open(); }), (Some(WindowRequest::Open(None)), false, false), "open restores");
-    }
-
-    #[test]
-    fn a_standard_close_or_minimize_key_acts_only_when_no_handler_takes_it() {
-        use crate::runtime::Unhandled;
-        use crate::{Key, KeyEvent, Mods, PhysicalInput, PhysicalKeyCode as Code};
-        let cmd = Mods { cmd: true, ..Mods::default() };
-        let press = |rt: &mut Runtime<u32>, code, c, then| {
-            rt.physical_then(PhysicalInput::Key { key: code, mods: cmd, pressed: true, repeat: false },
-                Some(KeyEvent { key: Key::Command(c), mods: cmd }), None, Some(then));
-            rt.frame(0.0);
-        };
-        let mut rt = Runtime::new(0u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env::default());
-        press(&mut rt, Code::KeyW, 'w', Unhandled::Close);
-        assert_eq!(rt.shell_request.take(), Some(Shell::Close), "an unhandled ⌘W closes as the button would");
-        press(&mut rt, Code::KeyM, 'm', Unhandled::Minimize);
-        assert!(std::mem::take(&mut rt.minimize_request) && rt.shell_request.is_none());
-        rt.on_key = Some(|n, ev, _| { *n += 1; ev.is_command('w') });
-        press(&mut rt, Code::KeyW, 'w', Unhandled::Close);
-        assert_eq!((rt.state, rt.shell_request), (1, None), "the app's own ⌘W wins, once");
-        press(&mut rt, Code::KeyM, 'm', Unhandled::Minimize);
-        assert_eq!(rt.state, 2, "the app saw ⌘M first");
-        assert!(rt.minimize_request, "and didn't take it");
-    }
-
-    thread_local! { static BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
-
-    fn counted(n: &u32, _: &mut Cx<u32>) -> El {
-        BUILDS.set(BUILDS.get() + 1);
-        crate::el::row().child(el().key("box").size(10.0 + *n as f32, 10.0))
-    }
-
-    fn drain(rt: &mut Runtime<u32>, app: &App<u32>) -> bool {
-        let mut updated = false;
-        for f in app.shared.take().updates { updated |= rt.update_if(f); }
-        updated
-    }
-
-    #[test]
-    fn updates_that_change_nothing_build_nothing() {
-        let app = App::new(AppSpec::new("t", (100.0, 100.0), || 0, counted));
-        let handle = app.handle();
-        let mut rt = Runtime::new(0u32, counted, (100.0, 100.0), Env::default());
-        rt.frame(0.0);
-        let (builds, commits) = (BUILDS.get(), rt.stats.commits);
-        for _ in 0..100 {
-            handle.update_if(|_, _| false);
-            assert!(!drain(&mut rt, &app));
-            assert!(!rt.stale(), "nothing to redraw");
-            rt.frame(1.0 / 120.0);
-        }
-        assert_eq!((BUILDS.get() - builds, rt.stats.commits - commits), (0, 0));
-
-        handle.update_if(|_, _| false);
-        handle.update_if(|n, tx| { *n = 5; tx.instant(); true });
-        handle.update_if(|_, _| false);
-        assert!(drain(&mut rt, &app), "one change in the batch commits it");
-        rt.frame(1.0 / 120.0);
-        rt.frame(1.0 / 120.0);
-        assert_eq!(BUILDS.get() - builds, 1, "once");
-        assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("box")).unwrap().rect[2], 15.0);
-
-        handle.update(|_, _| {});
-        assert!(drain(&mut rt, &app), "`update` always counts as a change");
-        rt.frame(1.0 / 120.0);
-        assert_eq!(BUILDS.get() - builds, 2);
-    }
-
-    #[test]
-    fn an_update_that_changes_nothing_still_delivers_its_requests() {
-        let mut rt = Runtime::new(0u32, counted, (100.0, 100.0), Env::default());
-        rt.frame(0.0);
-        assert!(!rt.update_if(|_, tx| { tx.copy("hello"); tx.wake_after(std::time::Duration::from_millis(500)); false }));
-        assert!(!rt.stale());
-        assert_eq!(rt.copy_request.as_deref(), Some("hello"));
-        assert_eq!(rt.wake_deadline(), None, "left for the next frame, as `update` leaves it");
-        rt.schedule_pending_wakes();
-        assert_eq!(rt.wake_deadline(), Some(rt.clock + 0.5), "or scheduled by a host that runs none");
-        assert!(!rt.update_if(|_, tx| { tx.quit(); false }));
-        assert_eq!(rt.shell_request, Some(Shell::Quit));
-    }
-
-    /// A `wake_after(ZERO)` from an update that changed nothing, in a batch that still draws,
-    /// asks for the frame after, as `update`'s does: the frame doesn't spend it before polling.
-    #[test]
-    fn an_unchanging_updates_next_frame_timer_survives_a_frame() {
-        let run = |changed: bool| {
-            let mut rt = Runtime::new(0u32, counted, (100.0, 100.0), Env::default());
-            rt.frame(0.0);
-            rt.update_if(move |_, tx| { tx.wake_after(std::time::Duration::ZERO); changed });
-            rt.update(|n, _| *n += 1);
-            rt.frame(1.0);
-            rt.wake_deadline()
-        };
-        assert!(run(true).is_some());
-        assert_eq!(run(false), run(true));
-    }
-
-    #[test]
-    fn a_hidden_window_drains_its_inbox_on_wake_and_shows_it_when_reopened() {
-        #[derive(Default)]
-        struct Lock { inbox: Option<std::sync::mpsc::Receiver<u32>>, locked: u32 }
-        fn view(s: &Lock, _: &mut Cx<Lock>) -> El {
-            crate::el::row().child(el().key("box").size(10.0 + s.locked as f32, 10.0))
-        }
-        let mut rt = Runtime::new(Lock::default(), view, (200.0, 200.0), Env { system_dark: true, scale: 1.0 });
-        rt.poll = Some(|s: &mut Lock, _, tx: &mut Tx| {
-            let Some(n) = s.inbox.as_ref().and_then(|inbox| inbox.try_iter().last()) else { return false };
-            s.locked = n;
-            tx.wake_after(std::time::Duration::from_secs(60));
-            true
-        });
-        rt.wall_start = Some(std::time::Instant::now());
-        let (send, inbox) = std::sync::mpsc::channel();
-        rt.state.inbox = Some(inbox);
-        rt.frame(0.0);
-        let width = |rt: &Runtime<Lock>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("box")).unwrap().rect[2];
-        assert_eq!(width(&rt), 10.0);
-
-        // Hidden from here: something queues a lock and wakes the loop.
-        send.send(30).unwrap();
-        assert!(rt.poll_hidden(), "a hidden launcher renders when poll reports a change");
-        assert!(!rt.poll_hidden());
-        assert_eq!(rt.state.locked, 30, "poll drained the inbox without a frame");
-        assert_eq!(width(&rt), 10.0, "nothing laid out, animated or presented while hidden");
-        assert!(rt.wake_deadline().is_some(), "poll's own timers still schedule while hidden");
-
-        // `show` lands everything on its first frame.
-        rt.settle_all();
-        rt.frame(1.0 / 60.0);
-        assert_eq!(width(&rt), 40.0);
-    }
-
-    /// An update's `wake_after`, delivered while no frame draws (hidden, covered, asleep or
-    /// minimised), arms its timer on the next hidden poll.
-    #[test]
-    fn an_update_arriving_without_frames_arms_its_timer() {
-        let mut rt = Runtime::new(0_u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
-        rt.poll = Some(|polls: &mut u32, _, _: &mut Tx| { *polls += 1; false });
-        rt.wall_start = Some(std::time::Instant::now());
-        rt.frame(0.0);
-        assert_eq!(rt.wake_deadline(), None);
-        rt.update(|_, tx| tx.wake_after(std::time::Duration::from_secs(5)));
-        rt.poll_hidden();
-        let deadline = rt.wake_deadline().expect("the update's timer is armed without a frame");
-        assert!((4.9..5.5).contains(&deadline), "it counts from the update: {deadline}");
-        rt.frame(0.0);
-        assert_eq!(rt.wake_deadline(), Some(deadline), "and the next frame doesn't arm it twice");
-    }
-
-    /// A hidden host's due timer runs `poll` and spends the timer without building the view,
-    /// poll or not. The view waits, dirty, for the frame that shows the host.
-    #[test]
-    fn a_hidden_timer_polls_without_building_the_view() {
-        use std::time::{Duration, Instant};
-        for with_poll in [true, false] {
-            let mut rt = Runtime::new(0_u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
-            if with_poll { rt.poll = Some(|polls: &mut u32, _, _: &mut Tx| { *polls += 1; true }); }
-            let t0 = Instant::now();
-            rt.wall_start = Some(t0);
-            rt.frame(0.0);
-            let commits = rt.stats.commits;
-            rt.update(|_, tx| tx.wake_after(Duration::from_millis(10)));
-            assert_eq!(rt.hidden_wake(), with_poll);
-            assert!(rt.wake_deadline().is_some());
-            rt.wall_start = Some(t0 - Duration::from_secs(1));
-            assert_eq!(rt.hidden_wake(), with_poll);
-            assert_eq!(rt.wake_deadline(), None, "the due timer is spent, so it doesn't wake the host again");
-            assert_eq!(rt.stats.commits, commits, "no view or layout while hidden");
-            assert!(rt.needs_commit());
-            rt.frame(0.0);
-            assert_eq!(rt.stats.commits, commits + 1, "the frame that shows it builds once");
-        }
-    }
-}
+mod tests;

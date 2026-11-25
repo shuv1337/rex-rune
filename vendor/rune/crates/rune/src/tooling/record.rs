@@ -9,11 +9,56 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use crate::render::Offscreen;
 
-/// Readbacks in flight: rendering frame n + 1 and n + 2 overlaps mapping frame n.
+/// Readbacks and uncaptured frames in flight: rendering frame n + 1 and n + 2 overlaps frame n.
 pub(crate) const DEPTH: usize = 3;
 
+/// Bounds GPU submissions in flight for headless frames that don't read pixels back.
+///
+/// Without a swap chain or a full readback ring, a tight headless loop submits faster than a
+/// slower GPU retires frames, leaving command allocators and driver submission buffers unrecycled.
+/// Waiting on the oldest submission once `depth` frames are in flight keeps the GPU pipelined with
+/// bounded memory.
+pub(crate) struct InFlight<T = wgpu::SubmissionIndex> {
+    pending: VecDeque<T>,
+    depth: usize,
+}
+
+impl<T> InFlight<T> {
+    pub(crate) fn new(depth: usize) -> Self {
+        Self { pending: VecDeque::with_capacity(depth.max(1)), depth: depth.max(1) }
+    }
+
+    pub(crate) fn push(&mut self, submission: T) {
+        self.pending.push_back(submission);
+    }
+
+    /// Retires the oldest submission(s) through `wait` until fewer than `depth` remain in flight.
+    pub(crate) fn pace_with(&mut self, mut wait: impl FnMut(T)) {
+        while self.pending.len() >= self.depth {
+            wait(self.pending.pop_front().unwrap());
+        }
+    }
+
+    /// Drops tracked submissions after a full device drain (`wait_indefinitely`).
+    pub(crate) fn clear(&mut self) {
+        self.pending.clear();
+    }
+}
+
+impl InFlight<wgpu::SubmissionIndex> {
+    /// Waits on the oldest submission(s) until fewer than `depth` frames remain in flight.
+    pub(crate) fn pace(&mut self, device: &wgpu::Device) {
+        self.pace_with(|oldest| {
+            rune_gpu::health::poll(
+                device,
+                wgpu::PollType::Wait { submission_index: Some(oldest), timeout: None },
+            ).ok();
+        });
+    }
+}
+
 struct Slot {
-    buffer: wgpu::Buffer,
+    readback: rune_staging::Readback,
     ready: Arc<AtomicBool>,
 }
 
@@ -23,24 +68,15 @@ pub(crate) struct Readback<T> {
     next: usize,
     /// Copied frames, oldest first: slot, tag, and whether `map_async` was called.
     pending: VecDeque<(usize, T, bool)>,
-    width: u32,
-    height: u32,
-    padded_row: u32,
 }
 
 impl<T> Readback<T> {
     pub(crate) fn new(device: &wgpu::Device, target: &Offscreen, depth: usize) -> Self {
-        let padded_row = target.padded_row();
         let slots = (0..depth.max(1)).map(|_| Slot {
-            buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("readback ring"),
-                size: u64::from(padded_row) * u64::from(target.height),
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }),
+            readback: rune_staging::Readback::new(device, "readback ring", target.width, target.height, 4),
             ready: Arc::new(AtomicBool::new(false)),
         }).collect();
-        Readback { slots, next: 0, pending: VecDeque::new(), width: target.width, height: target.height, padded_row }
+        Readback { slots, next: 0, pending: VecDeque::new() }
     }
 
     /// Frames that must finish before the next `copy` has a free buffer (waits for the oldest
@@ -59,7 +95,7 @@ impl<T> Readback<T> {
         assert!(self.pending.len() < self.slots.len(), "Readback::make_room first");
         let slot = self.next;
         self.next = (self.next + 1) % self.slots.len();
-        target.copy_to(encoder, &self.slots[slot].buffer);
+        self.slots[slot].readback.copy_from(encoder, target.texture());
         self.pending.push_back((slot, tag, false));
     }
 
@@ -68,9 +104,9 @@ impl<T> Readback<T> {
         for (slot, _, mapping) in self.pending.iter_mut().filter(|p| !p.2) {
             let ready = self.slots[*slot].ready.clone();
             ready.store(false, Ordering::Release);
-            self.slots[*slot].buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                r.expect("map readback");
-                ready.store(true, Ordering::Release);
+            // A lost device's map fails: the frame stays unready and `pop`'s wait says why.
+            self.slots[*slot].readback.buffer().slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                if r.is_ok() { ready.store(true, Ordering::Release); }
             });
             *mapping = true;
         }
@@ -78,7 +114,7 @@ impl<T> Readback<T> {
 
     /// Finished frames in submission order, without waiting.
     pub(crate) fn ready(&mut self, device: &wgpu::Device) -> Vec<(T, Vec<u8>)> {
-        let _ = device.poll(wgpu::PollType::Poll);
+        rune_gpu::health::poll(device, wgpu::PollType::Poll).ok();
         let mut done = Vec::new();
         while let Some(frame) = self.pop(device, false) { done.push(frame); }
         done
@@ -98,29 +134,24 @@ impl<T> Readback<T> {
         if !ready.load(Ordering::Acquire) {
             if !wait { return None; }
             while !ready.load(Ordering::Acquire) {
-                device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+                match rune_gpu::health::poll(device, wgpu::PollType::wait_indefinitely()) {
+                    Err(error) => crate::tooling::args::die(&format!("{error} while a frame was read back; no image was written")),
+                    // Nothing left to wait for, and the map failed.
+                    Ok(wgpu::PollStatus::QueueEmpty) if !ready.load(Ordering::Acquire) => crate::tooling::args::die("a frame's readback failed; no image was written"),
+                    Ok(_) => {}
+                }
             }
         }
         let (slot, tag, _) = self.pending.pop_front().unwrap();
-        let buffer = &self.slots[slot].buffer;
-        let pixels = {
-            let data = buffer.slice(..).get_mapped_range().expect("mapped range");
-            unpad(&data, self.width, self.height, self.padded_row)
-        };
-        buffer.unmap();
+        let pixels = self.slots[slot].readback.take_mapped();
         Some((tag, pixels))
     }
 }
 
 /// Rows of `width` RGBA pixels from a buffer whose rows are `padded_row` bytes apart.
+#[cfg(test)]
 pub(crate) fn unpad(data: &[u8], width: u32, height: u32, padded_row: u32) -> Vec<u8> {
-    let row = (width * 4) as usize;
-    let mut out = Vec::with_capacity(row * height as usize);
-    for y in 0..height as usize {
-        let start = y * padded_row as usize;
-        out.extend_from_slice(&data[start..start + row]);
-    }
-    out
+    rune_staging::unpad_rows(data, (width * 4) as usize, height, padded_row)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -188,8 +219,8 @@ struct Encoder(std::process::Child);
 impl Drop for Encoder {
     fn drop(&mut self) {
         if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            self.0.kill().ok();
+            self.0.wait().ok();
         }
     }
 }
@@ -355,7 +386,7 @@ mod tests {
 
     #[test]
     fn pipelined_readbacks_match_serial_pixels_in_order_across_wraps() {
-        let gpu = crate::render::Gpu::headless();
+        let Some(gpu) = crate::render::Gpu::test_headless() else { return };
         // An odd width exercises row-padding removal as well as ring reuse and final draining.
         let target = Offscreen::new(&gpu.device, 37, 23);
         let mut ring = Readback::new(&gpu.device, &target, DEPTH);
@@ -403,5 +434,71 @@ mod tests {
             expected.push((i, target.read(&gpu.device)));
         }
         assert_eq!(actual, expected, "no drops, duplicates, reordering or stale slot contents");
+    }
+
+    #[test]
+    fn in_flight_paces_fifo_and_bounds_queue_depth() {
+        let mut ring = InFlight::new(DEPTH);
+        let mut waited = Vec::new();
+        for i in 0..10usize {
+            ring.push(i);
+            assert!(ring.pending.len() <= DEPTH);
+            ring.pace_with(|oldest| waited.push(oldest));
+            assert!(ring.pending.len() < DEPTH);
+        }
+        assert_eq!(waited, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(ring.pending.iter().copied().collect::<Vec<_>>(), [8, 9]);
+
+        // A full device drain clears tracked entries so subsequent frames start fresh.
+        ring.clear();
+        waited.clear();
+        ring.push(10);
+        ring.push(11);
+        ring.pace_with(|oldest| waited.push(oldest));
+        assert!(waited.is_empty());
+
+        // Depth 0 clamps to 1 so every push retires immediately.
+        let mut serial = InFlight::new(0);
+        serial.push(42usize);
+        serial.pace_with(|oldest| waited.push(oldest));
+        assert_eq!(waited, [42]);
+    }
+
+    #[test]
+    fn in_flight_paces_gpu_submissions_before_exceeding_depth() {
+        use std::sync::atomic::AtomicUsize;
+
+        let Some(gpu) = crate::render::Gpu::test_headless() else { return };
+        let target = Offscreen::new(&gpu.device, 32, 32);
+        let mut ring = InFlight::new(DEPTH);
+        let completed = Arc::new(AtomicUsize::new(0));
+        for i in 0..12usize {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.view, depth_slice: None, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: i as f64 / 12.0, g: 0.2, b: 0.4, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
+            let submission = gpu.queue.submit([encoder.finish()]);
+            let done = completed.clone();
+            gpu.queue.on_submitted_work_done(move || { done.fetch_add(1, Ordering::Release); });
+            ring.push(submission);
+            ring.pace(&gpu.device);
+            let min_done = (i + 1).saturating_sub(DEPTH - 1);
+            assert!(
+                completed.load(Ordering::Acquire) >= min_done,
+                "frame {i}: at most {} submissions may remain unfinished after pace",
+                DEPTH - 1
+            );
+        }
+        rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).unwrap();
+        assert_eq!(completed.load(Ordering::Acquire), 12);
     }
 }
