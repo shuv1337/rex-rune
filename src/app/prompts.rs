@@ -632,7 +632,9 @@ impl Workspace {
                     if let Some(active) = self.prompts.find_mut(&key) {
                         active.sending = false;
                         active.error = Some(message);
-                        if self.prompts.open.as_ref() != Some(&key) && self.panel.is_none() {
+                        if self.prompts.open.as_ref() != Some(&key)
+                            && self.can_auto_open_prompt(index, now)
+                        {
                             self.open_prompt(key, now);
                             tx.wake_after(SUBMIT_GUARD);
                         }

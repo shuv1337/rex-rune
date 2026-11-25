@@ -1214,6 +1214,66 @@ fn sending_prompt_ignores_cancel_reopens_on_reject_and_distinguishes_disconnect_
 }
 
 #[test]
+fn reply_rejected_while_typing_stays_waiting_chip_with_draft_and_error() {
+    let (mut ws, rxs) = connected_ws(1);
+    let rx = &rxs[0];
+    let base = Instant::now();
+
+    push_prompt_event_at(
+        &mut ws,
+        0,
+        PromptEventKind::Requested(input_prompt("reject-typing", "Confirm tag")),
+        base,
+    );
+    assert!(ws.is_prompt_open());
+    ws.prompt_edit().text = "v2.3.4".into();
+
+    let t_submit = base + SUBMIT_GUARD;
+    let mut tx = Tx::default();
+    ws.submit_open_prompt(&mut tx, t_submit, false);
+    assert_eq!(prompt_replies(rx).len(), 1);
+    assert!(ws.prompts.open_prompt().unwrap().sending);
+
+    // Demote via a local panel, return to the terminal, and record a recent keypress (< 750 ms).
+    ws.picker(false);
+    ws.close_panel(&mut tx);
+    assert!(!ws.is_prompt_open());
+    let t_key = t_submit + Duration::from_millis(50);
+    ws.last_keypress = Some(t_key);
+
+    // ReplyRejected arrives 150 ms after typing with no action in flight: must stay a chip.
+    let t_reject = t_key + Duration::from_millis(150);
+    push_prompt_event_at(
+        &mut ws,
+        0,
+        PromptEventKind::ReplyRejected {
+            call_id: "reject-typing".into(),
+            message: "Tag already exists.".into(),
+        },
+        t_reject,
+    );
+    assert!(
+        !ws.is_prompt_open(),
+        "ReplyRejected during active typing must not steal focus"
+    );
+    assert!(ws.has_waiting_prompt());
+    assert!(!ws.prompts.queue[0].sending);
+    assert_eq!(ws.prompts.queue[0].edit.text, "v2.3.4");
+    assert_eq!(
+        ws.prompts.queue[0].error.as_deref(),
+        Some("Tag already exists.")
+    );
+
+    // Opening the waiting chip reveals the preserved draft and inline error.
+    assert!(ws.open_oldest_waiting_prompt());
+    assert_eq!(ws.prompt_edit().text, "v2.3.4");
+    assert_eq!(
+        ws.prompts.open_prompt().unwrap().error.as_deref(),
+        Some("Tag already exists.")
+    );
+}
+
+#[test]
 fn pick_modal_with_wrapped_error_fits_within_85_percent_cap_at_640x480() {
     let (mut ws, _rxs) = connected_ws(1);
     ws.settings.hosts[0].label = "workstation".into();
