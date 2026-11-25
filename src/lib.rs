@@ -21,6 +21,7 @@ pub mod legacy;
 pub mod links;
 pub mod platform;
 pub mod ports;
+pub mod program_resume;
 pub mod qr;
 pub mod settings;
 pub mod ssh;

@@ -29,4 +29,8 @@ SSH attachment uses OpenSSH socket forwarding with strict host-key checking. **C
 
 ## Out of scope for now
 
+The client library reads Program Resume metadata on API 24. There is no UI for
+it yet. The client never uses the report to start a program. Rex snapshot 2646
+does not resume reported programs after restart.
+
 Complete Kitty graphics, distribution packages, and screen-reader support for the terminal itself. Rune's AT-SPI tree is on and names the chrome, but it has not been tried with a screen reader, and the terminal pane exposes only visible text as plain labels (no caret, selection or focus). See the README's Accessibility section and its list of unvalidated areas.

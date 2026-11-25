@@ -29,6 +29,7 @@ pub mod hosts;
 mod input;
 pub mod ports;
 mod prefetch;
+pub(crate) mod program_resume;
 pub mod server_info;
 mod status_sweep;
 mod title_wake;
@@ -460,6 +461,12 @@ pub struct HostModel {
     pub ports_reading: HashSet<String>,
     /// Monotonic count of completed `com.superlogical.terminal.ports` reads on this connection.
     pub ports_read_completions: u64,
+    /// Latest metadata-only resume records for terminal blocks in held views.
+    pub program_resume: HashMap<String, crate::program_resume::ResumeSnapshot>,
+    /// Blocks with queued or in-flight on-demand resume reads.
+    pub program_resume_reading: HashSet<String>,
+    /// This API 24+ connection explicitly refused the read as unsupported.
+    pub program_resume_unsupported: bool,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -602,6 +609,8 @@ impl HostModel {
         self.progress.remove(block);
         self.ports.remove(block);
         self.ports_reading.remove(block);
+        self.program_resume.remove(block);
+        self.program_resume_reading.remove(block);
     }
 
     /// The block's terminal title while it's current. Shells rarely clear a title when the
@@ -705,6 +714,12 @@ pub enum HostCommand {
     ReadPorts {
         epoch: u64,
         session: String,
+    },
+    /// Open or close on-demand Program Resume inspection on this epoch (API 24+).
+    /// Only the selected foreground session is eligible for reads.
+    WatchProgramResume {
+        epoch: u64,
+        session: Option<String>,
     },
     /// Create or update one host in this server's shared host list (`hosts.put`) on `epoch` only.
     /// Never auto-retried or queued across reconnects.
@@ -872,6 +887,8 @@ struct ControlState {
     ports_seq: HashMap<String, u64>,
     /// On-demand detached `com.superlogical.terminal.ports` reader for this connection.
     ports_reads: ports::Reader,
+    resume_seq: HashMap<String, u64>,
+    resume_reads: program_resume::Reader,
 }
 
 impl ControlState {
@@ -945,6 +962,8 @@ impl ControlState {
         self.tickets.retain(|(_, b), _| b != block);
         self.ports_seq.remove(block);
         self.ports_reads.cancel_block(block);
+        self.resume_seq.remove(block);
+        self.resume_reads.cancel_block(block);
     }
 
     fn forget_session(&mut self, id: &str, blocks: impl IntoIterator<Item = String>) {
@@ -958,6 +977,7 @@ impl ControlState {
         self.fetch_stale.remove(id);
         self.tickets.retain(|(s, _), _| s != id);
         self.ports_reads.cancel_session(id);
+        self.resume_reads.cancel_session(id);
         for block in blocks {
             self.forget_block(&block);
         }
@@ -977,8 +997,7 @@ impl ControlState {
         if list_event || event_type == "session_label_changed" {
             floor = floor.max(self.list_seq);
         }
-        // Views contain state, not transient clipboard events, ports_changed events, or
-        // list-level session events.
+        // Views contain layout, not clipboard, listening ports, Program Resume, or session lists.
         let session = event.session_id.as_deref().or_else(|| {
             (event.name == "event_dropped")
                 .then(|| event.payload["session_id"].as_str())
@@ -986,12 +1005,15 @@ impl ControlState {
         });
         let is_copy = event.name == "block_event" && clipboard::is_copy(&event.payload);
         let is_ports = event.name == "block_event" && ports::is_ports_changed(&event.payload);
+        let is_resume =
+            event.name == "block_event" && program_resume::is_resume_changed(&event.payload);
         // `session.view` carries layout, not program status, title, or process metadata, so
         // only `session_view_changed` drops are superseded by a newer `view_seq`.
         let view_covered = event.name != "event_dropped" || event_type == "session_view_changed";
         if !list_event
             && !is_copy
             && !is_ports
+            && !is_resume
             && view_covered
             && let Some(id) = session
         {
@@ -1084,6 +1106,9 @@ impl Shared {
                 m.keymap_revision += 1;
                 m.ports.clear();
                 m.ports_reading.clear();
+                m.program_resume.clear();
+                m.program_resume_reading.clear();
+                m.program_resume_unsupported = false;
                 m.focus_history_result = None;
             }
             for terminal in m.terminals.values() {
@@ -1428,7 +1453,10 @@ fn replace_view(
         }
         apply_view_to_model(m, id, view);
         if !added.is_empty() {
-            state.ports_reads.enqueue_new_watched_blocks(m, id, added);
+            state
+                .ports_reads
+                .enqueue_new_watched_blocks(m, id, added.iter().cloned());
+            state.resume_reads.enqueue_new_watched_blocks(m, id, added);
         }
     });
 }
@@ -1717,6 +1745,7 @@ fn apply_visibility(
 ) {
     shared.update(|m| m.visible = visible);
     ports::reconcile_selected(shared, state);
+    program_resume::reconcile_selected(shared, state);
     state.prune(&shared.model.lock().expect("host model"));
     reconcile(endpoint, shared, sender, workers);
 }
@@ -1920,10 +1949,31 @@ async fn handle_event(
                     .await?;
                 return Ok(());
             }
+            if event_type == "block_event" && block_event_name == Some(program_resume::EVENT) {
+                program_resume::handle_dropped(
+                    control,
+                    shared,
+                    state,
+                    session_id,
+                    dropped_block,
+                    event.seq,
+                )
+                .await?;
+                return Ok(());
+            }
             if event_type.is_empty() || (event_type == "block_event" && block_event_name.is_none())
             {
                 ports::handle_dropped(control, shared, state, session_id, dropped_block, event.seq)
                     .await?;
+                program_resume::handle_dropped(
+                    control,
+                    shared,
+                    state,
+                    session_id,
+                    dropped_block,
+                    event.seq,
+                )
+                .await?;
             }
             match event_type {
                 "session_destroyed" => {
@@ -2132,6 +2182,24 @@ async fn handle_event(
                 }
                 return Ok(());
             }
+            if program_resume::is_resume_changed(&event.payload) {
+                if control.welcome().api_revision >= crate::program_resume::MIN_API_REVISION
+                    && let (Some(session), Some(block)) = (
+                        event.session_id.as_deref(),
+                        event.payload["block_id"].as_str(),
+                    )
+                {
+                    program_resume::apply_event(
+                        shared,
+                        state,
+                        session,
+                        block,
+                        event.seq,
+                        &event.payload["payload"],
+                    );
+                }
+                return Ok(());
+            }
             let (Some(id), Some((block, change))) = (
                 event.session_id.as_deref(),
                 activity::parse_block_event(&event.payload),
@@ -2165,8 +2233,12 @@ async fn handle_event(
         _ => {}
     }
     ports::reconcile_selected(shared, state);
+    program_resume::reconcile_selected(shared, state);
     if state.ports_reads.can_pump() {
         state.ports_reads.pump(control, shared).await?;
+    }
+    if state.resume_reads.can_pump() {
+        state.resume_reads.pump(control, shared).await?;
     }
     Ok(())
 }
@@ -2294,6 +2366,9 @@ async fn run_host(
                 m.ports.clear();
                 m.ports_reading.clear();
                 m.ports_read_completions = 0;
+                m.program_resume.clear();
+                m.program_resume_reading.clear();
+                m.program_resume_unsupported = false;
                 m.activity_epoch += 1;
                 m.activity_reading = true;
                 m.activity_incomplete = false;
@@ -2436,6 +2511,9 @@ async fn run_host(
                 if !exclusive && state.ports_reads.can_pump() {
                     state.ports_reads.pump(&mut control, shared).await?;
                 }
+                if !exclusive && state.resume_reads.can_pump() {
+                    state.resume_reads.pump(&mut control, shared).await?;
+                }
                 let next = (!exclusive).then(|| status_sweep::next(shared, &state)).flatten();
                 let out = sweep.in_flight() + usize::from(prefetch.in_flight());
                 if !exclusive {
@@ -2533,6 +2611,10 @@ async fn run_host(
                     finished = state.ports_reads.finished(), if !exclusive && state.ports_reads.in_flight() > 0 => {
                         ports::record_reply(shared, &mut state, finished);
                         state.ports_reads.pump(&mut control, shared).await?;
+                    }
+                    finished = state.resume_reads.finished(), if !exclusive && state.resume_reads.in_flight() > 0 => {
+                        program_resume::record_reply(shared, &mut state, finished);
+                        state.resume_reads.pump(&mut control, shared).await?;
                     }
                     reply = server_reads.finished(), if !exclusive && server_reads.in_flight() => server_info::record(shared, reply),
                     reply = hosts_reads.finished(), if !exclusive && hosts_reads.in_flight() => hosts::record(shared, reply),
@@ -2832,6 +2914,12 @@ async fn run_host(
                             }
                             continue;
                         }
+                        if let HostCommand::WatchProgramResume { epoch, session } = command {
+                            if epoch == shared.model.lock().expect("host model").connection_epoch {
+                                program_resume::watch(&mut control, shared, &mut state, session).await?;
+                            }
+                            continue;
+                        }
                         if let HostCommand::PutSharedHost { id, epoch, host } = command {
                             hosts::execute_put(&mut control, shared, &mut hosts_reads, id, epoch, host).await?;
                             continue;
@@ -2925,6 +3013,7 @@ async fn run_host(
                             }
                             CommandEffect::Full => {
                                 ports::reconcile_selected(shared, &mut state);
+                                program_resume::reconcile_selected(shared, &mut state);
                                 state.prune(&shared.model.lock().expect("host model"));
                                 reconcile(&endpoint, shared, &sender, &mut workers);
                                 metadata_due = true;
@@ -3087,6 +3176,7 @@ async fn run_host(
                 | HostCommand::FetchView { .. }
                 | HostCommand::WatchPorts { .. }
                 | HostCommand::ReadPorts { .. }
+                | HostCommand::WatchProgramResume { .. }
                 | HostCommand::DownloadConfirm(_)
                 | HostCommand::DownloadCancel(_) => {}
                 _ if in_backoff => shared.update(|m| {
@@ -3721,6 +3811,7 @@ async fn handle_command(
         | HostCommand::WatchSharedHosts
         | HostCommand::WatchPorts { .. }
         | HostCommand::ReadPorts { .. }
+        | HostCommand::WatchProgramResume { .. }
         | HostCommand::PutSharedHost { .. }
         | HostCommand::RemoveSharedHost { .. }
         | HostCommand::Download(_)

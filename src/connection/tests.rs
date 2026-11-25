@@ -23,6 +23,8 @@ mod navigation_tests;
 mod perform_tests;
 #[path = "ports_tests.rs"]
 mod ports_tests;
+#[path = "program_resume_tests.rs"]
+mod program_resume_tests;
 #[path = "prompt_wire_tests.rs"]
 mod prompt_wire_tests;
 #[path = "server_controls_tests.rs"]

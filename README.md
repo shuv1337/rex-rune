@@ -219,3 +219,7 @@ and protocol this client follows (API revision 24, with revisions 10-23 also
 supported), and to [m4nik1/rex-linux-client](https://github.com/m4nik1/rex-linux-client)
 and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx) for protocol work
 that served as references.
+
+The API 24 client library reads Program Resume record metadata. There is no
+Program Resume UI yet. Rex snapshot 2646 does not rerun reported programs
+after a restart. See [the API 24 compatibility record](docs/server-api24.md).

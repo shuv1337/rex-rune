@@ -3094,6 +3094,7 @@ dependencies = [
  "futures-util",
  "gethostname",
  "ghostty-vt",
+ "icu_properties",
  "image",
  "libc",
  "log",

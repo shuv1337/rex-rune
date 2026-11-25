@@ -12,7 +12,7 @@ The server was built on November 25, 2026 at 11:17 AM PST.
 | --- | --- | --- |
 | 22 | `session.transfer_window` moves a live window across sessions and reuses block IDs. | Negotiates the revision. No transfer action. |
 | 23 | `com.superlogical.fs` adds tar upload and download on filesystem blocks. | Negotiates the revision. No filesystem block or tar support. |
-| 24 | `com.superlogical.terminal.program_resume_records` and the `program_resume_changed` block event. | Negotiates the revision. |
+| 24 | `com.superlogical.terminal.program_resume_records` and the `program_resume_changed` block event. | Reads record metadata and follows changes. No UI or actions. |
 
 The catalog adds four methods to the API 21 catalog. None of the existing
 request or response shapes changed.
@@ -39,3 +39,28 @@ record, ask for confirmation, or emit a resume event. Terminal state had
 only `version`, `process_cwd`, and `size`. There is no resume, approval,
 forget, clear, or rule-edit API for the client. This is evidence about
 2646, not a guarantee about future Rex builds.
+
+## Reader
+
+Rex Rune gates the read and the event on the negotiated API 24 revision.
+The library reads only when a caller opens a watch on the selected
+foreground session. It reads each terminal once per watch, with up to two
+reads in flight and an eight-second deadline. Passive events update held
+views without reading or generating activity, notifications, or sounds.
+
+Replies and events are decoded as metadata. The reader does not use the
+generated response type, which describes the whole wire response including
+secret arguments. The client drops those arguments and server error text,
+escapes hostile display text and caps records at 16 per block and 1024 per
+host. It does not evaluate trust rules or execute anything.
+
+Events apply above a block's last sequence. Reads apply at or above it.
+Dropped events invalidate affected snapshots and only reread an open
+foreground watch. A watch and its pending work are scoped to the current
+connection epoch, with no retries on reconnect.
+
+`scripts/program-resume-private.py` exercises the worker against private
+2646 and 2562 servers. Its clean-restart tripwire checks for saved records,
+program execution, prompts and resume events. All seven checks passed on
+these snapshots. Both `rex-probe` and `rex-workspace-probe` also passed
+against each snapshot with `REX_EXPECT_REVISION` set to its revision.
