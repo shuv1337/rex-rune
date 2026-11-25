@@ -14,19 +14,7 @@ fn empty_snapshot() -> Vec<u8> {
 
 fn spawn_data_server(mut ws: WebSocketStream<TcpStream>) {
     tokio::spawn(async move {
-        let Some(Ok(Message::Binary(hello))) = ws.next().await else {
-            return;
-        };
-        if hello.len() != 17 || hello[0] != 1 {
-            return;
-        }
-        let mut welcome = vec![0u8; 32];
-        welcome[0] = 0x81;
-        welcome[24] = 1;
-        if ws.send(Message::Binary(welcome.into())).await.is_err() {
-            return;
-        }
-        let _ = ws.send(Message::Binary(empty_snapshot().into())).await;
+        data_handshake(&mut ws).await;
         // Keep the data socket open until the client closes.
         while let Some(Ok(frame)) = ws.next().await {
             if matches!(frame, Message::Close(_)) {
@@ -34,6 +22,18 @@ fn spawn_data_server(mut ws: WebSocketStream<TcpStream>) {
             }
         }
     });
+}
+
+async fn data_handshake(ws: &mut Ws) {
+    let hello = ws.next().await.unwrap().unwrap().into_data();
+    assert_eq!((hello.len(), hello[0]), (17, 1));
+    let mut welcome = vec![0; 32];
+    welcome[0] = 0x81;
+    welcome[24] = 1;
+    ws.send(Message::Binary(welcome.into())).await.unwrap();
+    ws.send(Message::Binary(empty_snapshot().into()))
+        .await
+        .unwrap();
 }
 
 fn key_payload(key: &str, text: &str, action: &str) -> Value {
@@ -174,6 +174,118 @@ async fn close(host: HostConnection, ws: &mut Ws) {
         tokio::time::timeout(WAIT, ws.next()).await.unwrap(),
         Some(Ok(Message::Close(_)))
     ));
+}
+
+/// Exercise both sockets: the control server holds Enter while the data server sends stale
+/// echoes. Read back the worker's published frames, never infer delivery from a timer.
+#[tokio::test]
+async fn local_echo_enter_reply_and_post_ack_data_allow_typing_again() {
+    use crate::settings::terminal::LocalEcho;
+    use crate::terminal::local_echo::{InputAction::Insert, Predictor};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = HostConnection::spawn_with_prompts(
+        format!("http://{}", listener.local_addr().unwrap()),
+        None,
+        None,
+        None,
+        true,
+        None,
+        "test".into(),
+        None,
+        true,
+    );
+    host.model.lock().unwrap().rtt.enable(true);
+    let mut control = start_control(&listener).await;
+    let mut data = accept(&listener, wire::PROTOCOL).await;
+    data_handshake(&mut data).await;
+    wait_pane_live(&host, BLOCK).await;
+    let pane = host.model.lock().unwrap().terminals[BLOCK].model.clone();
+    let frame = || pane.lock().unwrap().frame.clone().unwrap();
+    let mut f = frame();
+    let (command, seq) = pane
+        .lock()
+        .unwrap()
+        .input_acks
+        .track_reset(Command::Key(key_payload("enter", "\n", "press")));
+    let seq = seq.unwrap();
+    let mode = LocalEcho::Always;
+    let reset_at = std::time::Instant::now();
+    let now = reset_at + Duration::from_millis(100);
+    let rtt = Some(80);
+    let mut p = Predictor::default();
+    p.sent_reset(seq, Some(&f), reset_at, rtt);
+    send_term(&host, BLOCK, command);
+    let enter = next(&mut control, "client.key").await;
+    assert_eq!(enter["payload"]["key"]["key"], "enter");
+    for bytes in ["l", "s", "\r\n$ ", "a"] {
+        if bytes == "\r\n$ " {
+            reply(&mut control, &enter, 5, json!({})).await;
+            until(&host, |_| {
+                pane.lock()
+                    .unwrap()
+                    .input_acks
+                    .slot()
+                    .load(Ordering::Acquire)
+                    == seq
+            })
+            .await;
+            // Ack alone cannot reinterpret already published bytes.
+            p.on_input(Insert('p'), Some(&f), mode, rtt, now);
+            assert!(!p.has_pending());
+        }
+        data.send(Message::Binary(bytes.as_bytes().to_vec().into()))
+            .await
+            .unwrap();
+        until(&host, |_| frame().output_position > f.output_position).await;
+        let newer = frame();
+        p.reconcile(&f, &newer, mode, rtt, now);
+        f = newer;
+        match bytes {
+            "l" | "s" => {
+                assert_eq!(f.acked_input, 0);
+                p.on_input(Insert('s'), Some(&f), mode, rtt, now);
+                assert!(!p.has_pending());
+            }
+            "\r\n$ " => {
+                assert_eq!(f.acked_input, seq);
+                p.on_input(Insert('a'), Some(&f), mode, rtt, now);
+                assert!(p.has_pending());
+                assert!(p.overlay(&f, mode, rtt, now).is_none());
+            }
+            _ => {
+                p.on_input(Insert('b'), Some(&f), mode, rtt, now);
+                assert!(p.overlay(&f, mode, rtt, now).is_some());
+            }
+        }
+    }
+    close(host, &mut control).await;
+}
+
+#[tokio::test]
+async fn local_echo_off_skips_ack_allocation_rtt_measurement_and_active_screen() {
+    let (_, host, mut ws) = live_pane().await;
+    key(&host, "s");
+    let req = next(&mut ws, "client.key").await;
+    reply(&mut ws, &req, 5, json!({})).await;
+    // An ordered non-input request fences the key's detached reply.
+    send_term(&host, BLOCK, Command::Reset);
+    let reset = next(&mut ws, "com.superlogical.terminal.reset").await;
+    reply(&mut ws, &reset, 6, json!({})).await;
+    {
+        let model = host.model.lock().unwrap();
+        let pane = model.terminals[BLOCK].model.lock().unwrap();
+        assert!(!pane.rtt.enabled());
+        assert_eq!(pane.rtt.ms(), None);
+        assert!(pane.input_acks.slot.get().is_none());
+        let mut f = (**pane.frame.as_ref().unwrap()).clone();
+        sample_echo_facts(&pane.rtt, &mut f, 123, 7, || -> Result<_> {
+            panic!("Off queried the active screen")
+        })
+        .unwrap();
+        assert!(f.alt_screen);
+        assert_eq!((f.output_position, f.acked_input), (0, 0));
+    }
+    close(host, &mut ws).await;
 }
 
 #[tokio::test]

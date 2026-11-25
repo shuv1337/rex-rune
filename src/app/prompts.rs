@@ -354,6 +354,9 @@ impl Workspace {
     pub(super) fn sync_panel_terminal_guard(&mut self) {
         let open = self.is_prompt_open() || self.ports_target().is_some();
         for term in self.terminals.values_mut() {
+            if open && !term.panel_blocks_input {
+                term.clear_local_echo();
+            }
             term.panel_blocks_input = open;
         }
     }

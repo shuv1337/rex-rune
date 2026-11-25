@@ -7,7 +7,7 @@
 //! Responses are still tracked on the same connection: API errors surface as notices without
 //! dropping the host, while transport errors or an 8-second stall on the oldest unanswered request
 //! disconnect so failed input pauses and is never replayed.
-use super::{Client, Command, HostCommand, Shared};
+use super::{Client, Command, HostCommand, InputReceipt, Shared};
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll, time::Duration};
@@ -23,13 +23,14 @@ pub(super) const MAX_IN_FLIGHT: usize = 64;
 pub(super) const TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(super) struct Queue {
-    in_flight: VecDeque<oneshot::Receiver<String>>,
+    in_flight: VecDeque<(oneshot::Receiver<String>, Instant, Option<InputReceipt>)>,
     timer: Pin<Box<Sleep>>,
+    pub(super) rtt: std::sync::Arc<super::Rtt>,
 }
 
 /// None for commands outside the ordered-input pipeline.
 pub(super) fn passive(command: &Command) -> Option<bool> {
-    Some(match command {
+    Some(match command.untracked() {
         Command::Key(k) | Command::KeyWithPrefix { key: k, .. } | Command::SendKey(k) => {
             k["action"] == "release"
         }
@@ -70,9 +71,17 @@ pub(super) fn wire_request(
     })
 }
 
+#[cfg(test)]
 impl Default for Queue {
     fn default() -> Self {
+        Self::new(Default::default())
+    }
+}
+
+impl Queue {
+    pub fn new(rtt: std::sync::Arc<super::Rtt>) -> Self {
         Self {
+            rtt,
             in_flight: VecDeque::new(),
             timer: Box::pin(tokio::time::sleep(Duration::ZERO)),
         }
@@ -120,11 +129,16 @@ impl Queue {
                     .is_some_and(|pane| pane.model.lock().expect("terminal model").owner))
     }
 
-    fn push(&mut self, reply: oneshot::Receiver<String>, started: Instant) {
+    fn push(
+        &mut self,
+        reply: oneshot::Receiver<String>,
+        started: Instant,
+        receipt: Option<InputReceipt>,
+    ) {
         if self.in_flight.is_empty() {
             self.timer.as_mut().reset(started + TIMEOUT);
         }
-        self.in_flight.push_back(reply);
+        self.in_flight.push_back((reply, started, receipt));
     }
 
     /// Transmit one ordered input request without waiting for its reply.
@@ -135,6 +149,7 @@ impl Queue {
         shared: &Shared,
         method: &str,
         payload: Value,
+        receipt: Option<InputReceipt>,
     ) -> Result<()> {
         debug_assert!(!self.is_full());
         let started = Instant::now();
@@ -147,7 +162,7 @@ impl Queue {
             .map_err(|_| anyhow!("Rex input write timed out; action was not retried"))?
         {
             Ok(reply) => {
-                self.push(reply, started);
+                self.push(reply, started, receipt);
                 Ok(())
             }
             Err(error @ (rexrs::Error::Json(_) | rexrs::Error::RequestTooLarge { .. })) => {
@@ -165,14 +180,14 @@ impl Queue {
             return std::future::pending().await;
         }
         let outcome = std::future::poll_fn(|cx| {
-            if let Poll::Ready(reply) = Pin::new(&mut self.in_flight[0]).poll(cx) {
+            if let Poll::Ready(reply) = Pin::new(&mut self.in_flight[0].0).poll(cx) {
                 return Poll::Ready(Ok((0, reply)));
             }
             if Instant::now() >= self.timer.deadline() || self.timer.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(Err(()));
             }
             for (index, entry) in self.in_flight.iter_mut().enumerate().skip(1) {
-                if let Poll::Ready(reply) = Pin::new(entry).poll(cx) {
+                if let Poll::Ready(reply) = Pin::new(&mut entry.0).poll(cx) {
                     return Poll::Ready(Ok((index, reply)));
                 }
             }
@@ -182,14 +197,22 @@ impl Queue {
         let Ok((index, reply)) = outcome else {
             return Err(anyhow!("Rex request timed out; action was not retried"));
         };
-        self.in_flight.remove(index);
+        let (_, sent_at, receipt) = self.in_flight.remove(index).expect("polled reply");
         if index == 0 && !self.in_flight.is_empty() {
             self.timer.as_mut().reset(Instant::now() + TIMEOUT);
         }
         let text = reply
             .map_err(|_| anyhow!("Rex control connection closed while awaiting input reply"))?;
+        if self.rtt.enabled() {
+            self.rtt.record(sent_at.elapsed());
+        }
         match crate::transport::detached_result::<Value>(&text) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                if let Some(receipt) = receipt {
+                    receipt.complete();
+                }
+                Ok(())
+            }
             Err(error @ rexrs::Error::Api(_)) => {
                 shared.update(|m| m.notice = Some(format!("{error:#}")));
                 Ok(())
@@ -215,7 +238,7 @@ mod tests {
 
     fn push(queue: &mut Queue, sent_at: Instant) -> oneshot::Sender<String> {
         let (tx, rx) = oneshot::channel();
-        queue.push(rx, sent_at);
+        queue.push(rx, sent_at, None);
         tx
     }
 
@@ -297,4 +320,20 @@ mod tests {
         let err = queue.finished(&shared).await.unwrap_err();
         assert!(err.to_string().contains("closed"), "{err:#}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn local_echo_rtt_distinguishes_zero_and_clamps_samples() {
+    let rtt = super::Rtt::default();
+    assert_eq!(rtt.ms(), None);
+    rtt.record(Duration::ZERO);
+    assert_eq!(rtt.ms(), Some(0));
+    rtt.record(Duration::MAX);
+    assert_eq!(rtt.ms(), Some(1250));
+    rtt.clear();
+    rtt.record(Duration::MAX);
+    assert_eq!(rtt.ms(), Some(5000));
+    rtt.record(Duration::from_millis(200));
+    assert_eq!(rtt.ms(), Some(3800));
 }

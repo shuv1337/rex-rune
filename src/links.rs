@@ -95,7 +95,7 @@ fn openable(uri: &str) -> Option<String> {
 }
 
 /// Byte ranges of the URLs written in `text`.
-fn find_urls(text: &str) -> Vec<Range<usize>> {
+pub(crate) fn find_urls(text: &str) -> Vec<Range<usize>> {
     // ASCII lowercasing keeps every byte offset.
     let lower = text.to_ascii_lowercase();
     let mut found = Vec::new();

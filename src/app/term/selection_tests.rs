@@ -90,6 +90,7 @@ fn only_the_outer_corners_of_a_selection_of_several_rows_are_round() {
 fn cells(text: &str) -> Vec<Cell> {
     text.chars()
         .map(|ch| Cell {
+            explicit_bg: false,
             text: ch.to_string(),
             spacer_tail: false,
             fg: if ch.is_ascii_uppercase() {

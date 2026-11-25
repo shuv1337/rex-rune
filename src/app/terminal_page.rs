@@ -14,7 +14,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::settings::{
-    terminal::{CursorStyle, OptionKey, SelectionColor, TerminalConfig},
+    terminal::{CursorStyle, LocalEcho, OptionKey, SelectionColor, TerminalConfig},
     typography::FontStyle,
 };
 use rune::{El, TextStyle, col, row, text};
@@ -185,7 +185,21 @@ fn keyboard(s: &Workspace) -> El {
             },
         )
     });
-    section("Keyboard", [card(option.into_iter().chain([hints]))])
+    let local_echo = select_row(
+        "local-echo",
+        "Local echo",
+        "Show pending keystrokes while waiting for the server to echo them.",
+        &LocalEcho::ALL.map(LocalEcho::name),
+        LocalEcho::ALL
+            .iter()
+            .position(|mode| *mode == s.settings.terminal.local_echo)
+            .unwrap_or_default(),
+        |s, i, _| s.set_local_echo(LocalEcho::ALL[i.min(LocalEcho::ALL.len() - 1)]),
+    );
+    section(
+        "Keyboard",
+        [card(option.into_iter().chain([hints, local_echo]))],
+    )
 }
 
 /// The choice at `index` of a selection colour's list.
@@ -565,6 +579,18 @@ impl Workspace {
         self.settings.terminal.cursor_style = style;
         for term in self.terminals.values_mut() {
             term.set_cursor_style(style.shape());
+        }
+        self.save();
+    }
+
+    /// Whether typed characters are predicted locally before the server echoes them.
+    pub fn set_local_echo(&mut self, mode: LocalEcho) {
+        self.settings.terminal.local_echo = mode;
+        for host in &self.hosts {
+            host.model.rtt.enable(mode != LocalEcho::Off);
+        }
+        for term in self.terminals.values_mut() {
+            term.set_local_echo(mode);
         }
         self.save();
     }

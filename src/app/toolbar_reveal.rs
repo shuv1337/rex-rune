@@ -179,6 +179,12 @@ pub fn pointer_press(s: &mut Workspace, _: rune::PointerButton, _: PointerEvent,
     if !s.toolbar_reveal.hover {
         s.toolbar_reveal.deadline = None;
     }
+    if s.settings.terminal.local_echo != rex_rune::settings::terminal::LocalEcho::Off
+        && s.active_terminal_mut()
+            .is_some_and(|t| t.clear_local_echo())
+    {
+        return;
+    }
     tx.live_only();
 }
 

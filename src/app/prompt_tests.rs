@@ -25,7 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn input_prompt(call_id: &str, title: &str) -> Arc<Prompt> {
+pub(super) fn input_prompt(call_id: &str, title: &str) -> Arc<Prompt> {
     Arc::new(Prompt {
         call_id: call_id.into(),
         action: Some("deploy_release".into()),

@@ -11,7 +11,10 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -156,6 +159,8 @@ pub mod perform;
 pub mod prompt;
 
 pub enum Command {
+    /// Local receipt carried beside a reset input, never serialized on the wire.
+    EchoReset(Box<(Command, InputReceipt)>),
     Selection(crate::terminal::selection::Input),
     CopyMode(crate::terminal::copy_mode::CopyModeInput),
     Key(Value),
@@ -189,8 +194,106 @@ pub enum Command {
     Clear,
 }
 
+impl Command {
+    fn untracked(&self) -> &Self {
+        match self {
+            Self::EchoReset(tracked) => &tracked.0,
+            other => other,
+        }
+    }
+}
+
+/// Host-wide smoothed round trip. Zero encodes unknown; one encodes a measured zero.
+#[derive(Default, Debug)]
+pub struct Rtt {
+    value: std::sync::atomic::AtomicU32,
+    enabled: std::sync::atomic::AtomicBool,
+}
+impl Rtt {
+    /// Local preference shared by this host's control and data workers.
+    pub fn enable(&self, enabled: bool) {
+        self.enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn enabled(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn ms(&self) -> Option<u32> {
+        self.value
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .checked_sub(1)
+    }
+    fn record(&self, elapsed: Duration) {
+        let sample = elapsed.as_millis().min(5000) as u32;
+        let value = self
+            .ms()
+            .map_or(sample, |ms| (3 * ms.min(5000) + sample) / 4);
+        self.value
+            .store(value + 1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn clear(&self) {
+        self.value.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Only opt-in panes allocate a counter shared by the control and data workers.
+#[derive(Default)]
+pub struct InputAcks {
+    issued: AtomicU64,
+    slot: OnceLock<Arc<AtomicU64>>,
+}
+pub struct InputReceipt {
+    seq: u64,
+    slot: Arc<AtomicU64>,
+}
+impl InputReceipt {
+    fn complete(self) {
+        self.slot.fetch_max(self.seq, Ordering::Release);
+    }
+}
+impl InputAcks {
+    fn slot(&self) -> Arc<AtomicU64> {
+        self.slot.get_or_init(Default::default).clone()
+    }
+    fn disconnect(&self) {
+        if let Some(slot) = self.slot.get() {
+            slot.store(0, Ordering::Release);
+        }
+    }
+    /// Only server-bound resets need a reply. View operations keep their ordinary frame barrier.
+    pub fn track_reset(&self, command: Command) -> (Command, Option<u64>) {
+        if !matches!(
+            command,
+            Command::Key(_)
+                | Command::KeyWithPrefix { .. }
+                | Command::SendKey(_)
+                | Command::Paste(_)
+                | Command::Mouse(_)
+                | Command::Resize(..)
+                | Command::Reset
+                | Command::Clear
+        ) {
+            return (command, None);
+        }
+        let seq = self.issued.fetch_add(1, Ordering::Relaxed) + 1;
+        (
+            Command::EchoReset(Box::new((
+                command,
+                InputReceipt {
+                    seq,
+                    slot: self.slot(),
+                },
+            ))),
+            Some(seq),
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct Model {
+    pub input_acks: InputAcks,
+    pub rtt: Arc<Rtt>,
+    pub stream_epoch: u64,
     pub frame: Option<Arc<Frame>>,
     pub status: String,
     pub session: String,
@@ -267,6 +370,7 @@ const STOP_ACCEPTED: &str = "Server stop accepted. Rex Rune will not start it ag
 
 #[derive(Clone, Default)]
 pub struct HostModel {
+    pub rtt: Arc<Rtt>,
     /// Setup problems from the last read-only SSH lookup.
     pub ssh_problem: Option<crate::ssh::Problem>,
     pub visible: bool,
@@ -971,6 +1075,7 @@ impl Shared {
             m.status = status.into();
             m.connected = connected;
             if !connected {
+                m.rtt.clear();
                 self.wake.reset_titles();
                 m.clipboard = None;
                 m.prompt_events.clear();
@@ -982,11 +1087,12 @@ impl Shared {
                 m.focus_history_result = None;
             }
             for terminal in m.terminals.values() {
-                terminal
-                    .model
-                    .lock()
-                    .expect("terminal model")
-                    .control_connected = connected;
+                let mut pane = terminal.model.lock().expect("terminal model");
+                if pane.control_connected != connected {
+                    pane.stream_epoch += 1;
+                    pane.input_acks.disconnect();
+                }
+                pane.control_connected = connected;
             }
         });
     }
@@ -1007,6 +1113,10 @@ impl PaneShared {
     fn status(&self, status: impl Into<String>, connected: bool) {
         self.update(|m| {
             m.status = status.into();
+            if !connected || !m.connected {
+                m.stream_epoch += 1;
+                m.input_acks.disconnect();
+            }
             m.connected = connected;
         });
         self.host_wake.notify();
@@ -1546,6 +1656,7 @@ fn reconcile(
                     continue;
                 }
                 let state = Arc::new(Mutex::new(Model {
+                    rtt: model.rtt.clone(),
                     status: "Restoring terminal…".into(),
                     session: session_id.clone(),
                     block: id.clone(),
@@ -2190,7 +2301,7 @@ async fn run_host(
             let mut state = ControlState { prompts_enabled, ..Default::default() };
             let mut sweep = status_sweep::Reader::default();
             let mut downloads = downloads::Downloads::default();
-            let mut inputs = input::Queue::default();
+            let mut inputs = input::Queue::new(shared.model.lock().expect("host model").rtt.clone());
             let mut busy_since = Some(Instant::now());
             let boot = bootstrap_request(wanted.as_deref(), create.is_some(), workers.values().map(|w| w.session.clone()));
             let started = Instant::now();
@@ -2207,6 +2318,7 @@ async fn run_host(
                     return Err(error);
                 }
             };
+            if inputs.rtt.enabled() { inputs.rtt.record(started.elapsed()); }
             apply_bootstrap(shared, &mut state, reply, started);
             if let Some((label, shell)) = create.take() {
                 // Take before calling: an uncertain response must never create twice.
@@ -2932,9 +3044,9 @@ async fn run_host(
                         let _ = worker.commands.send(DataCommand::Selection(input));
                     }
                 }
-                HostCommand::Terminal { block, command: Command::Resize(a,b,c,d), .. } if in_backoff => {
-                    if let Some(worker) = workers.get_mut(&block) {
-                        worker.size = Some((a,b,c,d));
+                HostCommand::Terminal { block, command, .. } if in_backoff && matches!(command.untracked(), Command::Resize(..)) => {
+                    if let (Some(worker),Command::Resize(a,b,c,d)) = (workers.get_mut(&block),command.untracked()) {
+                        worker.size = Some((*a,*b,*c,*d));
                     }
                 }
                 HostCommand::Terminal { block, command, .. }
@@ -3198,7 +3310,7 @@ fn coalesce_terminal_command(
     deferred: &mut VecDeque<HostCommand>,
     incoming: &flume::Receiver<HostCommand>,
 ) {
-    let coalescable = matches!(command, Command::Resize(..))
+    let coalescable = matches!(command.untracked(), Command::Resize(..))
         || matches!(command, Command::Mouse(payload) if is_mouse_motion(payload));
     if !coalescable {
         return;
@@ -3210,26 +3322,25 @@ fn coalesce_terminal_command(
             };
             deferred.push_back(next);
         }
-        let matches_next = match (&*command, deferred.front()) {
-            (
-                Command::Resize(..),
-                Some(HostCommand::Terminal {
-                    session: next_session,
-                    block: next_block,
-                    command: Command::Resize(..),
-                }),
-            ) => next_session == session && next_block == block,
-            (
-                Command::Mouse(current),
-                Some(HostCommand::Terminal {
-                    session: next_session,
-                    block: next_block,
-                    command: Command::Mouse(next_payload),
-                }),
-            ) => {
-                next_session == session
-                    && next_block == block
-                    && is_mouse_motion(next_payload)
+        let Some(HostCommand::Terminal {
+            session: next_session,
+            block: next_block,
+            command: next,
+        }) = deferred.front()
+        else {
+            break;
+        };
+        if next_session != session || next_block != block {
+            break;
+        }
+        let matches_next = match (command.untracked(), next.untracked()) {
+            // Keep the last receipt when collapsing tracked resizes. Do not drop a receipt
+            // in favour of an untracked resize after the preference was switched off.
+            (Command::Resize(..), Command::Resize(..)) => {
+                !matches!(command, Command::EchoReset(_)) || matches!(next, Command::EchoReset(_))
+            }
+            (Command::Mouse(current), Command::Mouse(next_payload)) => {
+                is_mouse_motion(next_payload)
                     && next_payload.get("button") == current.get("button")
                     && next_payload.get("mods") == current.get("mods")
             }
@@ -3451,6 +3562,13 @@ async fn handle_command(
             let Some(worker) = workers.get_mut(&block) else {
                 return Ok(CommandEffect::None);
             };
+            let (command, receipt) = match command {
+                Command::EchoReset(tracked) => {
+                    let (command, receipt) = *tracked;
+                    (command, Some(receipt))
+                }
+                command => (command, None),
+            };
             match command {
                 Command::Selection(input) => {
                     let _ = worker.commands.send(DataCommand::Selection(input));
@@ -3463,6 +3581,9 @@ async fn handle_command(
                 Command::Resize(cols, rows, w, h) => {
                     worker.size = Some((cols, rows, w, h));
                     resize(control, &session, &block, cols, rows, w, h).await?;
+                    if let Some(receipt) = receipt {
+                        receipt.complete();
+                    }
                     return Ok(CommandEffect::None);
                 }
                 Command::Scroll(delta) => {
@@ -3502,6 +3623,9 @@ async fn handle_command(
                         json!({"session_id":session,"block_id":block,"args":{}}),
                     )
                     .await?;
+                    if let Some(receipt) = receipt {
+                        receipt.complete();
+                    }
                     // The history the view may have been scrolled into is gone.
                     let _ = worker.commands.send(DataCommand::Bottom);
                 }
@@ -3568,7 +3692,9 @@ async fn handle_command(
                             .input_events += 1;
                     }
                     if let Some((method, payload)) = input::wire_request(&session, &block, input) {
-                        inputs.send(control, shared, method, payload).await?;
+                        inputs
+                            .send(control, shared, method, payload, receipt)
+                            .await?;
                     }
                     return Ok(if claimed {
                         CommandEffect::Claimed
@@ -3642,6 +3768,21 @@ fn fail_copy_mode(
     });
 }
 
+fn sample_echo_facts<E>(
+    rtt: &Rtt,
+    frame: &mut Frame,
+    position: u64,
+    ack: u64,
+    screen: impl FnOnce() -> Result<ghostty_vt::screen::Screen, E>,
+) -> Result<(), E> {
+    if rtt.enabled() {
+        frame.alt_screen = screen()? == ghostty_vt::screen::Screen::Alternate;
+        frame.output_position = position;
+        frame.acked_input = ack;
+    }
+    Ok(())
+}
+
 async fn run_data(
     endpoint: String,
     session: String,
@@ -3650,6 +3791,7 @@ async fn run_data(
     commands: flume::Receiver<DataCommand>,
     shared: PaneShared,
 ) {
+    let rtt = shared.model.lock().expect("terminal model").rtt.clone();
     let mut welcome: Option<wire::Welcome> = None;
     let mut stream: Option<TerminalStream> = None;
     let mut selection = None;
@@ -3703,13 +3845,22 @@ async fn run_data(
             let stream = stream.as_mut().context("terminal stream")?;
             let selection = selection.as_mut().context("selection controller")?;
             let mut pending_copy_search: Option<PendingCopySearch> = None;
+            let mut ack_slot: Option<Arc<AtomicU64>> = None;
+            let mut output_ack = 0;
             let mut dirty = true;
             let mut tick = tokio::time::interval(Duration::from_millis(16));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     bytes = wire::next_binary(&mut socket) => {
-                        if let Err(error) = stream.feed(&bytes?) { welcome = None; return Err(error); }
+                        let bytes = bytes?;
+                        if !bytes.is_empty() && rtt.enabled() {
+                            // Stamp at receipt. A delayed render or local redraw after the ack
+                            // must not turn pre-ack data into a post-ack frame.
+                            let slot = ack_slot.get_or_insert_with(|| shared.model.lock().expect("terminal model").input_acks.slot());
+                            output_ack = slot.load(Ordering::Acquire);
+                        }
+                        if let Err(error) = stream.feed(&bytes) { welcome = None; return Err(error); }
                         dirty = true;
                     }
                     command = commands.recv_async() => match command {
@@ -3892,7 +4043,9 @@ async fn run_data(
                                 fail_copy_mode(&mut copy_mode, &shared, error);
                             }
                             let mut frame = renderer.frame(terminal)?;
-                            if terminal.is_viewport_active()? { prompt_anchor = false; }
+                            frame.viewport_active = terminal.is_viewport_active()?;
+                            if frame.viewport_active { prompt_anchor = false; }
+                            sample_echo_facts(&rtt, &mut frame, stream.received, output_ack, || terminal.active_screen())?;
                             frame.prompt_anchor = prompt_anchor;
                             frame.selection_revision = selection_revision;
                             frame.copy = match copy_mode.view(terminal) {
@@ -3906,12 +4059,12 @@ async fn run_data(
                                 Ok(results) => results,
                                 Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); None }
                             };
-                            let frame = Arc::new(frame);
                             let yank = pending_yank.take();
                             let ended = copy_mode.ended_epoch();
                             let mut transitioned = false;
                             shared.update(|m| {
-                                m.frame = Some(frame);
+                                frame.stream_epoch = m.stream_epoch;
+                                m.frame = Some(Arc::new(frame));
                                 if let Some(yank) = yank {
                                     m.copy_yank = Some(yank);
                                 }

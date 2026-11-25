@@ -155,6 +155,33 @@ impl OptionSides {
     }
 }
 
+/// When this client predicts typed characters locally before the server echoes them back
+/// (Mosh-style speculative local echo). Render-only overlay; never modifies terminal state.
+/// Defaults to Off. A value this version doesn't know reads as Off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalEcho {
+    /// Predict locally when connection latency is noticeable and the terminal echoes input.
+    Adaptive,
+    /// Always predict locally when the terminal echoes input, regardless of latency.
+    Always,
+    /// Never predict typed characters locally (default).
+    #[default]
+    #[serde(other)]
+    Off,
+}
+impl LocalEcho {
+    /// In the order the control lists them.
+    pub const ALL: [LocalEcho; 3] = [LocalEcho::Off, LocalEcho::Adaptive, LocalEcho::Always];
+    pub fn name(self) -> &'static str {
+        match self {
+            LocalEcho::Off => "Off",
+            LocalEcho::Adaptive => "Adaptive",
+            LocalEcho::Always => "Always",
+        }
+    }
+}
+
 /// The Terminal page's cursor, keyboard and selection settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -167,6 +194,9 @@ pub struct TerminalConfig {
     pub key_sequence_hints: bool,
     #[serde(skip_serializing_if = "is_default")]
     pub option_key: OptionKey,
+    /// Speculative Mosh-style local echo for slow connections (default Off).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub local_echo: LocalEcho,
     /// Offer and remember paths used by the local path browser.
     #[serde(skip_serializing_if = "is_true")]
     pub show_recent_paths: bool,
@@ -198,6 +228,7 @@ impl Default for TerminalConfig {
             cursor_force: false,
             key_sequence_hints: true,
             option_key: OptionKey::default(),
+            local_echo: LocalEcho::default(),
             show_recent_paths: true,
             copy_on_selection: false,
             primary_selection: false,
@@ -295,6 +326,7 @@ mod tests {
                     cursor_force: true,
                     key_sequence_hints: false,
                     option_key: OptionKey::Alt,
+                    local_echo: LocalEcho::Adaptive,
                     show_recent_paths: false,
                     copy_on_selection: true,
                     primary_selection: true,
@@ -424,5 +456,34 @@ mod tests {
                 .keep_program_background
         );
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn local_echo_defaults_off_omits_default_and_round_trips() {
+        let old: Settings = serde_json::from_str(r#"{"terminal": {}}"#).unwrap();
+        assert_eq!(old.terminal.local_echo, LocalEcho::Off);
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(
+            saved["terminal"].get("local_echo").is_none(),
+            "default Off is omitted from serialized JSON"
+        );
+
+        let unknown: Settings =
+            serde_json::from_str(r#"{"terminal": {"local_echo": "telepathy"}}"#).unwrap();
+        assert_eq!(unknown.terminal.local_echo, LocalEcho::Off);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("workspace.json");
+        for (choice, wire) in [
+            (LocalEcho::Adaptive, "adaptive"),
+            (LocalEcho::Always, "always"),
+        ] {
+            let mut settings = Settings::default();
+            settings.terminal.local_echo = choice;
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["terminal"]["local_echo"], wire);
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap().terminal.local_echo, choice);
+        }
     }
 }

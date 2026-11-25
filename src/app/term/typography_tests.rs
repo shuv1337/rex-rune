@@ -157,6 +157,7 @@ fn drawn(text: &str, metrics: Metrics) -> Vec<[f32; 4]> {
     let cells: Vec<Cell> = text
         .chars()
         .map(|ch| Cell {
+            explicit_bg: false,
             text: ch.to_string(),
             spacer_tail: false,
             fg: 0xffffff,

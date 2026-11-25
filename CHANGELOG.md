@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Local echo** in Settings → Terminal can show pending keystrokes on slow links after the terminal echoes ordinary text. It defaults to Off. Thanks to @johnknott (#180).
+
 - **Focus history (Rex Server API 19+).** Step back through server-side focus history across panes, tabs, and sessions via **Previous focus**, **Previous focused pane in tab**, **Previous focused tab**, and **Previous focused session** in Commands (backed by `focus_history.reverse`). Consecutive keybinding presses of the same scope walk deeper through history using the server's cursor; any other input, navigation, or panel (including opening Commands) resets the walk so the next invocation toggles between the two most recent focuses. `client.focus_history.reverse` is local-only (`Remote::Never`), unbound by default, and supports optional `scope` arguments (`any`, `pane`, `tab`, `tab_any_session`, `session`) in keymaps and Settings -> Shortcuts. Passive refreshes of already-attached sessions use `session.attach` on API 19+ so they do not record focus (avoiding focus-history overwrites from background pane exits or idle clients on attached sessions), while unattached background sweeps keep using `session.view` so Rex Rune never joins unopened sessions. Existing local Back/Forward navigation (`client.history.back` / `client.history.forward`) is unchanged.
 
 - **Listening ports (Rex Server API 15+).** Find listening TCP ports in the current session from Commands or the pane menu. Copy an address anywhere, open a local port, or copy an SSH forwarding command without running it.

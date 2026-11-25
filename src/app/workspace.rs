@@ -471,6 +471,9 @@ impl Workspace {
             })
             .expect("host wake thread");
         let model = connection.model.lock().expect("host model").clone();
+        model.rtt.enable(
+            self.settings.terminal.local_echo != rex_rune::settings::terminal::LocalEcho::Off,
+        );
         HostState {
             id,
             connection,
@@ -685,6 +688,7 @@ impl Workspace {
                     .expect("terminal wake thread");
                 let mut term = Term::new(connection.clone());
                 term.set_cursor_style(self.settings.terminal.cursor_style.shape());
+                term.set_local_echo(self.settings.terminal.local_echo);
                 term.cache_images(self.images.as_ref());
                 self.terminals.insert(key, term);
             }
@@ -722,6 +726,26 @@ impl Workspace {
             super::actions::diagnose_compatibility(
                 &mut std::sync::Arc::make_mut(snapshot).resolved,
             );
+        }
+        if self.settings.terminal.local_echo != rex_rune::settings::terminal::LocalEcho::Off {
+            let old = &self.hosts[index].model;
+            let boundary = !model.connected
+                || old.connection_epoch != model.connection_epoch
+                || old.selected != model.selected
+                || old.focused() != model.focused()
+                || old.window().map(|w| &w.window_id) != model.window().map(|w| &w.window_id);
+            for ((host, block), term) in &mut self.terminals {
+                if *host == id
+                    && (boundary
+                        || old.programs.get(block) != model.programs.get(block)
+                        || old.foreground.get(block) != model.foreground.get(block)
+                        || old.titles.get(block) != model.titles.get(block)
+                        || old.executables.get(block) != model.executables.get(block)
+                        || old.scripts.get(block) != model.scripts.get(block))
+                {
+                    term.clear_local_echo();
+                }
+            }
         }
         self.hosts[index].model = model;
         if self
@@ -892,6 +916,7 @@ impl Workspace {
             self.cancel_layer_drag();
             for term in self.terminals.values_mut() {
                 term.end_selection();
+                term.clear_local_echo();
             }
         }
         if focused {
@@ -1322,6 +1347,7 @@ impl Workspace {
             return;
         }
         if let Some(term) = self.active_terminal_mut() {
+            term.clear_local_echo();
             term.search.get_or_insert_with(|| TextEdit::new("")).focused = true;
         }
     }
@@ -1548,6 +1574,7 @@ impl Workspace {
             self.cancel_panel_quiet();
         }
         for term in self.terminals.values_mut() {
+            term.clear_local_echo();
             term.end_selection();
         }
         for index in 0..self.hosts.len() {
@@ -2296,6 +2323,7 @@ impl Workspace {
         self.leave_install_dialog();
         self.bindings.sequence.clear();
         for term in self.terminals.values_mut() {
+            term.clear_local_echo();
             term.end_selection();
         }
         let previous = self.panel.take();

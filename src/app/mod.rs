@@ -222,11 +222,15 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                 })
         }))
         .child(root);
-    if s.settings.interface.toolbar == rex_rune::settings::interface::ToolbarBehavior::OnHover {
+    let hover =
+        s.settings.interface.toolbar == rex_rune::settings::interface::ToolbarBehavior::OnHover;
+    if hover {
         window = window
             .on_pointer_move_local(toolbar_reveal::pointer)
-            .on_hover_change(toolbar_reveal::window_hover)
-            .on_any_press(toolbar_reveal::pointer_press);
+            .on_hover_change(toolbar_reveal::window_hover);
+    }
+    if hover || s.settings.terminal.local_echo != rex_rune::settings::terminal::LocalEcho::Off {
+        window = window.on_any_press(toolbar_reveal::pointer_press);
     }
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
@@ -326,13 +330,32 @@ fn poll(s: &mut Workspace, clock: f64, tx: &mut Tx) -> bool {
     if s.notices.iter().any(|n| !n.sticky) {
         tx.wake_after(Duration::from_secs(1));
     }
-    // A pane waiting for a frame at its size draws anyway at its deadline; be awake for it.
+    // A pane waiting for a frame at its size draws anyway at its deadline, and a pane with
+    // pending local-echo predictions wakes to underline or expire them.
     let now = std::time::Instant::now();
     for term in s.terminals.values_mut() {
         if term.draw_anyway(now) {
             changed = true;
         } else if let Some(deadline) = term.draws_anyway_at() {
             tx.wake_after(deadline - now);
+        }
+    }
+    if s.settings.terminal.local_echo != rex_rune::settings::terminal::LocalEcho::Off {
+        let active = s
+            .window_focused
+            .then(|| s.focused_block())
+            .flatten()
+            .map(|id| s.term_key(&id));
+        for (key, term) in &mut s.terminals {
+            if Some(key) != active.as_ref() || s.panel.is_some() || term.search.is_some() {
+                term.clear_local_echo();
+                continue;
+            }
+            let (redraw, wake) = term.poll_local_echo(now);
+            changed |= redraw;
+            if let Some(time) = wake {
+                tx.wake_after(time.saturating_duration_since(now));
+            }
         }
     }
     changed

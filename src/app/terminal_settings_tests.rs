@@ -4,7 +4,7 @@ use super::*;
 use crate::app::{panel::SettingsSection, select_copy::memory, term};
 use rex_rune::{
     connection::Command,
-    settings::terminal::{CursorStyle, OptionKey, SelectionColor},
+    settings::terminal::{CursorStyle, LocalEcho, OptionKey, SelectionColor},
     terminal::{CursorShape, Renderer, selection},
 };
 use std::sync::Arc;
@@ -1602,3 +1602,6 @@ fn keep_program_backgrounds_saves_locally_and_fills_osc11_panes_without_changing
     assert!(other_commands(&term_rx).is_empty());
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
+
+#[path = "local_echo_tests.rs"]
+mod local_echo_tests;

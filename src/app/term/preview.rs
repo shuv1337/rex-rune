@@ -90,6 +90,7 @@ pub fn sample(key: &str, sample: &Sample<'_>, m: &Metrics, colors: &TermColors) 
         for run in line {
             for ch in run.text.chars() {
                 cells.push(Cell {
+                    explicit_bg: false,
                     text: ch.to_string(),
                     spacer_tail: false,
                     fg: run.color.unwrap_or(sample.text),

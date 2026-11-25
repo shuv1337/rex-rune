@@ -529,6 +529,9 @@ pub fn on_ime(s: &mut Workspace, ime: &Ime, _: &mut Tx) -> bool {
     let Some(term) = s.active_terminal_mut() else {
         return false;
     };
+    if matches!(ime, Ime::Preedit(..) | Ime::Commit(_) | Ime::Disabled) {
+        term.clear_local_echo();
+    }
     match ime {
         Ime::Preedit(text, ..) => {
             term.preedit = text.clone();

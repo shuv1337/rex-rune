@@ -14,6 +14,7 @@ use std::{
 
 pub mod copy_mode;
 pub mod graphics;
+pub mod local_echo;
 pub mod search;
 pub mod selection;
 
@@ -256,10 +257,11 @@ pub enum CursorShape {
     Hollow,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub text: String,
     pub spacer_tail: bool,
+    pub explicit_bg: bool,
     pub fg: u32,
     pub bg: u32,
     /// The SGR 58 underline colour; none draws underlines in the text colour.
@@ -289,6 +291,15 @@ pub struct Frame {
     pub cursor_shape: CursorShape,
     /// The program asked for mouse reports (DEC 9, 1000, 1002 or 1003).
     pub mouse_tracking: bool,
+    /// True on the alternate screen or if screen facts were not sampled.
+    pub alt_screen: bool,
+    pub viewport_active: bool,
+    /// Server stream position, independent of local redraws.
+    pub output_position: u64,
+    /// Latest reset acknowledged when these server bytes reached the data worker.
+    pub acked_input: u64,
+    /// The connection epoch in which this frame was published.
+    pub stream_epoch: u64,
     pub images: Vec<graphics::Image>,
     pub cell_pixels: [u32; 2],
     pub selection_rows: Vec<Option<(usize, usize)>>,
@@ -475,6 +486,12 @@ impl Renderer {
                 _ => CursorShape::Block,
             },
             mouse_tracking: terminal.is_mouse_tracking()?,
+            // A frame without opt-in screen facts is never eligible.
+            alt_screen: true,
+            viewport_active: false,
+            output_position: 0,
+            acked_input: 0,
+            stream_epoch: 0,
             images: self.images.frame(terminal, &snapshot)?,
             cell_pixels: [
                 terminal.width_px()? / u32::from(snapshot.cols()?).max(1),
@@ -502,7 +519,8 @@ impl Renderer {
                 cell.graphemes_utf8(&mut text)?;
                 let style = cell.style()?;
                 let mut fg = cell.fg_color()?.map(rgb).unwrap_or(fg);
-                let mut bg = cell.bg_color()?.map(rgb).unwrap_or(bg);
+                let explicit_bg = cell.bg_color()?;
+                let mut bg = explicit_bg.map(rgb).unwrap_or(bg);
                 if style.inverse {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -528,6 +546,7 @@ impl Renderer {
                     StyleColor::Rgb(color) => Some(rgb(color)),
                 };
                 line.push(Cell {
+                    explicit_bg: explicit_bg.is_some(),
                     text,
                     spacer_tail: raw.wide()? == ghostty_vt::screen::CellWide::SpacerTail,
                     fg,
