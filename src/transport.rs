@@ -248,10 +248,31 @@ pub async fn control_with_label(
     reconnect: Option<&str>,
     label: &str,
 ) -> Result<Client> {
+    control_with_max_revision(endpoint, reconnect, label, API_REVISION).await
+}
+
+/// Like [`control_with_label`], but caps the client's offered maximum API revision
+/// (clamped to `MIN_API_REVISION..=API_REVISION`). Used by protocol probes to verify
+/// lower-revision negotiation behavior.
+pub async fn control_with_max_revision(
+    endpoint: &str,
+    reconnect: Option<&str>,
+    label: &str,
+    max_api_revision: u32,
+) -> Result<Client> {
     // This is an attachment-only client. Server lifetime and listener configuration
     // belong to the existing upstream Rex server, including its Tailscale identity.
+    let max_rev = max_api_revision.clamp(MIN_API_REVISION, API_REVISION);
     let socket = socket(endpoint, "/api/control", "rex.control.v1").await?;
-    connect(socket, reconnect, "Rex Rune", label, rexrs::ClientKind::App).await
+    connect(
+        socket,
+        reconnect,
+        "Rex Rune",
+        label,
+        rexrs::ClientKind::App,
+        max_rev,
+    )
+    .await
 }
 
 /// Connect a short-lived discovery probe as `ClientKind::Other` so rev 17+ servers never
@@ -263,6 +284,7 @@ pub(crate) async fn discovery_from_socket(socket: Socket, name: &str) -> Result<
         name,
         &crate::settings::hostname(),
         rexrs::ClientKind::Other,
+        API_REVISION,
     )
     .await
 }
@@ -273,12 +295,13 @@ async fn connect(
     name: &str,
     label: &str,
     kind: rexrs::ClientKind,
+    max_api_revision: u32,
 ) -> Result<Client> {
     let mut builder = AsyncRexClient::builder()
         .label(label)
         .name(name)
         .version(env!("CARGO_PKG_VERSION"))
-        .api_revisions(MIN_API_REVISION..=API_REVISION)
+        .api_revisions(MIN_API_REVISION..=max_api_revision)
         .kind(kind);
     if let Some(token) = reconnect {
         builder = builder.reconnect_token(token);
@@ -295,8 +318,8 @@ async fn connect(
     .await
     .context("Rex control WELCOME timed out")??;
     anyhow::ensure!(
-        (MIN_API_REVISION..=API_REVISION).contains(&client.welcome().api_revision),
-        "Rex negotiated API revision {}; this client supports {MIN_API_REVISION}–{API_REVISION}",
+        (MIN_API_REVISION..=max_api_revision).contains(&client.welcome().api_revision),
+        "Rex negotiated API revision {}; this client supports {MIN_API_REVISION}–{max_api_revision}",
         client.welcome().api_revision
     );
     client.transport().max_message_bytes = client.welcome().limits.max_message_bytes;

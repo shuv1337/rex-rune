@@ -20,6 +20,7 @@ pub mod clipboard;
 pub mod directory;
 pub mod downloads;
 pub mod hosts;
+pub mod ports;
 mod prefetch;
 pub mod server_info;
 mod status_sweep;
@@ -336,6 +337,10 @@ pub struct HostModel {
     pub shared_revision: u64,
     /// Completed shared-host write outcomes (`hosts.put` / `hosts.remove`), taken once by the UI.
     pub shared_writes: Vec<hosts::WriteResult>,
+    /// Listening TCP ports last read or reported for each terminal block in a held view.
+    pub ports: HashMap<String, crate::ports::PortSnapshot>,
+    /// Terminal blocks with an on-demand `com.superlogical.terminal.ports` read in flight or queued.
+    pub ports_reading: HashSet<String>,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -468,6 +473,8 @@ impl HostModel {
         self.titles.remove(block);
         self.places.remove(block);
         self.progress.remove(block);
+        self.ports.remove(block);
+        self.ports_reading.remove(block);
     }
 
     /// The block's terminal title while it's current. Shells rarely clear a title when the
@@ -550,6 +557,19 @@ pub enum HostCommand {
     Identify,
     /// Read `hosts.list` once per connection and re-read on `hosts_changed`; see [`hosts`].
     WatchSharedHosts,
+    /// Open or close on-demand listening-port inspection for `session` on `epoch` only (API 15+).
+    /// `Some(session)` starts reads for that session's terminal blocks and enables `event_dropped`
+    /// re-reads for it; `None` clears the watched session and cancels in-flight port reads.
+    WatchPorts {
+        epoch: u64,
+        session: Option<String>,
+    },
+    /// One-shot on-demand listening-port read for `session`'s terminal blocks on `epoch` only
+    /// (API 15+), without changing the watched session.
+    ReadPorts {
+        epoch: u64,
+        session: String,
+    },
     /// Create or update one host in this server's shared host list (`hosts.put`) on `epoch` only.
     /// Never auto-retried or queued across reconnects.
     PutSharedHost {
@@ -709,6 +729,10 @@ struct ControlState {
     // This pool is scoped to the terminal data ref and subprotocol; other sources
     // are filtered out before insertion. It lives only as long as this control socket.
     tickets: HashMap<(String, String), PendingTicket>,
+    /// Highest control `seq` applied to each block's listening-ports snapshot.
+    ports_seq: HashMap<String, u64>,
+    /// On-demand detached `com.superlogical.terminal.ports` reader for this connection.
+    ports_reads: ports::Reader,
 }
 
 impl ControlState {
@@ -780,6 +804,8 @@ impl ControlState {
         self.status_reading.remove(block);
         self.themed.remove(block);
         self.tickets.retain(|(_, b), _| b != block);
+        self.ports_seq.remove(block);
+        self.ports_reads.cancel_block(block);
     }
 
     fn forget_session(&mut self, id: &str, blocks: impl IntoIterator<Item = String>) {
@@ -791,6 +817,7 @@ impl ControlState {
         }
         self.fetch_stale.remove(id);
         self.tickets.retain(|(s, _), _| s != id);
+        self.ports_reads.cancel_session(id);
         for block in blocks {
             self.forget_block(&block);
         }
@@ -810,18 +837,21 @@ impl ControlState {
         if list_event || event_type == "session_label_changed" {
             floor = floor.max(self.list_seq);
         }
-        // Views contain state, not transient clipboard events or list-level session events.
+        // Views contain state, not transient clipboard events, ports_changed events, or
+        // list-level session events.
         let session = event.session_id.as_deref().or_else(|| {
             (event.name == "event_dropped")
                 .then(|| event.payload["session_id"].as_str())
                 .flatten()
         });
         let is_copy = event.name == "block_event" && clipboard::is_copy(&event.payload);
+        let is_ports = event.name == "block_event" && ports::is_ports_changed(&event.payload);
         // `session.view` carries layout, not program status, title, or process metadata, so
         // only `session_view_changed` drops are superseded by a newer `view_seq`.
         let view_covered = event.name != "event_dropped" || event_type == "session_view_changed";
         if !list_event
             && !is_copy
+            && !is_ports
             && view_covered
             && let Some(id) = session
         {
@@ -910,6 +940,7 @@ impl Shared {
                 m.actions_in_flight = 0;
                 m.keymap = None;
                 m.keymap_revision += 1;
+                m.ports_reading.clear();
             }
             for terminal in m.terminals.values() {
                 terminal
@@ -1088,6 +1119,39 @@ impl HostConnection {
                 label,
                 ssh_auth_sock,
                 prompts_enabled,
+                max_api_revision: transport::API_REVISION,
+                #[cfg(test)]
+                ssh_program: None,
+                #[cfg(test)]
+                tunnel_dir: None,
+            },
+            visible,
+        )
+    }
+
+    /// Spawn a host worker offering at most `max_api_revision` in HELLO (clamped to
+    /// `MIN_API_REVISION..=API_REVISION`). Used by protocol probes to verify lower-revision
+    /// behavior against live servers.
+    pub fn spawn_with_max_revision(
+        endpoint: String,
+        preferred: Option<String>,
+        create: Option<(String, Option<String>)>,
+        block: Option<String>,
+        visible: bool,
+        theme: Option<SetTheme>,
+        max_api_revision: u32,
+    ) -> Self {
+        Self::spawn_internal(
+            endpoint,
+            Startup {
+                preferred,
+                create,
+                block,
+                theme,
+                label: crate::settings::hostname(),
+                ssh_auth_sock: None,
+                prompts_enabled: false,
+                max_api_revision,
                 #[cfg(test)]
                 ssh_program: None,
                 #[cfg(test)]
@@ -1705,10 +1769,22 @@ async fn handle_event(
     match event.name.as_str() {
         "event_dropped" => {
             let event_type = event.payload["event_type"].as_str().unwrap_or("");
+            let block_event_name = event.payload["block_event_name"].as_str();
+            let dropped_block = event.payload["block_id"].as_str();
             let session_id = event
                 .session_id
                 .as_deref()
                 .or_else(|| event.payload["session_id"].as_str());
+            if event_type == "block_event" && block_event_name == Some("ports_changed") {
+                ports::handle_dropped(control, shared, state, session_id, dropped_block, event.seq)
+                    .await?;
+                return Ok(());
+            }
+            if event_type.is_empty() || (event_type == "block_event" && block_event_name.is_none())
+            {
+                ports::handle_dropped(control, shared, state, session_id, dropped_block, event.seq)
+                    .await?;
+            }
             match event_type {
                 "session_destroyed" => {
                     if let Some(id) = session_id {
@@ -1898,6 +1974,22 @@ async fn handle_event(
                 }
                 return Ok(());
             }
+            if ports::is_ports_changed(&event.payload) {
+                if let (Some(session), Some(block)) = (
+                    event.session_id.as_deref(),
+                    event.payload["block_id"].as_str(),
+                ) {
+                    ports::apply_event(
+                        shared,
+                        state,
+                        session,
+                        block,
+                        event.seq,
+                        &event.payload["payload"],
+                    );
+                }
+                return Ok(());
+            }
             let (Some(id), Some((block, change))) = (
                 event.session_id.as_deref(),
                 activity::parse_block_event(&event.payload),
@@ -1942,6 +2034,7 @@ struct Startup {
     theme: Option<SetTheme>,
     ssh_auth_sock: Option<PathBuf>,
     prompts_enabled: bool,
+    max_api_revision: u32,
     #[cfg(test)]
     ssh_program: Option<PathBuf>,
     #[cfg(test)]
@@ -1963,6 +2056,7 @@ async fn run_host(
         label,
         mut ssh_auth_sock,
         mut prompts_enabled,
+        max_api_revision,
         #[cfg(test)]
         ssh_program,
         #[cfg(test)]
@@ -2013,7 +2107,13 @@ async fn run_host(
                 }
                 None => configured.clone(),
             };
-            let mut control = transport::control_with_label(&endpoint, token.as_deref(), &label).await?;
+            let mut control = transport::control_with_max_revision(
+                &endpoint,
+                token.as_deref(),
+                &label,
+                max_api_revision,
+            )
+            .await?;
             let identity = control.welcome().client.as_ref().context("Rex client identity")?;
             token = Some(identity.reconnect_token.clone());
             let wanted = preferred.clone().or_else(|| shared.model.lock().expect("host model").selected.clone());
@@ -2043,6 +2143,8 @@ async fn run_host(
                 m.titles.clear();
                 m.places.clear();
                 m.progress.clear();
+                m.ports.clear();
+                m.ports_reading.clear();
                 m.activity_epoch += 1;
                 m.activity_reading = true;
                 m.activity_incomplete = false;
@@ -2260,6 +2362,10 @@ async fn run_host(
                     (session, block, reply) = sweep.finished(), if !exclusive && sweep.in_flight() > 0 => {
                         let removed = state.status_reading.remove(&block).unwrap_or_default();
                         status_sweep::record(shared, &mut state, &session, &block, reply, &removed);
+                    }
+                    finished = state.ports_reads.finished(), if !exclusive && state.ports_reads.in_flight() > 0 => {
+                        ports::record_reply(shared, &mut state, finished);
+                        state.ports_reads.pump(&mut control, shared).await?;
                     }
                     reply = server_reads.finished(), if !exclusive && server_reads.in_flight() => server_info::record(shared, reply),
                     reply = hosts_reads.finished(), if !exclusive && hosts_reads.in_flight() => hosts::record(shared, reply),
@@ -2530,6 +2636,18 @@ async fn run_host(
                             hosts_reads.watch(&mut control, retryable).await?;
                             continue;
                         }
+                        if let HostCommand::WatchPorts { epoch, session } = command {
+                            if epoch == shared.model.lock().expect("host model").connection_epoch {
+                                ports::watch(&mut control, shared, &mut state, session).await?;
+                            }
+                            continue;
+                        }
+                        if let HostCommand::ReadPorts { epoch, session } = command {
+                            if epoch == shared.model.lock().expect("host model").connection_epoch {
+                                ports::read_once(&mut control, shared, &mut state, &session).await?;
+                            }
+                            continue;
+                        }
                         if let HostCommand::PutSharedHost { id, epoch, host } = command {
                             hosts::execute_put(&mut control, shared, &mut hosts_reads, id, epoch, host).await?;
                             continue;
@@ -2724,6 +2842,8 @@ async fn run_host(
                 | HostCommand::PerformReply { .. }
                 | HostCommand::PromptReply { .. }
                 | HostCommand::FetchView { .. }
+                | HostCommand::WatchPorts { .. }
+                | HostCommand::ReadPorts { .. }
                 | HostCommand::DownloadConfirm(_)
                 | HostCommand::DownloadCancel(_) => {}
                 _ if in_backoff => shared.update(|m| {
@@ -3257,6 +3377,8 @@ async fn handle_command(
         | HostCommand::Keymap(_)
         | HostCommand::Identify
         | HostCommand::WatchSharedHosts
+        | HostCommand::WatchPorts { .. }
+        | HostCommand::ReadPorts { .. }
         | HostCommand::PutSharedHost { .. }
         | HostCommand::RemoveSharedHost { .. }
         | HostCommand::Download(_)

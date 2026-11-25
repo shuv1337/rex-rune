@@ -17,6 +17,8 @@ mod keymap_tests;
 mod navigation_tests;
 #[path = "perform_tests.rs"]
 mod perform_tests;
+#[path = "ports_tests.rs"]
+mod ports_tests;
 #[path = "prompt_wire_tests.rs"]
 mod prompt_wire_tests;
 #[path = "server_controls_tests.rs"]

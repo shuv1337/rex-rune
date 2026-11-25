@@ -67,12 +67,15 @@ Summary of schema and protocol changes from revision 14 through revision 21:
 - **Block-type methods:**
   - `com.superlogical.terminal` (18 -> 19): added `ports` (API 15), reporting
     listening TCP ports, forward-compatible `status` string, optional `pid`,
-    process descriptors, and optional truncation/blob `id`. Because its process
-    object shape matches `com.superlogical.terminal.process`, `generate.py`
-    names the shared struct `terminal::PortsResponseProcess` instead of
-    `terminal::Ancestor` (nothing in `rex-rune` references `Ancestor`).
-  - `com.superlogical.tunnel` (0 -> 1): added `info` (API 16), reporting tunnel
-    flavor, target/address metadata, `last_owner`, and active connection count.
+    process descriptors, and optional truncation/blob `id`, plus the
+    `ports_changed` block event (API 16) carrying the same snapshot shape.
+    Because its process object shape matches `com.superlogical.terminal.process`,
+    `generate.py` names the shared struct `terminal::PortsResponseProcess`
+    instead of `terminal::Ancestor` (nothing in `rex-rune` references `Ancestor`).
+  - `com.superlogical.tunnel` (0 -> 1): added `info` (API 14,
+    `r0014_tunnel_block.go`; verified live on `0.1.0-preview.19` API 14),
+    reporting tunnel flavor, target/address metadata, `last_owner`, and active
+    connection count.
   - `com.superlogical.onboarding` (2 -> 2): unchanged.
 - **Control events and client behavior:**
   - `client_prompt_requested` and `client_prompt_ended` (API 17): `rex.ui`
@@ -227,9 +230,10 @@ the private API 13 server, all three closes succeeded without schema errors.
   the shipped client still refuses with `not_supported` in the meantime.
 - **Focus history navigation UI (`focus_history.reverse`):** SDK types are
   generated and tested; UI commands/bindings are deferred.
-- **Listening ports and tunnel inspection UI (`com.superlogical.terminal.ports`,
-  `com.superlogical.tunnel.info`):** SDK types are generated and tested; UI
-  surfaces are deferred.
+- **Listening ports UI and tunnel inspection UI (`com.superlogical.terminal.ports`,
+  `com.superlogical.tunnel.info`):** listening-ports Slice 1 (protocol, pure
+  model, connection sync, caps, and locality/reach policy) is implemented;
+  listening-ports UI (Slice 2) and tunnel inspection UI remain deferred.
 
 ## Verification
 
@@ -295,3 +299,42 @@ characters and details at 32. Unknown icon names use a generic icon. The
 client refuses prefills over 4096 characters and lists over 2000 items rather
 than cutting them down; item IDs are opaque, unique, nonempty and at most
 1024 bytes. The display deadline clamps `timeout_ms` to 1000 through 3660000.
+
+### Terminal listening ports (API 15-16)
+
+Captured live from `0.1.0-snapshot.2562` (API 21) via `block_creator.list` and
+exercised against isolated API 21 and API 14 (`0.1.0-preview.19`) servers using
+`examples/ports_probe.rs` and `scripts/ports-private.py`:
+
+- **`com.superlogical.terminal.ports` (API 15):** takes empty `args: {}`,
+  returns a response envelope with `seq` and payload `{status, ports, processes,
+  truncated?, id?}`. Calling it at negotiated API 14 on an API 21 server fails
+  with `revision_too_low` (status 400); calling it on a real API 14 server
+  (`0.1.0-preview.19`) fails with `method_not_found` (status 404). Rex Rune
+  never sends the method below API 15.
+- **`ports_changed` `block_event` (API 16):** declared under
+  `com.superlogical.terminal`'s `api.events.ports_changed` in
+  `block_creator.list` with required fields `status` (string: `"ok"`,
+  `"partial"`, `"unsupported"`, unknown treated as `"partial"`), `ports` (array
+  of `{port, address, protocol, first_seen_at, pid?}`), and `processes` (array
+  of `{pid, user_id, user?, name, path?, invoked_path?, argv0?, script?, cwd?}`),
+  plus optional `truncated` (bool) and `id` (integer). Arrives inside
+  `session_event` -> `block_event` with `creator_name: "com.superlogical.terminal"`
+  and `name: "ports_changed"`.
+- **Observed live behaviors:**
+  - Opening a listening TCP socket produces a `ports_changed` event with
+    `status: "ok"`, bound `port`, `address`, `protocol: "tcp"`, RFC 3339
+    `first_seen_at`, `pid`, and matching process entry (`script`, `argv0`,
+    `name`, `cwd`, etc.).
+  - Closing the socket produces `ports_changed` with `status: "ok"` and
+    `ports: []`.
+  - Exiting the terminal's process while listening (with `exit.on_completion:
+    false`) emits a final `ports_changed` event with `status: "unsupported"` and
+    `ports: []`; subsequent `com.superlogical.terminal.ports` calls also return
+    `status: "unsupported"` and `ports: []`.
+  - Negotiating API 15 against the API 21 server allows
+    `com.superlogical.terminal.ports`; note that server rev 21 does not filter
+    `ports_changed` block events by negotiated client revision, while genuine
+    API 15 servers lack `ports_changed` and rely on explicit reads.
+- See [listening-ports.md](parity-2026-11/listening-ports.md) for the Slice 1
+  architecture, caps, locality/reach security matrix, and Slice 2 handoff.

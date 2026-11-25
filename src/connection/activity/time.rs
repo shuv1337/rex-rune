@@ -52,7 +52,7 @@ pub fn reported_elapsed(value: &str, wall: SystemTime) -> Option<Duration> {
 
 /// RFC 3339 without a new dependency. Validate before civil-date conversion;
 /// reject leap seconds (unknown age), and truncate sub-nanosecond precision.
-fn timestamp(raw: &str) -> Option<SystemTime> {
+pub(crate) fn timestamp(raw: &str) -> Option<SystemTime> {
     let b = raw.as_bytes();
     if b.len() < 20
         || !raw.is_ascii()
