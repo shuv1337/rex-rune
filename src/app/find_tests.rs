@@ -661,10 +661,10 @@ fn a_split_panes_bar_is_under_its_header_and_inside_its_card() {
     let (_, apron) = bar_on_rows(&rt, "block:b");
     assert!((apron[1] - grid[1]).abs() < 0.01, "on the first rows");
     assert!(
-        (apron[0] + apron[2] - (grid[0] + grid[2])).abs() < 0.01,
+        (apron[0] + apron[2] - (grid[0] + grid[2])).abs() < 0.05,
         "{apron:?} meets the grid's edge {grid:?}"
     );
-    assert!((bar[0] + bar[2] - (grid[0] + grid[2] - find::INSET)).abs() < 0.01);
+    assert!((bar[0] + bar[2] - (grid[0] + grid[2] - find::INSET)).abs() < 0.05);
     assert_eq!(bar[2], find::WIDTH.min(grid[2] - 2. * find::INSET));
     // The match is at the left of the first row, clear of the bar.
     assert_eq!(

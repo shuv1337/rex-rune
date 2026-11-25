@@ -488,6 +488,7 @@ fn fractional_cell_widths_preserve_the_pointer_half_for_selection() {
         pane.drag(0., 4.);
         pane.worker();
         assert_eq!(pane.clipboard(), "alpha", "{mono}: {width} pt");
+        std::fs::remove_file(&pane.rt.state.settings_path).ok();
     }
 }
 

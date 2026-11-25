@@ -34,5 +34,5 @@ still enables Hunspell, but native builds do not compile `spellbook`.
   second click of a double click from reaching Rune. Release or focus loss
   cancels a pending move. macOS still starts a move inside mouse-down, as
   AppKit requires. Touch and native edge resizing use upstream behavior.
-  Rune's native secondary-release menu also works on bare X11 and Wayland drag
-   regions on Unix outside macOS: only those platforms skip the upstream caption check.
+  Rune's native secondary-release menu also works on bare drag regions on Unix
+  outside macOS, where the upstream caption check is skipped.
