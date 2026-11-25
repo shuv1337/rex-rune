@@ -2532,8 +2532,19 @@ async fn run_host(
                             continue;
                         }
                         if let HostCommand::Visibility(visible) = command {
-                            apply_visibility(visible, &endpoint, shared, &sender, &mut workers, &mut state);
-                            metadata_due = true;
+                            if exclusive {
+                                deferred_commands.push_back(HostCommand::Visibility(visible));
+                            } else {
+                                apply_visibility(
+                                    visible,
+                                    &endpoint,
+                                    shared,
+                                    &sender,
+                                    &mut workers,
+                                    &mut state,
+                                );
+                                metadata_due = true;
+                            }
                             continue;
                         }
                         if exclusive || blocked_front || !inputs.admits(&command, shared) {
