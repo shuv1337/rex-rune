@@ -7,10 +7,11 @@ Vendored from `https://github.com/a10y/rexrs` at
 
 Local changes:
 
-- `codegen/help.json` and `version.json` capture Rex `0.1.0-snapshot.2646`,
-  commit `3dda44da999b669ea56a0fce4f16b86d4d55d2cb`, API revision 24. Both
+- `codegen/help.json` and `version.json` capture Rex `0.1.0-snapshot.2670`,
+  commit `b070aae645f5cbfac65d65d031a8b712b2ebca36`, API revision 24. Both
   are verbatim outputs of `rex api list --json` and `server.version` on a
-  disposable server. `python3 codegen/generate.py`
+  disposable server. The catalog was byte-identical to snapshot 2646, so
+  the generated files did not change. `python3 codegen/generate.py`
   regenerates the committed types and example tests. The API additions since
   upstream are `session.bootstrap.data_tickets` (8), layer `state` and
   `session.set_layer_state` (9), the Tailscale `control_url` (10) and
