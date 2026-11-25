@@ -16,6 +16,8 @@
 
 ### Changed
 
+- Negotiates Rex Server API revisions 10 through 24 and refreshes the SDK capture from snapshot 2646. [Compatibility record](docs/server-api24.md).
+
 - Terminal input no longer waits a round trip per keystroke on slow links. Adjacent resizes and matching mouse motions coalesce, and multi-pane metadata and themes load in batches. Thanks to @johnknott (#179).
 
 - Upgraded Rune to `983e33b9`. The client now uses Rune's native window chrome, keyboard, IME, and system font APIs, including the X11 window menu. Release builds still include screenshot and acceptance scripting tools.

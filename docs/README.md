@@ -29,7 +29,8 @@ What is in this folder, one line per document or subfolder.
 
 - [server-preview14.md](server-preview14.md): compatibility with Rex server preview.14, verified on 2026-11-09 (PST) for 0.4.1, which advertises API revisions 10–12.
 - [server-api13.md](server-api13.md): compatibility with Rex API 13, verified on 2026-11-10 (PST), from which the client advertises API revisions 10–13.
-- [server-api21.md](server-api21.md): compatibility with Rex API 21 (`0.1.0-snapshot.2562` and `0.1.0-snapshot.2563`), advertising API revisions 10-21 with dual zoom, `rex.ui` prompt refusal, `event_dropped` recovery and ID-reuse cleanup.
+- [server-api24.md](server-api24.md): API revisions 10-24, additive wire changes and the Program Resume contract on `0.1.0-snapshot.2646`.
+- [server-api21.md](server-api21.md): historical API 21 compatibility, dual zoom, the initial `rex.ui` prompt refusal, `event_dropped` recovery and ID-reuse cleanup.
 
 ## Verification records
 

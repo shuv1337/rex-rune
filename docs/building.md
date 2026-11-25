@@ -14,11 +14,12 @@ ownership of source files and deeper internals, see [AGENTS.md](../AGENTS.md).
 - Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan,
   xkbcommon, fontconfig and the Wayland/X11 client libraries. For macOS or
   Windows source builds, see [macOS](#macos) and [Windows](#windows).
-- A running Rex server that supports API revisions 10 through 21. Verified with
-  Linux servers **0.1.0-snapshot.2562 (`9e2eef1`, API 21)**,
+- A running Rex server that supports an API revision from 10 through 24.
+  Compatibility records cover Linux servers **0.1.0-snapshot.2646 (`3dda44da`, API 24)**,
+  **0.1.0-snapshot.2562 (`9e2eef1`, API 21)**,
   **0.1.0-snapshot.2563 (`14f6d7f`, API 21)**,
   **0.0.1794323808-g757adf (API 13)** and **0.1.0-preview.14 (`7e460d0`, API 12)**;
-  see [API-21 compatibility results](server-api21.md),
+  see [API-24 compatibility](server-api24.md), [API-21 compatibility results](server-api21.md),
   [API-13 compatibility results](server-api13.md) and
   [preview.14 results](server-preview14.md). Rex is in alpha, so older revisions
   aren't supported; update Rex on a host that refuses the connection. Uploading
@@ -366,7 +367,7 @@ through `[patch]` in [`Cargo.toml`](../Cargo.toml):
   fixes. The other Rune crates and upstream registry patches stay at the same
   pinned git revision.
 - [`vendor/rexrs/`](../vendor/rexrs/REX-RUNE.md): `a10y/rexrs` at `780be3f` (MIT
-  OR Apache-2.0), plus revision-21 generated types, explicit API-revision range
+  OR Apache-2.0), plus revision-24 generated types, explicit API-revision range
   negotiation and preservation of an empty `attach_session_ids`.
 - [`vendor/ghostty-vt/`](../vendor/ghostty-vt/REX-RUNE.md): the crates.io
   `ghostty-vt` 0.8.0 source (Apache-2.0; Ghostty itself is MIT), plus a safe

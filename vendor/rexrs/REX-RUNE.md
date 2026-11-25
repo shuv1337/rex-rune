@@ -34,7 +34,7 @@ Local changes:
   repository for the comparisons.
 - `ClientBuilder::api_revisions(min..=max)` passes an explicit supported range
   to HELLO. The SDK default still advertises only its generated revision.
-  Rex Rune advertises 10-21, validates WELCOME and keeps per-feature revision
+  Rex Rune advertises 10-24, validates WELCOME and keeps per-feature revision
   gates (uploads on 11, SSH setup on 12, floating layers and downloads on 13).
 - A focused negotiation test accompanies the builder change.
 - Hand-written `tests/listeners.rs` covers the optional listener metadata in
