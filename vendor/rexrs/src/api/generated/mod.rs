@@ -2,13 +2,14 @@
 
 //! Request and response types for every method the server documents.
 //!
-//! Generated from Rex 0.1.0-snapshot.2562, API revision 21.
+//! Generated from Rex 0.1.0-snapshot.2646, API revision 24.
 
 pub mod block;
 pub mod block_creator;
 pub mod client;
 pub mod data;
 pub mod focus_history;
+pub mod fs;
 pub mod help;
 pub mod hosts;
 pub mod onboarding;
@@ -19,4 +20,4 @@ pub mod terminal;
 pub mod tunnel;
 
 /// The control API revision these types were generated for.
-pub const API_REVISION: u32 = 21;
+pub const API_REVISION: u32 = 24;

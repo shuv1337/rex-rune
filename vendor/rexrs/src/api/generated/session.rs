@@ -3294,6 +3294,106 @@ impl crate::api::Method for SwapBlocks {
     type Response = SwapBlocksResponse;
 }
 
+/// The result of [`TransferWindow`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TransferWindowResponse {
+    /// The revision of the session the window left, after it left.
+    pub revision: u64,
+    /// The revision of the destination session, after the window arrived.
+    pub to_revision: u64,
+}
+
+/// Move a window, with its blocks still running, to another session.
+///
+/// - The window keeps its ID, label, layout, focused block and zoom, and its blocks keep their
+///   IDs and go on running. A terminal keeps its program and its scrollback.
+/// - The session the window leaves sends `window_closed` and a `block_closed` for each block, as
+///   if the window had closed. The destination sends a `block_created` for each block and then
+///   `window_created`. A client that is attached to both sees the same IDs close in one and open
+///   in the other.
+/// - Streams opened on the window's blocks through the session it left end. Open them again
+///   through the destination session.
+/// - The calling client becomes the owner of the blocks if it is attached to the destination
+///   session. Otherwise they have no owner until a client claims them.
+/// - A program already running in a terminal keeps the `REX_SESSION` value it started with, which
+///   names the session the window left.
+/// - If the window's session has no other window, it is left with none, as after
+///   `session.close_window`.
+/// - To reorder windows within one session, use `session.move_window`. If `to_session_id` equals
+///   `session_id`, the call fails with `bad_request`.
+/// - If the destination already has its maximum number of windows, or a block of the window is
+///   still starting or is being moved by another call, the call fails with `conflict` and the
+///   window stays where it is.
+/// - If either session doesn't exist, the call fails with `session_not_found`, and the message
+///   says which one. If `window_id` isn't in the session, or `before_window_id` isn't in the
+///   destination, it fails with `not_found`.
+///
+/// Wire method: `session.transfer_window`.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "session_id": "session:01234567-89ab-cdef-0123-456789abcde1",
+///   "window_id": "window:01234567-89ab-cdef-0123-456789abcde3",
+///   "to_session_id": "session:01234567-89ab-cdef-0123-456789abcde2"
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+#[non_exhaustive]
+pub struct TransferWindow {
+    /// The session that holds the window.
+    pub session_id: String,
+    /// The window to move.
+    pub window_id: String,
+    /// The session to move the window to. It must be a different session.
+    pub to_session_id: String,
+    /// The window in the destination session to place it just before. Leave it out to put the
+    /// window at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_window_id: Option<String>,
+    /// Whether to make the window the destination session's active window. Defaults to false. A
+    /// session with no active window always makes it active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<bool>,
+}
+
+impl TransferWindow {
+    /// Creates a `TransferWindow` with its required fields.
+    pub fn new(
+        session_id: impl Into<String>,
+        window_id: impl Into<String>,
+        to_session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            window_id: window_id.into(),
+            to_session_id: to_session_id.into(),
+            before_window_id: Default::default(),
+            focus: Default::default(),
+        }
+    }
+
+    /// The window in the destination session to place it just before. Leave it out to put the
+    /// window at the end.
+    pub fn before_window_id(mut self, value: impl Into<String>) -> Self {
+        self.before_window_id = Some(value.into());
+        self
+    }
+
+    /// Whether to make the window the destination session's active window. Defaults to false. A
+    /// session with no active window always makes it active.
+    pub fn focus(mut self, value: bool) -> Self {
+        self.focus = Some(value);
+        self
+    }
+}
+
+impl crate::api::Method for TransferWindow {
+    const NAME: &'static str = "session.transfer_window";
+    type Response = TransferWindowResponse;
+}
+
 /// How this node divides in two. Set only when block_id isn't.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Split {

@@ -2048,6 +2048,30 @@ fn session_swap_blocks_response() {
 }
 
 #[test]
+fn session_transfer_window_request() {
+    let value: rexrs::api::session::TransferWindow = serde_json::from_str(
+        r##"{
+  "session_id": "session:01234567-89ab-cdef-0123-456789abcde1",
+  "window_id": "window:01234567-89ab-cdef-0123-456789abcde3",
+  "to_session_id": "session:01234567-89ab-cdef-0123-456789abcde2"
+}"##,
+    )
+    .unwrap();
+    let json = serde_json::to_value(&value).unwrap();
+    let again: rexrs::api::session::TransferWindow = serde_json::from_value(json).unwrap();
+    assert_eq!(value, again);
+}
+
+#[test]
+fn session_transfer_window_response() {
+    let value: rexrs::api::session::TransferWindowResponse =
+        serde_json::from_str(r##"{"revision": 42, "to_revision": 7}"##).unwrap();
+    let json = serde_json::to_value(&value).unwrap();
+    let again: rexrs::api::session::TransferWindowResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(value, again);
+}
+
+#[test]
 fn session_view_request() {
     let value: rexrs::api::session::View = serde_json::from_str(
         r##"{

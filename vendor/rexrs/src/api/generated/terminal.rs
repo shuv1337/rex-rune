@@ -866,7 +866,8 @@ impl crate::api::BlockMethod for Process {
     type Response = ProcessResponse;
 }
 
-/// The terminal's foreground process when the report arrived. Left out if the server couldn't tell.
+/// The process the record belongs to. name is empty if the process exited before the server read
+/// its name.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Owner {
     /// The process ID.
@@ -878,6 +879,88 @@ pub struct Owner {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Record {
+    /// The process the record belongs to. name is empty if the process exited before the server
+    /// read its name.
+    pub owner: Owner,
+    /// The last element of the command's program, such as claude. Show it to name the record.
+    pub program: String,
+    /// The directory to run the command in. Left out when it isn't known, and the program then
+    /// starts where a new shell would.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// The time the report gave, as an RFC 3339 timestamp.
+    pub reported_at: String,
+    /// True for the one record a restart of the terminal would resume. Left out for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<bool>,
+    /// True if Rex would run the command without asking the user first, because a trust rule names
+    /// it exactly. Left out for a record that isn't trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted: Option<bool>,
+    /// The name of the rule that trusts the record, such as claude. Set only when trusted is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// Why Rex doesn't trust the record. 'wrapped': its process runs under a program, such as
+    /// bwrap, that running the command alone would leave out. 'no_rule': no trust rule names the
+    /// command. 'program_differs': its process isn't the program the command starts.
+    /// 'flag_not_listed': its process was started with a flag the rule doesn't list. 'flag_value':
+    /// a flag's values don't fit the rule. 'flags_differ': the command's flags aren't the ones its
+    /// process was started with. 'dir_not_allowed': the command would start outside the directories
+    /// the rule allows. 'launch_unreadable': the server couldn't read its process's command line.
+    /// 'config_incomplete': init.lua failed before it finished loading, so nothing is trusted.
+    /// Treat a value you don't know as not trusted, for a reason you can't name. Left out when
+    /// there is no reason to give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untrusted_reason: Option<String>,
+    /// The command that starts the program again, as a list of arguments that begins with the
+    /// program. It can hold a secret, such as a token passed as a flag, so don't log it.
+    #[serde(default, deserialize_with = "crate::api::nullable")]
+    pub command: Vec<String>,
+}
+
+/// The result of [`ProgramResumeRecords`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct ProgramResumeRecordsResponse {
+    /// The terminal's records, newest report first. An empty array when it has none, including when
+    /// the terminal doesn't support Program Resume.
+    #[serde(default, deserialize_with = "crate::api::nullable")]
+    pub records: Vec<Record>,
+}
+
+/// List the commands that programs in the terminal reported with OSC 7577 for starting them again
+/// after a restart. The record a restart would use is marked chosen. A command can hold a secret,
+/// such as a token passed as a flag. It doesn't wake an idle terminal. To follow changes, call it
+/// once and then follow the program_resume_changed event.
+///
+/// Wire method: `com.superlogical.terminal.program_resume_records`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+#[non_exhaustive]
+pub struct ProgramResumeRecords {}
+
+impl ProgramResumeRecords {
+    /// Creates a `ProgramResumeRecords` with every field left out.
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl crate::api::BlockMethod for ProgramResumeRecords {
+    const NAME: &'static str = "com.superlogical.terminal.program_resume_records";
+    type Response = ProgramResumeRecordsResponse;
+}
+
+/// The terminal's foreground process when the report arrived. Left out if the server couldn't tell.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct ProgramStatusResponseRecordOwner {
+    /// The process ID.
+    pub pid: i64,
+    /// The process's name, found the same way as name in the result of process. Compare it as well
+    /// as pid, because the system reuses process IDs.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct ProgramStatusResponseRecord {
     /// The record's ID. A slash separates a parent from a child, as in build/test. Left out for the
     /// root record, which holds the reports that give no ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -914,7 +997,7 @@ pub struct Record {
     /// The terminal's foreground process when the report arrived. Left out if the server couldn't
     /// tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<Owner>,
+    pub owner: Option<ProgramStatusResponseRecordOwner>,
 }
 
 /// The result of [`ProgramStatus`].
@@ -923,7 +1006,7 @@ pub struct ProgramStatusResponse {
     /// Every record, sorted by id. The root record comes first, and each parent comes before its
     /// children. Empty if no program has reported a status.
     #[serde(default, deserialize_with = "crate::api::nullable")]
-    pub records: Vec<Record>,
+    pub records: Vec<ProgramStatusResponseRecord>,
 }
 
 /// List the status that programs in the terminal have reported. Programs report a status, such as
@@ -956,7 +1039,7 @@ pub struct PwdResponse {
     /// The process that reported the directory. Left out if pwd is left out or the server couldn't
     /// tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<Owner>,
+    pub owner: Option<ProgramStatusResponseRecordOwner>,
 }
 
 /// Get the working directory that a program in the terminal last reported. To find where each
@@ -1197,7 +1280,7 @@ pub struct TitleResponse {
     /// The process that set the title, as title_changed reported it. Left out if no title is set, a
     /// reset cleared it, or the server couldn't tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<Owner>,
+    pub owner: Option<ProgramStatusResponseRecordOwner>,
 }
 
 /// Get the terminal's title and the process that set it.

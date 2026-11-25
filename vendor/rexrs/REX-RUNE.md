@@ -7,11 +7,10 @@ Vendored from `https://github.com/a10y/rexrs` at
 
 Local changes:
 
-- `codegen/help.json` and `version.json` capture Rex `0.1.0-snapshot.2562`,
-  commit `9e2eef18ea487e17be2b7facf899c4b3a9b8b9ca`, API revision 21 (`rex api
-  list --json` and `server.version` from a disposable server; byte-for-byte
-  identical `help.json` and `/llms.txt` to `0.1.0-snapshot.2563` commit
-  `14f6d7f95cc6fe056935937de9783b8e40b416da`). `python3 codegen/generate.py`
+- `codegen/help.json` and `version.json` capture Rex `0.1.0-snapshot.2646`,
+  commit `3dda44da999b669ea56a0fce4f16b86d4d55d2cb`, API revision 24. Both
+  are verbatim outputs of `rex api list --json` and `server.version` on a
+  disposable server. `python3 codegen/generate.py`
   regenerates the committed types and example tests. The API additions since
   upstream are `session.bootstrap.data_tickets` (8), layer `state` and
   `session.set_layer_state` (9), the Tailscale `control_url` (10) and
@@ -22,11 +21,15 @@ Local changes:
   `client_prompt_ended`, `event_dropped`, `focus_history.reverse`,
   `undoable` on `block.close` / `session.close_window` / `session.destroy`
   plus `client.undo_close`, and `tiled_zoomed_block_id` on `session::Window`.
+  Revisions 22 through 24 add `session.transfer_window`, the filesystem
+  block's upload and download methods, and `program_resume_records` with
+  `program_resume_changed`. Rex Rune's resume reader does not use the
+  generated response type.
   Because `com.superlogical.terminal.ports` shares its process object shape
   with `com.superlogical.terminal.process`, `generate.py` names that shared
   struct `terminal::PortsResponseProcess` instead of `terminal::Ancestor`
   (nothing in `rex-rune` references `Ancestor`). No upstream revision bump or
-  generator changes were needed. See `docs/server-api21.md`,
+  generator changes were needed. See `docs/server-api24.md`, `docs/server-api21.md`,
   `docs/server-api13.md` and `docs/server-preview14.md` in the client
   repository for the comparisons.
 - `ClientBuilder::api_revisions(min..=max)` passes an explicit supported range
