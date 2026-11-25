@@ -137,10 +137,14 @@ fn reverse(
         deadline: Instant::now() + Duration::from_secs(10),
     })?;
     wait(host, Duration::from_secs(8), "focus_history_result", |m| {
-        m.focus_history_result
+        let r = m
+            .focus_history_result
             .as_ref()
-            .filter(|r| r.epoch == epoch && r.id == req_id)
-            .cloned()
+            .filter(|r| r.epoch == epoch && r.id == req_id)?;
+        if r.reversed && r.session_id.is_some() && m.selected != r.session_id {
+            return None;
+        }
+        Some(r.clone())
     })
 }
 

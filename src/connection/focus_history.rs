@@ -228,7 +228,22 @@ pub(super) async fn reverse(
         return Ok(());
     }
 
-    let target_session = response.session_id.clone().or(current_session);
+    // Publish the confirmed reverse and cursor immediately so the UI captures the
+    // server cursor even if follow-up target sync later hits the shared deadline.
+    shared.update(|m| {
+        m.notice = None;
+        m.focus_history_result = Some(FocusHistoryResult {
+            epoch,
+            id,
+            reversed: true,
+            cursor: response.cursor,
+            session_id: response.session_id.clone(),
+            window_id: response.window_id.clone(),
+            block_id: response.block_id.clone(),
+        });
+    });
+
+    let target_session = response.session_id.or(current_session);
     let mut sync_timed_out = false;
     if let Some(target) = target_session.as_deref() {
         let (listed, has_view) = {
@@ -283,32 +298,17 @@ pub(super) async fn reverse(
             let message = crate::download::display_text(&format!("{error:#}"));
             shared.update(|m| {
                 m.notice = Some(format!("Could not show previous focus target: {message}"));
-                m.focus_history_result = Some(FocusHistoryResult::not_reversed(epoch, id));
             });
             return Ok(());
         }
-    }
-
-    shared.update(|m| {
-        if let Some(target) = &target_session {
-            let known = !sync_timed_out
-                || m.views.contains_key(target)
-                || m.sessions.iter().any(|s| s.session_id == *target);
-            if known {
+        shared.update(|m| {
+            if sync_timed_out {
+                m.notice = Some(FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE.into());
+            } else {
                 m.background_views.remove(target);
-                m.selected = Some(target.clone());
+                m.selected = Some(target.to_string());
             }
-        }
-        m.notice = sync_timed_out.then(|| FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE.into());
-        m.focus_history_result = Some(FocusHistoryResult {
-            epoch,
-            id,
-            reversed: true,
-            cursor: response.cursor,
-            session_id: response.session_id,
-            window_id: response.window_id,
-            block_id: response.block_id,
         });
-    });
+    }
     Ok(())
 }

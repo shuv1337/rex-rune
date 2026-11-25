@@ -261,11 +261,11 @@ past the UI's pending window. Empirically verified on Rex `0.1.0-snapshot.2562`
 block at the top of the principal's focus history (even when called offscreen
 or while unattached), whereas `session.attach` returns the full fresh
 `ViewResponse` without modifying focus history. Accordingly, on API 19+:
-- Passive refreshes on sessions already in `ControlState::attached`
+- Passive refreshes of sessions already in `ControlState::attached`
   (`session_view_changed`, `block_closed`, `event_dropped`, and `after_request`
-  for BOTH offscreen and locally selected sessions) as well as post-reverse
-  target refreshes use `session.attach`, so background pane exits and idle
-  clients displaying another session never overwrite focus history.
+  for both offscreen and locally selected attached sessions) as well as
+  post-reverse target refreshes use `session.attach` so they do not record
+  focus.
 - Unattached initial background sweeps (`Prefetch`, `view_fetch`) and sessions
   explicitly detached via `session.detach` keep using `session.view` so Rex
   Rune never joins unopened sessions (`session.list_clients` / `client_connected`
@@ -276,9 +276,12 @@ or while unattached), whereas `session.attach` returns the full fresh
   window) use `session.view` (attaching first when not yet attached, including
   after `session.detach`) so switching sessions records focus immediately on
   the server without extra traffic for already-attached sessions.
-- When `focus_history.reverse` returns a target in another session, the worker
-  re-lists if needed, attaches/refreshes via `session.attach` within the shared
-  deadline, and switches `HostModel::selected` with fresh view state.
+- When `focus_history.reverse` returns `reversed: true`, the worker publishes
+  the confirmed result and cursor immediately, then re-lists and
+  attaches/refreshes the target via `session.attach` within the shared deadline
+  before switching `HostModel::selected`; if follow-up sync times out,
+  `HostModel::selected` stays unchanged and a timeout notice is shown while
+  keeping the confirmed cursor.
 Existing local navigation history (`client.history.back` and
 `client.history.forward`) is unchanged.
 

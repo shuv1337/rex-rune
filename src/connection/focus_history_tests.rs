@@ -451,6 +451,7 @@ async fn focus_history_cross_session_switches_selected_attaches_and_reversed_fal
         .unwrap();
     until(&host, |m| {
         m.focus_history_result.as_ref().is_some_and(|r| r.id == 1)
+            && m.selected.as_deref() == Some(OTHER)
     })
     .await;
     {
@@ -1083,6 +1084,7 @@ async fn focus_history_attached_passive_events_use_attach_while_unattached_and_d
 async fn focus_history_followup_attach_bounded_by_shared_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (attach_seen_tx, attach_seen_rx) = tokio::sync::oneshot::channel::<()>();
     let (hold_done_tx, hold_done_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
@@ -1129,6 +1131,7 @@ async fn focus_history_followup_attach_bounded_by_shared_deadline() {
         };
         assert_eq!(att["method"], "session.attach");
         assert_eq!(att["payload"]["session_id"], OTHER);
+        let _ = attach_seen_tx.send(());
         let _ = hold_done_rx.await;
     });
 
@@ -1136,26 +1139,45 @@ async fn focus_history_followup_attach_bounded_by_shared_deadline() {
     connected(&host).await;
     let epoch = host.model.lock().unwrap().connection_epoch;
     let started = Instant::now();
+    let deadline = started + Duration::from_secs(1);
     host.commands
         .send(HostCommand::ReverseFocusHistory {
             epoch,
             id: 21,
             scope: FocusHistoryScope::Session,
             cursor: None,
-            deadline: started + Duration::from_millis(180),
+            deadline,
         })
         .unwrap();
 
-    // Must settle well before an unclipped 8s follow-up timeout.
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // Confirm the mock server received follow-up session.attach before the shared deadline,
+    // and verify FocusHistoryResult (reversed: true, cursor: 77) is already published while
+    // follow-up attach is still pending (so UI deadline expiry can never lose the cursor).
+    tokio::time::timeout(Duration::from_secs(4), attach_seen_rx)
+        .await
+        .expect("timed out waiting for follow-up session.attach")
+        .expect("attach_seen channel closed");
+    let expected_result = Some(FocusHistoryResult {
+        epoch,
+        id: 21,
+        reversed: true,
+        cursor: Some(77),
+        session_id: Some(OTHER.into()),
+        window_id: Some(OTHER_TAB.into()),
+        block_id: Some(OTHER_BLOCK.into()),
+    });
+    {
+        let m = host.model.lock().unwrap();
+        assert_eq!(m.focus_history_result, expected_result);
+        assert_eq!(m.selected.as_deref(), Some(SESSION));
+        assert_eq!(m.notice, None);
+    }
+
+    // Follow-up attach must time out promptly at the shared 1s deadline (well under 8s).
+    tokio::time::timeout(Duration::from_secs(4), async {
         loop {
-            if host
-                .model
-                .lock()
-                .unwrap()
-                .focus_history_result
-                .as_ref()
-                .is_some_and(|r| r.id == 21)
+            if host.model.lock().unwrap().notice.as_deref()
+                == Some(FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE)
             {
                 break;
             }
@@ -1165,27 +1187,20 @@ async fn focus_history_followup_attach_bounded_by_shared_deadline() {
     .await
     .expect("follow-up attach exceeded shared reverse deadline");
     assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "elapsed {:?} should stay bounded by shared deadline",
+        started.elapsed() < Duration::from_secs(5),
+        "elapsed {:?} should stay bounded by shared deadline (below 8s CALL_TIMEOUT)",
         started.elapsed()
     );
     {
         let m = host.model.lock().unwrap();
         assert!(m.connected);
-        assert_eq!(m.selected.as_deref(), Some(OTHER));
-        assert_eq!(m.notice.as_deref(), Some(FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE));
         assert_eq!(
-            m.focus_history_result,
-            Some(FocusHistoryResult {
-                epoch,
-                id: 21,
-                reversed: true,
-                cursor: Some(77),
-                session_id: Some(OTHER.into()),
-                window_id: Some(OTHER_TAB.into()),
-                block_id: Some(OTHER_BLOCK.into()),
-            })
+            m.selected.as_deref(),
+            Some(SESSION),
+            "m.selected must stay preserved when follow-up target sync times out"
         );
+        assert_eq!(m.notice.as_deref(), Some(FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE));
+        assert_eq!(m.focus_history_result, expected_result);
     }
     let _ = hold_done_tx.send(());
     drop(host);
