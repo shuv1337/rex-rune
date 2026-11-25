@@ -26,18 +26,10 @@ const MAX_WAITERS: usize = 16;
 const MAX_RPC_WAIT: Duration = Duration::from_secs(8);
 
 #[derive(Deserialize)]
-struct ViewReply {
+struct Response {
     #[serde(default)]
     seq: u64,
     payload: Option<session::ViewResponse>,
-    error: Option<ResponseError>,
-}
-
-#[derive(Deserialize)]
-struct AttachReply {
-    #[serde(default)]
-    seq: u64,
-    payload: Option<session::AttachResponse>,
     error: Option<ResponseError>,
 }
 
@@ -62,7 +54,6 @@ impl ResponseError {
 pub(super) enum Event {
     Reply {
         session: String,
-        attached: bool,
         ids: Vec<u64>,
         result: Result<(u64, session::ViewResponse), ViewFetchOutcome>,
     },
@@ -75,7 +66,6 @@ pub(super) enum Event {
 
 struct InFlight {
     session: String,
-    attached: bool,
     waiters: Vec<(u64, Instant)>,
     reply: oneshot::Receiver<String>,
     timer: Pin<Box<tokio::time::Sleep>>,
@@ -142,25 +132,15 @@ impl Reader {
         if self.entries.len() >= MAX_IN_FLIGHT {
             return Ok(false);
         }
-        let attached =
-            control.welcome().api_revision >= crate::connection::FOCUS_HISTORY_MIN_API_REVISION;
-        let reply = if attached {
-            control
-                .transport()
-                .detach(session::Attach::NAME, session::Attach::new(&session))
-                .await?
-        } else {
-            control
-                .transport()
-                .detach(session::View::NAME, session::View::new(&session))
-                .await?
-        };
+        let reply = control
+            .transport()
+            .detach(session::View::NAME, session::View::new(&session))
+            .await?;
         let timer = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
             capped,
         )));
         self.entries.push(InFlight {
             session,
-            attached,
             waiters: vec![(id, capped)],
             reply,
             timer,
@@ -180,10 +160,9 @@ impl Reader {
                 if let Poll::Ready(text) = Pin::new(&mut self.entries[index].reply).poll(cx) {
                     let entry = self.entries.remove(index);
                     let ids = entry.waiters.into_iter().map(|(id, _)| id).collect();
-                    let result = parse_reply(text.ok(), entry.attached);
+                    let result = parse_reply(text.ok());
                     return Poll::Ready(Event::Reply {
                         session: entry.session,
-                        attached: entry.attached,
                         ids,
                         result,
                     });
@@ -259,26 +238,11 @@ impl Reader {
     }
 }
 
-fn parse_reply(
-    text: Option<String>,
-    attached: bool,
-) -> Result<(u64, session::ViewResponse), ViewFetchOutcome> {
+fn parse_reply(text: Option<String>) -> Result<(u64, session::ViewResponse), ViewFetchOutcome> {
     let Some(text) = text else {
         return Err(ViewFetchOutcome::Failed);
     };
-    if attached {
-        let Ok(response) = serde_json::from_str::<AttachReply>(&text) else {
-            return Err(ViewFetchOutcome::Failed);
-        };
-        if let Some(error) = response.error {
-            return Err(error.outcome());
-        }
-        return response
-            .payload
-            .map(|p| (response.seq, p.view))
-            .ok_or(ViewFetchOutcome::Failed);
-    }
-    let Ok(response) = serde_json::from_str::<ViewReply>(&text) else {
+    let Ok(response) = serde_json::from_str::<Response>(&text) else {
         return Err(ViewFetchOutcome::Failed);
     };
     if let Some(error) = response.error {

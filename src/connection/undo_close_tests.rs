@@ -180,8 +180,21 @@ async fn undo_close_pane_tab_and_session_restore_focus_metadata_and_data() {
                 }
                 "session.attach" => {
                     assert_eq!(payload["session_id"], SESSION);
-                    assert_eq!(follow.pop(), Some(method));
-                    json!({"client_id":"client:test","view":reopen_view(revision,true,true)})
+                    if held.as_deref() == Some("session.destroy") {
+                        error(&mut ws, &req, "session_not_found", 404).await;
+                        continue;
+                    }
+                    if !follow.is_empty() {
+                        assert_eq!(follow.pop(), Some(method));
+                    }
+                    json!({
+                        "client_id": "client:test",
+                        "view": reopen_view(
+                            revision,
+                            held.is_none(),
+                            held.as_deref() != Some("session.close_window"),
+                        )
+                    })
                 }
                 "data.connect" => {
                     assert_eq!(payload["block_id"], BLOCK);
@@ -288,8 +301,19 @@ async fn undo_close_revision_gate_and_automated_close_shape() {
                 assert_eq!(req["payload"].get("undoable"), None, "API {revision}");
                 reply(&mut ws, &req, seq, json!({})).await;
                 let view = next(&mut ws).await;
-                assert_eq!(view["method"], "session.view");
-                reply(&mut ws, &view, seq, view_of(SESSION)).await;
+                if revision >= FOCUS_HISTORY_MIN_API_REVISION {
+                    assert_eq!(view["method"], "session.attach");
+                    reply(
+                        &mut ws,
+                        &view,
+                        seq,
+                        json!({"client_id": "client:test", "view": view_of(SESSION)}),
+                    )
+                    .await;
+                } else {
+                    assert_eq!(view["method"], "session.view");
+                    reply(&mut ws, &view, seq, view_of(SESSION)).await;
+                }
             }
             if revision == 20 {
                 let req = next(&mut ws).await;

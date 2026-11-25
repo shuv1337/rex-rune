@@ -142,11 +142,11 @@ def verify_api21(probe: Path, rex21: Path):
             assert scopes["tab"] == topo["w1b"], scopes
             assert scopes["session"] == topo["s2"], scopes
             assert scopes["tab_any_session"] == topo["w1b"], scopes
-            assert offscreen["rev_a_after_exit"] > offscreen["rev_a_after_split"], offscreen
             assert offscreen["any_session"] == topo["s2"], offscreen
             assert offscreen["session_scope_session"] == topo["s2"], offscreen
+            assert offscreen["idle_client_any_session"] == topo["s2"], offscreen
             print(
-                "PASS [1/3] API 21 live toggle, 3-step cursor walk, all scopes (Pane/Tab/Session/TabAnySession), cross-session HostModel::selected switching, and offscreen A->B->C non-pollution"
+                "PASS [1/3] API 21 live toggle, 3-step cursor walk, all scopes (Pane/Tab/Session/TabAnySession), cross-session HostModel::selected switching, independent offscreen A->B->C non-pollution, and idle-client passive refresh non-pollution"
             )
 
             # Pinned API 18 on API 21 server: zero focus_history.reverse sent, clean unsupported outcome.

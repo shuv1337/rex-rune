@@ -31,7 +31,8 @@ mod view_fetch;
 pub use focus_history::{
     FOCUS_HISTORY_DISCONNECTED, FOCUS_HISTORY_DISCONNECTED_NOTICE, FOCUS_HISTORY_EMPTY_NOTICE,
     FOCUS_HISTORY_EXPIRED_NOTICE, FOCUS_HISTORY_MIN_API_REVISION, FOCUS_HISTORY_REQUIRES_API,
-    FOCUS_HISTORY_UNSUPPORTED_NOTICE, FocusHistoryResult, FocusHistoryScope,
+    FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE, FOCUS_HISTORY_UNSUPPORTED_NOTICE, FocusHistoryResult,
+    FocusHistoryScope,
 };
 pub use view_fetch::ViewFetchOutcome;
 
@@ -1252,12 +1253,20 @@ async fn attach(
     sweep: &mut status_sweep::Reader,
     id: &str,
 ) -> Result<()> {
+    attach_within(control, shared, state, sweep, id, Duration::from_secs(8)).await
+}
+
+async fn attach_within(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+    id: &str,
+    timeout: Duration,
+) -> Result<()> {
     shared.update(|m| m.protocol.attach_requests += 1);
-    let reply = tokio::time::timeout(
-        Duration::from_secs(8),
-        control.call_with_seq(session::Attach::new(id)),
-    )
-    .await??;
+    let reply =
+        tokio::time::timeout(timeout, control.call_with_seq(session::Attach::new(id))).await??;
     state.view_seq.insert(id.into(), reply.seq);
     state.attached.insert(id.into());
     replace_view(shared, state, sweep, id, reply.value.view);
@@ -1355,7 +1364,7 @@ async fn refresh(
     Ok(())
 }
 
-/// Read an offscreen session's view via `session.attach` rather than `session.view`.
+/// Read an already-attached session's view via `session.attach` rather than `session.view`.
 /// On API 19+, `session.view` records focus in the server's focus history while
 /// `session.attach` returns the full fresh view without altering focus history.
 async fn refresh_background(
@@ -1365,19 +1374,29 @@ async fn refresh_background(
     sweep: &mut status_sweep::Reader,
     id: &str,
 ) -> Result<()> {
-    let reply = tokio::time::timeout(
-        Duration::from_secs(8),
-        control.call_with_seq(session::Attach::new(id)),
-    )
-    .await??;
+    refresh_background_within(control, shared, state, sweep, id, Duration::from_secs(8)).await
+}
+
+async fn refresh_background_within(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+    id: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let reply =
+        tokio::time::timeout(timeout, control.call_with_seq(session::Attach::new(id))).await??;
     state.view_seq.insert(id.into(), reply.seq);
     state.attached.insert(id.into());
     replace_view(shared, state, sweep, id, reply.value.view);
     Ok(())
 }
 
-/// Refresh `id`'s view without polluting server-side focus history when `id` is offscreen
-/// on API 19+.
+/// Refresh `id`'s view for a passive event or post-request sync without altering
+/// server-side focus history when this connection is already attached to `id` on API 19+.
+/// Unattached sessions keep using `session.view` so Rex Rune never joins unopened or
+/// explicitly detached sessions.
 async fn refresh_for_event(
     control: &mut Client,
     shared: &Shared,
@@ -1385,9 +1404,9 @@ async fn refresh_for_event(
     sweep: &mut status_sweep::Reader,
     id: &str,
 ) -> Result<()> {
-    let is_background = control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION
-        && shared.model.lock().expect("host model").selected.as_deref() != Some(id);
-    if is_background {
+    if control.welcome().api_revision >= FOCUS_HISTORY_MIN_API_REVISION
+        && state.attached.contains(id)
+    {
         refresh_background(control, shared, state, sweep, id).await
     } else {
         refresh(control, shared, state, sweep, id).await
@@ -1399,8 +1418,18 @@ async fn list(
     state: &mut ControlState,
     sweep: &mut status_sweep::Reader,
 ) -> Result<()> {
+    list_within(control, shared, state, sweep, Duration::from_secs(8)).await
+}
+
+async fn list_within(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    sweep: &mut status_sweep::Reader,
+    timeout: Duration,
+) -> Result<()> {
     let reply = tokio::time::timeout(
-        Duration::from_secs(8),
+        timeout,
         control.call_with_seq(session::AttachAll::new("all")),
     )
     .await??;
@@ -2417,13 +2446,10 @@ async fn run_host(
                             }
                         }
                     }
-                    (id, text, attached) = prefetch.finished(), if !exclusive && prefetch.in_flight() => {
+                    (id, text) = prefetch.finished(), if !exclusive && prefetch.in_flight() => {
                         state.view_reading = None;
                         let stale = std::mem::take(&mut state.view_stale);
-                        if let Some((seq, view)) = prefetch.result(&id, text, attached, Instant::now()) {
-                            if attached {
-                                state.attached.insert(id.clone());
-                            }
+                        if let Some((seq, view)) = prefetch.result(&id, text, Instant::now()) {
                             let placed = {
                                 let m = shared.model.lock().expect("host model");
                                 m.views.contains_key(&id) || !m.sessions.iter().any(|s| s.session_id == id)
@@ -2457,10 +2483,7 @@ async fn run_host(
                     _ = directory_reads.finished(shared), if !exclusive && directory_reads.in_flight() => {}
                     fetched = view_fetches.finished(), if !exclusive && view_fetches.in_flight() => {
                         match fetched {
-                            view_fetch::Event::Reply { session, attached, ids, result: Ok((seq, view)) } => {
-                                if attached {
-                                    state.attached.insert(session.clone());
-                                }
+                            view_fetch::Event::Reply { session, ids, result: Ok((seq, view)) } => {
                                 if !view_fetches.reading(&session) {
                                     state.fetch_reading.remove(&session);
                                 }
@@ -2493,7 +2516,7 @@ async fn run_host(
                                     }
                                 }
                             }
-                            view_fetch::Event::Reply { session, ids, result: Err(outcome), .. } => {
+                            view_fetch::Event::Reply { session, ids, result: Err(outcome) } => {
                                 if !view_fetches.reading(&session) {
                                     state.fetch_reading.remove(&session);
                                     state.fetch_stale.remove(&session);

@@ -635,14 +635,14 @@ async fn lifecycle_cleanup_block_closed_undo_close_disconnect_and_remove_session
         )
         .await;
         let view_req = recv_skipping_meta(&mut ws, 4).await.unwrap();
-        assert_eq!(view_req["method"], "session.view");
+        assert_eq!(view_req["method"], "session.attach");
         send(
             &mut ws,
             json!({
                 "type": "response",
                 "id": view_req["id"],
                 "seq": 4,
-                "payload": view_with_blocks(SESSION, 2, &[B1])
+                "payload": {"client_id": "client:test", "view": view_with_blocks(SESSION, 2, &[B1])}
             }),
         )
         .await;
@@ -666,14 +666,14 @@ async fn lifecycle_cleanup_block_closed_undo_close_disconnect_and_remove_session
         )
         .await;
         let view_req2 = recv_skipping_meta(&mut ws, 5).await.unwrap();
-        assert_eq!(view_req2["method"], "session.view");
+        assert_eq!(view_req2["method"], "session.attach");
         send(
             &mut ws,
             json!({
                 "type": "response",
                 "id": view_req2["id"],
                 "seq": 5,
-                "payload": view_with_blocks(SESSION, 3, &[B1, B2])
+                "payload": {"client_id": "client:test", "view": view_with_blocks(SESSION, 3, &[B1, B2])}
             }),
         )
         .await;
@@ -707,14 +707,14 @@ async fn lifecycle_cleanup_block_closed_undo_close_disconnect_and_remove_session
         )
         .await;
         let view_req3 = recv_skipping_meta(&mut ws, 7).await.unwrap();
-        assert_eq!(view_req3["method"], "session.view");
+        assert_eq!(view_req3["method"], "session.attach");
         send(
             &mut ws,
             json!({
                 "type": "response",
                 "id": view_req3["id"],
                 "seq": 7,
-                "payload": view_with_blocks(SESSION, 4, &[B2])
+                "payload": {"client_id": "client:test", "view": view_with_blocks(SESSION, 4, &[B2])}
             }),
         )
         .await;

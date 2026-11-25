@@ -1,8 +1,13 @@
 //! Server-side focus history (`focus_history.reverse`, Rex Server API 19+).
-use super::{Client, ControlState, Shared, attach, list, refresh_background, status_sweep};
+use super::{
+    Client, ControlState, Shared, attach_within, list_within, refresh_background_within,
+    status_sweep,
+};
 use anyhow::Result;
 use rexrs::api::focus_history::Reverse;
 use std::time::{Duration, Instant};
+
+const CALL_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Minimum Rex Server API revision that supports `focus_history.reverse`.
 pub const FOCUS_HISTORY_MIN_API_REVISION: u32 = 19;
@@ -13,6 +18,8 @@ pub const FOCUS_HISTORY_DISCONNECTED_NOTICE: &str =
     "Focus history not sent while disconnected. Try again after reconnecting.";
 pub const FOCUS_HISTORY_EXPIRED_NOTICE: &str =
     "Focus history request timed out; action was not retried.";
+pub const FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE: &str =
+    "Moved focus, but refreshing the target view timed out.";
 pub const FOCUS_HISTORY_REQUIRES_API: &str = "Requires Rex Server API 19 or later";
 pub const FOCUS_HISTORY_DISCONNECTED: &str = "Connect to the host to use focus history";
 
@@ -184,11 +191,7 @@ pub(super) async fn reverse(
         }
     };
 
-    let response = match tokio::time::timeout(
-        remaining.min(Duration::from_secs(8)),
-        control.call(req),
-    )
-    .await
+    let response = match tokio::time::timeout(remaining.min(CALL_TIMEOUT), control.call(req)).await
     {
         Ok(Ok(response)) => response,
         Ok(Err(rexrs::Error::Api(
@@ -226,6 +229,7 @@ pub(super) async fn reverse(
     }
 
     let target_session = response.session_id.clone().or(current_session);
+    let mut sync_timed_out = false;
     if let Some(target) = target_session.as_deref() {
         let (listed, has_view) = {
             let m = shared.model.lock().expect("host model");
@@ -234,21 +238,45 @@ pub(super) async fn reverse(
                 m.views.contains_key(target),
             )
         };
-        let sync_result: Result<()> = async {
-            if !listed {
-                list(control, shared, state, sweep).await?;
+        let mut sync_error: Option<anyhow::Error> = None;
+        if !listed {
+            match deadline.checked_duration_since(Instant::now()) {
+                Some(rem) => {
+                    match list_within(control, shared, state, sweep, rem.min(CALL_TIMEOUT)).await {
+                        Ok(()) => {}
+                        Err(err) if err.is::<tokio::time::error::Elapsed>() => {
+                            sync_timed_out = true;
+                        }
+                        Err(err) => sync_error = Some(err),
+                    }
+                }
+                None => sync_timed_out = true,
             }
-            if !state.attached.contains(target) || !has_view {
-                attach(control, shared, state, sweep, target).await?;
-            } else {
-                // Use session.attach rather than session.view so refreshing the reversed
-                // target's view never re-writes server-side focus history.
-                refresh_background(control, shared, state, sweep, target).await?;
-            }
-            Ok(())
         }
-        .await;
-        if let Err(error) = sync_result {
+        if !sync_timed_out && sync_error.is_none() {
+            match deadline.checked_duration_since(Instant::now()) {
+                Some(rem) => {
+                    let budget = rem.min(CALL_TIMEOUT);
+                    let res = if !state.attached.contains(target) || !has_view {
+                        attach_within(control, shared, state, sweep, target, budget).await
+                    } else {
+                        // Use session.attach rather than session.view so refreshing the
+                        // reversed target's view never re-writes server-side focus history.
+                        refresh_background_within(control, shared, state, sweep, target, budget)
+                            .await
+                    };
+                    match res {
+                        Ok(()) => {}
+                        Err(err) if err.is::<tokio::time::error::Elapsed>() => {
+                            sync_timed_out = true;
+                        }
+                        Err(err) => sync_error = Some(err),
+                    }
+                }
+                None => sync_timed_out = true,
+            }
+        }
+        if let Some(error) = sync_error {
             if is_transport_error(&error) {
                 return Err(error);
             }
@@ -263,10 +291,15 @@ pub(super) async fn reverse(
 
     shared.update(|m| {
         if let Some(target) = &target_session {
-            m.background_views.remove(target);
-            m.selected = Some(target.clone());
+            let known = !sync_timed_out
+                || m.views.contains_key(target)
+                || m.sessions.iter().any(|s| s.session_id == *target);
+            if known {
+                m.background_views.remove(target);
+                m.selected = Some(target.clone());
+            }
         }
-        m.notice = None;
+        m.notice = sync_timed_out.then(|| FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE.into());
         m.focus_history_result = Some(FocusHistoryResult {
             epoch,
             id,

@@ -254,22 +254,31 @@ reverse queued behind an exclusive `client.action` never executes late, and a
 while keeping the connection healthy.
 
 Each request is connection-epoch scoped and never retried or queued across
-disconnects. Empirically verified on Rex `0.1.0-snapshot.2562` (API 21):
-`session.view` records the target session's active window's focused block at
-the top of the principal's focus history (even when called offscreen or while
-unattached), whereas `session.attach` returns the full fresh `ViewResponse`
-without modifying focus history. Accordingly, on API 19+:
-- Offscreen background view reads (`Prefetch`, `view_fetch`, and offscreen
-  `session_view_changed`, `block_closed`, `event_dropped`, and `after_request`
-  refreshes) as well as post-reverse target refreshes use `session.attach`, so
-  background activity and status sweeps never hijack `Previous focus`.
-- Foreground switches (`Select` and `Navigate` without a target window) use
-  `session.view` (attaching first when not yet attached, including after
-  `session.detach`) so switching sessions records focus immediately on the
-  server without extra traffic for already-attached sessions.
+disconnects, and post-reverse `session.attach_all` / `session.attach`
+reconciliation shares the same deadline so a slow follow-up reply never hangs
+past the UI's pending window. Empirically verified on Rex `0.1.0-snapshot.2562`
+(API 21): `session.view` records the target session's active window's focused
+block at the top of the principal's focus history (even when called offscreen
+or while unattached), whereas `session.attach` returns the full fresh
+`ViewResponse` without modifying focus history. Accordingly, on API 19+:
+- Passive refreshes on sessions already in `ControlState::attached`
+  (`session_view_changed`, `block_closed`, `event_dropped`, and `after_request`
+  for BOTH offscreen and locally selected sessions) as well as post-reverse
+  target refreshes use `session.attach`, so background pane exits and idle
+  clients displaying another session never overwrite focus history.
+- Unattached initial background sweeps (`Prefetch`, `view_fetch`) and sessions
+  explicitly detached via `session.detach` keep using `session.view` so Rex
+  Rune never joins unopened sessions (`session.list_clients` / `client_connected`
+  membership stays unchanged, verified by `scripts/status-sweep-private.py`).
+  Note that upstream Rex API 19-21 servers record focus on those initial
+  unattached `session.view` reads.
+- Foreground deliberate switches (`Select` and `Navigate` without a target
+  window) use `session.view` (attaching first when not yet attached, including
+  after `session.detach`) so switching sessions records focus immediately on
+  the server without extra traffic for already-attached sessions.
 - When `focus_history.reverse` returns a target in another session, the worker
-  re-lists if needed, attaches/refreshes via `session.attach`, and switches
-  `HostModel::selected` with fresh view state.
+  re-lists if needed, attaches/refreshes via `session.attach` within the shared
+  deadline, and switches `HostModel::selected` with fresh view state.
 Existing local navigation history (`client.history.back` and
 `client.history.forward`) is unchanged.
 
@@ -278,9 +287,9 @@ tests (`src/app/focus_history_tests.rs`, `src/app/command_tests.rs`,
 `src/app/wiring_tests.rs`, `src/app/remote_tests.rs`) cover wire payloads for
 all five scopes, the API 18 gate, `method_not_found`/`revision_too_low`/
 `not_supported` degradation without disconnecting, exclusive-action deadline
-expiry, `session.detach` tracking, offscreen `session.attach` isolation,
-cross-session switching, cursor stepping, and all interruption resets. To check
-against disposable servers:
+expiry, deadline-bounded post-reverse target sync, `session.detach` tracking,
+attached-vs-unattached passive refresh routing, cross-session switching, cursor
+stepping, and all interruption resets. To check against disposable servers:
 
 ```sh
 cargo build --locked --no-default-features --example focus_history_probe
@@ -289,13 +298,13 @@ python3 scripts/focus-history-private.py --api21 /path/to/api21/rex --api14 /pat
 
 On the private API 21 `0.1.0-snapshot.2562` server, the probe verified toggle,
 3-step cursor walking, all scoped filters (`pane`, `tab`, `session`,
-`tab_any_session`), cross-session `HostModel::selected` switching, and offscreen
-non-pollution (visiting A -> B -> C, letting a pane in A exit and refresh in
-the background plus prefetching A and B from a second connection while staying
-on C, then confirming `Any` and `Session` reverse from C both return B rather
-than A or C). Against both a pinned API 18 connection on the API 21 server and
-a real API 14 server (`0.1.0-preview.19`), zero `focus_history.reverse`
-requests were sent and the connection remained up.
+`tab_any_session`), cross-session `HostModel::selected` switching, independent
+file-gated offscreen A -> B -> C pane-exit non-pollution for both `Any` and
+`Session` scopes, and an idle second client parked on locally selected A
+refreshing via `block_closed` without overwriting B -> C focus history. Against
+both a pinned API 18 connection on the API 21 server and a real API 14 server
+(`0.1.0-preview.19`), zero `focus_history.reverse` requests were sent and the
+connection remained up.
 
 ## Deferred deliberately
 

@@ -820,9 +820,12 @@ async fn focus_history_detach_removes_attached_and_select_reattaches_then_record
 }
 
 #[tokio::test]
-async fn focus_history_offscreen_events_and_prefetch_use_attach_never_session_view() {
+async fn focus_history_attached_passive_events_use_attach_while_unattached_and_detached_use_view() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (step1_tx, step1_rx) = tokio::sync::oneshot::channel();
+    let (step2_go_tx, step2_go_rx) = tokio::sync::oneshot::channel();
+    let (step3_go_tx, step3_go_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
         welcome(&mut ws, 21).await;
@@ -830,14 +833,6 @@ async fn focus_history_offscreen_events_and_prefetch_use_attach_never_session_vi
         assert_eq!(req["method"], "session.bootstrap");
         reply(&mut ws, &req, 1, boot_two_sessions()).await;
 
-        let expect_other_attach = |req: &Value, what: &str| {
-            assert_ne!(
-                req["method"], "session.view",
-                "offscreen {what} must never call session.view on API 19+: {req}"
-            );
-            assert_eq!(req["method"], "session.attach", "{what}: {req}");
-            assert_eq!(req["payload"]["session_id"], OTHER, "{what}: {req}");
-        };
         let next_strict = async |ws: &mut WebSocketStream<TcpStream>, seq: u64| loop {
             let req = recv(ws).await;
             match req["method"].as_str().unwrap_or("") {
@@ -854,18 +849,24 @@ async fn focus_history_offscreen_events_and_prefetch_use_attach_never_session_vi
             }
         };
 
-        // 1. Background prefetch/status-sweep loads OTHER via session.attach.
+        // 1. Unattached background prefetch for OTHER MUST use session.view (never attach
+        //    unopened sessions).
         let pref = next_strict(&mut ws, 1).await;
-        expect_other_attach(&pref, "prefetch");
+        assert_eq!(
+            pref["method"], "session.view",
+            "unattached prefetch must use session.view, got: {pref}"
+        );
+        assert_eq!(pref["payload"]["session_id"], OTHER);
         reply(
             &mut ws,
             &pref,
             2,
-            json!({"client_id": "client:test", "view": view_for(OTHER, 1, OTHER_TAB, OTHER_BLOCK)}),
+            view_for(OTHER, 1, OTHER_TAB, OTHER_BLOCK),
         )
         .await;
 
-        // 2. Offscreen session_view_changed refreshes OTHER via session.attach (not session.view).
+        // 2. Passive session_view_changed on STILL-UNATTACHED OTHER MUST also use session.view
+        //    (never silently join unopened session).
         send(
             &mut ws,
             json!({
@@ -881,17 +882,23 @@ async fn focus_history_offscreen_events_and_prefetch_use_attach_never_session_vi
             }),
         )
         .await;
-        let ev1 = next_strict(&mut ws, 3).await;
-        expect_other_attach(&ev1, "session_view_changed");
+        let ev_unattached = next_strict(&mut ws, 3).await;
+        assert_eq!(
+            ev_unattached["method"], "session.view",
+            "unattached passive refresh must use session.view, got: {ev_unattached}"
+        );
+        assert_eq!(ev_unattached["payload"]["session_id"], OTHER);
         reply(
             &mut ws,
-            &ev1,
+            &ev_unattached,
             4,
-            json!({"client_id": "client:test", "view": view_for(OTHER, 2, OTHER_TAB, OTHER_BLOCK)}),
+            view_for(OTHER, 2, OTHER_TAB, OTHER_BLOCK),
         )
         .await;
 
-        // 3. Offscreen block_closed refreshes OTHER via session.attach (not session.view).
+        // 3. Passive block_closed on ALREADY-ATTACHED locally selected SESSION MUST use
+        //    session.attach (not session.view) so an idle client never overwrites another
+        //    client's focus history.
         send(
             &mut ws,
             json!({
@@ -900,42 +907,290 @@ async fn focus_history_offscreen_events_and_prefetch_use_attach_never_session_vi
                 "payload": {
                     "type": "session_event",
                     "payload": {
-                        "session_id": OTHER,
-                        "event": {"type": "block_closed", "payload": {"block_id": OTHER_BLOCK}}
+                        "session_id": SESSION,
+                        "event": {"type": "block_closed", "payload": {"block_id": BLOCK_B}}
                     }
                 }
             }),
         )
         .await;
-        let ev2 = next_strict(&mut ws, 5).await;
-        expect_other_attach(&ev2, "block_closed");
+        let ev_selected = next_strict(&mut ws, 5).await;
+        assert_eq!(
+            ev_selected["method"], "session.attach",
+            "attached selected block_closed must use session.attach, got: {ev_selected}"
+        );
+        assert_eq!(ev_selected["payload"]["session_id"], SESSION);
         reply(
             &mut ws,
-            &ev2,
+            &ev_selected,
             6,
+            json!({"client_id": "client:test", "view": view_for(SESSION, 2, TAB_A, BLOCK_A)}),
+        )
+        .await;
+        step1_tx.send(()).unwrap();
+
+        // 4. Client deliberately selects OTHER (attaching + recording via session.view),
+        //    then selects SESSION back so OTHER is now ALREADY-ATTACHED & offscreen.
+        step2_go_rx.await.unwrap();
+        let att_other = next_strict(&mut ws, 6).await;
+        assert_eq!(att_other["method"], "session.attach");
+        assert_eq!(att_other["payload"]["session_id"], OTHER);
+        reply(
+            &mut ws,
+            &att_other,
+            7,
+            json!({"client_id": "client:test", "view": view_for(OTHER, 2, OTHER_TAB, OTHER_BLOCK)}),
+        )
+        .await;
+        let view_other = next_strict(&mut ws, 7).await;
+        assert_eq!(view_other["method"], "session.view");
+        assert_eq!(view_other["payload"]["session_id"], OTHER);
+        reply(
+            &mut ws,
+            &view_other,
+            8,
+            view_for(OTHER, 2, OTHER_TAB, OTHER_BLOCK),
+        )
+        .await;
+
+        let sel_session = next_strict(&mut ws, 8).await;
+        assert_eq!(sel_session["method"], "session.view");
+        assert_eq!(sel_session["payload"]["session_id"], SESSION);
+        reply(
+            &mut ws,
+            &sel_session,
+            9,
+            view_for(SESSION, 2, TAB_A, BLOCK_A),
+        )
+        .await;
+
+        // 5. Passive session_view_changed on ALREADY-ATTACHED offscreen OTHER MUST use
+        //    session.attach (not session.view).
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 10,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": OTHER,
+                        "event": {"type": "session_view_changed", "payload": {"revision": 3}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let ev_attached_other = next_strict(&mut ws, 10).await;
+        assert_eq!(
+            ev_attached_other["method"], "session.attach",
+            "attached offscreen session_view_changed must use session.attach, got: {ev_attached_other}"
+        );
+        assert_eq!(ev_attached_other["payload"]["session_id"], OTHER);
+        reply(
+            &mut ws,
+            &ev_attached_other,
+            11,
             json!({"client_id": "client:test", "view": view_for(OTHER, 3, OTHER_TAB, OTHER_BLOCK)}),
         )
         .await;
 
-        let fence = next_strict(&mut ws, 6).await;
+        // 6. Client detaches OTHER; subsequent offscreen session_view_changed on OTHER MUST
+        //    use session.view and NOT silently re-attach OTHER.
+        step3_go_rx.await.unwrap();
+        let det = next_strict(&mut ws, 11).await;
+        assert_eq!(det["method"], "session.detach");
+        assert_eq!(det["payload"]["session_id"], OTHER);
+        reply(&mut ws, &det, 12, json!({})).await;
+
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": OTHER,
+                        "event": {"type": "session_view_changed", "payload": {"revision": 4}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let ev_detached_other = next_strict(&mut ws, 13).await;
+        assert_eq!(
+            ev_detached_other["method"], "session.view",
+            "detached offscreen session_view_changed must not re-attach, got: {ev_detached_other}"
+        );
+        assert_eq!(ev_detached_other["payload"]["session_id"], OTHER);
+        reply(
+            &mut ws,
+            &ev_detached_other,
+            14,
+            view_for(OTHER, 4, OTHER_TAB, OTHER_BLOCK),
+        )
+        .await;
+
+        let fence = next_strict(&mut ws, 14).await;
         assert_eq!(fence["method"], "test.sentinel");
-        reply(&mut ws, &fence, 7, json!({})).await;
+        reply(&mut ws, &fence, 15, json!({})).await;
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
     connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(8), step1_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Step 4: attach OTHER deliberately via Select, then return to SESSION.
+    step2_go_tx.send(()).unwrap();
+    host.commands
+        .send(HostCommand::Select(OTHER.into()))
+        .unwrap();
+    until(&host, |m| m.selected.as_deref() == Some(OTHER)).await;
+    host.commands
+        .send(HostCommand::Select(SESSION.into()))
+        .unwrap();
     until(&host, |m| {
-        m.views.get(OTHER).is_some_and(|v| v.revision >= 3)
+        m.selected.as_deref() == Some(SESSION)
+            && m.views.get(OTHER).is_some_and(|v| v.revision >= 3)
     })
     .await;
-    assert_eq!(
-        host.model.lock().unwrap().selected.as_deref(),
-        Some(SESSION)
-    );
+
+    // Step 6: detach OTHER, verify subsequent offscreen refresh advances rev without re-attaching.
+    step3_go_tx.send(()).unwrap();
+    host.commands
+        .send(HostCommand::Request {
+            method: "session.detach".into(),
+            payload: json!({"session_id": OTHER}),
+        })
+        .unwrap();
+    until(&host, |m| {
+        m.views.get(OTHER).is_some_and(|v| v.revision >= 4)
+    })
+    .await;
     send_sentinel(&host);
     tokio::time::timeout(Duration::from_secs(8), server)
         .await
         .unwrap()
         .unwrap();
     drop(host);
+}
+
+#[tokio::test]
+async fn focus_history_followup_attach_bounded_by_shared_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (hold_done_tx, hold_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let req = recv(&mut ws).await;
+        assert_eq!(req["method"], "session.bootstrap");
+        reply(&mut ws, &req, 1, boot_two_sessions()).await;
+
+        let rev = next_non_meta(&mut ws, 1).await;
+        assert_eq!(rev["method"], "focus_history.reverse");
+        reply(
+            &mut ws,
+            &rev,
+            2,
+            json!({
+                "reversed": true,
+                "cursor": 77,
+                "session_id": OTHER,
+                "window_id": OTHER_TAB,
+                "block_id": OTHER_BLOCK
+            }),
+        )
+        .await;
+
+        // Receive follow-up session.attach for OTHER and deliberately hold the reply past
+        // the caller's deadline to verify the worker does not hang for a fresh 8s timeout.
+        let att = loop {
+            let req = recv(&mut ws).await;
+            match req["method"].as_str().unwrap_or("") {
+                "com.superlogical.terminal.program_status" => {
+                    reply(&mut ws, &req, 2, json!({"records": []})).await;
+                }
+                "com.superlogical.terminal.title" => {
+                    reply(&mut ws, &req, 2, json!({"title": ""})).await;
+                }
+                "com.superlogical.terminal.process" => {
+                    reply(&mut ws, &req, 2, json!({})).await;
+                }
+                "session.view" if req["payload"]["session_id"] == OTHER => {
+                    reply(&mut ws, &req, 2, view_for(OTHER, 1, OTHER_TAB, OTHER_BLOCK)).await;
+                }
+                _ => break req,
+            }
+        };
+        assert_eq!(att["method"], "session.attach");
+        assert_eq!(att["payload"]["session_id"], OTHER);
+        let _ = hold_done_rx.await;
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+    let started = Instant::now();
+    host.commands
+        .send(HostCommand::ReverseFocusHistory {
+            epoch,
+            id: 21,
+            scope: FocusHistoryScope::Session,
+            cursor: None,
+            deadline: started + Duration::from_millis(180),
+        })
+        .unwrap();
+
+    // Must settle well before an unclipped 8s follow-up timeout.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if host
+                .model
+                .lock()
+                .unwrap()
+                .focus_history_result
+                .as_ref()
+                .is_some_and(|r| r.id == 21)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("follow-up attach exceeded shared reverse deadline");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "elapsed {:?} should stay bounded by shared deadline",
+        started.elapsed()
+    );
+    {
+        let m = host.model.lock().unwrap();
+        assert!(m.connected);
+        assert_eq!(m.selected.as_deref(), Some(OTHER));
+        assert_eq!(m.notice.as_deref(), Some(FOCUS_HISTORY_SYNC_TIMEOUT_NOTICE));
+        assert_eq!(
+            m.focus_history_result,
+            Some(FocusHistoryResult {
+                epoch,
+                id: 21,
+                reversed: true,
+                cursor: Some(77),
+                session_id: Some(OTHER.into()),
+                window_id: Some(OTHER_TAB.into()),
+                block_id: Some(OTHER_BLOCK.into()),
+            })
+        );
+    }
+    let _ = hold_done_tx.send(());
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(8), server)
+        .await
+        .unwrap()
+        .unwrap();
 }
