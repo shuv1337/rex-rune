@@ -89,11 +89,38 @@ impl<T: std::io::Read + std::io::Write> ReadWrite for T {}
 pub enum UnixSocketError {
     NotFound,
     NotSocket,
+    WrongType,
     Refused,
     PermissionDenied,
     TimedOut,
     Unavailable(&'static str),
     Other(String),
+}
+
+#[cfg(unix)]
+fn classify_unix_connect_error(error: std::io::Error) -> UnixSocketError {
+    use std::io::ErrorKind;
+    // EPROTOTYPE occurs both on live non-stream (SOCK_DGRAM) Unix sockets and on some
+    // macOS/BSD socket teardown races, so report it separately from a missing listener.
+    if error.raw_os_error() == Some(libc::EPROTOTYPE) {
+        return UnixSocketError::WrongType;
+    }
+    if error.raw_os_error() == Some(libc::ENOTSOCK) {
+        return UnixSocketError::NotSocket;
+    }
+    // macOS/BSD XNU can return ECONNRESET, ECONNABORTED, EPIPE, or ENOTCONN when
+    // connecting to a stale or just-closed Unix domain socket.
+    match error.kind() {
+        ErrorKind::NotFound => UnixSocketError::NotFound,
+        ErrorKind::ConnectionRefused
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe
+        | ErrorKind::NotConnected => UnixSocketError::Refused,
+        ErrorKind::PermissionDenied => UnixSocketError::PermissionDenied,
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => UnixSocketError::TimedOut,
+        _ => UnixSocketError::Other(error.to_string()),
+    }
 }
 
 /// Connect to a local Unix domain socket with bounded read/write timeouts and run `f`.
@@ -114,13 +141,7 @@ pub fn with_unix_socket<T>(
             return Err(UnixSocketError::NotSocket);
         }
         let mut stream =
-            std::os::unix::net::UnixStream::connect(path).map_err(|error| match error.kind() {
-                ErrorKind::NotFound => UnixSocketError::NotFound,
-                ErrorKind::ConnectionRefused => UnixSocketError::Refused,
-                ErrorKind::PermissionDenied => UnixSocketError::PermissionDenied,
-                ErrorKind::TimedOut | ErrorKind::WouldBlock => UnixSocketError::TimedOut,
-                _ => UnixSocketError::Other(error.to_string()),
-            })?;
+            std::os::unix::net::UnixStream::connect(path).map_err(classify_unix_connect_error)?;
         let _ = stream.set_read_timeout(Some(timeout));
         let _ = stream.set_write_timeout(Some(timeout));
         Ok(f(&mut stream))
@@ -239,6 +260,54 @@ mod tests {
         assert!(own.exists(), "this process's directory stays");
         assert!(other.exists(), "anything else is left alone");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_connect_errors_classify_stale_and_closed_sockets_as_refused() {
+        use std::io::{Error, ErrorKind};
+
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+            ErrorKind::NotConnected,
+        ] {
+            assert_eq!(
+                classify_unix_connect_error(Error::from(kind)),
+                UnixSocketError::Refused,
+                "expected {kind:?} to classify as Refused"
+            );
+        }
+        assert_eq!(
+            classify_unix_connect_error(Error::from_raw_os_error(libc::EPROTOTYPE)),
+            UnixSocketError::WrongType
+        );
+        assert_eq!(
+            classify_unix_connect_error(Error::from_raw_os_error(libc::ENOTSOCK)),
+            UnixSocketError::NotSocket
+        );
+        assert_eq!(
+            classify_unix_connect_error(Error::from(ErrorKind::NotFound)),
+            UnixSocketError::NotFound
+        );
+        assert_eq!(
+            classify_unix_connect_error(Error::from(ErrorKind::PermissionDenied)),
+            UnixSocketError::PermissionDenied
+        );
+        assert_eq!(
+            classify_unix_connect_error(Error::from(ErrorKind::TimedOut)),
+            UnixSocketError::TimedOut
+        );
+        assert_eq!(
+            classify_unix_connect_error(Error::from(ErrorKind::WouldBlock)),
+            UnixSocketError::TimedOut
+        );
+        assert!(matches!(
+            classify_unix_connect_error(Error::from(ErrorKind::InvalidInput)),
+            UnixSocketError::Other(_)
+        ));
     }
 
     #[test]
