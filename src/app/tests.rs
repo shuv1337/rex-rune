@@ -20,6 +20,8 @@ mod copy_mode_tests;
 mod directory_tests;
 #[path = "ports_tests.rs"]
 mod ports_tests;
+#[path = "program_resume_tests.rs"]
+mod program_resume_tests;
 // These fixtures exercise Unix process identity and the POSIX download store.
 #[cfg(unix)]
 #[path = "downloads_tests.rs"]

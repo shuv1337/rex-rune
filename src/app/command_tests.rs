@@ -19,6 +19,7 @@ const IDS: &[&str] = &[
     "client.activity.priority",
     "client.activity.session",
     "client.ports",
+    "client.program_resume",
     "session.new",
     "session.rename",
     "session.next",

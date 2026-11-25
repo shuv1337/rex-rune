@@ -72,6 +72,11 @@ client, launcher and icons, never the `rex` server.
   bind address. Ctrl+Enter (Cmd+Enter on macOS) opens supported ports on Unix-socket
   hosts or copies an `ssh -L` command for SSH hosts.
   [Scope and limits](docs/parity-2026-11/listening-ports.md#slice-2-ui).
+- **Program resume.** **Show program resume…** in Commands lists reported
+  programs by pane (API 24); the pane menu puts that pane first. On Rex snapshot
+  2670 with restore enabled, the server resumes trusted chosen programs after
+  restart. Rex Rune shows metadata and trust reasons, never launch arguments.
+  [Scope and limits](docs/parity-2026-11/program-resume.md).
 - **Fonts and themes.** Chrome palettes, terminal themes declared to the server
   including Ghostty files, installed fonts with a picker and ordered fallbacks,
   bundled IBM Plex Mono and Symbols Nerd Font, font size and live metrics.
@@ -220,6 +225,5 @@ supported), and to [m4nik1/rex-linux-client](https://github.com/m4nik1/rex-linux
 and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx) for protocol work
 that served as references.
 
-The API 24 client library reads Program Resume record metadata. There is no
-Program Resume UI yet. Rex snapshot 2646 does not rerun reported programs
-after a restart. See [the API 24 compatibility record](docs/server-api24.md).
+See [the API 24 compatibility record](docs/server-api24.md) for the tested
+Rex snapshots and their restart behavior.

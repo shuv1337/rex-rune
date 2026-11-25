@@ -89,7 +89,7 @@ pub struct Term {
     pending_copy_yank: Option<CopyYank>,
     /// Last delivered `(epoch, revision)` so each yank is copied at most once.
     last_copy_yank: Option<(u64, u64)>,
-    /// Defense-in-depth: a script prompt or Ports can block direct PTY input commands.
+    /// Defense-in-depth: a script prompt or session inspector can block direct PTY input.
     pub panel_blocks_input: bool,
     /// Opt-in Mosh-style speculative local echo state (render-only overlay).
     local_echo: local_echo::Predictor,
@@ -511,7 +511,7 @@ impl Term {
     }
 
     /// The same send and notice, with acceptance feedback for local path history.
-    /// Defense-in-depth: blocks PTY input while a script prompt or Ports is open, and exits
+    /// Defense-in-depth: blocks PTY input while a prompt or session inspector is open, and exits
     /// copy mode before any PTY input command reaches the worker.
     pub fn try_send(&mut self, command: Command) -> bool {
         let is_any_pty_input = matches!(

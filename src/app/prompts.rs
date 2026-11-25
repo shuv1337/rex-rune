@@ -350,9 +350,9 @@ impl Workspace {
         ) && self.prompts.open_prompt().is_some()
     }
 
-    /// Keep direct terminal commands inert while a prompt or Ports owns the keyboard.
+    /// Keep direct terminal commands inert while a prompt or a session inspector is open.
     pub(super) fn sync_panel_terminal_guard(&mut self) {
-        let open = self.is_prompt_open() || self.ports_target().is_some();
+        let open = self.is_prompt_open() || self.session_inspector_open();
         for term in self.terminals.values_mut() {
             if open && !term.panel_blocks_input {
                 term.clear_local_echo();

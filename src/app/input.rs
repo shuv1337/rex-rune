@@ -494,7 +494,7 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     .identity();
     let consumed = s.bindings.consumed.remove(&identity).is_some();
-    if s.is_prompt_open() || s.ports_target().is_some() {
+    if s.is_prompt_open() || s.session_inspector_open() {
         s.forwarded.remove(&identity);
         return true;
     }

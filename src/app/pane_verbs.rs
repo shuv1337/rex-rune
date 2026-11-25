@@ -51,6 +51,7 @@ impl Workspace {
                 target.host == self.active
                     && self.model().selected.as_ref() == Some(&target.session)
             }
+            PaneAction::ProgramResume => self.program_resume_menu_detail(target).is_some(),
             _ => true,
         }
     }
@@ -72,6 +73,11 @@ impl Workspace {
             PaneAction::Ports => {
                 if self.pane_verb_available(&target, action) {
                     self.show_ports(Some(target.block));
+                }
+            }
+            PaneAction::ProgramResume => {
+                if self.pane_verb_available(&target, action) {
+                    self.show_program_resume(Some(target.block));
                 }
             }
             PaneAction::Copy => {

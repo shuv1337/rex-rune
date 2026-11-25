@@ -1,5 +1,5 @@
-//! Live, destructive only to its own temporary session. Exercises the same
-//! snapshot/APC/offset implementation used by the native view.
+//! `--version-only <unix endpoint>` sends only a version read. Otherwise the probe
+//! creates its own temporary session to exercise the native snapshot and stream paths.
 use anyhow::{Context, Result, ensure};
 use rex_rune::{terminal::TerminalStream, transport, wire};
 use rexrs::api::{Layout, session};
@@ -51,9 +51,28 @@ fn verify_sequence(stream: &TerminalStream) -> Result<()> {
     Ok(())
 }
 async fn run() -> Result<()> {
-    let endpoint = std::env::args()
-        .nth(1)
-        .unwrap_or_else(transport::local_endpoint);
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    if first.as_deref() == Some("--version-only") {
+        let endpoint = args
+            .next()
+            .context("--version-only requires an explicit Unix endpoint")?;
+        ensure!(
+            endpoint.starts_with("unix:///") && args.next().is_none(),
+            "expected one Unix endpoint"
+        );
+        // This path only negotiates HELLO and reads server.version. It must not
+        // attach to, select or create a session on the specified server.
+        let socket = transport::socket(&endpoint, "/api/control", "rex.control.v1").await?;
+        let mut control =
+            transport::discovery_from_socket(socket, "Rex Rune (version probe)").await?;
+        let revision = control.welcome().api_revision;
+        let info = control.call_raw("server.version", json!({})).await?;
+        control.close().await?;
+        println!("Negotiated Rex API {revision}; server.version: {info}");
+        return Ok(());
+    }
+    let endpoint = first.unwrap_or_else(transport::local_endpoint);
     // An ssh:// endpoint is reached through a forward of the server's socket.
     let _tunnel = rex_rune::ssh::Tunnel::for_endpoint(&endpoint).await?;
     let endpoint = _tunnel

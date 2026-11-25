@@ -166,13 +166,10 @@ impl Workspace {
                 walk.pending_deadline = None;
                 walk.cursor = result.cursor;
             }
-            if self
-                .ports_target()
-                .is_some_and(|target| !self.ports_in_context(target))
-            {
+            if self.session_inspector_out_of_context() {
                 self.close_panel(tx);
             }
-            self.refresh_ports_watch();
+            self.refresh_session_inspector_watches();
             self.observe_navigation();
         } else {
             self.focus_history.clear();

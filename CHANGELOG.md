@@ -4,7 +4,7 @@
 
 ### Added
 
-- The client library reads Program Resume record metadata on API 24. No UI yet. Snapshot 2646 does not rerun the reported programs after restart.
+- **Program resume (Rex Server API 24).** Open **Show program resume…** in Commands or **Program resume…** in the pane menu to see reported programs, Rex's chosen record, and trust reasons. Snapshot 2670 resumes trusted chosen programs with server restore enabled. The view never shows, copies or runs launch arguments.
 
 - **Local echo** in Settings → Terminal can show pending keystrokes on slow links after the terminal echoes ordinary text. It defaults to Off. Thanks to @johnknott (#180).
 
@@ -18,7 +18,7 @@
 
 ### Changed
 
-- Negotiates Rex Server API revisions 10 through 24 and refreshes the SDK capture from snapshot 2646. [Compatibility record](docs/server-api24.md).
+- Negotiates Rex Server API revisions 10 through 24 and refreshes the SDK capture from snapshot 2670. [Compatibility record](docs/server-api24.md).
 
 - Terminal input no longer waits a round trip per keystroke on slow links. Adjacent resizes and matching mouse motions coalesce, and multi-pane metadata and themes load in batches. Thanks to @johnknott (#179).
 

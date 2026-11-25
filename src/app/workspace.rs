@@ -73,6 +73,7 @@ pub struct Workspace {
     pub terminals: HashMap<(HostId, String), Term>,
     pub panel: Option<Panel>,
     pub(super) ports_watch: Option<super::ports::Watch>,
+    pub(super) program_resume_watch: Option<super::program_resume::Watch>,
     pub notices: Vec<Notice>,
     next_notice: u64,
     zoom_notice: Option<u64>,
@@ -294,6 +295,7 @@ impl Workspace {
             terminals: HashMap::new(),
             panel: None,
             ports_watch: None,
+            program_resume_watch: None,
             notices: Vec::new(),
             next_notice: 0,
             zoom_notice: None,
@@ -522,7 +524,7 @@ impl Workspace {
         self.leave_install_dialog();
         self.clear_focus_history_walk();
         self.navigation.cancel();
-        if self.ports_target().is_some() {
+        if self.session_inspector_open() {
             self.close_panel(tx);
         }
         let state = self.hosts.remove(index);
@@ -748,13 +750,10 @@ impl Workspace {
             }
         }
         self.hosts[index].model = model;
-        if self
-            .ports_target()
-            .is_some_and(|target| !self.ports_in_context(target))
-        {
+        if self.session_inspector_out_of_context() {
             self.close_panel(tx);
         }
-        self.refresh_ports_watch();
+        self.refresh_session_inspector_watches();
         if index == self.active {
             // The session, keymap revision or connection above is what a mode belongs to.
             self.revalidate_key_modes();
@@ -781,6 +780,8 @@ impl Workspace {
                     "Returned client action skipped: only the person at this computer can stop a server."
                 } else if queued.action.action == super::ports::ACTION {
                     "Returned client action skipped: only the person at this computer can show listening ports."
+                } else if queued.action.action == super::program_resume::ACTION {
+                    "Returned client action skipped: only the person at this computer can show program resume."
                 } else if queued.action.action == super::actions::UNDO_CLOSE {
                     "Returned client action skipped: only the person at this computer can undo a close."
                 } else if queued.action.action == super::actions::FOCUS_HISTORY_REVERSE {
@@ -830,6 +831,7 @@ impl Workspace {
         self.restore_activity_selection(activity_selection);
         self.restore_row_selection();
         self.seed_ports_selection();
+        self.seed_program_resume_selection();
         self.deliver_program_notices(index, notices);
         self.sync_layer_menu(tx);
         self.sync_layer_drag();
@@ -1567,10 +1569,7 @@ impl Workspace {
     /// back a mode nobody entered again.
     pub fn update_visibility(&mut self) {
         self.revalidate_key_modes();
-        if self
-            .ports_target()
-            .is_some_and(|target| !self.ports_in_context(target))
-        {
+        if self.session_inspector_out_of_context() {
             self.cancel_panel_quiet();
         }
         for term in self.terminals.values_mut() {
@@ -1626,6 +1625,7 @@ impl Workspace {
             && !matches!(
                 action,
                 Intent::Port(_)
+                    | Intent::InspectProgramResume
                     | Intent::Theme(_)
                     | Intent::Chrome(_)
                     | Intent::SshAgent(_)
@@ -1657,6 +1657,7 @@ impl Workspace {
             Intent::Select(host, id) => self.select(host, id, tx),
             Intent::ActivityTab(target) => self.choose_activity(target, tx),
             Intent::Port(key) => self.use_port(&key, false, tx),
+            Intent::InspectProgramResume => {}
             Intent::Tab(id) => {
                 if let Some(session) = self.model().selected.clone() {
                     self.select_window(self.active, session, id, tx);
@@ -1825,7 +1826,7 @@ impl Workspace {
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
-                self.refresh_ports_watch();
+                self.refresh_session_inspector_watches();
                 if self.settings_section == SettingsSection::Notifications {
                     self.notification_command(super::notify::Command::Check);
                     self.sound_request(super::sounds::Request::Check);
@@ -2227,6 +2228,7 @@ impl Workspace {
             | PaneAction::SelectAll
             | PaneAction::CopyId
             | PaneAction::Ports
+            | PaneAction::ProgramResume
             | PaneAction::Clear
             | PaneAction::Reset => self.pane_verb(target, action, tx),
         }
@@ -2286,7 +2288,7 @@ impl Workspace {
                 Box::new(p)
             });
         self.panel = Some(panel);
-        self.refresh_ports_watch();
+        self.refresh_session_inspector_watches();
         self.reconcile_prompts();
     }
 
@@ -2370,13 +2372,13 @@ impl Workspace {
         };
         self.panel = Some(panel);
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
-            if self.ports_target().is_some() {
+            if self.session_inspector_open() {
                 self.select_row(first);
             } else {
                 self.panel.as_mut().unwrap().selected = first;
             }
         }
-        self.refresh_ports_watch();
+        self.refresh_session_inspector_watches();
         self.reconcile_prompts();
     }
 
@@ -2428,7 +2430,7 @@ impl Workspace {
         self.leave_download_dialog();
         self.bindings.sequence.clear();
         self.panel = None;
-        self.refresh_ports_watch();
+        self.refresh_session_inspector_watches();
         self.reconcile_prompts();
         tx.blur();
     }
@@ -2452,7 +2454,7 @@ impl Workspace {
         } else {
             self.panel = None;
         }
-        self.refresh_ports_watch();
+        self.refresh_session_inspector_watches();
         self.reconcile_prompts();
     }
 
@@ -2471,7 +2473,7 @@ impl Workspace {
                 input.focused = true;
             }
             self.panel = Some(*back);
-            self.refresh_ports_watch();
+            self.refresh_session_inspector_watches();
             self.reconcile_prompts();
         } else {
             self.close_panel(tx);
@@ -2480,7 +2482,7 @@ impl Workspace {
 
     pub fn navigate_panel(&mut self, delta: isize) {
         let entries = self.entries();
-        if self.ports_target().is_some()
+        if self.session_inspector_open()
             && let Some((_, id)) = self.panel.as_ref().and_then(|p| p.row.as_ref())
             && !entries.iter().any(|e| e.id.as_deref() == Some(id))
         {
@@ -2572,6 +2574,9 @@ impl Workspace {
     }
 
     pub fn submit(&mut self, tx: &mut Tx) {
+        if self.program_resume_target().is_some() {
+            return;
+        }
         if self.ports_target().is_some() {
             self.submit_port(false, tx);
             return;

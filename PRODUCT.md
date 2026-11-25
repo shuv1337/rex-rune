@@ -27,10 +27,12 @@ SSH attachment uses OpenSSH socket forwarding with strict host-key checking. **C
 
 **Listening ports** inspects TCP listeners reported for the session in front, on demand only (API 15+). The copy notice names the destination machine on remote hosts. Open is offered only for Unix-socket hosts, and the SSH equivalent only copies a forwarding command; Rex Rune never probes the port or runs the command.
 
-## Out of scope for now
+**Program resume** shows which programs in the current session reported how
+to resume, whether Rex chose them, and why Rex trusts them or not (API 24).
+Rex snapshot 2670 saves and resumes trusted chosen programs when the server
+restarts with restore enabled. The view is local and read-only: it neither
+shows launch arguments nor asks for approval, changes rules, or runs programs.
 
-The client library reads Program Resume metadata on API 24. There is no UI for
-it yet. The client never uses the report to start a program. Rex snapshot 2646
-does not resume reported programs after restart.
+## Out of scope for now
 
 Complete Kitty graphics, distribution packages, and screen-reader support for the terminal itself. Rune's AT-SPI tree is on and names the chrome, but it has not been tried with a screen reader, and the terminal pane exposes only visible text as plain labels (no caret, selection or focus). See the README's Accessibility section and its list of unvalidated areas.

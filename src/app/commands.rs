@@ -231,7 +231,7 @@ pub struct Command {
     /// More words a search finds the row by, in lower case.
     pub keywords: Cow<'static, str>,
     /// A disabled row's explanation is displayed, not searched as a shortcut.
-    blocked_reason: Option<&'static str>,
+    blocked_reason: Option<Cow<'static, str>>,
     pub entry: Entry,
 }
 
@@ -283,7 +283,11 @@ impl Command {
         self
     }
 
-    fn blocked_by(mut self, reason: Option<&'static str>) -> Self {
+    fn blocked_by(self, reason: Option<&'static str>) -> Self {
+        self.blocked_with(reason.map(Cow::Borrowed))
+    }
+
+    fn blocked_with(mut self, reason: Option<Cow<'static, str>>) -> Self {
         self.entry.enabled = reason.is_none();
         self.blocked_reason = reason;
         self
@@ -475,6 +479,14 @@ impl Workspace {
                 super::ports::ACTION,
             )
             .keywords("port server localhost forward tcp dev"),
+            Command::action(
+                super::program_resume::ACTION,
+                G,
+                "Show program resume…",
+                super::program_resume::ACTION,
+            )
+            .keywords("resume restart restore osc 7577 trust agent claude codex")
+            .blocked_with(self.program_resume_blocked()),
             Command::action(
                 "session.new",
                 G,
@@ -1287,8 +1299,8 @@ impl Workspace {
         commands.extend(self.app_commands());
         for command in &mut commands {
             self.shortcut_details(std::slice::from_mut(&mut command.entry));
-            if let Some(reason) = command.blocked_reason {
-                command.entry.detail = reason.into();
+            if let Some(reason) = &command.blocked_reason {
+                command.entry.detail = reason.to_string();
                 command.entry.keys.clear();
             }
         }

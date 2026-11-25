@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check Program Resume with disposable Linux Rex servers, never the default socket.
 
-Usage: program-resume-private.py <program_resume_probe> <API-24 rex> [<API-21 rex>]
+Usage: program-resume-private.py <program_resume_probe> <snapshot 2670 rex> [<API-21 rex>]
 Requires Python websockets >= 15, Bash and a C compiler. Build the probe with
 cargo build --locked --no-default-features --example program_resume_probe.
 All state, sockets, report fixtures and logs live under a private directory
@@ -30,22 +30,11 @@ EVENT = "program_resume_changed"
 UUID = "01234567-89ab-4def-8123-456789abcdef"
 
 STAND_IN = r"""
-#include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
-int main(int argc, char **argv) {
-    if (argc < 1 || getenv("RESUME_FIXTURE") == NULL) return 1;
-    const char *name = strrchr(argv[0], '/');
-    char counter[4096];
-    snprintf(counter, sizeof(counter), "%s/%s.launches",
-             getenv("RESUME_FIXTURE"), name ? name + 1 : argv[0]);
-    FILE *f = fopen(counter, "a");
-    if (!f) return 2;
-    fprintf(f, "%ld\n", (long)getpid());
-    fclose(f);
+int main(void) {
+    if (getenv("RESUME_FIXTURE") == NULL) return 1;
     for (;;) pause();
 }
 """
@@ -96,6 +85,31 @@ else:
             time.sleep(0.03)
         os._exit(0)
     os.execvp(args[0], args)
+"""
+
+PYTHON_PROGRAM = r"""
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+name = Path(sys.argv[0]).name
+root = Path(os.environ["RESUME_FIXTURE"])
+token = os.environ.pop("OSC7577_TOKEN", None)
+args = json.loads((root / f"{name}.args").read_text())
+with (root / f"{name}.invocations").open("a") as marker:
+    marker.write(json.dumps(sys.argv[1:]) + "\n")
+if token:
+    argv = ",".join(base64.b64encode(s.encode()).decode() for s in [name, *args])
+    body = f"pid={os.getpid()}:time={int(time.time())}:argv={argv}"
+    mac = hashlib.sha256(f"{body}:{token}".encode()).hexdigest()
+    with open("/dev/tty", "wb", buffering=0) as tty:
+        tty.write(f"\x1b]7577;{body}:mac={mac}\x1b\\".encode())
+while True:
+    time.sleep(1)
 """
 
 
@@ -267,6 +281,15 @@ class Fixture:
         # After the owned server exits, discard only its socket if it left one.
         self.sock.unlink(missing_ok=True)
 
+    def stop_cleanly(self):
+        result = subprocess.run(
+            [self.rex, "--autostart=false", "-S", f"unix://{self.sock}", "server", "stop"],
+            cwd=self.root, env=self.env, capture_output=True, timeout=8,
+        )
+        assert result.returncode == 0, "private rex server stop failed"
+        assert self.proc.wait(timeout=8) == 0, "private server did not exit cleanly"
+        self.stop()
+
     def reload(self):
         result = subprocess.run(
             [self.rex, "--autostart=false", "-S", f"unix://{self.sock}", "config", "reload"],
@@ -304,10 +327,6 @@ class Fixture:
 
     def ancestor(self, control, sid, bid, action):
         control.write(sid, bid, f'python3 {shlex.quote(str(self.reporter))} ancestor "$$" {action}\n')
-
-    def launches(self, name):
-        return len((self.root / f"{name}.launches").read_text().splitlines())
-
 
 @contextmanager
 def worker(probe, fixture, sid, maximum):
@@ -458,58 +477,69 @@ def verify_live(probe, fixture):
         run("close")
         print("PASS [5] ancestor is chosen with two records in the same terminal", flush=True)
 
-        control.write(sid, other, "\x03")
-        control.changed(other, "owner_exited")
-        fixture.ancestor(control, sid, other, "clear")
-        control.changed(other, "clear")
-        fixture.start_reporter(control, sid, other, "unlisted", "--flag", "value")
-        control.changed(other, "report")
-        assert control.records(sid, good)[0].get("trusted")
-        assert control.records(sid, other)[0].get("untrusted_reason") == "no_rule"
-        counts = {name: fixture.launches(name) for name in ("codex", "unlisted")}
-    return sid, blocks, counts
+def verify_restart(fixture):
+    bindir = fixture.root / "bin"
+    bindir.mkdir()
+    commands = {"claude": ["--resume", UUID], "unlisted": ["--flag", "fixture"]}
+    for name, args in commands.items():
+        script = bindir / name
+        script.write_text(f"#!{shutil.which('python3')}\n" + PYTHON_PROGRAM)
+        script.chmod(0o700)
+        (fixture.root / f"{name}.args").write_text(json.dumps(args))
 
+    def invocations(name):
+        return [json.loads(line) for line in
+                (fixture.root / f"{name}.invocations").read_text().splitlines()]
 
-def restart_tripwire(fixture, sid, blocks, counts):
-    fixture.stop()
-    files = [
-        path for path in fixture.state.rglob("state.json")
-        if "blocks" in path.relative_to(fixture.state).parts
-    ]
-    assert len(files) >= len(blocks), "2646 terminal state files missing"
-    assert all(set(json.loads(path.read_text())) == {"version", "process_cwd", "size"} for path in files), (
-        "restart tripwire: terminal state changed; inspect for persisted resume records"
-    )
     fixture.launch(restore=True)
     with ExitStack() as stack:
         control = Control(stack, fixture.sock, 24)
-        control.attach(stack, sid, blocks)
-        for block in blocks:
-            assert control.records(sid, block) == [], "restart tripwire: records persisted"
-            control.write(sid, block, "printf 'RESTORED-%s\\n' \"$((39+3))\"\n")
-        deadline = time.monotonic() + 4
-        fresh = set()
-        while time.monotonic() < deadline:
-            for block in blocks:
-                content = control.terminal("format", sid, block, format="text")["content"]
-                if "RESTORED-42" in content:
-                    fresh.add(block)
-            assert all(fixture.launches(name) == count for name, count in counts.items()), (
-                "restart tripwire: a reported program ran after restart"
-            )
-            assert not any(prompt_event(m) for m in control.events), "restart tripwire: Rex prompted"
-            assert not any(resume_event(m) is not None for m in control.events), (
-                "restart tripwire: Rex emitted a resume event"
-            )
-            time.sleep(0.1)
-        assert len(fresh) == len(blocks), "restart tripwire: a restored pane did not run its fresh shell"
-        for block in blocks:
-            assert control.records(sid, block) == [], "restart tripwire: records appeared after attach"
-        assert not any(prompt_event(m) for m in control.events), "restart tripwire: Rex prompted"
-        assert not any(resume_event(m) is not None for m in control.events), (
-            "restart tripwire: Rex emitted a resume event"
+        sid, (good, other) = fixture.create(control, 2)
+        control.attach(stack, sid, (good, other))
+        control.write(sid, good, "claude\n")
+        trusted, = control.changed(good, "report")
+        assert trusted.get("chosen") and trusted.get("trusted") and trusted.get("rule") == "claude", (
+            "stand-in claude was not trusted and chosen: " + str(trusted.get("untrusted_reason"))
         )
-    print("PASS [7] restart tripwire: no persistence, rerun, prompt or resume event", flush=True)
+        control.write(sid, other, "unlisted\n")
+        untrusted, = control.changed(other, "report")
+        assert untrusted.get("chosen") and untrusted.get("untrusted_reason") == "no_rule"
+        assert invocations("claude") == invocations("unlisted") == [[]]
+
+    fixture.stop_cleanly()
+    by_file_id = {bid.removeprefix("block:"): bid for bid in (good, other)}
+    states = {
+        by_file_id[path.parent.parent.name]: json.loads(path.read_text())
+        for path in fixture.state.rglob("state.json")
+        if path.parent.parent.name in by_file_id
+    }
+    assert set(states) == {good, other}, "saved terminal state files missing"
+    assert "resume" in states[good], "trusted chosen resume missing from saved terminal state"
+    assert "resume" not in states[other], "untrusted resume was saved"
+
+    log_offset = fixture.log.stat().st_size
+    fixture.launch(restore=True)
+    with ExitStack() as stack:
+        control = Control(stack, fixture.sock, 24)
+        control.attach(stack, sid, (good, other))
+        wait(lambda: len(invocations("claude")) > 1, "restored claude did not run")
+        assert invocations("claude") == [[], commands["claude"]], "wrong restored claude arguments"
+        assert re.search(
+            rb"INFO +terminal: resuming saved program[^\n]* program=claude rule=claude(?:\s|$)",
+            fixture.log.read_bytes()[log_offset:],
+        ), "Rex did not report resuming trusted claude"
+
+        # The marker comes from shell evaluation, not the echo of the input line.
+        control.write(sid, other, "printf 'RESTORED-%s\\n' \"$((39+3))\"\n")
+        wait(
+            lambda: "RESTORED-42" in control.terminal("format", sid, other, format="text")["content"],
+            "the untrusted pane did not return to a plain shell",
+        )
+        assert invocations("unlisted") == [[]], "untrusted program was run after restart"
+        assert not control.records(sid, other), "untrusted metadata survived restart"
+        assert not any(prompt_event(m) for m in control.events), "Rex prompted on restart"
+    print("PASS [7] trusted chosen claude persisted and resumed; untrusted pane restored a shell",
+          flush=True)
 
 
 def verify_old(probe, fixture):
@@ -541,18 +571,24 @@ def main():
     if not base.is_dir():
         parser.error("the temporary path must be a directory")
     probe = args.probe.resolve(strict=True)
+    rex24 = args.rex24.resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="rex-resume-", dir=base) as work:
-        fixture = Fixture(Path(work), args.rex24.resolve(strict=True))
+        fixture = Fixture(Path(work), rex24)
         try:
-            live = verify_live(probe, fixture)
-            if args.rex21:
-                with tempfile.TemporaryDirectory(prefix="rex-resume-", dir=base) as old:
-                    legacy = Fixture(Path(old), args.rex21.resolve(strict=True))
-                    try:
-                        verify_old(probe, legacy)
-                    finally:
-                        legacy.stop()
-            restart_tripwire(fixture, *live)
+            verify_live(probe, fixture)
+        finally:
+            fixture.stop()
+    if args.rex21:
+        with tempfile.TemporaryDirectory(prefix="rex-resume-", dir=base) as old:
+            legacy = Fixture(Path(old), args.rex21.resolve(strict=True))
+            try:
+                verify_old(probe, legacy)
+            finally:
+                legacy.stop()
+    with tempfile.TemporaryDirectory(prefix="rex-resume-restart-", dir=base) as work:
+        fixture = Fixture(Path(work), rex24)
+        try:
+            verify_restart(fixture)
         finally:
             fixture.stop()
 

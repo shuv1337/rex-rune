@@ -1,7 +1,7 @@
 //! Detached on-demand Program Resume reads and passive block-event sync (API 24+).
 use super::{Client, ControlState, HostModel, Shared, activity, view_blocks};
 use crate::{
-    program_resume::{MAX_RECORDS_PER_HOST, MIN_API_REVISION, ResumeSnapshot, WireSnapshot},
+    program_resume::{MAX_RECORDS_PER_HOST, MIN_API_REVISION, ResumeSnapshot},
     transport::DetachedEnvelope,
 };
 use serde::Deserialize;
@@ -186,15 +186,15 @@ fn decode_reply(text: &str) -> ReplyOutcome {
             ErrorCode::Other => ReplyOutcome::Failed,
         };
     }
-    let Some(wire) = reply
+    let Some(snapshot) = reply
         .payload
-        .and_then(|raw| serde_json::from_str::<WireSnapshot>(raw.get()).ok())
+        .and_then(|raw| ResumeSnapshot::decode_metadata(raw.get()))
     else {
         return ReplyOutcome::Failed;
     };
     ReplyOutcome::Snapshot {
         seq: reply.seq,
-        snapshot: wire.into_snapshot(),
+        snapshot,
     }
 }
 
@@ -276,14 +276,14 @@ pub(super) fn apply_event(
         return;
     }
     // The server sends only metadata in events. Use the same typed parser as for replies.
-    let Some(wire) = serde_json::to_string(body)
+    let Some(snapshot) = serde_json::to_string(body)
         .ok()
-        .and_then(|text| serde_json::from_str::<WireSnapshot>(&text).ok())
+        .and_then(|text| ResumeSnapshot::decode_metadata(&text))
     else {
         return;
     };
     state.resume_seq.insert(block.to_owned(), seq);
-    let changed = store_snapshot(&mut model, block, wire.into_snapshot());
+    let changed = store_snapshot(&mut model, block, snapshot);
     drop(model);
     if changed {
         shared.wake.notify();

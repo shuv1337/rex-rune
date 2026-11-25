@@ -3,7 +3,7 @@
 use super::{
     input::{list_key, rename_key},
     keycaps::keycap,
-    panel::{Intent, PanelKind},
+    panel::{Intent, PaneAction, PanelKind},
     theme::*,
     widgets::{Row, SEPARATOR, glyph, list_row, row_action, separator},
     workspace::Workspace,
@@ -236,6 +236,10 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let commands = matches!(panel.kind, PanelKind::Picker(false));
     let activity = matches!(panel.kind, PanelKind::Activity);
     let ports = matches!(panel.kind, PanelKind::Ports(_)).then(|| s.ports_coverage());
+    let resume = s
+        .program_resume_target()
+        .map(|target| s.program_resume_coverage(target));
+    let inspector = ports.is_some() || resume.is_some();
     // The values of one setting: a short list with the current one checked.
     let values = matches!(panel.kind, PanelKind::Choice(_) | PanelKind::Chromes);
     // Lists that mark the current value keep the check's column on every row, so names align.
@@ -295,7 +299,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     // A machine already added carries a chip, in a column every row of the list keeps.
     let added_column = discover && entries.iter().any(|e| e.current);
     let name_limit = super::discover::name_limit(width, added_column);
-    let row_height = if activity || ports.is_some() {
+    let row_height = if activity || inspector {
         44.
     } else if commands {
         30.
@@ -325,6 +329,9 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .count() as f32
             + if p.locality.is_some() { 29. } else { 0. }
     });
+    let resume_extra = resume
+        .as_ref()
+        .map_or(0., |coverage| 27. + 24. * coverage.footer.len() as f32);
     let mut list_max = match room {
         Some((below, above)) => (below.max(above) - input_height - 42.).clamp(60., 360.),
         None => (vh
@@ -333,9 +340,10 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
             - input_height
             - directory_extra
             - ports_extra
+            - resume_extra
             - if activity { 28. } else { 0. }
             - footer_count as f32 * 29.
-            - if ports.is_some() { 0. } else { 56. })
+            - if inspector { 0. } else { 56. })
         .max(60.),
     };
     if commands {
@@ -350,6 +358,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let surface_id = match panel.kind {
         PanelKind::Activity => "activity",
         PanelKind::Ports(_) => "ports",
+        PanelKind::ProgramResume(_) => "program-resume",
         PanelKind::Picker(true) => "switcher",
         PanelKind::Picker(false) => "commands",
         PanelKind::Hosts(_) => "hosts",
@@ -441,12 +450,16 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .as_ref()
                 .filter(|(t, _)| t.host == *host && &t.session == session)
         });
-        let r = if let Some(port) = &entry.port {
-            let selected = panel
+        let inspector_selected = || {
+            panel
                 .row
                 .as_ref()
-                .is_some_and(|(_, id)| entry.id.as_deref() == Some(id));
-            super::ports::port_row(entry, port, i, selected)
+                .is_some_and(|(_, id)| entry.id.as_deref() == Some(id))
+        };
+        let r = if let Some(port) = &entry.port {
+            super::ports::port_row(entry, port, i, inspector_selected())
+        } else if let Some(summary) = &entry.program_resume {
+            super::program_resume::resume_row(entry, summary, i, inspector_selected())
         } else if let Some((_, edit)) = renaming {
             rename_row(edit, row_height, entry.current, surface_id)
         } else {
@@ -480,7 +493,13 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                     subtitle: None,
                     label: &entry.label,
                     detail: &entry.detail,
-                    detail_max_w: None,
+                    detail_max_w: match &entry.action {
+                        Intent::Pane(_, PaneAction::ProgramResume) => Some(100.),
+                        Intent::ClientAction(super::program_resume::ACTION, _) if !enabled => {
+                            Some(230.)
+                        }
+                        _ => None,
+                    },
                     tone: entry.tone,
                     keys: &entry.keys,
                     height: if entry.footer { 28. } else { row_height },
@@ -544,6 +563,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
             PanelKind::Activity if s.query().is_empty() => "Nothing needs you.".into(),
             PanelKind::Activity => "No matching activity.".into(),
             PanelKind::Ports(_) => ports.as_ref().unwrap().empty.into(),
+            PanelKind::ProgramResume(_) => resume.as_ref().unwrap().empty.clone(),
             PanelKind::Directory(_) => panel
                 .error
                 .clone()
@@ -561,9 +581,9 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         y += 52.;
     }
     let content = y;
-    // Let a short Ports list use the available space. Reserve the overflow hint only
+    // Let a short inspector list use the available space. Reserve the overflow hint only
     // when rows actually scroll, so it doesn't displace a row that already fits.
-    if ports.is_some() && content > list_max + 1. {
+    if inspector && content > list_max + 1. {
         list_max = (list_max - 24.).max(60.);
     }
     let overflow = content > list_max + 1.;
@@ -650,7 +670,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     )
     .clip_rounded(12.)
     .transition(pop_in());
-    if matches!(panel.kind, PanelKind::Directory(_) | PanelKind::Ports(_)) {
+    if inspector || matches!(panel.kind, PanelKind::Directory(_)) {
         surface = surface.child(
             row().h(26.).px(10.).center_y().child(
                 text(panel.title.clone())
@@ -670,12 +690,13 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
             ),
         );
     } else if titled {
-        let active_descendant = match &ports {
-            Some(_) => panel
+        let active_descendant = if inspector {
+            panel
                 .row
                 .as_ref()
-                .and_then(|(_, id)| entries.iter().position(|e| e.id.as_deref() == Some(id))),
-            None => Some(panel.selected),
+                .and_then(|(_, id)| entries.iter().position(|e| e.id.as_deref() == Some(id)))
+        } else {
+            Some(panel.selected)
         };
         let placeholder = panel
             .fields
@@ -767,10 +788,19 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     if let Some(ports) = &ports {
         surface = surface.child(super::ports::ports_footer(ports));
     }
+    if let Some(resume) = &resume {
+        surface = surface.children(
+            resume
+                .footer
+                .iter()
+                .map(|line| super::ports::coverage_line(line)),
+        );
+    }
     // Keep the whole surface on screen: an estimate of its height bounds the anchor.
     let estimated = input_height
         + directory_extra
         + ports_extra
+        + resume_extra
         + view_h
         + if pane { 24. } else { 0. }
         + footer_count as f32 * 29.

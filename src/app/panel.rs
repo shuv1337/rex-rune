@@ -13,6 +13,7 @@ use serde_json::Value;
 
 #[derive(Clone, Debug)]
 pub enum Intent {
+    InspectProgramResume,
     Select(usize, String),
     Tab(String),
     ActivityTab(super::notify::NoteTarget),
@@ -131,6 +132,7 @@ impl Intent {
                 PaneAction::Reconnect => ("pane.reconnect", Value::Null),
                 PaneAction::Download => (super::actions::DOWNLOAD, Value::Null),
                 PaneAction::Ports => (super::ports::ACTION, Value::Null),
+                PaneAction::ProgramResume => (super::program_resume::ACTION, Value::Null),
                 PaneAction::InsertPath => (super::directory::ACTION, Value::Null),
                 PaneAction::GoToDirectory => (super::directory::GO, Value::Null),
                 PaneAction::Close => ("pane.close", Value::Null),
@@ -155,7 +157,7 @@ impl Intent {
             Intent::InsertPath(_)
                 | Intent::Switcher
                 | Intent::ClientAction(
-                    "client.settings" | "session.switch" | super::activity_list::ACTION | super::ports::ACTION | super::about::ABOUT | super::recorder::EDIT,
+                    "client.settings" | "session.switch" | super::activity_list::ACTION | super::ports::ACTION | super::program_resume::ACTION | super::about::ABOUT | super::recorder::EDIT,
                     _
                 )
                 | Intent::Shortcuts(super::recorder::Menu::ResetAll)
@@ -205,7 +207,7 @@ impl Intent {
                 | Intent::RemoveHost(_)
                 | Intent::Pane(
                     _,
-                    PaneAction::Rename | PaneAction::Close | PaneAction::Download | PaneAction::Ports | PaneAction::InsertPath | PaneAction::GoToDirectory
+                    PaneAction::Rename | PaneAction::Close | PaneAction::Download | PaneAction::Ports | PaneAction::ProgramResume | PaneAction::InsertPath | PaneAction::GoToDirectory
                 )
                 | Intent::Session(_, SessionAction::Rename | SessionAction::Close)
         )
@@ -313,6 +315,7 @@ pub enum PaneAction {
     /// The same browser over folders only; it types `cd <folder>` without Enter.
     GoToDirectory,
     Ports,
+    ProgramResume,
     /// The pane's selected text to the clipboard.
     Copy,
     /// The clipboard into the pane, as Ctrl Shift V does for the focused one.
@@ -418,6 +421,7 @@ pub enum PanelKind {
     Picker(bool),
     Activity,
     Ports(super::ports::Target),
+    ProgramResume(super::program_resume::Target),
     Hosts(String),
     SwitchHost,
     MovePane,
@@ -562,6 +566,7 @@ impl Panel {
                 | PanelKind::Picker(_)
                 | PanelKind::Activity
                 | PanelKind::Ports(_)
+                | PanelKind::ProgramResume(_)
                 | PanelKind::Hosts(_)
                 | PanelKind::Pane
                 | PanelKind::Layer
@@ -583,6 +588,7 @@ impl Panel {
 pub struct Entry {
     pub activity: Option<super::activity_list::Presentation>,
     pub port: Option<super::ports::Presentation>,
+    pub program_resume: Option<super::program_resume::Presentation>,
     /// The row's own identity across a rebuild, where the list has one (`Command.id`): a
     /// host wake that reorders the list finds the same row by this, not by its position.
     pub id: Option<std::borrow::Cow<'static, str>>,
@@ -625,6 +631,7 @@ impl Entry {
         Self {
             activity: None,
             port: None,
+            program_resume: None,
             id: None,
             label: label.into(),
             detail: detail.into(),
@@ -877,6 +884,9 @@ impl Workspace {
         if let PanelKind::Ports(target) = &panel.kind {
             return self.ports_entries(target, &lower);
         }
+        if let PanelKind::ProgramResume(target) = &panel.kind {
+            return self.program_resume_entries(target, &lower);
+        }
         if let PanelKind::Fonts(pick) = panel.kind {
             return self.font_entries(pick);
         }
@@ -1095,13 +1105,22 @@ impl Workspace {
                 ("Copy pane ID", 2, PaneAction::CopyId),
                 ("Download file…", 2, PaneAction::Download),
                 ("Listening ports…", 2, PaneAction::Ports),
+                ("Program resume…", 2, PaneAction::ProgramResume),
                 ("Clear terminal", 3, PaneAction::Clear),
                 ("Reset terminal", 3, PaneAction::Reset),
                 ("Reconnect terminal", 3, PaneAction::Reconnect),
                 ("Close pane…", 4, PaneAction::Close),
             ]);
             for (label, section, action) in rows {
-                let mut entry = Entry::new(label, "", "", Intent::Pane(target.clone(), action))
+                let detail = if matches!(action, PaneAction::ProgramResume) {
+                    let Some(detail) = self.program_resume_menu_detail(&target) else {
+                        continue;
+                    };
+                    detail
+                } else {
+                    ""
+                };
+                let mut entry = Entry::new(label, detail, "", Intent::Pane(target.clone(), action))
                     .in_section(section);
                 entry.danger = matches!(action, PaneAction::Close);
                 entry.enabled = self.pane_verb_available(&target, action);
@@ -1285,7 +1304,10 @@ impl Workspace {
                 let keys = self.shortcut_chords(name, &args);
                 // An unbound action leaves the row's own words alone: a pointer hint (Mouse
                 // Back) or the reason the row cannot run now.
-                if keys.is_empty() {
+                if keys.is_empty()
+                    || (matches!(entry.action, Intent::Pane(_, PaneAction::ProgramResume))
+                        && !entry.detail.is_empty())
+                {
                     continue;
                 }
                 entry.detail = super::keycaps::spell(&keys);

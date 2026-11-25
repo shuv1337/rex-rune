@@ -42,6 +42,7 @@ pub(crate) mod platform;
 mod popups;
 mod ports;
 mod program_icons;
+mod program_resume;
 mod prompts;
 mod recorder;
 mod remote;

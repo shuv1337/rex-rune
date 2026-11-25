@@ -261,6 +261,8 @@ impl Workspace {
         };
         if self.ports_target().is_some_and(|target| {
             target.host != visit.host || target.session.as_deref() != Some(&visit.session)
+        }) || self.program_resume_target().is_some_and(|target| {
+            target.host != visit.host || target.session.as_deref() != Some(&visit.session)
         }) {
             self.close_panel(tx);
         }

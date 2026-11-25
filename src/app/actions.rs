@@ -42,6 +42,7 @@ enum Handler {
     SwitchSession,
     Activity,
     Ports,
+    ProgramResume,
     PairDevice,
     StopServer,
     SelectSession,
@@ -133,6 +134,7 @@ specs! {
     "session.switch" => SwitchSession,
     super::activity_list::ACTION => Activity,
     super::ports::ACTION => Ports,
+    super::program_resume::ACTION => ProgramResume,
     super::pair_device::ACTION => PairDevice,
     super::server_page::STOP => StopServer,
     SELECT_SESSION => SelectSession,
@@ -291,7 +293,7 @@ impl Spec {
                 "Only the person at this computer can choose a file to download; nothing a host sends can start one.",
             ),
             Palette | Settings | Search | SwitchSession | Activity | PairDevice | StopServer
-            | PaneActions | Shortcuts | Ports => {
+            | PaneActions | Shortcuts | Ports | ProgramResume => {
                 Remote::Never("Only the person at this computer can open dialogs and popups.")
             }
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
@@ -354,6 +356,7 @@ impl Spec {
             self.handler,
             Handler::Download
                 | Handler::Ports
+                | Handler::ProgramResume
                 | Handler::InsertPath
                 | Handler::GoToDirectory
                 | Handler::PairDevice
@@ -441,6 +444,7 @@ impl Spec {
             Handler::SwitchSession => "Switch session",
             Handler::Activity => "Show activity",
             Handler::Ports => "Show listening ports",
+            Handler::ProgramResume => "Show program resume",
             Handler::PairDevice => "Pair device…",
             Handler::StopServer => "Stop server…",
             Handler::SelectSession => "Show session",
@@ -532,6 +536,7 @@ impl Spec {
             | Handler::SwitchSession
             | Handler::Activity
             | Handler::Ports
+            | Handler::ProgramResume
             | Handler::SelectSession
             | Handler::GotoTab
             | Handler::NextSession
@@ -791,6 +796,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             s.show_activity();
         }
         Handler::Ports => s.show_ports(s.focused_block()),
+        Handler::ProgramResume => s.show_program_resume(None),
         Handler::PairDevice => s.pair_device(),
         Handler::StopServer => s.stop_server(),
         Handler::SelectSession => {

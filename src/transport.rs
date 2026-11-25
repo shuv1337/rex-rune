@@ -287,7 +287,7 @@ pub async fn control_with_max_revision(
 
 /// Connect a short-lived discovery probe as `ClientKind::Other` so rev 17+ servers never
 /// select it as a `rex.ui` prompt target.
-pub(crate) async fn discovery_from_socket(socket: Socket, name: &str) -> Result<Client> {
+pub async fn discovery_from_socket(socket: Socket, name: &str) -> Result<Client> {
     connect(
         socket,
         None,

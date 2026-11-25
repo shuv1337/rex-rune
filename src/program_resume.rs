@@ -49,6 +49,16 @@ impl fmt::Debug for RecordKey {
     }
 }
 
+impl RecordKey {
+    /// Opaque, lossless identity for lists keyed by strings. Never use it as display text.
+    pub fn row_id(&self, block: &str) -> String {
+        format!(
+            "resume:{block:?}:{}:{:?}:{:?}",
+            self.pid, self.owner_name, self.reported_at
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Trust {
     Trusted { rule: String },
@@ -232,6 +242,13 @@ impl WireSnapshot {
 }
 
 impl ResumeSnapshot {
+    /// Decode the display metadata, ignoring launch arguments.
+    pub fn decode_metadata(json: &str) -> Option<Self> {
+        serde_json::from_str::<WireSnapshot>(json)
+            .ok()
+            .map(WireSnapshot::into_snapshot)
+    }
+
     pub(crate) fn apply_host_budget(&mut self, remaining: usize) {
         if self.records.len() > remaining {
             self.records.truncate(remaining);

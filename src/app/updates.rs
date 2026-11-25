@@ -636,7 +636,7 @@ impl Workspace {
             &[],
         ));
         self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
-        self.refresh_ports_watch();
+        self.refresh_session_inspector_watches();
         self.sync_panel_terminal_guard();
     }
 

@@ -41,7 +41,11 @@ impl Age {
 /// Elapsed time from a server's clock to this client's. Shared by Activity and Server.
 /// A minute of future skew counts as now; more skew or over a year is unknown.
 pub fn reported_elapsed(value: &str, wall: SystemTime) -> Option<Duration> {
-    let at = timestamp(value)?;
+    reported_elapsed_since(timestamp(value)?, wall)
+}
+
+/// Apply the same age policy to an already decoded report timestamp.
+pub fn reported_elapsed_since(at: SystemTime, wall: SystemTime) -> Option<Duration> {
     let age = match wall.duration_since(at) {
         Ok(age) => age,
         Err(ahead) if ahead.duration() <= AHEAD => Duration::ZERO,
