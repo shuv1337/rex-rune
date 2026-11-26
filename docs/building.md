@@ -14,16 +14,17 @@ ownership of source files and deeper internals, see [AGENTS.md](../AGENTS.md).
 - Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan,
   xkbcommon, fontconfig and the Wayland/X11 client libraries. For macOS or
   Windows source builds, see [macOS](#macos) and [Windows](#windows).
-- A running Rex server that supports an API revision from 10 through 24.
-  Compatibility records cover Linux servers **0.1.0-snapshot.2646 (`3dda44da`, API 24)**,
+- A running Rex server that supports an API revision from 0 through 24.
+  Compatibility records cover Linux servers **0.1.0-snapshot.2670 (`b070aae6`, API 24)**,
   **0.1.0-snapshot.2562 (`9e2eef1`, API 21)**,
   **0.1.0-snapshot.2563 (`14f6d7f`, API 21)**,
   **0.0.1794323808-g757adf (API 13)** and **0.1.0-preview.14 (`7e460d0`, API 12)**;
   see [API-24 compatibility](server-api24.md), [API-21 compatibility results](server-api21.md),
   [API-13 compatibility results](server-api13.md) and
-  [preview.14 results](server-preview14.md). Rex is in alpha, so older revisions
-  aren't supported; update Rex on a host that refuses the connection. Uploading
-  files needs revision 11; floating layers and downloads need revision 13.
+  [preview.14 results](server-preview14.md). Newer feature methods remain gated
+  on the negotiated revision: stopping a server needs revision 4, bundled
+  bootstrap tickets need revision 8, uploading files needs revision 11, and
+  floating layers and downloads need revision 13.
 
 ## Linux
 

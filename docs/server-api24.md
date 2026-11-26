@@ -109,11 +109,12 @@ Rex Rune lowers `MIN_API_REVISION` from `10` to `0` so it matches the official
 - **Bundled bootstrap tickets (`r08`).** `session.bootstrap` includes
   `data_tickets` only on revision 8 and newer. Revisions 0 through 7 omit
   `data_tickets` and open terminal streams through `data.connect`.
-- **Revision 0 reporting honesty.** `ProtocolStats::api_revision_negotiated` and
-  `ProtocolStats::negotiated_api_revision()` distinguish a real negotiated
-  revision `0` from an unreported default `0` in Settings -> Server, Settings ->
-  About, **Copy version info**, and **Copy debug info**. `ServerInfo::api_revisions`
-  accepts `(0, max)` ranges whenever `max != 0` so servers reporting
+- **Revision 0 reporting honesty.** `ProtocolStats::api_revision` is an
+  `Option<u32>` (set to `Some(rev)` on WELCOME and cleared to `None` on
+  disconnect), distinguishing a real negotiated revision `0` from an unreported
+  or disconnected host in Settings -> Server, Settings -> About, **Copy version
+  info**, and **Copy debug info**. `ServerInfo::api_revisions` accepts
+  `(0, max)` ranges whenever `max != 0` so servers reporting
   `api_min_revision = 0` and `api_server_revision = 24` display `0–24` rather
   than `Not reported`.
 

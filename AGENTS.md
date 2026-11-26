@@ -37,7 +37,7 @@ Some probes connect to the configured Rex server and create sessions there. Of t
   - `qr.rs`: dependency-free Model 2 QR byte-mode M encoder, versions 1–10 (213 bytes), matrix-only. `qr/tests.rs` compares 22 committed qrencode matrices under `tests/data/qr`; `scripts/qr-goldens.py` regenerates them, and `scripts/qr-verify.py` independently decodes `examples/qr_dump.rs` output and dialog captures with zbarimg.
   - `layout.rs`: split placement and API 21 dual zoom (`full_window_zoom`, `tiled_zoom`,
     `is_zoomed`, `any_zoomed`, `block_visible`: tiled zoom draws behind non-minimized floating
-    layers while floating cards, dividers, resize grips and drag remain active; legacy API 10-20
+    layers while floating cards, dividers, resize grips and drag remain active; legacy API 0-20
     zoom and API 21 floating zoom cover the entire window; each `Placement` and `Divider` is
     tagged with `layer_index` so `panes::area` emits each layer's cards, dividers and floating
     resize grips back to front). Record: `docs/server-api21.md`.
@@ -90,7 +90,7 @@ Some probes connect to the configured Rex server and create sessions there. Of t
     resize (#136 slice 2; L-shaped 12 pt corners clear of Close, 4 pt outside / 3 pt inside
     bands, Rune's directional resize cursors, inert accent ghost outline, commit-on-release via epoch- and
     revision-checked `HostCommand::ResizeLayer`, raise-first when non-frontmost; `Phase::Down`
-    only starts a drag, cancellation never re-arms on later motion; API 10–12 emits zero grips).
+    only starts a drag, cancellation never re-arms on later motion; API 0-12 emits zero grips).
     `floating_tests/drag.rs` covers pointer drag/resize, z-order, cancellation and ghost
     captures (`floating_drag_ghost_draw`, `floating_resize_ghost_draw`). `font_size.rs`: terminal font size actions. `help.rs`: Rex help.
   - `input.rs`, `keys.rs`: workspace shortcuts first, then every other key to the focused pane's PTY; Rune key events to Rex `client.key` payloads; IME. `copy_mode.rs`: local Vim copy-mode UI integration (#149 slice 2) behind a single `pane.copy_mode` action (`Ctrl+Shift+X` / `Cmd+Shift+X`, `Remote::Never`, one Commands row, one Shortcuts row), layout-independent key dispatch, repeat counts (`1..=9999`), `g`/`y` prefixes, `/` & `?` search handoff (`Enter` → `CopyModeOp::ToMatch`, `n`/`N` stepping, search cleanup on exit), zero-PTY-leak guards across keys/IME/mouse/`Term::send`, immediate lifecycle auto-exit, race-free `CopyYank` clipboard/PRIMARY delivery, `ACCENT`/`ON_ACCENT` copy cursor (2-cell wide aware, hollow when unfocused), and `mode_chip` reuse. `copy_mode_tests.rs` covers headless UI behavior and `copy_mode_draw` real-font captures (`REX_TEST_SNAP_DIR`); `scripts/copy-mode-x11.py` verifies zero PTY leaks and real X11 scrollback yank on a private Rex server + Xvfb. Scope and evidence: `docs/parity-2026-11/copy-mode.md`.

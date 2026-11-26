@@ -52,7 +52,7 @@ fn fixture() -> Workspace {
     ws.settings.hosts[0].label = "Build machine".into();
     ws.settings.hosts[0].endpoint = "ssh://user@build.example/run/rex.sock".into();
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 13;
+    ws.hosts[0].model.protocol.api_revision = Some(13);
     ws.hosts[0].model.server_info = reported("0.1.0-preview.15");
     ws
 }
@@ -155,7 +155,7 @@ fn reported_facts_are_cached_not_live_and_sensitive_members_are_not_rendered() {
 fn pending_partial_refused_and_unknown_fields_remain_distinct() {
     let mut ws = fixture();
     ws.hosts[0].model.server_info = ServerInfo::default();
-    ws.hosts[0].model.protocol.api_revision = 0;
+    ws.hosts[0].model.protocol.api_revision = None;
     let mut rt = open(ws, (1024., 700.));
     assert!(shows(&rt, "Waiting for report"));
     for label in ["Built-in Tailscale", "Tailscale HTTPS", "Tailscale address"] {
@@ -182,7 +182,7 @@ fn pending_partial_refused_and_unknown_fields_remain_distinct() {
     assert!(!shows(&rt, "0") && !shows(&rt, "Disabled"));
 
     rt.update(|s, _| {
-        s.hosts[0].model.protocol.api_revision = 10;
+        s.hosts[0].model.protocol.api_revision = Some(10);
         s.hosts[0].model.server_info = ServerInfo {
             build: Answer::Reported(Build {
                 rex_version: Some("old-server".into()),
@@ -278,7 +278,7 @@ fn active_hosts_with_same_server_ids_never_share_facts_or_copy_payloads() {
         ws.settings.hosts[i].endpoint =
             format!("https://user:password@{name}.example?token=secret");
         ws.hosts[i].model.connected = true;
-        ws.hosts[i].model.protocol.api_revision = 13;
+        ws.hosts[i].model.protocol.api_revision = Some(13);
         ws.hosts[i].model.server_info = reported(name);
     }
     let mut rt = open(ws, (1024., 700.));
@@ -538,7 +538,7 @@ fn draw(case: &str) {
     let mut ws = fixture();
     match case {
         "older" => {
-            ws.hosts[0].model.protocol.api_revision = 10;
+            ws.hosts[0].model.protocol.api_revision = Some(10);
             ws.hosts[0].model.server_info = ServerInfo {
                 build: Answer::Unreported,
                 process: Answer::Reported(Process::default()),
@@ -979,8 +979,7 @@ fn pairing_drops_only_a_bare_origins_slash_and_says_why_it_is_not_offered() {
 #[test]
 fn negotiated_api_revision_zero_is_distinct_from_unreported() {
     let mut ws = fixture();
-    ws.hosts[0].model.protocol.api_revision = 0;
-    ws.hosts[0].model.protocol.api_revision_negotiated = false;
+    ws.hosts[0].model.protocol.api_revision = None;
     ws.hosts[0].model.server_info.api_revisions = None;
     let mut rt = open(ws, (1024., 700.));
     assert!(
@@ -991,7 +990,7 @@ fn negotiated_api_revision_zero_is_distinct_from_unreported() {
     assert!(!shows(&rt, "0"));
 
     rt.update(|s, _| {
-        s.hosts[0].model.protocol.api_revision_negotiated = true;
+        s.hosts[0].model.protocol.api_revision = Some(0);
         s.hosts[0].model.server_info.api_revisions = Some((0, 24));
     });
     settle(&mut rt);

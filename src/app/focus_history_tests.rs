@@ -20,7 +20,7 @@ fn focus_workspace() -> (
     let model = &mut ws.hosts[0].model;
     model.connected = true;
     model.connection_epoch = 7;
-    model.protocol.api_revision = 21;
+    model.protocol.api_revision = Some(21);
     model.sessions = vec![session("s"), session("t")];
     model.selected = Some("s".into());
     model.views.insert(
@@ -64,7 +64,7 @@ fn focus_workspace() -> (
     );
     ws.hosts[1].model.connected = true;
     ws.hosts[1].model.connection_epoch = 3;
-    ws.hosts[1].model.protocol.api_revision = 21;
+    ws.hosts[1].model.protocol.api_revision = Some(21);
     ws.hosts[1].model.sessions = vec![session("u")];
     ws.hosts[1].model.selected = Some("u".into());
     (ws, rx0, rx1)
@@ -453,7 +453,7 @@ fn commands_gating_arguments_remote_policy_and_returned_actions() {
         (true, 21, None),
     ] {
         ws.hosts[0].model.connected = connected;
-        ws.hosts[0].model.protocol.api_revision = revision;
+        ws.hosts[0].model.protocol.api_revision = Some(revision);
         ws.notices.clear();
         for id in [
             "focus_history.reverse",
@@ -484,7 +484,7 @@ fn commands_gating_arguments_remote_policy_and_returned_actions() {
 
     // Single session / single tab / single pane disable the narrow scoped rows on API 21.
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 21;
+    ws.hosts[0].model.protocol.api_revision = Some(21);
     ws.hosts[0].model.sessions.truncate(1);
     ws.hosts[0]
         .model

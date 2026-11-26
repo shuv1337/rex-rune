@@ -247,7 +247,13 @@ async fn run() -> Result<()> {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    let revision = host.model.lock().unwrap().protocol.api_revision;
+    let revision = host
+        .model
+        .lock()
+        .unwrap()
+        .protocol
+        .api_revision
+        .context("negotiated API revision")?;
     println!("connected, API revision {revision}, session {session}");
     let mut probe = Probe {
         host,

@@ -437,9 +437,7 @@ async fn rev0_and_rev1_wire_compatibility_covers_bootstrap_and_split_anchor() {
         connected(&host).await;
         {
             let model = host.model.lock().unwrap();
-            assert_eq!(model.protocol.api_revision, revision);
-            assert!(model.protocol.api_revision_negotiated);
-            assert_eq!(model.protocol.negotiated_api_revision(), Some(revision));
+            assert_eq!(model.protocol.api_revision, Some(revision));
         }
         host.commands
             .send(HostCommand::Request {
@@ -472,6 +470,61 @@ async fn rev0_and_rev1_wire_compatibility_covers_bootstrap_and_split_anchor() {
             m.views.get(SESSION).is_some_and(|v| v.revision == 3)
         })
         .await;
+        drop(host);
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn disconnect_clears_api_revision_and_reconnect_restores_it() {
+    for revision in [0u32, 24u32] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (drop_tx, drop_rx) = tokio::sync::oneshot::channel::<()>();
+        let (reconnect_tx, reconnect_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let mut ws = accept(&listener, "rex.control.v1").await;
+            welcome(&mut ws, revision).await;
+            let boot_req = next(&mut ws).await;
+            assert_eq!(boot_req["method"], "session.bootstrap");
+            reply(&mut ws, &boot_req, 1, serde_json::to_value(boot()).unwrap()).await;
+            drop_rx.await.unwrap();
+            drop(ws);
+
+            // Hold the second accept until the client observes the disconnected None state.
+            reconnect_rx.await.unwrap();
+            let mut ws = accept(&listener, "rex.control.v1").await;
+            welcome(&mut ws, revision).await;
+            let boot_req = next(&mut ws).await;
+            assert_eq!(boot_req["method"], "session.bootstrap");
+            reply(&mut ws, &boot_req, 1, serde_json::to_value(boot()).unwrap()).await;
+            assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+        });
+        let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+        connected(&host).await;
+        assert_eq!(
+            host.model.lock().unwrap().protocol.api_revision,
+            Some(revision)
+        );
+
+        drop_tx.send(()).unwrap();
+        until(&host, |m| !m.connected).await;
+        assert_eq!(
+            host.model.lock().unwrap().protocol.api_revision,
+            None,
+            "disconnect must clear api_revision on rev {revision}"
+        );
+
+        reconnect_tx.send(()).unwrap();
+        until(&host, |m| m.connected && m.connection_epoch == 2).await;
+        assert_eq!(
+            host.model.lock().unwrap().protocol.api_revision,
+            Some(revision),
+            "reconnect must restore api_revision on rev {revision}"
+        );
         drop(host);
         tokio::time::timeout(Duration::from_secs(5), server)
             .await

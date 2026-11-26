@@ -154,8 +154,7 @@ fn stop_server_requires_api_revision_4_in_ui_and_commands() {
         let mut ws = fixture();
         ws.settings.hosts[0].endpoint = "unix:///private/server.sock".into();
         ws.hosts[0].model.connected = true;
-        ws.hosts[0].model.protocol.api_revision = revision;
-        ws.hosts[0].model.protocol.api_revision_negotiated = true;
+        ws.hosts[0].model.protocol.api_revision = Some(revision);
         let sent = capture_host(&mut ws, 0);
         let mut rt = open(ws, (640., 480.));
         assert_eq!(rt.state.can_stop_server(), allowed, "rev {revision}");
@@ -261,7 +260,7 @@ fn confirmed_stop_targets_only_one_host_once_and_rejects_changed_target() {
             ws.settings.hosts[i].endpoint = format!("unix:///private/{i}.sock");
             ws.hosts[i].model.connected = true;
             ws.hosts[i].model.protocol.api_revision =
-                rex_rune::connection::STOP_SERVER_MIN_API_REVISION;
+                Some(rex_rune::connection::STOP_SERVER_MIN_API_REVISION);
             ws.hosts[i].model.connection_epoch = 9;
         }
         let a = capture_host(&mut ws, 0);
@@ -296,7 +295,7 @@ fn pressing_the_stop_button_in_the_confirmation_sends_one_stop_to_that_host() {
         ws.settings.hosts[i].endpoint = format!("unix:///private/{i}.sock");
         ws.hosts[i].model.connected = true;
         ws.hosts[i].model.protocol.api_revision =
-            rex_rune::connection::STOP_SERVER_MIN_API_REVISION;
+            Some(rex_rune::connection::STOP_SERVER_MIN_API_REVISION);
         ws.hosts[i].model.connection_epoch = 9;
     }
     let a = capture_host(&mut ws, 0);

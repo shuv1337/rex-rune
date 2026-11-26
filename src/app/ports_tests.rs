@@ -15,7 +15,7 @@ fn fixture(endpoint: &str) -> (Workspace, flume::Receiver<HostCommand>) {
     ws.settings.hosts[0].endpoint = endpoint.into();
     ws.settings.hosts[0].label = "Build box".into();
     let model = &mut ws.hosts[0].model;
-    model.protocol.api_revision = 21;
+    model.protocol.api_revision = Some(21);
     model.connection_epoch = 3;
     model.sessions[0].label = "Workbench".into();
     model.views.get_mut("s").unwrap().label = Some("Workbench".into());
@@ -214,14 +214,14 @@ fn coverage_distinguishes_disconnected_older_reading_unsupported_empty_and_limit
     ws.show_ports(None);
     assert_eq!(ws.ports_coverage().empty, "Host is disconnected.");
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 14;
+    ws.hosts[0].model.protocol.api_revision = Some(14);
     ws.show_ports(None);
     assert_eq!(
         ws.ports_coverage().empty,
         "This Rex server can't list ports. Update Rex on the host."
     );
     assert!(watches(&rx).is_empty());
-    ws.hosts[0].model.protocol.api_revision = 15;
+    ws.hosts[0].model.protocol.api_revision = Some(15);
     ws.show_ports(None);
     assert_eq!(watches(&rx), [(3, Some("s".into()))]);
     ws.hosts[0].model.ports_reading.insert("block:a".into());
@@ -469,7 +469,7 @@ fn draw(name: &str, endpoint: &str, api: u32) {
         &tx,
         b"$ ./api-worker\r\nListening on port 9000",
     );
-    ws.hosts[0].model.protocol.api_revision = api;
+    ws.hosts[0].model.protocol.api_revision = Some(api);
     if api >= 15 {
         fill(&mut ws);
     }

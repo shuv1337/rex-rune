@@ -41,7 +41,7 @@ fn chord(index: usize) -> String {
 /// bound in shortcuts.json to its own sequence.
 fn all_bound() -> Workspace {
     let (mut ws, _host) = tabbed_workspace("split");
-    ws.hosts[0].model.protocol.api_revision = 20;
+    ws.hosts[0].model.protocol.api_revision = Some(20);
     let (sender, _sent) = flume::unbounded();
     super::pane_verb_tests::framed_terminal(&mut ws, "block:b", &sender, b"$ ");
     let bindings: Vec<Value> = actions::SPECS
@@ -299,7 +299,7 @@ fn program_resume_is_local_and_has_one_unbound_shortcuts_row() {
 #[test]
 fn focus_history_is_local_unbound_and_recordable_with_scoped_rows() {
     let (mut ws, _) = tabbed_workspace("split");
-    ws.hosts[0].model.protocol.api_revision = 21;
+    ws.hosts[0].model.protocol.api_revision = Some(21);
     let action = actions::FOCUS_HISTORY_REVERSE;
     let spec = actions::find(action).unwrap();
     assert!(matches!(spec.remote(), Remote::Never(_)));

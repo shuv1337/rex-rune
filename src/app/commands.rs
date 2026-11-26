@@ -365,7 +365,10 @@ impl Workspace {
         let model = self.model();
         if !model.connected {
             Some(UNDO_CLOSE_DISCONNECTED)
-        } else if model.protocol.api_revision < UNDO_CLOSE_MIN_API_REVISION {
+        } else if !model
+            .protocol
+            .api_revision_at_least(UNDO_CLOSE_MIN_API_REVISION)
+        {
             Some(UNDO_CLOSE_REQUIRES_API)
         } else {
             None

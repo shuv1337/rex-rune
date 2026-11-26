@@ -21,7 +21,7 @@ fn scratch() -> Folder {
 /// Two panes on a host speaking revision 13, saving into a private folder.
 fn workspace_13() -> (Workspace, flume::Receiver<HostCommand>, Folder) {
     let (mut ws, rx) = tabbed_workspace("split");
-    ws.hosts[0].model.protocol.api_revision = 13;
+    ws.hosts[0].model.protocol.api_revision = Some(13);
     let dir = scratch();
     ws.settings.downloads.directory = Some(dir.path().display().to_string());
     (ws, rx, dir)
@@ -315,7 +315,7 @@ fn pane_menu_and_commands_list_download_file_and_commands_list_downloads() {
     assert!(labels.contains(&"Downloads".to_owned()), "{labels:?}");
     // Even a host that cannot send files keeps the action visible.
     let (mut old, _rx, _dir) = workspace_13();
-    old.hosts[0].model.protocol.api_revision = 12;
+    old.hosts[0].model.protocol.api_revision = Some(12);
     old.pane_menu("block:b".into(), None);
     assert!(
         old.entries()
@@ -531,7 +531,7 @@ fn escape_on_the_question_cancels_it_and_an_unseen_question_is_cancelled_too() {
 #[test]
 fn an_old_server_says_so_and_nothing_is_sent() {
     let (mut ws, rx, _dir) = workspace_13();
-    ws.hosts[0].model.protocol.api_revision = 12;
+    ws.hosts[0].model.protocol.api_revision = Some(12);
     pane_menu_download(&mut ws, "block:b");
     let mut rt = open_dialog(ws);
     assert!(shows(
@@ -1844,7 +1844,7 @@ fn rows_from_two_hosts_each_name_their_host_and_cancel_goes_to_that_host() {
     ws.settings.downloads.directory = Some(dir.display().to_string());
     for host in &mut ws.hosts {
         host.model.connected = true;
-        host.model.protocol.api_revision = 13;
+        host.model.protocol.api_revision = Some(13);
     }
     ws.perform(Intent::Downloads, &mut rune::Tx::default());
     let mut rt = runtime(ws);

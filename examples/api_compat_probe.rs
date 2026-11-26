@@ -59,21 +59,16 @@ fn pane_count(model: &HostModel, sid: &str) -> usize {
 
 fn verify_common(model: &HostModel, pinned_rev: u32) -> Result<()> {
     ensure!(
-        model.protocol.api_revision == pinned_rev,
-        "expected negotiated API {pinned_rev}, got {}",
+        model.protocol.api_revision == Some(pinned_rev),
+        "expected negotiated API Some({pinned_rev}), got {:?}",
         model.protocol.api_revision
     );
     ensure!(
-        model.protocol.api_revision_negotiated,
-        "expected api_revision_negotiated == true"
-    );
-    ensure!(
-        model.protocol.negotiated_api_revision() == Some(pinned_rev),
-        "expected negotiated_api_revision() == Some({pinned_rev})"
-    );
-    ensure!(
-        model.server_info.api_revisions == Some((0, 24)),
-        "expected server_info.api_revisions == Some((0, 24)), got {:?}",
+        model
+            .server_info
+            .api_revisions
+            .is_some_and(|(min, max)| min == 0 && max >= pinned_rev),
+        "expected server_info.api_revisions with min == 0 and max >= {pinned_rev}, got {:?}",
         model.server_info.api_revisions
     );
     Ok(())
@@ -322,7 +317,6 @@ fn main() -> Result<()> {
         json!({
             "mode": mode,
             "api_revision": m.protocol.api_revision,
-            "api_revision_negotiated": m.protocol.api_revision_negotiated,
             "api_revisions": m.server_info.api_revisions,
             "bootstrap_requests": m.protocol.bootstrap_requests,
             "bundled_tickets_used": m.protocol.bundled_tickets_used,

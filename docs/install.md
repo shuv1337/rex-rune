@@ -141,7 +141,7 @@ dynamically linked, not self-contained AppImages. Install your distribution's
 graphics drivers, fontconfig (including `fc-match`), xkbcommon, Wayland/X11,
 EGL/OpenGL/Vulkan libraries, CA certificates and `xdg-utils`. On Debian/Ubuntu
 the `.deb` declares these dependencies. Rust and Zig are **not** needed to run a
-binary. A running Rex server that supports an API revision from 10 through 24 is required.
+binary. A running Rex server that supports an API revision from 0 through 24 is required.
 
 ## Verify a download
 

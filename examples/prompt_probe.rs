@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
         None,
     );
     wait(&host, |m| {
-        (m.connected && m.protocol.api_revision == 21).then_some(())
+        (m.connected && m.protocol.api_revision == Some(21)).then_some(())
     })?;
     // The shipped behavior must also release a same-client action promptly.
     ask(&host, 41)?;

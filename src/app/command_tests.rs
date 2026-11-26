@@ -662,7 +662,7 @@ fn undo_close_is_local_unbound_and_available_only_on_the_connected_active_host()
     ] {
         let model = &mut ws.hosts[0].model;
         model.connected = connected;
-        model.protocol.api_revision = revision;
+        model.protocol.api_revision = Some(revision);
         model.connection_epoch = 42;
         model.selected = None;
         let row = ws
@@ -693,7 +693,7 @@ fn undo_close_human_confirmations_mark_pane_tab_and_session_even_on_old_clients(
     use rex_rune::connection::HumanClose;
     for revision in [13, 19, 20, 21] {
         let (mut ws, rx) = tabbed_workspace("split");
-        ws.hosts[0].model.protocol.api_revision = revision;
+        ws.hosts[0].model.protocol.api_revision = Some(revision);
         ws.hosts[0].model.sessions = vec![session("s")];
         for (action, kind) in [
             ("pane.close", HumanClose::Pane),
@@ -726,7 +726,7 @@ fn undo_close_human_confirmations_mark_pane_tab_and_session_even_on_old_clients(
 fn undo_close_empty_history_notice_reaches_the_ui_and_returned_actions_cannot_undo() {
     let (mut ws, first, _second) = fixture();
     let mut model = ws.hosts[0].model.clone();
-    model.protocol.api_revision = 21;
+    model.protocol.api_revision = Some(21);
     model.connection_epoch = 42;
     model.notice = Some("Nothing to reopen".into());
     model

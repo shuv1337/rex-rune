@@ -180,7 +180,7 @@ fn exercise(endpoint: &str, max_api_revision: u32) -> Result<()> {
             let sid = m.selected.clone()?;
             let wid = m.window()?.window_id.clone()?;
             let bid = m.focused()?.to_owned();
-            Some((m.connection_epoch, m.protocol.api_revision, sid, wid, bid))
+            Some((m.connection_epoch, m.protocol.api_revision?, sid, wid, bid))
         })?;
     emit(
         "connected",

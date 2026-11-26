@@ -210,7 +210,9 @@ fn exercise_live(
     );
     let (epoch, api_revision) = wait(&host, Duration::from_secs(8), "host connected", |m| {
         m.connected
-            .then_some((m.connection_epoch, m.protocol.api_revision))
+            .then_some(m.protocol.api_revision)
+            .flatten()
+            .map(|rev| (m.connection_epoch, rev))
     })?;
 
     // Create a session whose shell pane stays open after exit so we can observe exit status.

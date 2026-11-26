@@ -39,7 +39,7 @@ struct Server<'a> {
 impl<'a> Server<'a> {
     fn of(host: &'a HostModel) -> Option<Self> {
         host.connected
-            .then(|| host.protocol.negotiated_api_revision())
+            .then_some(host.protocol.api_revision)
             .flatten()
             .map(|api| Self {
                 version: host.server_info.rex_version(),
@@ -512,7 +512,7 @@ mod tests {
             connection_epoch: 1,
             ..HostModel::default()
         };
-        host.protocol.api_revision = 13;
+        host.protocol.api_revision = Some(13);
         host.server_info = ServerInfo {
             api_revisions: Some((10, 13)),
             build: Answer::Reported(Build {

@@ -459,7 +459,7 @@ async fn api_revision_15_ignores_ports_changed_but_allows_read_ports() {
         m.connected && m.sessions.iter().any(|s| s.label == "after-rev15-event")
     })
     .await;
-    assert_eq!(m1.protocol.api_revision, 15);
+    assert_eq!(m1.protocol.api_revision, Some(15));
     assert!(
         m1.ports.is_empty(),
         "API 15 must drop passive ports_changed without storing"
@@ -1555,7 +1555,10 @@ async fn api_revision_14_sends_zero_ports_requests() {
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
-    let m = wait_model(&host, |m| m.connected && m.protocol.api_revision == 14).await;
+    let m = wait_model(&host, |m| {
+        m.connected && m.protocol.api_revision == Some(14)
+    })
+    .await;
     host.commands
         .send(HostCommand::WatchPorts {
             epoch: m.connection_epoch,
@@ -1716,7 +1719,10 @@ async fn concurrency_cap_three_in_flight_and_unsupported_error_codes() {
     });
 
     let host = HostConnection::spawn(endpoint, None, None, None, false, None);
-    let m0 = wait_model(&host, |m| m.connected && m.protocol.api_revision == 15).await;
+    let m0 = wait_model(&host, |m| {
+        m.connected && m.protocol.api_revision == Some(15)
+    })
+    .await;
     // Stale epoch is ignored.
     host.commands
         .send(HostCommand::WatchPorts {

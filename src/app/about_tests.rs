@@ -43,7 +43,7 @@ fn build(version: &str) -> Answer<Build> {
 fn about_names_the_active_server_once_it_answers_and_says_what_it_did_not_report() {
     let mut ws = workspace_hosts(2);
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 13;
+    ws.hosts[0].model.protocol.api_revision = Some(13);
     ws.hosts[0].model.server_info.api_revisions = Some((10, 13));
     let mut rt = about(ws);
     assert_eq!(rt.state.settings_section, SettingsSection::About);
@@ -103,7 +103,7 @@ fn about_names_the_active_server_once_it_answers_and_says_what_it_did_not_report
 fn the_about_header_is_centred_over_the_cards() {
     let mut ws = workspace();
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 13;
+    ws.hosts[0].model.protocol.api_revision = Some(13);
     ws.hosts[0].model.server_info.build = build("0.1.0-preview.15");
     let rt = about(ws);
     let header = rect(&rt, "about-header");
@@ -153,7 +153,7 @@ fn debug_info_names_no_host_address_session_or_client() {
     local.status = "Connected".into();
     local.connection_epoch = 2;
     local.client_id = "client:abc123".into();
-    local.protocol.api_revision = 13;
+    local.protocol.api_revision = Some(13);
     local.sessions = vec![session("payroll")];
     local.server_info = ServerInfo {
         api_revisions: Some((10, 13)),
@@ -225,7 +225,7 @@ fn debug_info_names_no_host_address_session_or_client() {
 fn commands_open_about_and_copy_both_reports() {
     let mut ws = workspace();
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 13;
+    ws.hosts[0].model.protocol.api_revision = Some(13);
     ws.hosts[0].model.server_info.build = build("0.1.0-preview.15");
     let mut rt = runtime(ws);
     let clipboard = rune::clipboard::memory();
@@ -302,8 +302,7 @@ fn every_page_prints_the_client_version_one_way() {
 fn about_and_reports_show_negotiated_api_revision_zero_and_hide_unreported_zero() {
     let mut ws = workspace();
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 0;
-    ws.hosts[0].model.protocol.api_revision_negotiated = false;
+    ws.hosts[0].model.protocol.api_revision = None;
     ws.hosts[0].model.server_info.api_revisions = None;
     let mut rt = about(ws);
     assert!(!has(&rt, "about-server"));
@@ -311,7 +310,7 @@ fn about_and_reports_show_negotiated_api_revision_zero_and_hide_unreported_zero(
     assert!(!about::debug_info(&rt.state).contains("API revision "));
 
     rt.update(|s, _| {
-        s.hosts[0].model.protocol.api_revision_negotiated = true;
+        s.hosts[0].model.protocol.api_revision = Some(0);
         s.hosts[0].model.server_info.api_revisions = Some((0, 24));
         s.hosts[0].model.server_info.build = build("0.1.0-snapshot.2670");
     });

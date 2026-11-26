@@ -511,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::result_large_err)] // tungstenite's handshake callback type
-    async fn discovery_reads_only_status_on_revisions_10_through_21() {
+    async fn discovery_reads_only_status_on_revisions_0_through_24() {
         use futures_util::{SinkExt, StreamExt};
         use serde_json::{Value, json};
         use tokio_tungstenite::tungstenite::Message;

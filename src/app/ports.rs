@@ -107,7 +107,7 @@ fn blocks(model: &HostModel) -> impl Iterator<Item = (&Window, &LayerBlock, &str
 }
 
 fn supported(model: &HostModel) -> bool {
-    model.connected && model.protocol.api_revision >= PORTS_MIN_API_REVISION
+    model.connected && model.protocol.api_revision_at_least(PORTS_MIN_API_REVISION)
 }
 
 fn reach(endpoint: &str, locality: HostLocality, entry: &ports::PortEntry) -> Option<Reach> {
@@ -303,7 +303,9 @@ impl Workspace {
             return coverage;
         }
         coverage.locality = Some(locality);
-        coverage.api15 = model.protocol.api_revision < PORTS_EVENTS_MIN_API_REVISION;
+        coverage.api15 = !model
+            .protocol
+            .api_revision_at_least(PORTS_EVENTS_MIN_API_REVISION);
         let mut count = 0;
         let mut unsupported = 0;
         let mut reading = false;

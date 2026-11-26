@@ -359,8 +359,8 @@ pub struct Connection {
 
 #[derive(Clone, Default)]
 pub struct ProtocolStats {
-    pub api_revision: u32,
-    pub api_revision_negotiated: bool,
+    /// The API revision negotiated on the current connection, or `None` while disconnected.
+    pub api_revision: Option<u32>,
     pub bootstrap_requests: u64,
     pub attach_requests: u64,
     pub bundled_tickets_used: u64,
@@ -368,9 +368,9 @@ pub struct ProtocolStats {
 }
 
 impl ProtocolStats {
-    /// The API revision negotiated on the current connection, if known.
-    pub fn negotiated_api_revision(&self) -> Option<u32> {
-        (self.api_revision_negotiated || self.api_revision != 0).then_some(self.api_revision)
+    /// Whether the current connection negotiated at least `min`.
+    pub fn api_revision_at_least(&self, min: u32) -> bool {
+        self.api_revision.is_some_and(|rev| rev >= min)
     }
 }
 
@@ -651,6 +651,8 @@ const SPLIT_ANCHOR_ID_MIN_API_REVISION: u32 = 1;
 pub const STOP_SERVER_MIN_API_REVISION: u32 = 4;
 const BOOTSTRAP_DATA_TICKETS_MIN_API_REVISION: u32 = 8;
 pub const UNDO_CLOSE_MIN_API_REVISION: u32 = 20;
+pub const UNDO_CLOSE_REQUIRES_API: &str = "Requires Rex Server API 20 or later";
+pub const UNDO_CLOSE_DISCONNECTED: &str = "Connect to the host to undo a close";
 
 fn translate_request_for_revision(revision: u32, method: &str, payload: &mut Value) {
     if revision < SPLIT_ANCHOR_ID_MIN_API_REVISION
@@ -662,8 +664,6 @@ fn translate_request_for_revision(revision: u32, method: &str, payload: &mut Val
         object.insert("anchor_block_id".into(), anchor);
     }
 }
-pub const UNDO_CLOSE_REQUIRES_API: &str = "Requires Rex Server API 20 or later";
-pub const UNDO_CLOSE_DISCONNECTED: &str = "Connect to the host to undo a close";
 
 /// Only the close methods that accept `undoable`. Probes and automated requests use `Request`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1123,7 +1123,7 @@ impl Shared {
             m.status = status.into();
             m.connected = connected;
             if !connected {
-                m.protocol.api_revision_negotiated = false;
+                m.protocol.api_revision = None;
                 m.rtt.clear();
                 self.wake.reset_titles();
                 m.clipboard = None;
@@ -2371,8 +2371,7 @@ async fn run_host(
                 m.view_fetches.clear();
                 m.focus_history_result = None;
                 m.client_id = identity.id.clone();
-                m.protocol.api_revision = control.welcome().api_revision;
-                m.protocol.api_revision_negotiated = true;
+                m.protocol.api_revision = Some(control.welcome().api_revision);
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
                 // A server is answering again, so "stop accepted" is no longer the news. A
                 // refusal or an unconfirmed stop stays: the person has not seen it resolved.

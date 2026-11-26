@@ -58,7 +58,10 @@ impl Workspace {
         let model = self.model();
         if !model.connected {
             Some(FOCUS_HISTORY_DISCONNECTED)
-        } else if model.protocol.api_revision < FOCUS_HISTORY_MIN_API_REVISION {
+        } else if !model
+            .protocol
+            .api_revision_at_least(FOCUS_HISTORY_MIN_API_REVISION)
+        {
             Some(FOCUS_HISTORY_REQUIRES_API)
         } else {
             None

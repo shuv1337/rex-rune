@@ -340,7 +340,10 @@ impl Workspace {
     /// before anything is sent; the core refuses too.
     pub fn download_unsupported(&self, host: usize) -> bool {
         let model = &self.hosts[host].model;
-        model.connected && model.protocol.api_revision < download::MIN_API_REVISION
+        model.connected
+            && !model
+                .protocol
+                .api_revision_at_least(download::MIN_API_REVISION)
     }
 
     /// The pane's selection when it is one line: what the field starts with.

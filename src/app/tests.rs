@@ -1764,9 +1764,9 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
 fn about_only_reports_the_connected_active_hosts_api() {
     let mut ws = workspace_hosts(2);
     ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.protocol.api_revision = 12;
+    ws.hosts[0].model.protocol.api_revision = Some(12);
     ws.hosts[1].model.connected = true;
-    ws.hosts[1].model.protocol.api_revision = 11;
+    ws.hosts[1].model.protocol.api_revision = Some(11);
     assert!(super::about::version_info(&ws).contains("Server API revision: 12"));
     ws.active = 1;
     assert!(super::about::version_info(&ws).contains("Server API revision: 11"));

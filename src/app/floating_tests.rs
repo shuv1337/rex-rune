@@ -85,7 +85,7 @@ fn floating_workspace(
     let rx = capture_host(&mut ws, 0);
     let model = &mut ws.hosts[0].model;
     model.connected = true;
-    model.protocol.api_revision = revision;
+    model.protocol.api_revision = Some(revision);
     model.connection_epoch = 7;
     model.sessions = vec![session("s")];
     model.selected = Some("s".into());
@@ -218,7 +218,7 @@ fn every_layer_verb_is_local_only_with_a_title_a_heading_and_a_commands_row() {
 fn api_10_to_12_refuse_every_verb_with_the_revision_and_write_nothing() {
     for revision in 10..13 {
         let (mut ws, rx) = tiled_and_floating("block:f");
-        ws.hosts[0].model.protocol.api_revision = revision;
+        ws.hosts[0].model.protocol.api_revision = Some(revision);
         assert_eq!(ws.layer_gate(), Some(layers::Blocked::OldServer(revision)));
         let target = ws.focused_layer().expect("a floating layer");
         for (name, action) in [
@@ -862,7 +862,7 @@ fn capture_workspace(compact: bool, no_toolbar: bool) -> Workspace {
         ws.settings.interface.toolbar = rex_rune::settings::interface::ToolbarBehavior::Hidden;
     }
     ws.hosts[0].model.connection_epoch = 1;
-    ws.hosts[0].model.protocol.api_revision = 13;
+    ws.hosts[0].model.protocol.api_revision = Some(13);
     let view = ws.hosts[0].model.views.get_mut("s").expect("a view");
     let split = view
         .windows

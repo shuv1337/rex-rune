@@ -48,7 +48,7 @@ pub struct Coverage {
 }
 
 fn supported(model: &HostModel) -> bool {
-    model.protocol.api_revision >= MIN_API_REVISION && !model.program_resume_unsupported
+    model.protocol.api_revision_at_least(MIN_API_REVISION) && !model.program_resume_unsupported
 }
 
 fn has_foreground_view(model: &HostModel, session: &str) -> bool {

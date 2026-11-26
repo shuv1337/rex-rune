@@ -124,7 +124,7 @@ fn main() -> Result<()> {
         ))
     })?;
     ensure!(
-        host.model.lock().unwrap().protocol.api_revision == revision,
+        host.model.lock().unwrap().protocol.api_revision == Some(revision),
         "unexpected negotiated revision"
     );
     if revision < 20 {

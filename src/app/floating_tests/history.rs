@@ -357,14 +357,14 @@ fn a_root_opened_without_floating_support_keeps_the_branch_hidden() {
         let mut h = History::pane(&["block:f"]);
         report(&mut h.rt, |s| {
             s.hosts[0].model.connected = connected;
-            s.hosts[0].model.protocol.api_revision = if connected { 12 } else { 13 };
+            s.hosts[0].model.protocol.api_revision = Some(if connected { 12 } else { 13 });
         });
         pane_actions_key(&mut h.rt);
         title(&h.rt, "dev · f");
         assert!(h.rt.state.entries().iter().all(|e| e.label != ROOT));
         report(&mut h.rt, |s| {
             s.hosts[0].model.connected = true;
-            s.hosts[0].model.protocol.api_revision = 13;
+            s.hosts[0].model.protocol.api_revision = Some(13);
         });
         title(&h.rt, "dev · f");
         assert!(h.rt.state.entries().iter().all(|e| e.label != ROOT));
@@ -620,7 +620,7 @@ fn changing_the_active_host_does_not_change_the_open_menus_eligibility_or_recipi
     h.root("dev · f");
     report(&mut h.rt, |s| {
         s.active = 1;
-        s.hosts[1].model.protocol.api_revision = 12;
+        s.hosts[1].model.protocol.api_revision = Some(12);
     });
     row_enabled(&h.rt, ROOT, true);
     h.submenu("dev · f");

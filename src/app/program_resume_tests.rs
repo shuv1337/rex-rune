@@ -17,7 +17,7 @@ fn fixture() -> (Workspace, flume::Receiver<HostCommand>) {
     ws.settings.hosts[0].endpoint = "ssh://dev@buildbox/private/rex.sock".into();
     ws.settings.hosts[0].label = "Build box".into();
     let model = &mut ws.hosts[0].model;
-    model.protocol.api_revision = 24;
+    model.protocol.api_revision = Some(24);
     model.connection_epoch = 3;
     model.sessions[0].label = "Workbench".into();
     for (pane, name) in model
@@ -117,7 +117,7 @@ fn publish(ws: &mut Workspace, tx: &mut Tx) {
 #[test]
 fn commands_and_pane_menu_gate_reads_and_show_only_cached_detail() {
     let (mut ws, rx) = fixture();
-    ws.hosts[0].model.protocol.api_revision = 23;
+    ws.hosts[0].model.protocol.api_revision = Some(23);
     ws.picker(false);
     let commands = ws.entries();
     let command = commands
@@ -133,7 +133,7 @@ fn commands_and_pane_menu_gate_reads_and_show_only_cached_detail() {
     assert!(!ws.entries().iter().any(|e| e.label == "Program resume…"));
     assert!(watches(&rx).is_empty());
 
-    ws.hosts[0].model.protocol.api_revision = 24;
+    ws.hosts[0].model.protocol.api_revision = Some(24);
     ws.pane_menu("block:c".into(), None);
     assert_eq!(
         ws.entries()

@@ -5,7 +5,7 @@
 //! `state`, layout and blocks; `session.float_block`, `session.new_layer`, `session.raise_layer`,
 //! `session.set_layer_state`, `session.move_block` and `session.close_layer` change them. Those
 //! methods were checked live at revision 13 only (see `docs/parity-2026-11/M4-floating-layers.md`),
-//! so a host that negotiated 10–12 still attaches and renders its tiled layouts as before, and
+//! so a host that negotiated 0–12 still attaches and renders its tiled layouts as before, and
 //! gets no layer change from this client. [`unsupported`] and [`Blocked`] carry the words both
 //! the rows and the notices use.
 //!

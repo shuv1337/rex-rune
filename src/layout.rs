@@ -91,7 +91,7 @@ impl Divider {
 }
 /// The block zoomed over the entire window (in front of every layer).
 ///
-/// Covers both legacy API 10-20 zoom (`tiled_zoomed_block_id` is absent) and API 21 floating
+/// Covers both legacy API 0-20 zoom (`tiled_zoomed_block_id` is absent) and API 21 floating
 /// layer zoom (`zoomed_block_id` differs from `tiled_zoomed_block_id`).
 pub fn full_window_zoom(window: &Window) -> Option<&str> {
     if window.zoomed_block_id != window.tiled_zoomed_block_id {
@@ -689,7 +689,7 @@ mod tests {
         assert!(!block_visible(&base, &base.layers[1], "hidden"));
         assert!(block_visible(&base, &base.layers[2], "f1"));
 
-        // 2. Legacy API 10-20 zoom (`zoomed_block_id` set, `tiled_zoomed_block_id` absent).
+        // 2. Legacy API 0-20 zoom (`zoomed_block_id` set, `tiled_zoomed_block_id` absent).
         let mut legacy = base.clone();
         legacy.zoomed_block_id = Some("t1".into());
         assert_eq!(full_window_zoom(&legacy), Some("t1"));

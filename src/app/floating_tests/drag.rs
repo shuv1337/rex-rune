@@ -1,5 +1,5 @@
 //! Floating layers, slice 2: headless Rune tests for pointer drag-move from floating headers,
-//! 8-way edge/corner resize, per-layer divider z-order, cancellation, API 10-12 gate,
+//! 8-way edge/corner resize, per-layer divider z-order, cancellation, API 0-12 gate,
 //! multi-pane layers, OnHover header retention, Compact density, and real-font ghost captures.
 use super::*;
 use crate::app::{
