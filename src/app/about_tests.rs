@@ -297,3 +297,36 @@ fn every_page_prints_the_client_version_one_way() {
     assert!(about::version_info(&rt.state).starts_with(&format!("Rex Rune {version}\n")));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
+
+#[test]
+fn about_and_reports_show_negotiated_api_revision_zero_and_hide_unreported_zero() {
+    let mut ws = workspace();
+    ws.hosts[0].model.connected = true;
+    ws.hosts[0].model.protocol.api_revision = 0;
+    ws.hosts[0].model.protocol.api_revision_negotiated = false;
+    ws.hosts[0].model.server_info.api_revisions = None;
+    let mut rt = about(ws);
+    assert!(!has(&rt, "about-server"));
+    assert!(!about::version_info(&rt.state).contains("Server API revision:"));
+    assert!(!about::debug_info(&rt.state).contains("API revision "));
+
+    rt.update(|s, _| {
+        s.hosts[0].model.protocol.api_revision_negotiated = true;
+        s.hosts[0].model.server_info.api_revisions = Some((0, 24));
+        s.hosts[0].model.server_info.build = build("0.1.0-snapshot.2670");
+    });
+    settle(&mut rt);
+    assert!(has(&rt, "about-server"));
+    assert!(shows(
+        &rt,
+        "Negotiated with the active host, which supports 0–24."
+    ));
+    assert!(about::version_info(&rt.state).ends_with(
+        "Rex Server: 0.1.0-snapshot.2670\nServer API revision: 0 (server supports 0–24)\n"
+    ));
+    assert!(
+        about::debug_info(&rt.state)
+            .contains("API revision 0 (server supports 0–24), Rex Server 0.1.0-snapshot.2670")
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}

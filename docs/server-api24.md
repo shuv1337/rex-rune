@@ -1,6 +1,6 @@
 # Rex Server API 24 compatibility
 
-Rex Rune advertises revisions 10 through 24 and validates the revision in
+Rex Rune advertises revisions 0 through 24 and validates the revision in
 WELCOME. Existing per-feature gates still apply.
 
 The vendored Rex SDK was regenerated from verbatim `rex api list --json`
@@ -91,3 +91,35 @@ disposable 2670 server showed exactly one request (`server.version`) before
 the mode was used on the live socket. It never lists, attaches to, creates
 or changes sessions. Do not use the ordinary `rex-probe` mode on a live host:
 that mode creates a test session.
+
+## API 0 through 9 compatibility
+
+Rex Rune lowers `MIN_API_REVISION` from `10` to `0` so it matches the official
+`rex` CLI floor (`0..=24`) while preserving every feature gate:
+
+- **Revision 0 split anchor (`r01`).** `session.new_split` translates
+  `anchor_id` to `anchor_block_id` on revision 0 (in both `HostCommand::Request`
+  and `HostCommand::NewTerminal`, and in `rex-workspace-probe`) and sends
+  `anchor_id` on revision 1 and newer.
+- **Stop server gate (`r04`).** `HostCommand::StopServer` requires negotiated
+  revision 4 or newer. Below revision 4, the worker refuses locally without
+  sending `server.stop` on the wire, records the refusal in `notice` and
+  `server_stop_result`, and the Server settings page and Commands disable
+  **Stop server…** with `"Requires Rex Server API revision 4 or newer."`.
+- **Bundled bootstrap tickets (`r08`).** `session.bootstrap` includes
+  `data_tickets` only on revision 8 and newer. Revisions 0 through 7 omit
+  `data_tickets` and open terminal streams through `data.connect`.
+- **Revision 0 reporting honesty.** `ProtocolStats::api_revision_negotiated` and
+  `ProtocolStats::negotiated_api_revision()` distinguish a real negotiated
+  revision `0` from an unreported default `0` in Settings -> Server, Settings ->
+  About, **Copy version info**, and **Copy debug info**. `ServerInfo::api_revisions`
+  accepts `(0, max)` ranges whenever `max != 0` so servers reporting
+  `api_min_revision = 0` and `api_server_revision = 24` display `0–24` rather
+  than `Not reported`.
+
+`examples/api_compat_probe.rs` and `scripts/api-compat-private.py` verify live
+down-negotiation on a private disposable `0.1.0-snapshot.2670` server across
+revisions `0`, `1`, `3`, `7`, `8`, `9`, `24`, and `4` (including live output,
+`session.new_split` on rev 0 and rev 1, bundled vs `data.connect` ticket usage,
+local `StopServer` refusal on rev 0 and rev 3, and clean shutdown via rev 4
+`server.stop`).

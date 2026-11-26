@@ -214,7 +214,12 @@ async fn run() -> Result<()> {
         let windows = observer.call(session::View::new(&multi.session_id)).await?.windows;
         let first_window = windows[0].window_id.as_ref().context("first window")?;
         let second_window = windows[1].window_id.as_ref().context("second window")?;
-        observer.call_raw("session.new_split", json!({"session_id":multi.session_id,"anchor_id":windows[0].focused_block_id,
+        let anchor_key = if observer.welcome().api_revision == 0 {
+            "anchor_block_id"
+        } else {
+            "anchor_id"
+        };
+        observer.call_raw("session.new_split", json!({"session_id":multi.session_id, anchor_key:windows[0].focused_block_id,
             "direction":"horizontal","side":"after","layout":Layout::shell(),"focus":true})).await?;
         observer.call_raw("session.focus_window", json!({"session_id":multi.session_id,"window_id":first_window})).await?;
         let multi_host = HostConnection::spawn(endpoint.clone(), Some(multi.session_id.clone()), None, None, true, None);

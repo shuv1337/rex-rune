@@ -516,6 +516,7 @@ mod tests {
         use serde_json::{Value, json};
         use tokio_tungstenite::tungstenite::Message;
         for (revision, metadata, expected) in [
+            (0, json!({}), 0),
             (9, json!({}), 0),
             (10, json!({}), 0),
             (11, json!({"listeners":null}), 0),
@@ -534,6 +535,12 @@ mod tests {
                 json!({"listeners":[{"endpoint":"127.0.0.1:0","addresses":["127.0.0.1:4567"],"transport":"tcp","admission":"anonymous"}]}),
                 1,
             ),
+            (
+                24,
+                json!({"listeners":[{"endpoint":"127.0.0.1:0","addresses":["127.0.0.1:4567"],"transport":"tcp","admission":"anonymous"}]}),
+                1,
+            ),
+            (25, json!({}), 0),
             (12, json!({"listeners":[]}), 0),
             (12, json!({"listeners":"invalid"}), 0),
             (
@@ -558,7 +565,7 @@ mod tests {
                 assert_eq!(hello["client"]["kind"], "other");
                 ws.send(Message::Text(json!({"type":"welcome","protocol":"rex.control.v1","api_revision":revision,
                     "limits":{"max_message_bytes":65536},"client":{"id":"client:probe","reconnect_token":"probe"}}).to_string().into())).await.unwrap();
-                if revision == 9 {
+                if revision == 25 {
                     return;
                 }
                 let request: Value =
@@ -584,7 +591,7 @@ mod tests {
                 panic!("not Rex")
             };
             assert_eq!(found, endpoint);
-            if revision == 9 {
+            if revision == 25 {
                 assert!(reason.unwrap().contains("revision"));
             } else {
                 assert!(reason.is_none());

@@ -975,3 +975,34 @@ fn pairing_drops_only_a_bare_origins_slash_and_says_why_it_is_not_offered() {
     assert!(!has(&rt, "server-pair"));
     assert!(page_text(&rt).contains("Pair device\nAvailable while this host is connected."));
 }
+
+#[test]
+fn negotiated_api_revision_zero_is_distinct_from_unreported() {
+    let mut ws = fixture();
+    ws.hosts[0].model.protocol.api_revision = 0;
+    ws.hosts[0].model.protocol.api_revision_negotiated = false;
+    ws.hosts[0].model.server_info.api_revisions = None;
+    let mut rt = open(ws, (1024., 700.));
+    assert!(
+        page_text(&rt).contains("Negotiated API revision\nNot reported"),
+        "{}",
+        page_text(&rt)
+    );
+    assert!(!shows(&rt, "0"));
+
+    rt.update(|s, _| {
+        s.hosts[0].model.protocol.api_revision_negotiated = true;
+        s.hosts[0].model.server_info.api_revisions = Some((0, 24));
+    });
+    settle(&mut rt);
+    assert!(
+        page_text(&rt).contains("Negotiated API revision\n0"),
+        "{}",
+        page_text(&rt)
+    );
+    assert!(
+        page_text(&rt).contains("Supported API revisions\n0–24"),
+        "{}",
+        page_text(&rt)
+    );
+}

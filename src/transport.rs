@@ -247,7 +247,7 @@ impl rexrs::AsyncTransport for Transport {
 }
 
 pub type Client = AsyncRexClient<Transport>;
-pub const MIN_API_REVISION: u32 = 10;
+pub const MIN_API_REVISION: u32 = 0;
 pub const API_REVISION: u32 = 24;
 pub async fn control(endpoint: &str, reconnect: Option<&str>) -> Result<Client> {
     control_with_label(endpoint, reconnect, &crate::settings::hostname()).await

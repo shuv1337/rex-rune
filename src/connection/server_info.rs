@@ -146,10 +146,11 @@ impl ServerInfo {
     }
 }
 
-/// A revision range, when the server gave both ends. A missing end is 0 on the wire.
+/// A revision range, when the server gave its upper bound. A missing end is 0 on the wire,
+/// and 0 is a valid minimum revision when the upper bound is non-zero.
 fn range(oldest: u64, newest: u64) -> Option<(u32, u32)> {
     let (oldest, newest) = (u32::try_from(oldest).ok()?, u32::try_from(newest).ok()?);
-    (oldest != 0 && newest >= oldest).then_some((oldest, newest))
+    (newest != 0 && newest >= oldest).then_some((oldest, newest))
 }
 
 /// A response's payload: none for an error, an unanswered request or anything unreadable.
@@ -426,6 +427,11 @@ mod tests {
             ServerInfo::welcomed(&welcome(10, 13)).api_revisions,
             Some((10, 13))
         );
+        // Real servers that support revision 0 report api_min_revision = 0 and a non-zero max.
+        assert_eq!(
+            ServerInfo::welcomed(&welcome(0, 24)).api_revisions,
+            Some((0, 24))
+        );
         // A server from before the welcome carried them says 0 for both.
         let mut info = ServerInfo::welcomed(&welcome(0, 0));
         assert_eq!(info.api_revisions, None);
@@ -433,6 +439,12 @@ mod tests {
             json!({"rex_version":"1", "api_revision":11, "api_min_revision":10}),
         )));
         assert_eq!(info.api_revisions, Some((10, 11)));
+        // Omitting api_min_revision in server.version means minimum revision 0.
+        let mut info = ServerInfo::welcomed(&welcome(0, 0));
+        info.apply(Reply::Version(response(
+            json!({"rex_version":"0.1.0-snapshot.2670", "api_revision":24}),
+        )));
+        assert_eq!(info.api_revisions, Some((0, 24)));
         // The welcome's range is not replaced by a read.
         let mut info = ServerInfo::welcomed(&welcome(10, 13));
         info.apply(Reply::Status(response(

@@ -277,3 +277,87 @@ async fn resize_layer_sends_raise_then_resize_and_blocks_stale_epoch_or_old_api(
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn stop_server_is_blocked_below_api_4_and_sent_on_api_4() {
+    // API 3: StopServer must never reach the wire; a barrier request arrives first.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 3).await;
+        let boot_req = next(&mut ws).await;
+        assert_eq!(boot_req["method"], "session.bootstrap");
+        assert!(boot_req["payload"].get("data_tickets").is_none());
+        reply(&mut ws, &boot_req, 1, serde_json::to_value(boot()).unwrap()).await;
+        let barrier = next(&mut ws).await;
+        assert_eq!(
+            barrier["method"], "test.barrier",
+            "server.stop must not be sent on API 3"
+        );
+        reply(&mut ws, &barrier, 2, json!({})).await;
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+    host.commands
+        .send(HostCommand::StopServer { epoch })
+        .unwrap();
+    until(&host, |m| m.notice.is_some()).await;
+    {
+        let model = host.model.lock().unwrap();
+        let notice = model.notice.as_deref().unwrap();
+        assert!(
+            notice.contains("API revision 4") && notice.contains("revision 3"),
+            "{notice}"
+        );
+        assert_eq!(model.server_stop_result.as_deref(), Some(notice));
+    }
+    host.commands
+        .send(HostCommand::Request {
+            method: "test.barrier".into(),
+            payload: json!({}),
+        })
+        .unwrap();
+    until(&host, |m| m.notice.is_none()).await;
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // API 4: StopServer sends server.stop over the wire and closes cleanly on reply.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 4).await;
+        let boot_req = next(&mut ws).await;
+        assert_eq!(boot_req["method"], "session.bootstrap");
+        assert!(boot_req["payload"].get("data_tickets").is_none());
+        reply(&mut ws, &boot_req, 1, serde_json::to_value(boot()).unwrap()).await;
+        let stop_req = next(&mut ws).await;
+        assert_eq!(stop_req["method"], "server.stop");
+        assert_eq!(stop_req["payload"], json!({}));
+        reply(&mut ws, &stop_req, 2, json!({})).await;
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+    host.commands
+        .send(HostCommand::StopServer { epoch })
+        .unwrap();
+    until(&host, |m| {
+        m.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Server stop accepted"))
+    })
+    .await;
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}

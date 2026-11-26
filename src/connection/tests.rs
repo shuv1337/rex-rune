@@ -148,15 +148,33 @@ fn selection_and_bootstrap_preserve_explicit_intent() {
         (None, true, Some(json!([]))),
         (Some(SESSION), false, Some(json!([SESSION]))),
     ] {
-        let request =
-            serde_json::to_value(bootstrap_request(wanted, creating, std::iter::empty())).unwrap();
+        let request = serde_json::to_value(bootstrap_request(
+            wanted,
+            creating,
+            std::iter::empty(),
+            true,
+        ))
+        .unwrap();
         assert_eq!(request.get("attach_session_ids").cloned(), expected);
         assert_eq!(request["data_tickets"][0]["subprotocol"], wire::PROTOCOL);
+        let unbundled = serde_json::to_value(bootstrap_request(
+            wanted,
+            creating,
+            std::iter::empty(),
+            false,
+        ))
+        .unwrap();
+        assert_eq!(unbundled.get("attach_session_ids").cloned(), expected);
+        assert!(
+            unbundled.get("data_tickets").is_none(),
+            "pre-rev-8 bootstrap omits data_tickets: {unbundled}"
+        );
     }
     let retained = bootstrap_request(
         Some(SESSION),
         false,
         [SESSION.to_owned(), SESSION.to_owned()].into_iter(),
+        true,
     );
     assert_eq!(retained.attach_session_ids, Some(vec![SESSION.into()]));
 }
@@ -190,7 +208,7 @@ async fn send(ws: &mut WebSocketStream<TcpStream>, value: Value) {
 async fn welcome(ws: &mut WebSocketStream<TcpStream>, revision: u32) -> Value {
     let hello = recv(ws).await;
     assert_eq!(hello["api_revision"], 24);
-    assert_eq!(hello["api_min_revision"], 10);
+    assert_eq!(hello["api_min_revision"], 0);
     send(ws, json!({"type":"welcome", "protocol":"rex.control.v1", "api_revision":revision,
         "limits":{"max_message_bytes":65536}, "client":{"id":"client:test", "reconnect_token":"test-token"}})).await;
     hello
@@ -267,7 +285,7 @@ async fn bootstrap_is_first_and_newer_pre_response_events_survive() {
 
 #[tokio::test]
 async fn unsupported_negotiated_revision_is_rejected() {
-    for revision in [9, 25] {
+    for revision in [25, 99] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -277,15 +295,39 @@ async fn unsupported_negotiated_revision_is_rejected() {
         let error = transport::control(&endpoint, None).await.err().unwrap();
         assert_eq!(
             error.to_string(),
-            format!("Rex negotiated API revision {revision}; this client supports 10–24")
+            format!("Rex negotiated API revision {revision}; this client supports 0–24")
         );
         server.await.unwrap();
     }
+    // Lower max revision caps the accepted upper bound too.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        let hello = recv(&mut ws).await;
+        assert_eq!(hello["api_min_revision"], 0);
+        assert_eq!(hello["api_revision"], 4);
+        send(
+            &mut ws,
+            json!({"type":"welcome", "protocol":"rex.control.v1", "api_revision":5,
+                "limits":{"max_message_bytes":65536}, "client":{"id":"client:test", "reconnect_token":"test-token"}}),
+        )
+        .await;
+    });
+    let error = transport::control_with_max_revision(&endpoint, None, "test", 4)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "Rex negotiated API revision 5; this client supports 0–4"
+    );
+    server.await.unwrap();
 }
 
 #[tokio::test]
 async fn supported_revisions_negotiate() {
-    for revision in 10..=24 {
+    for revision in 0..=24 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -297,6 +339,144 @@ async fn supported_revisions_negotiate() {
         assert_eq!(control.welcome().api_revision, revision);
         control.close().await.unwrap();
         server.await.unwrap();
+    }
+}
+
+#[test]
+fn translate_request_rewrites_split_anchor_only_on_revision_zero() {
+    let mut rev0 =
+        json!({"session_id": SESSION, "anchor_id": "block:1", "direction": "horizontal"});
+    translate_request_for_revision(0, "session.new_split", &mut rev0);
+    assert_eq!(rev0["anchor_block_id"], "block:1");
+    assert!(rev0.get("anchor_id").is_none());
+
+    // Already translated payload is left alone.
+    let mut already =
+        json!({"session_id": SESSION, "anchor_id": "block:old", "anchor_block_id": "block:2"});
+    translate_request_for_revision(0, "session.new_split", &mut already);
+    assert_eq!(already["anchor_block_id"], "block:2");
+    assert_eq!(already["anchor_id"], "block:old");
+
+    // Revision 1+ keeps anchor_id.
+    let mut rev1 = json!({"session_id": SESSION, "anchor_id": "block:1"});
+    translate_request_for_revision(1, "session.new_split", &mut rev1);
+    assert_eq!(rev1["anchor_id"], "block:1");
+    assert!(rev1.get("anchor_block_id").is_none());
+
+    // Other methods are never rewritten.
+    let mut other = json!({"session_id": SESSION, "anchor_id": "block:1"});
+    translate_request_for_revision(0, "session.focus_block", &mut other);
+    assert_eq!(other["anchor_id"], "block:1");
+    assert!(other.get("anchor_block_id").is_none());
+}
+
+#[tokio::test]
+async fn rev0_and_rev1_wire_compatibility_covers_bootstrap_and_split_anchor() {
+    for revision in [0u32, 1u32] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut ws = accept(&listener, "rex.control.v1").await;
+            welcome(&mut ws, revision).await;
+            let boot_req = next(&mut ws).await;
+            assert_eq!(boot_req["method"], "session.bootstrap");
+            assert!(
+                boot_req["payload"].get("data_tickets").is_none(),
+                "rev {revision} must omit data_tickets on bootstrap"
+            );
+            reply(&mut ws, &boot_req, 1, serde_json::to_value(boot()).unwrap()).await;
+
+            // 1. HostCommand::Request("session.new_split")
+            let split_req = next(&mut ws).await;
+            assert_eq!(split_req["method"], "session.new_split");
+            if revision == 0 {
+                assert_eq!(split_req["payload"]["anchor_block_id"], "block:req");
+                assert!(split_req["payload"].get("anchor_id").is_none());
+            } else {
+                assert_eq!(split_req["payload"]["anchor_id"], "block:req");
+                assert!(split_req["payload"].get("anchor_block_id").is_none());
+            }
+            reply(&mut ws, &split_req, 2, json!({})).await;
+            let view1 = next(&mut ws).await;
+            assert_eq!(view1["method"], "session.view");
+            reply(
+                &mut ws,
+                &view1,
+                2,
+                json!({"revision": 2, "session_id": SESSION, "windows": []}),
+            )
+            .await;
+
+            // 2. HostCommand::NewTerminal("session.new_split")
+            let proc_req = next(&mut ws).await;
+            assert_eq!(proc_req["method"], "com.superlogical.terminal.process");
+            reply(&mut ws, &proc_req, 2, json!({})).await;
+            let split_new = next(&mut ws).await;
+            assert_eq!(split_new["method"], "session.new_split");
+            if revision == 0 {
+                assert_eq!(split_new["payload"]["anchor_block_id"], "block:new");
+                assert!(split_new["payload"].get("anchor_id").is_none());
+            } else {
+                assert_eq!(split_new["payload"]["anchor_id"], "block:new");
+                assert!(split_new["payload"].get("anchor_block_id").is_none());
+            }
+            reply(&mut ws, &split_new, 3, json!({})).await;
+            let view2 = next(&mut ws).await;
+            assert_eq!(view2["method"], "session.view");
+            reply(
+                &mut ws,
+                &view2,
+                3,
+                json!({"revision": 3, "session_id": SESSION, "windows": []}),
+            )
+            .await;
+
+            assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+        });
+        let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+        connected(&host).await;
+        {
+            let model = host.model.lock().unwrap();
+            assert_eq!(model.protocol.api_revision, revision);
+            assert!(model.protocol.api_revision_negotiated);
+            assert_eq!(model.protocol.negotiated_api_revision(), Some(revision));
+        }
+        host.commands
+            .send(HostCommand::Request {
+                method: "session.new_split".into(),
+                payload: json!({
+                    "session_id": SESSION,
+                    "anchor_id": "block:req",
+                    "direction": "horizontal",
+                    "side": "after",
+                    "layout": crate::layout::shell_layout(None, None),
+                    "focus": true,
+                }),
+            })
+            .unwrap();
+        host.commands
+            .send(HostCommand::NewTerminal {
+                method: "session.new_split".into(),
+                payload: json!({
+                    "session_id": SESSION,
+                    "anchor_id": "block:new",
+                    "direction": "vertical",
+                    "side": "after",
+                    "layout": crate::layout::shell_layout(None, None),
+                    "focus": true,
+                }),
+                cwd_from: "block:new".into(),
+            })
+            .unwrap();
+        until(&host, |m| {
+            m.views.get(SESSION).is_some_and(|v| v.revision == 3)
+        })
+        .await;
+        drop(host);
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 

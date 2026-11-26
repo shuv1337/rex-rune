@@ -147,6 +147,47 @@ fn stop_button_commands_and_person_gate_agree() {
     ));
 }
 
+#[test]
+fn stop_server_requires_api_revision_4_in_ui_and_commands() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    for (revision, allowed) in [(0, false), (3, false), (4, true)] {
+        let mut ws = fixture();
+        ws.settings.hosts[0].endpoint = "unix:///private/server.sock".into();
+        ws.hosts[0].model.connected = true;
+        ws.hosts[0].model.protocol.api_revision = revision;
+        ws.hosts[0].model.protocol.api_revision_negotiated = true;
+        let sent = capture_host(&mut ws, 0);
+        let mut rt = open(ws, (640., 480.));
+        assert_eq!(rt.state.can_stop_server(), allowed, "rev {revision}");
+        assert_eq!(has(&rt, "server-stop"), allowed, "rev {revision}");
+        assert_eq!(
+            shows(&rt, "Requires Rex Server API revision 4 or newer."),
+            !allowed,
+            "rev {revision}"
+        );
+        rt.update(|s, _| s.picker(false));
+        let row = rt
+            .state
+            .entries()
+            .into_iter()
+            .find(|e| e.label == "Stop server…")
+            .unwrap();
+        assert_eq!(row.enabled, allowed, "rev {revision}");
+        rt.update(|s, tx| {
+            crate::app::actions::run(s, server_page::STOP, &serde_json::Value::Null, tx);
+        });
+        assert_eq!(
+            matches!(
+                rt.state.panel.as_ref().unwrap().kind,
+                PanelKind::Confirm { .. }
+            ),
+            allowed,
+            "rev {revision}"
+        );
+        assert!(sent.is_empty());
+    }
+}
+
 fn description(ws: &Workspace) -> &str {
     let PanelKind::Confirm {
         method,
@@ -219,6 +260,8 @@ fn confirmed_stop_targets_only_one_host_once_and_rejects_changed_target() {
         for i in 0..2 {
             ws.settings.hosts[i].endpoint = format!("unix:///private/{i}.sock");
             ws.hosts[i].model.connected = true;
+            ws.hosts[i].model.protocol.api_revision =
+                rex_rune::connection::STOP_SERVER_MIN_API_REVISION;
             ws.hosts[i].model.connection_epoch = 9;
         }
         let a = capture_host(&mut ws, 0);
@@ -252,6 +295,8 @@ fn pressing_the_stop_button_in_the_confirmation_sends_one_stop_to_that_host() {
     for i in 0..2 {
         ws.settings.hosts[i].endpoint = format!("unix:///private/{i}.sock");
         ws.hosts[i].model.connected = true;
+        ws.hosts[i].model.protocol.api_revision =
+            rex_rune::connection::STOP_SERVER_MIN_API_REVISION;
         ws.hosts[i].model.connection_epoch = 9;
     }
     let a = capture_host(&mut ws, 0);
