@@ -173,11 +173,15 @@ impl Blocked {
 
 /// Why this host cannot change floating layers: the negotiated revision, before anything is
 /// sent. None while it can.
-pub fn unsupported(connected: bool, api_revision: u32) -> Option<Blocked> {
+pub fn unsupported(connected: bool, api_revision: Option<u32>) -> Option<Blocked> {
     if !connected {
         return Some(Blocked::NotConnected);
     }
-    (api_revision < MIN_API_REVISION).then_some(Blocked::OldServer(api_revision))
+    match api_revision {
+        Some(rev) if rev < MIN_API_REVISION => Some(Blocked::OldServer(rev)),
+        Some(_) => None,
+        None => Some(Blocked::NotConnected),
+    }
 }
 
 /// A layer the server's documented rule says to draw as floating: anything not `tiled`,
@@ -436,11 +440,14 @@ mod tests {
 
     #[test]
     fn the_gate_is_the_negotiated_revision_and_says_which_one() {
-        assert_eq!(unsupported(false, 13), Some(Blocked::NotConnected));
-        assert_eq!(unsupported(true, 10), Some(Blocked::OldServer(10)));
-        assert_eq!(unsupported(true, 12), Some(Blocked::OldServer(12)));
-        assert_eq!(unsupported(true, 13), None);
-        assert_eq!(unsupported(true, 14), None);
+        assert_eq!(unsupported(false, Some(13)), Some(Blocked::NotConnected));
+        assert_eq!(unsupported(false, None), Some(Blocked::NotConnected));
+        assert_eq!(unsupported(true, None), Some(Blocked::NotConnected));
+        assert_eq!(unsupported(true, Some(0)), Some(Blocked::OldServer(0)));
+        assert_eq!(unsupported(true, Some(10)), Some(Blocked::OldServer(10)));
+        assert_eq!(unsupported(true, Some(12)), Some(Blocked::OldServer(12)));
+        assert_eq!(unsupported(true, Some(13)), None);
+        assert_eq!(unsupported(true, Some(14)), None);
         assert_eq!(MIN_API_REVISION, 13);
         // A row's hint and a notice's sentence both name the revision it needs, truthfully.
         for revision in 10..13 {

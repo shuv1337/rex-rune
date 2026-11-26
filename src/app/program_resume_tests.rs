@@ -163,6 +163,33 @@ fn commands_and_pane_menu_gate_reads_and_show_only_cached_detail() {
 }
 
 #[test]
+fn disconnected_host_reports_disconnected_not_needs_api_24() {
+    let (mut ws, _rx) = fixture();
+    // Connected rev 24 -> disconnect clears api_revision to None.
+    ws.hosts[0].model.connected = false;
+    ws.hosts[0].model.protocol.api_revision = None;
+    assert_eq!(
+        ws.program_resume_blocked().as_deref(),
+        Some("Host is disconnected.")
+    );
+    ws.picker(false);
+    let command = ws
+        .entries()
+        .into_iter()
+        .find(|e| e.id.as_deref() == Some(ACTION))
+        .unwrap();
+    assert!(!command.enabled);
+    assert_eq!(command.detail, "Host is disconnected.");
+
+    // Even if an earlier rev 24 value lingered while disconnected, disconnected wins.
+    ws.hosts[0].model.protocol.api_revision = Some(24);
+    assert_eq!(
+        ws.program_resume_blocked().as_deref(),
+        Some("Host is disconnected.")
+    );
+}
+
+#[test]
 fn returned_client_action_is_refused_with_a_notice() {
     let (mut ws, rx) = fixture();
     let generation = ws.keymap_generation;

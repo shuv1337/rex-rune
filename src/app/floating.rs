@@ -19,7 +19,7 @@ impl Workspace {
     /// negotiated revision before anything is sent.
     pub fn layer_gate(&self) -> Option<layers::Blocked> {
         let model = self.model();
-        layers::unsupported(model.connected, model.protocol.api_revision.unwrap_or(0))
+        layers::unsupported(model.connected, model.protocol.api_revision)
     }
 
     /// The layer holding the pane of a captured target, as a target for a layer verb.
@@ -128,7 +128,7 @@ impl Workspace {
             return Some(layers::Blocked::Stale);
         };
         let model = &self.hosts[index].model;
-        layers::unsupported(model.connected, model.protocol.api_revision.unwrap_or(0))
+        layers::unsupported(model.connected, model.protocol.api_revision)
     }
 
     pub(super) fn layer_window(&self, target: &LayerTarget) -> Option<&Window> {

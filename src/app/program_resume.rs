@@ -69,11 +69,11 @@ fn blocks(model: &HostModel) -> impl Iterator<Item = (&LayerBlock, &str)> {
 impl Workspace {
     pub(super) fn program_resume_blocked(&self) -> Option<Cow<'static, str>> {
         let model = self.model();
-        if !supported(model) {
+        if !model.connected {
+            Some("Host is disconnected.".into())
+        } else if !supported(model) {
             let host = &self.settings.hosts[self.active].label;
             Some(format!("Needs Rex API 24 on {host}").into())
-        } else if !model.connected {
-            Some("Host is disconnected.".into())
         } else {
             None
         }
