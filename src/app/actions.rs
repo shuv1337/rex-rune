@@ -843,7 +843,11 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             if s.yank_copy_mode_selection() {
                 return true;
             }
-            if let Some(text) = s.active_terminal().and_then(|t| t.copy_text()) {
+            if let Some(text) = s
+                .active_terminal()
+                .and_then(|t| t.copy_text())
+                .filter(|t| !t.is_empty())
+            {
                 tx.copy(text);
             }
         }

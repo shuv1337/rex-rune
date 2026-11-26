@@ -1094,6 +1094,7 @@ fn full_vim_workflow_counts_prefixes_yank_clipboard_primary_and_escape_hierarchy
     assert!(harness.pump(&mut rt, &sent).is_empty());
     clipboard.set_text("keep-me");
     tap_ctrl_shift(&mut rt, Code::KeyC, 'c');
+    assert!(harness.pump(&mut rt, &sent).is_empty());
     assert!(
         rt.state.in_copy_mode(),
         "Ctrl+Shift+C without selection stays in copy mode"

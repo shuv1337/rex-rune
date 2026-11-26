@@ -87,7 +87,9 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
     s.bindings.mode_map = in_mode.then(|| super::bindings::mode_map(map, &s.bindings.modes, modes));
     let map = s.bindings.mode_map.as_ref().unwrap_or(map);
     let in_copy = s.in_copy_mode();
-    let searching = s.panel.is_none() && s.active_terminal().is_some_and(|t| t.search.is_some());
+    let term = s.active_terminal();
+    let searching = s.panel.is_none() && term.is_some_and(|t| t.search.is_some());
+    let has_selection = term.is_some_and(super::term::Term::has_selection);
     let step = s.bindings.sequence.advance(map, input, |i| {
         let binding = &map.bindings[i].binding;
         if !in_mode && binding.mode.is_some() {
@@ -95,6 +97,14 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
         }
         if binding.action == "linux.mode.block" {
             return !global_only;
+        }
+        if binding.action == "pane.copy"
+            && binding.keys.len() == 1
+            && !global_only
+            && !in_copy
+            && !has_selection
+        {
+            return false;
         }
         if binding
             .args

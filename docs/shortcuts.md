@@ -10,6 +10,10 @@ window and survives reconnects; unavailable targets are skipped. Commands also
 exposes these navigation actions. Ctrl Tab is a client default; remove it (see
 [recipes](#more-recipes)) to pass it to editors such as Neovim.
 
+A single-chord Copy shortcut copies the focused pane's selection. In ordinary
+terminal input, if Rex has no selection, the shortcut goes to the running
+program so it can handle its own selection.
+
 ## Default shortcuts
 
 | Shortcut | Behavior | Action (and args where required) |

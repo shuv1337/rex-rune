@@ -26,6 +26,7 @@ fn with_modes(ws: &mut Workspace, exclusive: bool) {
                 .args(json!({"direction":"left","amount":1}))
                 .mode("resize"),
             Binding::new(["q"], "client.mode.exit_all").mode("resize"),
+            Binding::new(["ctrl+shift+c"], "pane.copy").mode("resize"),
             Binding::new(["n"], "client.mode.enter")
                 .args(json!({"name":"nested"}))
                 .mode("resize"),
@@ -245,6 +246,21 @@ fn an_exclusive_mode_keeps_its_name_while_it_swallows_keys() {
     assert_eq!(chip_text(&rt).as_deref(), Some("resize"));
     press(&mut rt, Key::Text("w".into()));
     assert!(sent_keys(&sent).is_empty(), "the mode takes the plain key");
+    let copy = KeyEvent {
+        key: Key::Command('c'),
+        mods: Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::default()
+        },
+    };
+    rt.key(copy.clone());
+    rt.key_up(copy);
+    rt.frame(1. / 60.);
+    assert!(
+        sent_keys(&sent).is_empty(),
+        "an unavailable Copy stays in the mode"
+    );
     assert_eq!(
         chip_text(&rt).as_deref(),
         Some("resize"),
