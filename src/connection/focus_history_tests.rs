@@ -313,6 +313,7 @@ async fn focus_history_emits_exact_wire_payloads_for_all_five_scopes_and_cursor(
     let epoch = host.model.lock().unwrap().connection_epoch;
     for (idx, (scope, cursor, _)) in cases.iter().enumerate() {
         let id = (idx + 1) as u64;
+        let expected_rev = 1 + 2 * id;
         host.commands
             .send(HostCommand::ReverseFocusHistory {
                 epoch,
@@ -324,6 +325,7 @@ async fn focus_history_emits_exact_wire_payloads_for_all_five_scopes_and_cursor(
             .unwrap();
         until(&host, |m| {
             m.focus_history_result.as_ref().is_some_and(|r| r.id == id)
+                && m.view().is_some_and(|v| v.revision >= expected_rev)
         })
         .await;
         let m = host.model.lock().unwrap();
