@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.13.0 - 2026-11-25
+
+Rex Server API revision 24 support (`0.1.0-snapshot.2670`) with read-only OSC 7577 Program Resume inspection, interactive `rex.ui` script prompts (`#144`), API 20 Undo close, API 15 listening TCP ports, API 19 server-side focus history, upstream Rune `983e33b9` upgrade, pipelined high-latency terminal input (`#179`), opt-in render-only local echo (`#180`), and throttled hidden-tab title redraws (`#181`).
+
 ### Added
 
 - **Program resume (Rex Server API 24).** Open **Show program resume…** in Commands or **Program resume…** in the pane menu to see reported programs, Rex's chosen record, and trust reasons. Snapshot 2670 resumes trusted chosen programs with server restore enabled. The view never shows, copies or runs launch arguments.

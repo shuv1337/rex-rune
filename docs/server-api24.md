@@ -71,13 +71,13 @@ connection epoch, with no retries on reconnect.
 2670 and 2562 servers. It checks the persisted state and actual process
 invocation across a clean 2670 restart. [Popup scope and tests](parity-2026-11/program-resume.md).
 
-## Read-only live check on shuvdev
+## Read-only live check on a Linux workstation
 
 On November 25, 2026 (PST), with the existing Rex process already listening,
 the client probe negotiated revision 24 against the live server:
 
 ```sh
-rex-probe --version-only unix:///run/user/1000/rex/server.sock
+rex-probe --version-only unix:///run/user/$UID/rex/server.sock
 ```
 
 Result: `Negotiated Rex API 24`; `server.version` reported
