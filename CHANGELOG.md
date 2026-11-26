@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.13.1 - 2026-11-26
+
+Rex Server API revisions 0 through 24 compatibility (#192) and five community bug fixes (#188, #190, #191, #193, #194).
+
 ### Changed
 
 - Lowered the minimum negotiated Rex Server API revision from 10 to 0 (now 0 through 24, matching the official `rex` CLI floor). Added revision-0 `session.new_split` `anchor_block_id` translation, gated `server.stop` on API revision 4 or newer, gated `session.bootstrap` bundled `data_tickets` on API revision 8 or newer (falling back to `data.connect` on revisions 0 through 7), and fixed API revision `0` and `0–24` range reporting on Server, About, version, and debug info views. [Compatibility record](docs/server-api24.md).
@@ -11,6 +15,8 @@
 - Use the system hostname for the local host and repair blank saved host labels. Thanks to @satyamjay-iitd (#191).
 - Keep a removed local host off the saved list. `--session` and `--new` use the last active saved host unless `--endpoint` or `REX_SERVER` overrides it. Thanks to @nemofq (#190).
 - Keep a lone tiled pane edge to edge when a floating pane opens above it. Thanks to @LoricAndre (#193).
+- Honor xkb layout remaps (such as `caps:escape`) for non-text named keys sent to the terminal, while keeping keypad Enter/Backspace distinct and preserving physical codes for printable keys and shortcuts. Thanks to @nolith (#194).
+- Forward single-chord Copy shortcuts (such as `Ctrl+Shift+C`) to the terminal program when Rex Rune has no text selected, while keeping active selections, copy mode, and exclusive modes local. Thanks to @aptinio (#188).
 
 ## 0.13.0 - 2026-11-25
 
