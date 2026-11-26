@@ -377,7 +377,9 @@ impl Settings {
             .with_context(|| format!("Unable to read {}", path.display()))?;
         for host in &mut settings.hosts {
             if host.label.trim().is_empty() {
-                host.label = if host.endpoint == crate::transport::local_endpoint() {
+                host.label = if host.endpoint == crate::platform::local::default_socket_endpoint()
+                    || host.endpoint == crate::transport::local_endpoint()
+                {
                     local_host_label()
                 } else {
                     endpoint_label(&host.endpoint)
@@ -428,21 +430,16 @@ pub fn local_host_label() -> String {
 }
 
 fn local_host_label_from(name: &str) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        "Local".into()
-    } else {
-        name.to_owned()
-    }
+    host_label_or(name, "Local")
 }
 
 fn hostname_label(name: &str) -> String {
+    host_label_or(name, "Rex Rune")
+}
+
+fn host_label_or(name: &str, fallback: &str) -> String {
     let name = name.trim();
-    if name.is_empty() {
-        "Rex Rune".into()
-    } else {
-        name.to_owned()
-    }
+    if name.is_empty() { fallback } else { name }.to_owned()
 }
 
 pub fn parse_font_family(family: &str) -> std::result::Result<String, String> {
@@ -506,7 +503,7 @@ pub fn endpoint_label(endpoint: &str) -> String {
     }
     if !endpoint.starts_with("unix://")
         && let Ok(url) = url::Url::parse(endpoint)
-        && let Some(host) = url.host_str()
+        && let Some(host) = url.host_str().filter(|h| !h.is_empty())
     {
         return host.to_owned();
     }
@@ -530,7 +527,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let mut saved = serde_json::json!({
             "hosts": [
-                {"label": "", "endpoint": crate::transport::local_endpoint()},
+                {"label": "", "endpoint": crate::platform::local::default_socket_endpoint()},
                 {"label": "", "endpoint": "ssh://user@example.ac.in"},
                 {"label": " \t ", "endpoint": "https://other.example"}
             ]
@@ -541,12 +538,14 @@ mod tests {
         assert_eq!(settings.hosts[1].label, "example.ac.in");
         assert_eq!(settings.hosts[2].label, "other.example");
 
-        saved["hosts"][1]["endpoint"] = serde_json::json!(" ");
-        std::fs::write(&path, saved.to_string()).unwrap();
-        assert_eq!(
-            Settings::load(&path).err().unwrap().to_string(),
-            "Use an https://, ssh:// or unix:// endpoint"
-        );
+        for invalid in [" ", "foo:///bar"] {
+            saved["hosts"][1]["endpoint"] = serde_json::json!(invalid);
+            std::fs::write(&path, saved.to_string()).unwrap();
+            assert_eq!(
+                Settings::load(&path).err().unwrap().to_string(),
+                "Use an https://, ssh:// or unix:// endpoint"
+            );
+        }
         assert_eq!(
             validate_host("", "https://box").unwrap_err().to_string(),
             "Enter a host name"
@@ -557,6 +556,7 @@ mod tests {
     fn endpoint_labels_ignore_surrounding_space_and_fall_back_when_blank() {
         assert_eq!(endpoint_label(""), "Host");
         assert_eq!(endpoint_label(" \t\n "), "Host");
+        assert_eq!(endpoint_label("foo:///bar"), "foo:///bar");
         assert_eq!(
             endpoint_label(" ssh://user@example.ac.in\n"),
             "example.ac.in"

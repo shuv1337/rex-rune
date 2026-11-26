@@ -191,17 +191,24 @@ pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
 /// A floating layer does not take the edge-to-edge layout away from a sole tiled pane.
 pub fn tiled_full_bleed(s: &Workspace, window: &Window) -> bool {
     !layout::any_zoomed(window)
-        && layers::tiled(window).is_some_and(|layer| layer.blocks.len() == 1)
+        && layers::tiled(window).is_some_and(|layer| {
+            layer.blocks.len() == 1
+                && layer
+                    .layout
+                    .as_ref()
+                    .is_some_and(|root| root.block_id.is_some())
+        })
         && s.settings.pane_header != PaneHeader::Always
 }
 
+/// A pane can fill the area on its own or occupy it beneath floating cards.
 pub fn placement_full_bleed(s: &Workspace, window: &Window, placement: &layout::Placement) -> bool {
     full_bleed(s, window)
-        || window
+        || (window
             .layers
             .get(placement.layer_index)
             .is_some_and(|layer| !layers::floating(layer))
-            && tiled_full_bleed(s, window)
+            && tiled_full_bleed(s, window))
 }
 
 /// Room kept above the header, a row or a floating one, of a pane whose top is the top of

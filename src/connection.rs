@@ -53,8 +53,8 @@ pub const DEFAULT_TAB_LABEL: &str = "Shell";
     about = "Native multi-host workspace for existing Rex servers"
 )]
 pub struct Options {
-    /// Override the active host endpoint. By default, use the last active saved host,
-    /// or the default local server socket on first run.
+    /// Override the active host endpoint. Otherwise use REX_SERVER if set, the last active
+    /// saved host, or the default local server socket on first run.
     #[arg(long)]
     pub endpoint: Option<String>,
     /// Initially select a session by ID or exact label.

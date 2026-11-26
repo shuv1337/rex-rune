@@ -1,7 +1,14 @@
 //! Where a Rex server on this machine listens.
 use std::path::PathBuf;
 
-/// The endpoint of this user's own server: `REX_SERVER` when set, else the socket the Rex
+/// An explicit Rex endpoint from the environment, ignoring a blank value.
+pub fn env_endpoint() -> Option<String> {
+    std::env::var("REX_SERVER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// The endpoint of this user's own server: nonblank `REX_SERVER`, else the socket the Rex
 /// server makes by default on Unix. Windows keeps a valid but unsupported placeholder.
 ///
 /// | Platform | Socket |
@@ -10,7 +17,11 @@ use std::path::PathBuf;
 /// | macOS | `~/Library/Application Support/rex/server.sock` |
 /// | Windows | `unix:///rex/server.sock` (unsupported placeholder) |
 pub fn default_endpoint() -> String {
-    std::env::var("REX_SERVER").unwrap_or_else(|_| format!("unix://{}", default_socket().display()))
+    env_endpoint().unwrap_or_else(default_socket_endpoint)
+}
+
+pub fn default_socket_endpoint() -> String {
+    format!("unix://{}", default_socket().display())
 }
 
 /// The socket of this user's own server on Unix, whatever `REX_SERVER` says: the one a

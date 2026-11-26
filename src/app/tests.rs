@@ -109,7 +109,7 @@ mod workspace_fixes_tests;
 use super::{
     panel::{Form, Intent, PanelKind, SessionAction},
     placeholder, view,
-    workspace::Workspace,
+    workspace::{StartupSession, Workspace},
 };
 use clap::Parser;
 use rex_rune::{
@@ -201,18 +201,20 @@ fn offline_launch(
     args: &[&str],
     settings: Settings,
     path: std::path::PathBuf,
-) -> (Workspace, Vec<Option<String>>) {
+    env_endpoint: Option<&str>,
+) -> (Workspace, Vec<StartupSession>) {
     use super::workspace::{HostId, HostState};
     let handle = rune::App::new(AppSpec::new("Rex", (1024., 700.), placeholder, view)).handle();
-    let mut preferred = Vec::new();
+    let mut startup = Vec::new();
     let ws = Workspace::new_with_connector(
         Options::parse_from(args),
         settings,
         path,
         handle,
         None,
+        env_endpoint,
         |ws, index, explicit| {
-            preferred.push(ws.preferred_session(index, explicit));
+            startup.push(ws.startup_session(index, explicit));
             ws.hosts.push(HostState {
                 id: HostId(index as u64),
                 connection: HostConnection {
@@ -226,55 +228,110 @@ fn offline_launch(
             });
         },
     );
-    (ws, preferred)
+    (ws, startup)
+}
+
+fn selecting(session: &str) -> StartupSession {
+    StartupSession {
+        preferred: Some(session.into()),
+        ..Default::default()
+    }
 }
 
 #[test]
 fn launch_after_removing_local_host_uses_the_saved_ssh_host_unless_overridden() {
-    let local = rex_rune::transport::local_endpoint();
+    let local = rex_rune::platform::local::default_socket_endpoint();
     let remote = "ssh://user@example.invalid";
     let mut settings = Settings::default();
+    settings.hosts[0].endpoint = local.clone();
     settings.hosts.push(Host {
         label: "Remote".into(),
         endpoint: remote.into(),
+        shell: Some("fish".into()),
         ..settings.hosts[0].clone()
     });
     settings.sessions.insert(remote.into(), "previous".into());
     let scratch = super::scratch::Folder::new("launch-host");
     let path = scratch.join("workspace.json");
-    let (mut first, _) = offline_launch(&["rex-rune"], settings, path.clone());
+    let (mut first, _) = offline_launch(&["rex-rune"], settings, path.clone(), None);
     assert_eq!(first.settings.hosts[first.active].endpoint, local);
     first.remove_host(0, &mut rune::Tx::default());
 
     let relaunch =
-        |args: &[&str]| offline_launch(args, Settings::load(&path).unwrap(), path.clone());
-    for (args, session) in [
-        (&["rex-rune"][..], "previous"),
-        (&["rex-rune", "--session", "work"][..], "work"),
+        |args: &[&str]| offline_launch(args, Settings::load(&path).unwrap(), path.clone(), None);
+    for (args, expected) in [
+        (&["rex-rune"][..], selecting("previous")),
+        (&["rex-rune", "--session", "work"][..], selecting("work")),
+        (
+            &["rex-rune", "--new", "foo"][..],
+            StartupSession {
+                preferred: None,
+                create: Some(("foo".into(), Some("fish".into()))),
+            },
+        ),
     ] {
-        let (ws, preferred) = relaunch(args);
+        let (ws, startup) = relaunch(args);
         assert_eq!(ws.settings.hosts.len(), 1);
         assert_eq!(ws.settings.hosts[ws.active].endpoint, remote);
-        assert_eq!(preferred, [Some(session.into())]);
+        assert_eq!(startup, [expected]);
     }
 
     for (endpoint, label) in [
         (local.as_str(), rex_rune::settings::local_host_label()),
         ("ssh://other", "other".into()),
     ] {
-        let (ws, preferred) = relaunch(&["rex-rune", "--endpoint", endpoint]);
+        let (ws, startup) = relaunch(&["rex-rune", "--endpoint", endpoint]);
         assert_eq!(ws.settings.hosts.len(), 2);
         assert_eq!(ws.settings.hosts[ws.active].endpoint, endpoint);
         assert_eq!(ws.settings.hosts[ws.active].label, label);
-        assert_eq!(preferred, [Some("previous".into()), None]);
+        assert_eq!(startup, [selecting("previous"), StartupSession::default()]);
     }
 
     let (mut explicit, _) = relaunch(&["rex-rune", "--endpoint", "ssh://other"]);
     explicit.save();
-    let (ws, preferred) = relaunch(&["rex-rune", "--session", "work"]);
+    let (ws, startup) = relaunch(&["rex-rune", "--session", "work"]);
     assert_eq!(ws.settings.hosts.len(), 2);
     assert_eq!(ws.settings.hosts[ws.active].endpoint, "ssh://other");
-    assert_eq!(preferred, [Some("previous".into()), Some("work".into())]);
+    assert_eq!(startup, [selecting("previous"), selecting("work")]);
+}
+
+#[test]
+fn rex_server_overrides_the_saved_host_and_endpoint_flag_overrides_rex_server() {
+    let mut settings = Settings::default();
+    let saved = "ssh://saved";
+    let env = "ssh://from-env";
+    let cli = "ssh://from-flag";
+    settings.hosts[0].endpoint = saved.into();
+    settings.last_host = Some(saved.into());
+    settings.sessions.insert(saved.into(), "previous".into());
+    let scratch = super::scratch::Folder::new("launch-env");
+    let launch = |args: &[&str]| {
+        offline_launch(
+            args,
+            settings.clone(),
+            scratch.join("workspace.json"),
+            Some(env),
+        )
+    };
+
+    let (ws, startup) = launch(&["rex-rune", "--new", "foo"]);
+    assert_eq!(ws.settings.hosts.len(), 2);
+    assert_eq!(ws.settings.hosts[ws.active].endpoint, env);
+    assert_eq!(
+        startup,
+        [
+            selecting("previous"),
+            StartupSession {
+                preferred: None,
+                create: Some(("foo".into(), None)),
+            },
+        ]
+    );
+
+    let (ws, startup) = launch(&["rex-rune", "--endpoint", cli, "--session", "work"]);
+    assert_eq!(ws.settings.hosts.len(), 2);
+    assert_eq!(ws.settings.hosts[ws.active].endpoint, cli);
+    assert_eq!(startup, [selecting("previous"), selecting("work")]);
 }
 
 #[test]
@@ -287,11 +344,12 @@ fn launch_with_no_configured_hosts_seeds_the_local_host() {
             ..Settings::default()
         },
         scratch.join("workspace.json"),
+        None,
     );
     assert_eq!(ws.settings.hosts.len(), 1);
     assert_eq!(
         ws.settings.hosts[ws.active].endpoint,
-        rex_rune::transport::local_endpoint()
+        rex_rune::platform::local::default_socket_endpoint()
     );
     assert_eq!(
         ws.settings.hosts[ws.active].label,

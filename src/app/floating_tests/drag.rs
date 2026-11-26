@@ -187,6 +187,16 @@ fn floating_layer_keeps_auto_header_padding_specific_to_each_pane() {
     let [left_x, _, left_width, _] = rect_of(&rt, "pane:block:a");
     let right_x = rect_of(&rt, "pane:block:b")[0];
     assert!(right_x > left_x + left_width);
+
+    let first = rect_of(&rt, "pane:block:a");
+    let second = rect_of(&rt, "pane:block:b");
+    sync_wake(&mut rt, |s| {
+        s.hosts[0].model.views.get_mut("s").unwrap().windows[0].layers[0]
+            .blocks
+            .truncate(1);
+    });
+    assert_eq!(rect_of(&rt, "pane:block:a"), first);
+    assert_eq!(rect_of(&rt, "pane:block:b"), second);
 }
 
 #[test]

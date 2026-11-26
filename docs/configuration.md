@@ -12,7 +12,7 @@ rex-rune --session work --font 'JetBrainsMono Nerd Font' --font-size 15
 
 | Option | Meaning |
 | --- | --- |
-| `--endpoint <URL>` | Override the active host with `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](hosts.md)). When omitted, Rex Rune uses the last active saved host, even with `--session` or `--new`. |
+| `--endpoint <URL>` | Override the active host with `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](hosts.md)). This flag takes precedence over `REX_SERVER`. Without either override, Rex Rune uses the last active saved host, even with `--session` or `--new`. |
 | `--session <LABEL\|ID>` | Select a session by exact label or ID. Missing or ambiguous names never pick an arbitrary session. |
 | `--new <LABEL>` | Explicitly create a persistent session (conflicts with `--session`). Ordinary attachment never creates or destroys sessions. |
 | `--block <ID>` | Initially focus this terminal block. |
@@ -23,17 +23,17 @@ rex-rune --session work --font 'JetBrainsMono Nerd Font' --font-size 15
 | `--window-size <WxH>` | Override the saved startup size (default: the last non-maximized size, else `1440x900`); tiling compositors may override it. |
 | `--check-update` | Verify the latest signed release manifest, print channel-specific upgrade guidance, and exit without starting the UI. |
 
-On first run, the default host uses `$REX_SERVER` if set, otherwise
+On first run, the default host uses a nonblank `REX_SERVER` if set, otherwise
 `unix://$XDG_RUNTIME_DIR/rex/server.sock` (or `unix:///run/user/<uid>/rex/server.sock`
 when `XDG_RUNTIME_DIR` is unset). On macOS the socket is at
 `unix://$HOME/Library/Application Support/rex/server.sock`. On Windows, set
-`REX_SERVER` on first run or pass a network endpoint; the local placeholder
-reports that Unix sockets are unavailable.
+`REX_SERVER` or pass a network endpoint; the local placeholder reports that Unix
+sockets are unavailable and can be removed once another host is saved.
 
-A plain launch also restores the saved session for the active host. If there
-is no saved session, it selects the first listed session. Rune's own developer flags go after `--`
-(for example `-- --snap out.png`). `REX_FRAME_STATS=1` prints per-frame CPU
-percentiles.
+Without an endpoint override, a plain launch also restores the active host's
+saved session. If there is no saved session, it selects the first listed session.
+Rune's own developer flags go after `--` (for example `-- --snap out.png`).
+`REX_FRAME_STATS=1` prints per-frame CPU percentiles.
 
 ## Files and preferences
 

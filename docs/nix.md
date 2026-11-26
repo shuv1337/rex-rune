@@ -42,4 +42,4 @@ upgrade commands above.
 
 ## Session safety
 
-Installing or starting the package never starts, replaces, reconfigures or stops a Rex server. It connects to your existing `REX_SERVER` endpoint or the default local socket; run the Rex server separately. Tests and probes that create sessions must use disposable servers, never your daily sessions.
+Installing or starting the package never starts, replaces, reconfigures or stops a Rex server. It selects `--endpoint`, then a nonblank `REX_SERVER`, then the last active saved host, using the default local socket on first run without an override. Run the Rex server separately. Tests and probes that create sessions must use disposable servers, never your daily sessions.

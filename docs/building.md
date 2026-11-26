@@ -197,7 +197,7 @@ cargo build --locked --bin rex-rune
 | --- | --- |
 | VT decoding and command-line startup | Linked and run in CI; no native window check |
 | `https://`, `wss://`, `http://`, `ws://` hosts | The unchanged TCP and Rustls path compiles; real server attachment is untested |
-| Local host and `unix://` | Refused with a message suggesting an `https://` host. `REX_SERVER` overrides the default; otherwise Local keeps an unsupported `unix://` placeholder, which stays in the sidebar as disconnected and is retried every few seconds, also when you start with `--endpoint`. Named pipes are not implemented |
+| Local host and `unix://` | Refused with a message suggesting an `https://` host. Use `--endpoint` or `REX_SERVER` to choose a network host. Once another host is saved, the unsupported `unix://` placeholder can be removed and will not be added back unless explicitly requested. Named pipes are not implemented |
 | `ssh://` hosts | Refused before starting SSH; no loopback TCP forwarding |
 | Downloads | Refused before creating a file or asking the server for a ticket; CI tests the refusal boundary, not a working download store |
 | Uploads | Compile with portable random IDs; end-to-end uploads are untested |
