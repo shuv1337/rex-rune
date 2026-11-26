@@ -89,6 +89,7 @@ fn header(
     width: f32,
     focused: bool,
     m: &Metrics,
+    lead: f32,
 ) -> El {
     let label = s.pane_name(block);
     let activity = pane_activity(s.model(), block);
@@ -97,7 +98,6 @@ fn header(
     let id = block.to_owned();
     let menu_id = block.to_owned();
     let fade = pane_header::header_opacity(s, block);
-    let lead = pane_header::lead(s, window);
     let h = row()
         .key(format!("pane-header:{block}"))
         .hover_group()
@@ -289,7 +289,7 @@ pub(super) fn outlines(s: &Workspace, window: &Window, flat: bool) -> bool {
     s.settings.highlights_active_pane() && (!flat || layout::placements(window, None).0.len() > 1)
 }
 
-/// `bleed` draws the pane flat, with no card around it (a single pane, or Compact density).
+/// `card_bleed` fills the pane area. Compact density also draws flat, at its own bounds.
 #[allow(clippy::too_many_arguments)]
 fn pane_card(
     s: &Workspace,
@@ -299,8 +299,10 @@ fn pane_card(
     m: &Metrics,
     state: CardState,
     input: bool,
-    bleed: bool,
+    card_bleed: bool,
 ) -> El {
+    let bleed = card_bleed || s.settings.pane_density == PaneDensity::Compact;
+    let lead = pane_header::lead(s, card_bleed);
     let key = s.term_key(block);
     // The search field has the terminal's top-right corner, so nothing floats over it.
     let searching = s.terminals.get(&key).is_some_and(|t| t.search.is_some());
@@ -369,7 +371,7 @@ fn pane_card(
         if clear > 0. {
             c = c.child(el().key("pane-header-clear").w_full().h(clear));
         }
-        c = c.child(header(s, window, block, rect[2], focused, m));
+        c = c.child(header(s, window, block, rect[2], focused, m, lead));
     }
     let c = match s.terminals.get(&key) {
         Some(t) => {
@@ -784,8 +786,13 @@ fn pane_card(
         None => c,
     };
     let top = pane_header::clearance(s, rect);
-    let floating = (placement == Placement::Floating)
-        .then(|| pane_header::floating(header(s, window, block, rect[2], focused, m), !bleed, top));
+    let floating = (placement == Placement::Floating).then(|| {
+        pane_header::floating(
+            header(s, window, block, rect[2], focused, m, lead),
+            !bleed,
+            top,
+        )
+    });
     if !headed && !searching && s.settings.pane_header == PaneHeader::OnHover {
         // A hover band only sees its own target or descendants. The floating
         // header stays inside it so showing it does not report a hover leave.
@@ -928,7 +935,8 @@ pub fn area(s: &Workspace, px: f32) -> El {
     let [ix, iy, iw, ih] = inner(s);
 
     let emit_card = |placement: &layout::Placement| {
-        let rect = if bleed {
+        let card_bleed = pane_header::placement_full_bleed(s, current, placement);
+        let rect = if card_bleed {
             [0., 0., s.area[2], s.area[3]]
         } else {
             card_rect(s, placement.rect)
@@ -951,7 +959,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
             &m,
             state,
             is_focus && s.panel.is_none(),
-            bleed || s.settings.pane_density == PaneDensity::Compact,
+            card_bleed,
         )
     };
 

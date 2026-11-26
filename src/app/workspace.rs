@@ -14,10 +14,11 @@ use rex_rune::{
     },
     layout::{Divider, shell_layout},
     settings::{
-        ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice, terminal::OptionSides,
-        validate_host,
+        ChromeTheme, Host, NoticePosition, Settings, TerminalThemeChoice, endpoint_label,
+        local_host_label, terminal::OptionSides, validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
+    transport::local_endpoint,
 };
 use rexrs::api::terminal::SetTheme;
 use rune::{AppHandle, TextEdit, Tx};
@@ -226,25 +227,48 @@ impl TabStrip {
 impl Workspace {
     pub fn new(
         options: Options,
-        mut settings: Settings,
+        settings: Settings,
         path: PathBuf,
         handle: AppHandle<Workspace>,
         terminal_family: Option<&'static str>,
     ) -> Self {
+        Self::new_with_connector(
+            options,
+            settings,
+            path,
+            handle,
+            terminal_family,
+            Self::connect_host,
+        )
+    }
+
+    pub(super) fn new_with_connector(
+        options: Options,
+        mut settings: Settings,
+        path: PathBuf,
+        handle: AppHandle<Workspace>,
+        terminal_family: Option<&'static str>,
+        mut connect: impl FnMut(&mut Self, usize, bool),
+    ) -> Self {
         let launch_font = options.fonts(&settings).0.to_owned();
         let launch_saved_font = settings.font_family.clone();
         let fonts = super::font_picker::FontState::new(&options, &settings);
-        let explicit = options.session.is_some()
-            || options.new.is_some()
-            || options.endpoint != rex_rune::transport::local_endpoint();
-        if !settings
-            .hosts
-            .iter()
-            .any(|h| h.endpoint == options.endpoint)
-        {
+        let explicit_endpoint = options.endpoint.as_deref();
+        let explicit_cli =
+            explicit_endpoint.is_some() || options.session.is_some() || options.new.is_some();
+        let added_endpoint = match explicit_endpoint {
+            Some(ep) if !settings.hosts.iter().any(|h| h.endpoint == ep) => Some(ep.to_owned()),
+            _ if settings.hosts.is_empty() => Some(local_endpoint()),
+            _ => None,
+        };
+        if let Some(endpoint) = added_endpoint {
             settings.hosts.push(Host {
-                label: rex_rune::settings::endpoint_label(&options.endpoint),
-                endpoint: options.endpoint.clone(),
+                label: if endpoint == local_endpoint() {
+                    local_host_label()
+                } else {
+                    endpoint_label(&endpoint)
+                },
+                endpoint,
                 remote_control: false,
                 prompts: true,
                 collapsed: false,
@@ -252,13 +276,9 @@ impl Workspace {
                 shared: None,
             });
         }
-        let wanted = if explicit {
-            Some(&options.endpoint)
-        } else {
-            settings.last_host.as_ref()
-        };
+        let wanted = explicit_endpoint.or(settings.last_host.as_deref());
         let active = wanted
-            .and_then(|e| settings.hosts.iter().position(|h| &h.endpoint == e))
+            .and_then(|e| settings.hosts.iter().position(|h| h.endpoint == e))
             .unwrap_or(0);
         if let Some(size) = options.font_size {
             settings.font_size = size;
@@ -419,7 +439,7 @@ impl Workspace {
             this.save();
         }
         for index in 0..this.settings.hosts.len() {
-            this.connect_host(index, explicit);
+            connect(&mut this, index, explicit_cli);
         }
         this
     }
@@ -429,19 +449,25 @@ impl Workspace {
         self.hosts.push(state);
     }
 
+    pub(super) fn preferred_session(&self, index: usize, explicit: bool) -> Option<String> {
+        if explicit && index == self.active {
+            self.options.session.clone()
+        } else {
+            self.settings
+                .sessions
+                .get(&self.settings.hosts[index].endpoint)
+                .cloned()
+        }
+    }
+
     /// A connection to saved host `index` under a fresh id, with its wake thread.
     pub(super) fn spawn_host(&mut self, index: usize, explicit: bool) -> HostState {
         let host = &self.settings.hosts[index];
         let watch_shared = self.settings.sync_shared_hosts && self.is_shared_source(index);
         let cli = explicit && index == self.active;
-        let preferred = if cli {
-            self.options.session.clone()
-        } else {
-            self.settings.sessions.get(&host.endpoint).cloned()
-        };
         let connection = HostConnection::spawn_with_prompts(
             host.endpoint.clone(),
-            preferred,
+            self.preferred_session(index, explicit),
             cli.then(|| self.options.new.clone())
                 .flatten()
                 .map(|label| (label, host.shell.clone())),

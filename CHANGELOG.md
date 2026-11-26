@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Use the system hostname for the local host and repair blank saved host labels. Thanks to @satyamjay-iitd (#191).
+- Keep a removed local host off the saved list. `--session` and `--new` use the last active saved host unless `--endpoint` is specified. Thanks to @nemofq (#190).
+- Keep a lone tiled pane edge to edge when a floating pane opens above it. Thanks to @LoricAndre (#193).
+
 ### Changed
 
 - Lowered the minimum negotiated Rex Server API revision from 10 to 0 (now 0 through 24, matching the official `rex` CLI floor). Added revision-0 `session.new_split` `anchor_block_id` translation, gated `server.stop` on API revision 4 or newer, gated `session.bootstrap` bundled `data_tickets` on API revision 8 or newer (falling back to `data.connect` on revisions 0 through 7), and fixed API revision `0` and `0–24` range reporting on Server, About, version, and debug info views. [Compatibility record](docs/server-api24.md).

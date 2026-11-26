@@ -14,7 +14,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::{
-    layout,
+    layers, layout,
     settings::{PaneDensity, PaneHeader},
 };
 use rexrs::api::session::Window;
@@ -94,8 +94,8 @@ pub fn glyph_fits(width: f32, lead: f32, buttons: usize, extras: f32) -> bool {
 
 /// A header's leading pad: clear of a card's 12 pt corner, or lined up with the terminal's text
 /// under a header drawn edge to edge.
-pub fn lead(s: &Workspace, window: &Window) -> f32 {
-    if full_bleed(s, window) {
+pub fn lead(s: &Workspace, full_bleed: bool) -> f32 {
+    if full_bleed {
         s.settings.padding().0.max(8.)
     } else {
         HEADER_LEAD
@@ -186,6 +186,22 @@ pub fn in_title(s: &Workspace, window: &Window) -> bool {
 /// shown it is otherwise a card like any other.
 pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
     single(window) && (s.settings.pane_header != PaneHeader::Always || in_title(s, window))
+}
+
+/// A floating layer does not take the edge-to-edge layout away from a sole tiled pane.
+pub fn tiled_full_bleed(s: &Workspace, window: &Window) -> bool {
+    !layout::any_zoomed(window)
+        && layers::tiled(window).is_some_and(|layer| layer.blocks.len() == 1)
+        && s.settings.pane_header != PaneHeader::Always
+}
+
+pub fn placement_full_bleed(s: &Workspace, window: &Window, placement: &layout::Placement) -> bool {
+    full_bleed(s, window)
+        || window
+            .layers
+            .get(placement.layer_index)
+            .is_some_and(|layer| !layers::floating(layer))
+            && tiled_full_bleed(s, window)
 }
 
 /// Room kept above the header, a row or a floating one, of a pane whose top is the top of

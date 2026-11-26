@@ -77,6 +77,143 @@ fn grip_count(rt: &Runtime<Workspace>) -> usize {
         .count()
 }
 
+fn assert_pane_frame(
+    rt: &Runtime<Workspace>,
+    key: &str,
+    [x, y, w, h]: [f32; 4],
+    radius: f32,
+    border: bool,
+) {
+    let [ax, ay, _, _] = rt.state.area;
+    let element = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("missing element {key}"));
+    for (actual, expected) in element.rect.into_iter().zip([ax + x, ay + y, w, h]) {
+        assert!((actual - expected).abs() < 0.1, "{key}: {element:?}");
+    }
+    assert_eq!(element.radius, radius, "{key}");
+    assert_eq!(element.border_color.is_some(), border, "{key}");
+}
+
+#[test]
+fn opening_a_floating_pane_leaves_the_sole_tiled_pane_and_grid_edge_to_edge() {
+    use crate::app::theme::CARD_RADIUS;
+
+    let (mut ws, _rx) = floating_workspace(21, vec![tiled(&["block:a"])], "block:a");
+    ws.settings.pane_density = PaneDensity::Comfortable;
+    ws.settings.pane_header = PaneHeader::Hidden;
+    ws.settings.pane_padding = 0.;
+    let sender = ws.hosts[0].connection.commands.clone();
+    live_terminal(&mut ws, "block:a", &sender);
+    let connection = ws.terminals[&ws.term_key("block:a")].connection.clone();
+    ws.hosts[0]
+        .model
+        .terminals
+        .insert("block:a".into(), connection);
+    let mut rt = runtime(ws);
+    draw(&mut rt);
+    let [_, _, w, h] = rt.state.area;
+    let tiled_bounds = [0., 0., w, h];
+    let grid = rect_of(&rt, "grid:block:a");
+    assert_pane_frame(&rt, "pane:block:a", tiled_bounds, 0., false);
+
+    let float = [0.25, 0.25, 0.5, 0.5];
+    sync_wake(&mut rt, |s| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window
+            .layers
+            .push(serde_json::from_value(layer_at("floating", float, &["block:f"])).unwrap());
+        window.focused_block_id = Some("block:f".into());
+    });
+    assert_pane_frame(&rt, "pane:block:a", tiled_bounds, 0., false);
+    assert_eq!(rect_of(&rt, "grid:block:a"), grid);
+    let float_bounds = panes::card_rect(&rt.state, float);
+    assert_pane_frame(&rt, "pane:block:f", float_bounds, CARD_RADIUS, true);
+    assert!(grip_count(&rt) > 0);
+
+    for (block, rect, radius) in [
+        ("block:a", tiled_bounds, 0.),
+        ("block:f", float_bounds, CARD_RADIUS),
+    ] {
+        rt.update(|s, _| s.pane_menu(block.into(), None));
+        draw(&mut rt);
+        assert_pane_frame(&rt, "target-outline", rect, radius, true);
+    }
+}
+
+#[test]
+fn floating_layer_keeps_auto_header_padding_specific_to_each_pane() {
+    use crate::app::pane_header::HEADER_LEAD;
+    use crate::app::theme::CARD_RADIUS;
+
+    let (mut ws, _rx) = tiled_and_floating("block:f");
+    ws.settings.pane_header = PaneHeader::Auto;
+    ws.settings.pane_padding = 24.;
+    let mut rt = runtime(ws);
+    draw(&mut rt);
+    for (block, lead) in [("block:a", 24.), ("block:f", HEADER_LEAD)] {
+        let element = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(&format!("pane-header:{block}")))
+            .unwrap();
+        assert_eq!(element.inset[0], lead, "{block}");
+    }
+
+    rt.update(|s, _| s.settings.pane_header = PaneHeader::Always);
+    draw(&mut rt);
+    let tiled_card = panes::card_rect(&rt.state, [0., 0., 1., 1.]);
+    assert_pane_frame(&rt, "pane:block:a", tiled_card, CARD_RADIUS, true);
+
+    sync_wake(&mut rt, |s| {
+        s.settings.pane_header = PaneHeader::Auto;
+        s.hosts[0].model.views.get_mut("s").unwrap().windows[0].layers[0] =
+            serde_json::from_value(tiled(&["block:a", "block:b"])).unwrap();
+    });
+    for (key, bounds) in [
+        ("pane:block:a", [0., 0., 0.5, 1.]),
+        ("pane:block:b", [0.5, 0., 0.5, 1.]),
+    ] {
+        assert_pane_frame(
+            &rt,
+            key,
+            panes::card_rect(&rt.state, bounds),
+            CARD_RADIUS,
+            true,
+        );
+    }
+    let [left_x, _, left_width, _] = rect_of(&rt, "pane:block:a");
+    let right_x = rect_of(&rt, "pane:block:b")[0];
+    assert!(right_x > left_x + left_width);
+}
+
+#[test]
+fn a_sole_tiled_pane_does_not_go_full_bleed_while_zoomed() {
+    use crate::app::theme::CARD_RADIUS;
+
+    let (mut ws, _rx) = tiled_and_floating("block:a");
+    ws.hosts[0].model.protocol.api_revision = Some(21);
+    let mut rt = runtime(ws);
+    sync_wake(&mut rt, |s| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window.zoomed_block_id = Some("block:a".into());
+        window.tiled_zoomed_block_id = Some("block:a".into());
+    });
+    let zoom_bounds = panes::card_rect(&rt.state, [0., 0., 1., 1.]);
+    assert_pane_frame(&rt, "pane:block:a", zoom_bounds, CARD_RADIUS, true);
+    assert!(has_el(&rt, "pane:block:f"));
+    assert!(grip_count(&rt) > 0);
+
+    sync_wake(&mut rt, |s| {
+        s.hosts[0].model.views.get_mut("s").unwrap().windows[0].tiled_zoomed_block_id = None;
+    });
+    assert_pane_frame(&rt, "pane:block:a", zoom_bounds, CARD_RADIUS, true);
+    assert!(!has_el(&rt, "pane:block:f"));
+    assert_eq!(grip_count(&rt), 0);
+}
+
 fn rects_overlap(a: [f32; 4], b: [f32; 4]) -> bool {
     a[0] < b[0] + b[2] && a[0] + a[2] > b[0] && a[1] < b[1] + b[3] && a[1] + a[3] > b[1]
 }

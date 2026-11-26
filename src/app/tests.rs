@@ -197,6 +197,108 @@ fn a_relaunched_window_borrows_the_first_windows_settings_folder() {
     );
 }
 
+fn offline_launch(
+    args: &[&str],
+    settings: Settings,
+    path: std::path::PathBuf,
+) -> (Workspace, Vec<Option<String>>) {
+    use super::workspace::{HostId, HostState};
+    let handle = rune::App::new(AppSpec::new("Rex", (1024., 700.), placeholder, view)).handle();
+    let mut preferred = Vec::new();
+    let ws = Workspace::new_with_connector(
+        Options::parse_from(args),
+        settings,
+        path,
+        handle,
+        None,
+        |ws, index, explicit| {
+            preferred.push(ws.preferred_session(index, explicit));
+            ws.hosts.push(HostState {
+                id: HostId(index as u64),
+                connection: HostConnection {
+                    model: Default::default(),
+                    commands: flume::unbounded().0,
+                    wake: flume::unbounded().1,
+                },
+                model: Default::default(),
+                prefetch: Default::default(),
+                keymap_notices: Default::default(),
+            });
+        },
+    );
+    (ws, preferred)
+}
+
+#[test]
+fn launch_after_removing_local_host_uses_the_saved_ssh_host_unless_overridden() {
+    let local = rex_rune::transport::local_endpoint();
+    let remote = "ssh://user@example.invalid";
+    let mut settings = Settings::default();
+    settings.hosts.push(Host {
+        label: "Remote".into(),
+        endpoint: remote.into(),
+        ..settings.hosts[0].clone()
+    });
+    settings.sessions.insert(remote.into(), "previous".into());
+    let scratch = super::scratch::Folder::new("launch-host");
+    let path = scratch.join("workspace.json");
+    let (mut first, _) = offline_launch(&["rex-rune"], settings, path.clone());
+    assert_eq!(first.settings.hosts[first.active].endpoint, local);
+    first.remove_host(0, &mut rune::Tx::default());
+
+    let relaunch =
+        |args: &[&str]| offline_launch(args, Settings::load(&path).unwrap(), path.clone());
+    for (args, session) in [
+        (&["rex-rune"][..], "previous"),
+        (&["rex-rune", "--session", "work"][..], "work"),
+    ] {
+        let (ws, preferred) = relaunch(args);
+        assert_eq!(ws.settings.hosts.len(), 1);
+        assert_eq!(ws.settings.hosts[ws.active].endpoint, remote);
+        assert_eq!(preferred, [Some(session.into())]);
+    }
+
+    for (endpoint, label) in [
+        (local.as_str(), rex_rune::settings::local_host_label()),
+        ("ssh://other", "other".into()),
+    ] {
+        let (ws, preferred) = relaunch(&["rex-rune", "--endpoint", endpoint]);
+        assert_eq!(ws.settings.hosts.len(), 2);
+        assert_eq!(ws.settings.hosts[ws.active].endpoint, endpoint);
+        assert_eq!(ws.settings.hosts[ws.active].label, label);
+        assert_eq!(preferred, [Some("previous".into()), None]);
+    }
+
+    let (mut explicit, _) = relaunch(&["rex-rune", "--endpoint", "ssh://other"]);
+    explicit.save();
+    let (ws, preferred) = relaunch(&["rex-rune", "--session", "work"]);
+    assert_eq!(ws.settings.hosts.len(), 2);
+    assert_eq!(ws.settings.hosts[ws.active].endpoint, "ssh://other");
+    assert_eq!(preferred, [Some("previous".into()), Some("work".into())]);
+}
+
+#[test]
+fn launch_with_no_configured_hosts_seeds_the_local_host() {
+    let scratch = super::scratch::Folder::new("launch-empty");
+    let (ws, _) = offline_launch(
+        &["rex-rune"],
+        Settings {
+            hosts: Vec::new(),
+            ..Settings::default()
+        },
+        scratch.join("workspace.json"),
+    );
+    assert_eq!(ws.settings.hosts.len(), 1);
+    assert_eq!(
+        ws.settings.hosts[ws.active].endpoint,
+        rex_rune::transport::local_endpoint()
+    );
+    assert_eq!(
+        ws.settings.hosts[ws.active].label,
+        rex_rune::settings::local_host_label()
+    );
+}
+
 #[test]
 fn the_window_size_is_saved_once_a_resize_settles_but_not_when_maximized_or_full_screen() {
     use std::time::{Duration, Instant};

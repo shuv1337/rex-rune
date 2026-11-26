@@ -12,7 +12,7 @@ rex-rune --session work --font 'JetBrainsMono Nerd Font' --font-size 15
 
 | Option | Meaning |
 | --- | --- |
-| `--endpoint <URL>` | `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](hosts.md)). Defaults to `$REX_SERVER`, then `unix://$XDG_RUNTIME_DIR/rex/server.sock` (or `unix:///run/user/<uid>/rex/server.sock` if `XDG_RUNTIME_DIR` is unset); on macOS, `unix://$HOME/Library/Application Support/rex/server.sock`. On Windows, set `REX_SERVER` or name a network endpoint; the default local placeholder reports that Unix sockets are unavailable. |
+| `--endpoint <URL>` | Override the active host with `unix:///absolute/path.sock`, `https://…`, `http://…`, `wss://…`, `ws://…` or `ssh://[user@]host[:port][/socket]` (see [Hosts](hosts.md)). When omitted, Rex Rune uses the last active saved host, even with `--session` or `--new`. |
 | `--session <LABEL\|ID>` | Select a session by exact label or ID. Missing or ambiguous names never pick an arbitrary session. |
 | `--new <LABEL>` | Explicitly create a persistent session (conflicts with `--session`). Ordinary attachment never creates or destroys sessions. |
 | `--block <ID>` | Initially focus this terminal block. |
@@ -23,8 +23,15 @@ rex-rune --session work --font 'JetBrainsMono Nerd Font' --font-size 15
 | `--window-size <WxH>` | Override the saved startup size (default: the last non-maximized size, else `1440x900`); tiling compositors may override it. |
 | `--check-update` | Verify the latest signed release manifest, print channel-specific upgrade guidance, and exit without starting the UI. |
 
-Without `--session`, the workspace restores the saved host and session; on a new
-host it selects the first listed session. Rune's own developer flags go after `--`
+On first run, the default host uses `$REX_SERVER` if set, otherwise
+`unix://$XDG_RUNTIME_DIR/rex/server.sock` (or `unix:///run/user/<uid>/rex/server.sock`
+when `XDG_RUNTIME_DIR` is unset). On macOS the socket is at
+`unix://$HOME/Library/Application Support/rex/server.sock`. On Windows, set
+`REX_SERVER` on first run or pass a network endpoint; the local placeholder
+reports that Unix sockets are unavailable.
+
+A plain launch also restores the saved session for the active host. If there
+is no saved session, it selects the first listed session. Rune's own developer flags go after `--`
 (for example `-- --snap out.png`). `REX_FRAME_STATS=1` prints per-frame CPU
 percentiles.
 

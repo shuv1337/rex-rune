@@ -136,7 +136,7 @@ development](docs/building.md) for exact platform steps and
 ## Usage
 
 ```sh
-# Create a persistent session on the local Rex server.
+# Create a persistent session on the active host (local on first run).
 rex-rune --new work
 
 # Attach to an existing session by exact label or ID.
@@ -149,8 +149,9 @@ rex-rune --endpoint https://my-host.example.ts.net --session work
 rex-rune --endpoint ssh://me@my-host.example.ts.net --session work
 ```
 
-Without `--session`, the workspace restores the saved host and session. Missing
-or ambiguous session names never pick an arbitrary session. `--check-update`
+Without `--endpoint`, the workspace uses the last active saved host. Without
+`--session` or `--new`, it restores the saved session on that host. Missing or
+ambiguous session names never pick an arbitrary session. `--check-update`
 verifies the signed manifest and exits without starting the UI. The full option
 table is in [Configuration and settings](docs/configuration.md#command-line-options).
 

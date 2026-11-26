@@ -53,8 +53,10 @@ pub const DEFAULT_TAB_LABEL: &str = "Shell";
     about = "Native multi-host workspace for existing Rex servers"
 )]
 pub struct Options {
-    #[arg(long, default_value_t = transport::local_endpoint())]
-    pub endpoint: String,
+    /// Override the active host endpoint. By default, use the last active saved host,
+    /// or the default local server socket on first run.
+    #[arg(long)]
+    pub endpoint: Option<String>,
     /// Initially select a session by ID or exact label.
     #[arg(long)]
     pub session: Option<String>,

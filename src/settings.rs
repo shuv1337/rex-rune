@@ -302,10 +302,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             hosts: vec![Host {
-                label: std::fs::read_to_string("/etc/hostname")
-                    .unwrap_or_else(|_| "Local".into())
-                    .trim()
-                    .to_owned(),
+                label: local_host_label(),
                 endpoint: crate::transport::local_endpoint(),
                 remote_control: false,
                 prompts: true,
@@ -378,7 +375,14 @@ impl Settings {
             .with_context(|| format!("Unable to read {}", path.display()))?;
         let mut settings: Self = serde_json::from_value(value.clone())
             .with_context(|| format!("Unable to read {}", path.display()))?;
-        for host in &settings.hosts {
+        for host in &mut settings.hosts {
+            if host.label.trim().is_empty() {
+                host.label = if host.endpoint == crate::transport::local_endpoint() {
+                    local_host_label()
+                } else {
+                    endpoint_label(&host.endpoint)
+                };
+            }
             validate_host(&host.label, &host.endpoint)?;
         }
         ensure!(
@@ -417,6 +421,19 @@ impl Settings {
 
 pub fn hostname() -> String {
     hostname_label(&gethostname::gethostname().to_string_lossy())
+}
+
+pub fn local_host_label() -> String {
+    local_host_label_from(&gethostname::gethostname().to_string_lossy())
+}
+
+fn local_host_label_from(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        "Local".into()
+    } else {
+        name.to_owned()
+    }
 }
 
 fn hostname_label(name: &str) -> String {
@@ -480,6 +497,10 @@ pub fn validate_host(label: &str, endpoint: &str) -> Result<()> {
 /// A name for a host from its endpoint alone: the machine for a URL or SSH target, the socket
 /// path otherwise.
 pub fn endpoint_label(endpoint: &str) -> String {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return "Host".into();
+    }
     if let Ok(Some(target)) = crate::ssh::Target::parse(endpoint) {
         return target.host;
     }
@@ -495,6 +516,52 @@ pub fn endpoint_label(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_host_labels_trim_and_fall_back_when_blank() {
+        assert_eq!(local_host_label_from(""), "Local");
+        assert_eq!(local_host_label_from("  \n "), "Local");
+        assert_eq!(local_host_label_from("fedora\n"), "fedora");
+    }
+
+    #[test]
+    fn load_repairs_blank_saved_host_labels_but_still_validates_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut saved = serde_json::json!({
+            "hosts": [
+                {"label": "", "endpoint": crate::transport::local_endpoint()},
+                {"label": "", "endpoint": "ssh://user@example.ac.in"},
+                {"label": " \t ", "endpoint": "https://other.example"}
+            ]
+        });
+        std::fs::write(&path, saved.to_string()).unwrap();
+        let settings = Settings::load(&path).unwrap();
+        assert_eq!(settings.hosts[0].label, local_host_label());
+        assert_eq!(settings.hosts[1].label, "example.ac.in");
+        assert_eq!(settings.hosts[2].label, "other.example");
+
+        saved["hosts"][1]["endpoint"] = serde_json::json!(" ");
+        std::fs::write(&path, saved.to_string()).unwrap();
+        assert_eq!(
+            Settings::load(&path).err().unwrap().to_string(),
+            "Use an https://, ssh:// or unix:// endpoint"
+        );
+        assert_eq!(
+            validate_host("", "https://box").unwrap_err().to_string(),
+            "Enter a host name"
+        );
+    }
+
+    #[test]
+    fn endpoint_labels_ignore_surrounding_space_and_fall_back_when_blank() {
+        assert_eq!(endpoint_label(""), "Host");
+        assert_eq!(endpoint_label(" \t\n "), "Host");
+        assert_eq!(
+            endpoint_label(" ssh://user@example.ac.in\n"),
+            "example.ac.in"
+        );
+    }
 
     #[test]
     fn pane_padding_defaults_clamps_and_round_trips_zero() {
