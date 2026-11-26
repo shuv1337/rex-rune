@@ -27,6 +27,7 @@ fn with_modes(ws: &mut Workspace, exclusive: bool) {
                 .mode("resize"),
             Binding::new(["q"], "client.mode.exit_all").mode("resize"),
             Binding::new(["ctrl+shift+c"], "pane.copy").mode("resize"),
+            Binding::new(["ctrl+shift+c"], "client.tab.new"),
             Binding::new(["n"], "client.mode.enter")
                 .args(json!({"name":"nested"}))
                 .mode("resize"),
@@ -231,6 +232,36 @@ fn a_pending_sequence_and_a_mode_share_the_bar_in_that_order() {
         "Escape cancelled only the prefix"
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn nonexclusive_mode_copy_shadows_base_new_tab_without_a_selection() {
+    let (mut ws, host) = tabbed_workspace("single");
+    with_modes(&mut ws, false);
+    let (sender, sent) = flume::unbounded();
+    live_terminal(&mut ws, "block:a", &sender);
+    let mut rt = runtime(ws);
+    ctrl(&mut rt, Code::KeyR, 'r');
+    rt.frame(1. / 60.);
+    assert_eq!(chip_text(&rt).as_deref(), Some("resize"));
+    let copy = KeyEvent {
+        key: Key::Command('c'),
+        mods: Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::default()
+        },
+    };
+    rt.key(copy.clone());
+    rt.key_up(copy);
+    rt.frame(1. / 60.);
+    assert!(requests(&host).is_empty(), "must not open a tab");
+    let keys = sent_keys(&sent);
+    assert_eq!(keys.len(), 2);
+    for (payload, edge) in keys.iter().zip(["press", "release"]) {
+        assert_eq!(payload["action"], edge);
+        assert_eq!(payload["key"], "key_c");
+    }
 }
 
 #[test]

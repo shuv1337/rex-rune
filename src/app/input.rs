@@ -98,14 +98,6 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
         if binding.action == "linux.mode.block" {
             return !global_only;
         }
-        if binding.action == "pane.copy"
-            && binding.keys.len() == 1
-            && !global_only
-            && !in_copy
-            && !has_selection
-        {
-            return false;
-        }
         if binding
             .args
             .as_ref()
@@ -144,6 +136,20 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
             if binding.action == "linux.mode.block" {
                 s.bindings.consumed.insert(identity, true);
                 return true;
+            }
+            // Copy still shadows lower bindings when it passes the chord to the terminal.
+            if binding.action == "pane.copy"
+                && !sequence
+                && binding.keys.len() == 1
+                && !global_only
+                && !in_copy
+                && !has_selection
+            {
+                if exclusive {
+                    s.bindings.consumed.insert(identity, true);
+                    return true;
+                }
+                return false;
             }
             let mut once = false;
             if let Some(mode) = binding.mode.as_deref()

@@ -585,7 +585,22 @@ fn settings_diagnostic_sets_toast_once_per_host_never_file_or_linux() {
 
 #[test]
 fn copy_shortcut_forwards_both_edges_until_there_is_a_selection() {
-    let (mut ws, _rx) = tabbed_workspace("single");
+    check_copy_chord('c', Code::KeyC, "key_c", json!([]));
+}
+
+#[test]
+fn copy_override_shadows_new_tab_even_without_a_selection() {
+    check_copy_chord(
+        't',
+        Code::KeyT,
+        "key_t",
+        json!([{"keys":"ctrl+shift+t","action":"pane.copy"}]),
+    );
+}
+
+fn check_copy_chord(letter: char, code: Code, wire: &str, bindings: Value) {
+    let (mut ws, host) = tabbed_workspace("single");
+    overrides(&mut ws, bindings);
     let (sender, sent) = flume::unbounded();
     super::pane_verb_tests::framed_terminal(&mut ws, "block:a", &sender, b"alpha beta");
     let mut rt = runtime(ws);
@@ -593,18 +608,19 @@ fn copy_shortcut_forwards_both_edges_until_there_is_a_selection() {
     clipboard.set_text("keep");
     rt.use_clipboard(&clipboard);
     let tap_copy = |rt: &mut Runtime<Workspace>| {
-        let mut event = ctrl(Key::Command('c'));
+        let mut event = ctrl(Key::Command(letter));
         event.mods.shift = true;
         for down in [true, false] {
-            key(rt, Code::KeyC, event.clone(), down, false);
+            key(rt, code, event.clone(), down, false);
         }
     };
     tap_copy(&mut rt);
+    assert!(requests(&host).is_empty(), "no shadowed tab action");
     let keys = sent_keys(&sent);
     assert_eq!(keys.len(), 2);
     for (payload, edge) in keys.iter().zip(["press", "release"]) {
         assert_eq!(payload["action"], edge);
-        assert_eq!(payload["key"], "key_c");
+        assert_eq!(payload["key"], wire);
         assert_eq!(payload["mods"], "shift+ctrl");
     }
     assert_eq!(
@@ -626,6 +642,28 @@ fn copy_shortcut_forwards_both_edges_until_there_is_a_selection() {
         Some("alpha")
     );
     assert!(sent_keys(&sent).is_empty());
+    assert!(requests(&host).is_empty(), "only the local copy should run");
+}
+
+#[test]
+fn caps_remapped_to_escape_forwards_both_edges_to_the_terminal() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    let (sender, sent) = flume::unbounded();
+    live_terminal(&mut ws, "block:a", &sender);
+    let mut rt = runtime(ws);
+    let event = KeyEvent {
+        key: Key::Escape,
+        mods: Mods::default(),
+    };
+    for down in [true, false] {
+        key(&mut rt, Code::CapsLock, event.clone(), down, false);
+    }
+    let keys = sent_keys(&sent);
+    assert_eq!(keys.len(), 2);
+    for (payload, edge) in keys.iter().zip(["press", "release"]) {
+        assert_eq!(payload["action"], edge);
+        assert_eq!(payload["key"], "escape");
+    }
 }
 
 #[test]
