@@ -156,6 +156,46 @@ fn text(t: &str) -> Key {
 }
 
 #[test]
+fn caps_remapped_to_escape_sends_escape_on_every_edge() {
+    for (mods, name) in [(NONE, ""), (CTRL, "ctrl"), (ALT, "alt"), (SHIFT, "shift")] {
+        for (action, edge) in [
+            (Action::Press, "press"),
+            (Action::Repeat, "repeat"),
+            (Action::Release, "release"),
+        ] {
+            let p = payload(&ev(Key::Escape, mods), Some(C::CapsLock), None, action).unwrap();
+            assert_eq!(fields(&p), ("escape", name, "", "", 0));
+            assert_eq!(p["action"], edge);
+        }
+    }
+}
+
+#[test]
+fn named_keys_follow_the_layout_except_for_distinct_keypad_functions() {
+    for (key, physical, name, typed) in [
+        (Key::Backspace, C::CapsLock, "backspace", ""),
+        (Key::Tab, C::CapsLock, "tab", "\t"),
+        (Key::Enter, C::CapsLock, "enter", "\n"),
+        (Key::Delete, C::CapsLock, "delete", ""),
+        (Key::Left, C::Numpad4, "arrow_left", ""),
+        (Key::Up, C::CapsLock, "arrow_up", ""),
+        (Key::Down, C::CapsLock, "arrow_down", ""),
+        (Key::Right, C::CapsLock, "arrow_right", ""),
+        (Key::Home, C::CapsLock, "home", ""),
+        (Key::End, C::CapsLock, "end", ""),
+        (Key::PageUp, C::CapsLock, "page_up", ""),
+        (Key::PageDown, C::CapsLock, "page_down", ""),
+        (Key::Function(1), C::CapsLock, "f1", ""),
+        (Key::Enter, C::NumpadEnter, "numpad_enter", "\n"),
+        (Key::Backspace, C::NumpadBackspace, "numpad_backspace", ""),
+        (Key::Escape, C::NumpadEnter, "escape", ""),
+    ] {
+        let p = payload(&ev(key, NONE), Some(physical), None, Action::Press).unwrap();
+        assert_eq!(fields(&p), (name, "", "", typed, 0));
+    }
+}
+
+#[test]
 fn modified_keys_keep_their_modifiers_in_the_payload() {
     type Row<'a> = (
         &'a str,
@@ -165,6 +205,20 @@ fn modified_keys_keep_their_modifiers_in_the_payload() {
         (&'a str, &'a str, &'a str, &'a str, u64),
     );
     let rows: Vec<Row> = vec![
+        (
+            "layout A on physical Q",
+            ev(text("a"), NONE),
+            Some(C::KeyQ),
+            Some('a'),
+            ("key_q", "", "", "a", 97),
+        ),
+        (
+            "layout Ctrl+C on physical I",
+            ev(Key::Command('c'), CTRL),
+            Some(C::KeyI),
+            Some('c'),
+            ("key_i", "ctrl", "", "", 99),
+        ),
         (
             "Tab",
             ev(Key::Tab, NONE),

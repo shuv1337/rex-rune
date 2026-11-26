@@ -1,4 +1,4 @@
-//! Rune key events → Rex `client.key` payloads (Ghostty key names, by physical position).
+//! Rune key events → Rex `client.key` payloads (Ghostty key names).
 use rune::{Key, KeyEvent, Mods, PhysicalKeyCode};
 use serde_json::{Value, json};
 
@@ -35,8 +35,7 @@ pub fn wire_code_name(debug: &str) -> String {
     out
 }
 
-/// A logical key without a physical origin (tests, scripts) still needs a Rex name.
-fn logical_name(key: &Key) -> Option<String> {
+fn named_logical_name(key: &Key) -> Option<String> {
     Some(
         match key {
             Key::Enter => "enter",
@@ -53,19 +52,19 @@ fn logical_name(key: &Key) -> Option<String> {
             Key::Escape => "escape",
             Key::Tab => "tab",
             Key::Function(n) => return Some(format!("f{n}")),
-            Key::Text(t) if t == " " => "space",
-            Key::Command(c) => return char_name(*c),
-            Key::Text(t) => {
-                return t
-                    .chars()
-                    .next()
-                    .filter(|_| t.chars().count() == 1)
-                    .and_then(char_name);
-            }
             _ => return None,
         }
         .to_owned(),
     )
+}
+
+/// A logical key without a physical origin (tests, scripts) still needs a Rex name.
+fn logical_name(key: &Key) -> Option<String> {
+    match key {
+        Key::Command(c) => char_name(*c),
+        Key::Text(t) if t.chars().count() == 1 => t.chars().next().and_then(char_name),
+        _ => named_logical_name(key),
+    }
 }
 
 fn char_name(c: char) -> Option<String> {
@@ -151,7 +150,13 @@ pub fn payload(
     base: Option<char>,
     action: Action,
 ) -> Option<Value> {
-    let name = physical.map(code_name).or_else(|| logical_name(&ev.key))?;
+    let name = match (physical, &ev.key) {
+        // Keep distinct keypad keys when the layout hasn't remapped their function.
+        (Some(PhysicalKeyCode::NumpadEnter), Key::Enter) => "numpad_enter".into(),
+        (Some(PhysicalKeyCode::NumpadBackspace), Key::Backspace) => "numpad_backspace".into(),
+        (Some(code), key) => named_logical_name(key).unwrap_or_else(|| code_name(code)),
+        (None, key) => logical_name(key)?,
+    };
     let action = match action {
         Action::Press => "press",
         Action::Repeat => "repeat",
