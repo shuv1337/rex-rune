@@ -34,6 +34,8 @@ Rex Server API revision 24 support (`0.1.0-snapshot.2670`) with read-only OSC 75
 
 - **Lua actions no longer stall their own prompt.** The control worker keeps listening for `rex.ui` while `client.action` is pending, so it can decline or answer immediately and still apply the action's eventual response.
 
+- Cached session view labels stay in sync with `session.list` even if a rename event is dropped. Unix socket and SSH agent probes report clearer messages instead of raw OS errors ([#170](https://github.com/shuv1337/rex-rune/pull/170)).
+
 ## 0.12.0 - 2026-11-24
 
 Rex Server API revision 21 support (`0.1.0-snapshot.2562` and `0.1.0-snapshot.2563`), full shared Rex host list sync and writes (`#145`), keyboard-driven Vim copy mode (`#149`), scriptable `client.tab.mute` (`#163`), and a Wayland idle IME redraw loop fix (`#167`).

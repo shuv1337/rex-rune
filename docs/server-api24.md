@@ -77,7 +77,7 @@ On November 25, 2026 (PST), with the existing Rex process already listening,
 the client probe negotiated revision 24 against the live server:
 
 ```sh
-rex-probe --version-only unix:///run/user/$UID/rex/server.sock
+rex-probe --version-only unix:///run/user/$(id -u)/rex/server.sock
 ```
 
 Result: `Negotiated Rex API 24`; `server.version` reported
