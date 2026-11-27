@@ -619,7 +619,7 @@ impl<S> Cx<S> {
     #[inline(always)]
     pub fn safe_area(&self) -> [f32; 4] { self.core.safe_area() }
     /// The primary pointer can't hover: on the web, the browser's `(hover: none)` media query;
-    /// natively, tracks the window's primary pointer - starting `true` on touch-first postures
+    /// natively, tracks the window's primary pointer—starting `true` on touch-first postures
     /// (Windows slate mode or touchscreen without a mouse, and iOS), switching to `true` on
     /// finger touch input, and returning to `false` on mouse, trackpad, or pen input (or when
     /// leaving tablet mode). What a mouse would reveal on hover (a code block's Copy, a row's
@@ -629,7 +629,7 @@ impl<S> Cx<S> {
     pub fn hover_none(&self) -> bool { self.core.hover_none() }
     /// Whether the primary pointer is coarse touch and can't hover: on the web, the browser's
     /// `(hover: none)` and `(pointer: coarse)` media queries; natively, tracks the window's
-    /// primary pointer - starting `true` on touch-first postures (Windows slate mode or touchscreen
+    /// primary pointer—starting `true` on touch-first postures (Windows slate mode or touchscreen
     /// without a mouse, and iOS), switching to `true` on finger touch input, and returning to
     /// `false` on mouse, trackpad, or pen input (or when leaving tablet mode). Use this for
     /// touch-sized controls rather than viewport width: a narrow window can still have a mouse.

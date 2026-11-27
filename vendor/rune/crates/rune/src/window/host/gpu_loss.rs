@@ -304,7 +304,7 @@ impl Host {
 
     /// Drains updates, runs one `AppSpec::poll` (`poll_hidden`, no view rebuild/layout/draw) when
     /// woken, and applies non-GPU shell requests (`Tx::set_title`, `close_window`, `quit`,
-    /// `set_color_scheme`, clipboard) while latched - never requesting a redraw or creating a GPU.
+    /// `set_color_scheme`, clipboard) while latched—never requesting a redraw or creating a GPU.
     pub(in crate::window) fn drain_terminal(&mut self, event_loop: &ActiveEventLoop, wake: bool) {
         let _ = self.clipboard.receive_core(self.app.rt_mut());
         let _ = self.app.popup_answer(&mut self.popup) | self.file_dialog.answer_core(self.app.rt_mut());

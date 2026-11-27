@@ -448,7 +448,7 @@ impl Tx {
 
     /// Ask for `poll` to run again for work queued in state.
     ///
-    /// Called during a frame (from a handler - including a [`Tx::live_only`] handler - or from
+    /// Called during a frame (from a handler—including a [`Tx::live_only`] handler—or from
     /// `poll`), this runs one more round of that same frame's `poll` loop before the view
     /// commits (bounded by `MAX_POLL_ROUNDS` = 4). Called outside a frame (such as from
     /// [`AppHandle::update`](crate::AppHandle::update)), this schedules a poll on the next turn.

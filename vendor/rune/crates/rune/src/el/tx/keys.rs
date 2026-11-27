@@ -55,7 +55,7 @@ impl Tx {
     pub fn input_time(&self) -> Option<crate::time::Instant> { self.input_time }
 
     /// In `poll`: whether the user's input (a key, a press, the pointer, the wheel, text) is
-    /// waiting for - or was handled during - this frame. Work that can wait a frame (a background
+    /// waiting for—or was handled during—this frame. Work that can wait a frame (a background
     /// start, a cache warm-up) waits, so the input's frame (including any same-frame follow-up
     /// `poll` after handlers) comes without it. False everywhere else.
     pub fn input_waiting(&self) -> bool { self.input_waiting }

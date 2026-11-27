@@ -29,8 +29,8 @@ use std::cell::RefCell;
 /// # Callback contracts
 ///
 /// - **`pending`**: runs on the UI thread to check whether the queue already has unread events in
-///   memory. It must be cheap, non-blocking, and syscall-free - for `wayland-client`,
-///   `queue.prepare_read().is_none()` (immediately dropping the returned `ReadEventsGuard`) - and
+///   memory. It must be cheap, non-blocking, and syscall-free — for `wayland-client`,
+///   `queue.prepare_read().is_none()` (immediately dropping the returned `ReadEventsGuard`) — and
 ///   must return `false` once `dispatch` has drained the queue.
 /// - **`dispatch`**: runs on the UI thread in the same turn whenever `pending()` returned `true`.
 ///   It must never block, never read the Wayland socket (no `blocking_dispatch` or `read_events`),

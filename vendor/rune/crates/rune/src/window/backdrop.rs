@@ -41,7 +41,7 @@
 ///   Contrast mode, or when Transparency Effects are turned off in Windows Settings. Because this
 ///   is Windows' own rendering behaviour, [`Cx::window_backdrop`](crate::Cx::window_backdrop)
 ///   still reports the active variant (and `is_active()` stays `true`) once DWM accepts the
-///   attribute - including on a non-activating window or overlay (`KeyPolicy::None`) that never
+///   attribute—including on a non-activating window or overlay (`KeyPolicy::None`) that never
 ///   takes focus and therefore never shows the live material. Pair `cx.window_backdrop()` with
 ///   [`App::on_focus`](crate::App::on_focus) or
 ///   [`El::on_window_focus`](crate::El::on_window_focus) if your view needs to tell "backdrop
@@ -53,8 +53,8 @@
 ///   absent (KDE Plasma 5.x–6.6.x). Works on transparent GPU toplevel windows, toplevel-fallback
 ///   overlays, and `zwlr_layer_shell_v1` overlays, approximating `sctk-adwaita` rounded bottom
 ///   corners in surface-local logical coordinates. Neither Wayland protocol ties blur to keyboard
-///   focus - the blur region is surface-attached state and compositors such as KWin blur mapped
-///   unfocused windows and layer-shell overlays alike - though the blur algorithm and any focus
+///   focus—the blur region is surface-attached state and compositors such as KWin blur mapped
+///   unfocused windows and layer-shell overlays alike—though the blur algorithm and any focus
 ///   rules remain subject to compositor policy (and disabling a compositor's blur effect revokes
 ///   `Capability::Blur` at runtime). Unlike Windows Mica/Acrylic (which paint DWM's own tint
 ///   behind [`Color::TRANSPARENT`](crate::Color::TRANSPARENT)), Wayland blur is untinted: views

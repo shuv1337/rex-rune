@@ -1,6 +1,6 @@
 //! Issue #2389: a drag that starts and ends inside a link in static text must not fire
 //! `on_link`; once pointer travel crosses the click/touch drag threshold (`CLICK_SLOP = 4.0` pt
-//! per axis for mouse, `TOUCH_SLOP = 8.0` pt Euclidean for touch), the press becomes a drag -
+//! per axis for mouse, `TOUCH_SLOP = 8.0` pt Euclidean for touch), the press becomes a drag —
 //! dropping the link's pressed look, suppressing `on_link` on release (even if the pointer
 //! returns to the start), and starting text selection when `selectable(true)`.
 

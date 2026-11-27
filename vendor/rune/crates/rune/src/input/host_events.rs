@@ -758,9 +758,9 @@ pub(crate) fn sync_ime(window: &Window, rt: &mut RuntimeCore, ime_state: &mut Im
 /// Samples OS accessibility preferences (reduced motion, contrast theme, increased contrast,
 /// full keyboard access, and Linux double-click interval) onto `rt`.
 ///
-/// Called on window and overlay construction and before reveal so non-activating hosts - which never
+/// Called on window and overlay construction and before reveal so non-activating hosts—which never
 /// receive `WindowEvent::Focused` and have no native handle to hear `WM_SETTINGCHANGE` before
-/// creation or while parked - reflect current preferences on their first draw.
+/// creation or while parked—reflect current preferences on their first draw.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn refresh_accessibility_preferences(rt: &mut RuntimeCore) {
     rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());

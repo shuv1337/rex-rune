@@ -173,7 +173,7 @@ impl ClipboardImage {
     }
     /// Straight-alpha sRGB RGBA8 pixels (`width * height * 4` bytes, rows top first), encoded
     /// synchronously as PNG on the calling thread (required because [`Self::png`] is
-    /// synchronous; large images can take seconds - e.g. ~3.3 s for a 4000×3000 photo). Returns
+    /// synchronous; large images can take seconds—e.g. ~3.3 s for a 4000×3000 photo). Returns
     /// `None` when the length doesn't match, a side is zero, the image passes 64 megapixels, or
     /// its PNG passes [`MAX_IMAGE_BYTES`]. To copy an image an [`ImageCache`](crate::ImageCache)
     /// decoded without blocking the event thread, use [`Tx::copy_image`](crate::Tx::copy_image)

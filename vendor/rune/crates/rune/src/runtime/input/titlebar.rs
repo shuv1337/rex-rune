@@ -170,6 +170,7 @@ pub(in crate::runtime) enum Event {
     Region { now: f64, point: (f32, f32), interval: f64, defer: bool },
     /// The pointer moved to `point` while a deferred press may be held.
     Move { point: (f32, f32) },
+    /// The pointer moved in a native top-level window, where a drag starts past 3 pt on either axis.
     NativeMove { point: (f32, f32) },
     /// The primary pointer button was released.
     Release,

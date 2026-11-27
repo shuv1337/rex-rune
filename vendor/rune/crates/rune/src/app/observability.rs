@@ -111,7 +111,7 @@ impl<S: 'static> App<S> {
     ///
     /// Reports only non-sensitive timing and routing metadata
     /// ([`WindowKeyEvent`](crate::WindowKeyEvent): receipt time, platform `input_time`,
-    /// press/release, `repeat`, and whether a control had focus) - never key identity or text.
+    /// press/release, `repeat`, and whether a control had focus) — never key identity or text.
     /// Pair with [`App::on_frame_stage`], [`App::on_frame_encoded`], and
     /// [`App::on_frame_presented`] to separate OS/winit delivery, queueing, runtime/text work,
     /// and presentation latency. Zero-cost when unset.

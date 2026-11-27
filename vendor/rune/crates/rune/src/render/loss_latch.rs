@@ -1,7 +1,7 @@
 //! Terminal GPU failure policy ([`GpuLossPolicy`]) and explicit first-reason latch state machine
 //! ([`LatchState`], [`LatchEvent`], [`LatchEffect`], [`step`], [`GpuLossLatch`]).
 //!
-//! Recovery ([`GpuLossPolicy::Recover`]) remains Rune's default - mirroring Chromium's bounded GPU
+//! Recovery ([`GpuLossPolicy::Recover`]) remains Rune's default—mirroring Chromium's bounded GPU
 //! restarts with hardware-to-software fallback. Apps whose embedded renderer owns GPU resources
 //! that cannot silently migrate to a replacement device opt into [`GpuLossPolicy::Terminal`],
 //! matching WebGL's permanent context loss without `preventDefault()`, WebGPU's permanent

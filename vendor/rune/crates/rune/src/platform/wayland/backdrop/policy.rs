@@ -48,9 +48,9 @@ pub(crate) const fn ext_capabilities_has_blur(raw_bits: u32) -> bool {
 
 /// Chooses the display's Wayland blur protocol from advertised registry globals.
 ///
-/// Prefers `ext_background_effect_manager_v1` whenever it is present in the registry - even if
+/// Prefers `ext_background_effect_manager_v1` whenever it is present in the registry — even if
 /// its `capabilities` bitfield currently omits `blur` (for example when the user disabled KWin's
-/// Blur desktop effect) - and falls back to `org_kde_kwin_blur_manager` only when
+/// Blur desktop effect) — and falls back to `org_kde_kwin_blur_manager` only when
 /// `ext_background_effect_manager_v1` is absent.
 #[inline]
 pub(crate) const fn choose_protocol(

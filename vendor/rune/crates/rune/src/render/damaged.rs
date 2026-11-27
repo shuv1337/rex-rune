@@ -39,7 +39,7 @@ pub(crate) enum KeptDraw {
     /// The kept frame was already current, so only the armed rectangles were redrawn and the
     /// swap chain may present only those rectangles (`Present1` dirty rects on Windows).
     Partial,
-    /// The kept frame was behind (first frame, or the previous frame drew whole - e.g. with a
+    /// The kept frame was behind (first frame, or the previous frame drew whole — e.g. with a
     /// native surface, blur, effect or turned layer): the whole frame was drawn into the kept
     /// frame to bring it current, so the swap chain must present the whole window on this frame.
     Whole,

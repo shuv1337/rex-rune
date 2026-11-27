@@ -100,7 +100,7 @@ fn shift_arrows_extend_shrink_repeat_and_cross_anchor_on_plain_selectable_text()
     rt.use_clipboard(&board);
     rt.frame(0.0);
 
-    // Drag across "world" (bytes 6..11) - or select it via mouse drag from near byte 6 to byte 11.
+    // Drag across "world" (bytes 6..11) — or select it via mouse drag from near byte 6 to byte 11.
     // Use Tx::select_text first to confirm exact byte indices, then verify drag too.
     rt.update(|_, tx| tx.select_text("t", 6..11));
     rt.frame(0.0);

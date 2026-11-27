@@ -168,9 +168,9 @@ impl RuntimeCore {
     }
 
     /// A hidden or covered host's due timer or wake. `poll` and due timers run now; the view
-    /// and layout wait, dirty, for the frame that shows the host. Queued input and drag ends -
+    /// and layout wait, dirty, for the frame that shows the host. Queued input and drag ends—
     /// whether already waiting at entry or queued by `poll` (such as `Tx::send_key`,
-    /// `Play::press`, or a paste) - take a zero-dt frame without drawing (`hidden_timer_frame`)
+    /// `Play::press`, or a paste)—take a zero-dt frame without drawing (`hidden_timer_frame`)
     /// so their handlers hear them in this same wake with the poll's clock, then drain chained
     /// input through [`drain::drain_turn`]. Returns whether the last drawn frame went out of date.
     pub(crate) fn hidden_wake(&mut self, app: &mut dyn AppDriver) -> bool {

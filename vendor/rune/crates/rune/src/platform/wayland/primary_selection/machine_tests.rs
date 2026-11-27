@@ -123,7 +123,7 @@ fn source_replacement_ignores_stale_cancelled_and_serves_retired_source_until_ca
     );
     step(&mut s, Event::WriterFinished);
 
-    // Out-of-order stale Cancelled(1) destroys source 1 ONLY - must NOT emit SelectionLost or
+    // Out-of-order stale Cancelled(1) destroys source 1 ONLY — must NOT emit SelectionLost or
     // clear active source 2.
     assert_eq!(
         step(&mut s, Event::SourceCancelled { source_id: 1 }),

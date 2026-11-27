@@ -399,7 +399,7 @@ impl<T: 'static> ConfiguredOverlay<T> {
     ///
     /// Each show and prewarm measures what changed while hidden (at the target monitor's scale
     /// and active [`RendererKind`](crate::RendererKind), clamped to [`Self::min_size`],
-    /// [`Self::max_size`], and the target display's sizing bounds - on Windows,
+    /// [`Self::max_size`], and the target display's sizing bounds — on Windows,
     /// [`Display::work_area`](crate::Display::work_area) for edge placements and full display
     /// bounds for [`OverlayPlacement::Rect`], matching placement coordinates; full display
     /// bounds elsewhere) without committing, so the first frame
@@ -534,7 +534,7 @@ impl<T: 'static> ConfiguredOverlay<T> {
     /// By Microsoft design, Windows 11 draws Mica, Mica Alt, and Desktop Acrylic only while the
     /// window is the foreground window and shows its own flat solid fallback otherwise. A
     /// non-activating overlay ([`KeyPolicy::None`]) never takes focus and therefore never shows
-    /// the live material - even while `cx.window_backdrop().is_active()` is `true`. Pair with
+    /// the live material—even while `cx.window_backdrop().is_active()` is `true`. Pair with
     /// [`Self::on_focus`] (on a key-taking overlay) to tell "active and focused" from "active".
     ///
     /// ```no_run

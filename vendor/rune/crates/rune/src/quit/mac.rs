@@ -3,7 +3,7 @@
 //! method to the delegate's class once (as `platform::reopen` does for reopening).
 //!
 //! When no live host registers `App::on_quit_request` (or a quit is already under way), the
-//! delegate marks the app quitting and returns `NSTerminateNow` immediately - bit-identical to
+//! delegate marks the app quitting and returns `NSTerminateNow` immediately — bit-identical to
 //! an app without the hook. When at least one live host registers `App::on_quit_request`, the
 //! delegate steps `quit::request` to `Asking`, wakes the event loop with `WakeEvent::QuitRequest`,
 //! and returns `NSTerminateLater`. AppKit enters `NSModalPanelRunLoopMode`, where winit's

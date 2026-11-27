@@ -92,7 +92,7 @@ impl RuntimeCore {
     }
 
     /// A primary press on `target` (None: on nothing). On selectable text it starts a selection
-    /// (one click places it - or arms waiting for drag slop on an inline link - two select a word,
+    /// (one click places it — or arms waiting for drag slop on an inline link — two select a word,
     /// three a paragraph, and Shift extends the current one into another text of its group).
     /// Anywhere else it clears the selection.
     pub(in crate::runtime) fn selection_down(&mut self, target: Option<usize>, x: f32, y: f32) {

@@ -530,7 +530,7 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         }
         recordTouchTimestamp(false, event);
     };
-    // Release pressedPointers in window bubble phase - AFTER winit's target-phase listener on
+    // Release pressedPointers in window bubble phase — AFTER winit's target-phase listener on
     // canvas has already read offsetX/offsetY and completed the press. (A microtask queued from
     // capture phase runs at the per-listener microtask checkpoint BEFORE canvas's listener.)
     const bubblePointerEnd = event => {

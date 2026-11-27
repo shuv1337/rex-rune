@@ -2,7 +2,7 @@
 //!
 //! A surface created with an explicit `output_id` stays pinned to that global name. One created
 //! with no output lets the compositor place it and tracks `wl_surface.enter` / `wl_surface.leave`
-//! so it knows which output it is on now - or left most recently, when the compositor sends `leave`
+//! so it knows which output it is on now—or left most recently, when the compositor sends `leave`
 //! right before unplugging the output.
 
 /// Output ownership for a Wayland layer surface.

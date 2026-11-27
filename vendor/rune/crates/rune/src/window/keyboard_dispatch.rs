@@ -4,8 +4,8 @@
 ///
 /// By default ([`KeyboardDispatch::Batched`]), native hosts queue keyboard events into the
 /// runtime action queue and drain them on the next display-paced frame. For latency-sensitive
-/// native apps - where a control key needs to update authoritative state, send a command, or start
-/// a state machine before the next vblank - [`KeyboardDispatch::Immediate`] drains queued keyboard
+/// native apps—where a control key needs to update authoritative state, send a command, or start
+/// a state machine before the next vblank—[`KeyboardDispatch::Immediate`] drains queued keyboard
 /// input immediately on receipt without acquiring, encoding, or presenting a drawable; visual
 /// updates still wait for normal frame pacing.
 ///

@@ -298,7 +298,7 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     native or Wayland-blur `SystemMaterial`, image pixels or focused text input, the subtree
     bypasses the cache and draws live, then re-caches once settled. A subtree holding a
     fallback-only `El::system_material` (native and Wayland blur modes off) stays cached and replays
-    its recorded material rects - translated and scaled with the cached layer - into
+    its recorded material rects—translated and scaled with the cached layer—into
     `Runtime::system_materials` and `ConfiguredOverlay::on_materials` when reused.
   - **Scale and budget:** while an ancestor's live scale or scale spring is changing without view
     commits, the existing cached texture is composited with clamped bilinear filtering and
@@ -1240,7 +1240,7 @@ Staying fast afterwards is "Fast apps" (`site/src/FastApps.tsx`) and "Smooth scr
   unused images, dormant scene slots, oversized node/paint/memo buffers, and spare GPU targets,
   then runs `App::on_rest`. On Linux with glibc, freed arena chunks stay resident in `VmRSS`
   until trimmed, so after rest finishes its releases Rune calls `malloc_trim(0)` once off the UI
-  thread on its shared task pool - coalesced across resting windows and overlays with a 30 s
+  thread on its shared task pool—coalesced across resting windows and overlays with a 30 s
   cooldown and never on a periodic idle timer. Because glibc holds each arena's lock while
   trimming it, a thread allocating in the same arena during a large trim can pause for ~7 ms on a
   ~206 MiB freed heap and ~14 ms on a ~387 MiB freed heap (more than one 120 Hz frame at 8.3 ms);
@@ -1673,14 +1673,14 @@ rune::App::new(spec).fit_content_height().run();
   default 400 pt.
 - Overlays ignore these (`Tx::resize_window` included); use `OverlayHandle::resize`, or
   `ConfiguredOverlay::sizing(ContentSizing)` (`Fixed`, `Fit`, `FitHeight`, `FitWidth`) with
-  optional `min_size((w, h))` / `max_size((w, h))` - or `ConfiguredOverlay::fit_content_height()`
-  as shorthand for `ContentSizing::FitHeight` - for an overlay whose size follows its content
+  optional `min_size((w, h))` / `max_size((w, h))` — or `ConfiguredOverlay::fit_content_height()`
+  as shorthand for `ContentSizing::FitHeight` — for an overlay whose size follows its content
   (a candidate list, a horizontal IME bar, a HUD). Fitted axes are measured before each show
   and prewarm (at the target monitor's scale and active `RendererKind`, clamped to `min_size`,
-  `max_size`, and the display's sizing bounds - on Windows, `Display::work_area()` for edge
+  `max_size`, and the display's sizing bounds — on Windows, `Display::work_area()` for edge
   placements and full display bounds for `OverlayPlacement::Rect`, matching placement
   coordinates; full display bounds elsewhere; pass `max_size` from `Display::work_area()` if
-  a content-sized `Rect` overlay should stay within the work area - with text wrapping at
+  a content-sized `Rect` overlay should stay within the work area — with text wrapping at
   `max_size.0`), so its first
   frame draws at the exact content size with no flash. While shown, a content size change
   resizes and re-places the overlay before painting in the same frame (no spring; on Wayland
@@ -1733,8 +1733,8 @@ rune::App::new(spec).fit_content_height().run();
   wherever the platform or window manager does not report a fact. Reading views and their `memo`
   closures rebuild automatically on change, while views that never read them do no extra work.
   On Linux Wayland, Rune reads `xdg-decoration` and `xdg_toplevel` configure state gated by
-  protocol version (`>= 2` for tiled edges - reporting the exact `TILED_*` states the compositor
-  sends, so extensions tiling via vertical maximize report only top and bottom - `>= 5` for
+  protocol version (`>= 2` for tiled edges — reporting the exact `TILED_*` states the compositor
+  sends, so extensions tiling via vertical maximize report only top and bottom — `>= 5` for
   `wm_capabilities` combined with window resizability for `maximize`, and `close: Some(true)` once
   configured, matching GTK4) and wakes on decoration-mode or capability changes without a resize;
   on Linux X11, Rune reads `_NET_FRAME_EXTENTS` (preserving the non-fullscreen mode during and
@@ -2882,7 +2882,7 @@ row().key("theme").child(text(theme_title(&s.theme)))
   `item_corner_radius`, each unset one keeping its default. Submenus use the top menu's style
   (their own isn't used or shown in `--tree`); keyboard, pointer and screen-reader use don't
   change, and native menus ignore it.
-- **Default link context menu**: right-clicking (or pressing Menu / Shift+F10, or long-pressing on touch) an inline `Link` span with a real address - explicit `Link::href(url)`, or an `id` passing `http:`/`https:`/`mailto:` - shows **Open Link** (when `on_link` is set) and **Copy Link** (`Label::OpenLink`, `Label::CopyLink`), followed by a separator and **Copy** on selectable text, without selecting a word on macOS. Bare internal ids, `role("button")` chips, non-openable schemes, and redacted text never get the default menu; `El::on_link_secondary` and any element or ancestor `El::on_secondary_press` win when set. Pass `El::link_menu(false)` (or `Markdown::link_menu(false)`) to opt out. On the web, mouse right-click still hands off to the browser's `<a href>` menu; on Linux it flows through the same popup queue so an in-window fallback renders it.
+- **Default link context menu**: right-clicking (or pressing Menu / Shift+F10, or long-pressing on touch) an inline `Link` span with a real address—explicit `Link::href(url)`, or an `id` passing `http:`/`https:`/`mailto:`—shows **Open Link** (when `on_link` is set) and **Copy Link** (`Label::OpenLink`, `Label::CopyLink`), followed by a separator and **Copy** on selectable text, without selecting a word on macOS. Bare internal ids, `role("button")` chips, non-openable schemes, and redacted text never get the default menu; `El::on_link_secondary` and any element or ancestor `El::on_secondary_press` win when set. Pass `El::link_menu(false)` (or `Markdown::link_menu(false)`) to opt out. On the web, mouse right-click still hands off to the browser's `<a href>` menu; on Linux it flows through the same popup queue so an in-window fallback renders it.
 - **Opt-in image context menu**: attach `El::image_menu(ImageMenu::new(&img).save_bytes(..).file_name(..).address(..))` (or `.save_path(..)`) to any image element (`El::pixels` / `El::pixels_fit`, or inside `rune_kit::Markdown::image_frame`). Shows **Save Image As…** (native only, omitted on `wasm32` where `Tx::save_file` is unsupported; writes original bytes/file verbatim on a background thread so SVG and animated images stay intact), **Copy Image** (off-thread PNG encode via `Tx::copy_image_then`, disabled while pending/failed/over 64 MP, leaving the clipboard untouched and announcing/logging on error), and **Copy Image Address** (when `address` passes `http:`/`https:`/`mailto:`), localisable via `Label::{SaveImageAs, CopyImage, CopyImageAddress}`. Plain image elements get no menu by default; an element's own `on_secondary_press` wins, while explicit `El::image_menu` wins over an ancestor's `on_secondary_press`. When an opted-in image sits inside an `El::href` link, the menu shows the link items, a separator, and the image items. On Linux it flows through the same `Popups` queue so the in-window fallback renders it.
 - **Headless**: `--tree` has a `popupMenu` object (items, anchor, `selected`, `queued`, and
   `style` when set) while a menu is open, and `--trace` notes `popup-menu:open`, `popup-menu:pick:{id}` and
@@ -3921,8 +3921,8 @@ default, `Mica`, `MicaAlt`, `Acrylic`, `Blur`), configured with `App::window_bac
   non-activating `KeyPolicy::None` overlays, which never take focus and never show the live
   material); apps wanting their own unfocused fill can pair `cx.window_backdrop().is_active()`
   with `App::on_focus` or `El::on_window_focus`. On Wayland, neither `ext_background_effect_v1`
-  nor `org_kde_kwin_blur_manager` couples blur to focus - compositors such as KWin blur mapped
-  unfocused windows and layer-shell overlays alike - though blur appearance remains subject to
+  nor `org_kde_kwin_blur_manager` couples blur to focus—compositors such as KWin blur mapped
+  unfocused windows and layer-shell overlays alike—though blur appearance remains subject to
   compositor policy.
 - **No transparent holes**: on Windows builds before 22621, X11/XWayland, unsupported Wayland
   compositors (or when blur capability is revoked), opaque windows, `DxgiFromHwnd`, the CPU

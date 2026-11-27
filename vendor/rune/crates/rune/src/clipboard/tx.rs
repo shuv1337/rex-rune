@@ -61,7 +61,7 @@ impl Tx {
     /// Copy an image an [`ImageCache`](crate::ImageCache) decoded as PNG, encoded off the event
     /// thread on the clipboard worker (on the web, encoded off the main thread in a Web Worker
     /// over `CompressionStream("deflate")` inside a `ClipboardItem` `Promise<Blob>` created
-    /// during the user gesture - Chrome 80+, Firefox 113+, Safari 16.4+; time-sliced async
+    /// during the user gesture—Chrome 80+, Firefox 113+, Safari 16.4+; time-sliced async
     /// `CompressionStream` if CSP blocks `blob:` workers; synchronous Rust fallback on older
     /// browsers without `CompressionStream`), with no second decode.
     ///
