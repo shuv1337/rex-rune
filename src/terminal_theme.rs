@@ -303,7 +303,10 @@ selection-foreground = #1e1e2e
 
     #[test]
     fn midnight_declares_the_navy_and_dark() {
-        assert_eq!(args(&TerminalTheme::midnight())["background"], "#001528");
+        assert_eq!(
+            args(&TerminalTheme::midnight()),
+            json!({"background":"#001528", "scheme":"dark"})
+        );
         assert_eq!(
             args(&TerminalTheme::default()),
             json!({}),
@@ -425,9 +428,14 @@ selection-foreground = #1e1e2e
                 .unwrap()
                 .unwrap();
             assert_eq!(theme, builtin.theme());
-            assert_eq!(theme.palette.len(), 16);
-            assert!(theme.cursor.is_some() && theme.cursor_text.is_some());
-            assert!(theme.selection_foreground.is_some() && theme.selection_background.is_some());
+            let declares_ansi = chrome != ChromeTheme::Midnight;
+            let declares_local_colors = declares_ansi && chrome != ChromeTheme::GruvboxDark;
+            assert_eq!(theme.palette.len(), if declares_ansi { 16 } else { 0 });
+            assert_eq!(theme.foreground.is_some(), declares_ansi);
+            assert_eq!(theme.cursor.is_some(), declares_ansi);
+            assert_eq!(theme.cursor_text.is_some(), declares_local_colors);
+            assert_eq!(theme.selection_foreground.is_some(), declares_local_colors);
+            assert_eq!(theme.selection_background.is_some(), declares_local_colors);
             assert_eq!(serde_json::to_value(&chrome).unwrap(), chrome.id());
             assert_eq!(ChromeTheme::from_id(chrome.id()), chrome);
             assert_eq!(
@@ -464,11 +472,18 @@ selection-foreground = #1e1e2e
             ),
             (Some(0x282828), Some(0xebdbb2), 16)
         );
-        assert_eq!(
-            gruvbox.selection_background,
-            Some(0x504945),
-            "the chrome's selection"
-        );
+        assert_eq!(gruvbox.selection_background, None, "the chrome's selection");
+    }
+
+    #[test]
+    fn latte_cursor_and_selected_text_are_legible() {
+        let latte = builtin("rex/catppuccin_latte").unwrap().theme();
+        for (paper, ink) in [
+            (latte.cursor, latte.cursor_text),
+            (latte.selection_background, latte.selection_foreground),
+        ] {
+            assert!(crate::color::contrast(paper.unwrap(), ink.unwrap()) >= 4.5);
+        }
     }
 
     #[test]

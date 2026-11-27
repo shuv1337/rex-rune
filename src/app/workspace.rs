@@ -1749,9 +1749,9 @@ impl Workspace {
             Intent::ChooseChrome => {
                 self.open_panel(PanelKind::Chromes, "Theme", &[("", "Filter themes…", "")]);
                 if let Some(current) = self.entries().iter().position(|e| e.current) {
-                    let panel=self.panel.as_mut().unwrap();
-                    panel.selected=current;
-                    panel.reveal=true;
+                    let panel = self.panel.as_mut().unwrap();
+                    panel.selected = current;
+                    panel.reveal = true;
                 }
             }
             Intent::ChooseSshAgent => self.open_ssh_agents(),

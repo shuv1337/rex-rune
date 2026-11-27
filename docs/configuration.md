@@ -52,12 +52,13 @@ Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json`
   vertical padding (`interface.pane_padding_vertical`; absent follows the legacy
   horizontal value on all four sides);
 - terminal font family (`font_family`), ordered fallback families
-  (`font_fallbacks`), font size, the chrome palette (`chrome_theme`:
-  `"midnight"`, `"rose_pine"`, `"rose_pine_moon"` or `"gruvbox_dark"`; an unknown
-  value is Midnight), the terminal theme (`terminal_theme`: `"follow_server"`,
+  (`font_fallbacks`), font size, the chrome palette (`chrome_theme`: one of the
+  50 [built-in palette IDs](#themes), such as `"s2-dark"` or `"catppuccin_latte"`;
+  the default and fallback for unknown IDs is `"midnight"`), the terminal theme
+  (`terminal_theme`: `"follow_server"`,
   `"builtin_default"` for Rex's own colours, `"follow_chrome"`, or
-  `"named:<name>"` with `rex/midnight`, `rex/rose-pine`, `rex/rose-pine-moon`,
-  `rex/gruvbox-dark` or a Ghostty theme's file name), whether you have picked a
+  `"named:rex/<id>"` for a paired terminal theme, or `"named:<name>"` for a
+  Ghostty theme's file name), whether you have picked a
   terminal theme yourself (`terminal_theme_chosen`) and whether this client has
   ever declared one (`terminal_theme_declared`);
 - interface zoom (`ui_scale`), the corner notices appear in (`notice_position`),
@@ -274,9 +275,13 @@ limits](parity-2026-11/M2.8-tab-fill.md).
 
 ## Themes
 
-Chrome palettes (Settings → Interface → Theme): **Midnight** (the default), **Rosé
-Pine**, **Rosé Pine Moon** and **Gruvbox Dark**, all dark, applied at once without
-restarting. Each pairs with a built-in terminal theme of the same name whose
+Settings → Interface → Theme offers **35 dark and 15 light** chrome palettes:
+**S2Code Dark** (`s2-dark`), the four classics (Midnight, Rosé Pine, Rosé Pine Moon
+and Gruvbox Dark), all four Catppuccin flavours and 41 Rex macOS palettes. Search
+by name or ID; the swatches show the canvas and accent. The
+[built-in catalogue](../src/chrome_theme/catalog.rs) lists each chrome ID,
+terminal ID and display name in that order. Midnight is the default.
+Choosing a palette applies it immediately. Each pairs with a terminal theme whose
 background is the chrome's ground. Until you pick a terminal theme yourself,
 choosing a palette moves the terminal theme from Follow server to **Follow
 chrome**, which declares the palette's paired theme to the server as below; a
@@ -285,8 +290,11 @@ terminal theme you picked is left alone.
 Terminal themes (Settings → Terminal → Theme). **Follow server**, the default,
 declares nothing and shows whatever colours the server has, as long as this client
 has never declared a theme. **Rex default colours**, **Follow chrome** (the chrome
-palette's paired theme), the built-in **Midnight**, **Rosé Pine**, **Rosé Pine
-Moon** and **Gruvbox Dark**, or any Ghostty theme file are declared to the server
+palette's paired theme), any of the 50 built-ins, or a Ghostty theme file can
+be declared. To pin a built-in independently of the chrome, use `named:rex/<id>`,
+for example `named:rex/catppuccin_latte` or `named:rex/merino-light`. The ID is
+the chrome ID except for `rose_pine`, `rose_pine_moon` and `gruvbox_dark`, whose
+terminal IDs use hyphens instead of underscores. Themes are sent to the server
 with Rex's `set_theme`, which the server applies to panes this client owns or
 nobody owns; while another client owns a pane, the server keeps that client's
 colours and applies ours when this client takes the pane. New tabs and splits are

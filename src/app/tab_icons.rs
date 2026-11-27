@@ -116,10 +116,14 @@ pub fn glyph_tint(tint: u32, dark: bool) -> u32 {
         return tint;
     }
     use rex_rune::color::{luminance, srgb_decode, srgb_encode};
-    let scale = 0.14 / luminance(tint);
+    let lum = luminance(tint);
+    if lum <= 0. {
+        return tint;
+    }
+    let scale = 0.14 / lum;
     [16, 8, 0].into_iter().fold(0, |c, s| {
         let v = srgb_decode(((tint >> s) & 255) as f32 / 255.);
-        c | (((srgb_encode(v * scale) * 255.).round() as u32) << s)
+        c | (((srgb_encode((v * scale).clamp(0., 1.)) * 255.).round() as u32) << s)
     })
 }
 

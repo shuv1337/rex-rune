@@ -94,7 +94,9 @@ pub fn palette_of(chrome: &ChromeTheme) -> Arc<Palette> {
         .expect("validated built-in chrome ID");
     PALETTES[index].clone()
 }
-thread_local! {static ACTIVE: RefCell<Arc<Palette>> = RefCell::new(MIDNIGHT.clone());}
+thread_local! {
+    static ACTIVE: RefCell<Arc<Palette>> = RefCell::new(MIDNIGHT.clone());
+}
 pub fn palette() -> Arc<Palette> {
     ACTIVE.with_borrow(Arc::clone)
 }

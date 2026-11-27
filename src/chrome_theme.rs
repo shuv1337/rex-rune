@@ -79,23 +79,23 @@ pub struct Builtin {
     pub id: &'static str,
     pub name: &'static str,
     pub palette: PaletteSpec,
-    terminal: [u32; 5],
-    ansi: [u32; 16],
+    // Trailing roles left out of a preset retain Rex's defaults.
+    terminal: &'static [u32],
+    ansi: &'static [u32],
 }
 impl Builtin {
     pub fn scheme(&self) -> &'static str {
         if self.palette.dark { "dark" } else { "light" }
     }
     pub fn theme(&self) -> TerminalTheme {
-        let [fg, cursor, cursor_text, sel_bg, sel_fg] = self.terminal;
         TerminalTheme {
             background: Some(self.palette.ground),
-            foreground: Some(fg),
-            cursor: Some(cursor),
-            cursor_text: Some(cursor_text),
-            selection_background: Some(sel_bg),
-            selection_foreground: Some(sel_fg),
-            palette: (0..).zip(self.ansi).collect(),
+            foreground: self.terminal.first().copied(),
+            cursor: self.terminal.get(1).copied(),
+            cursor_text: self.terminal.get(2).copied(),
+            selection_background: self.terminal.get(3).copied(),
+            selection_foreground: self.terminal.get(4).copied(),
+            palette: (0..).zip(self.ansi.iter().copied()).collect(),
             scheme: Some(self.scheme()),
         }
     }

@@ -107,7 +107,7 @@ pub fn pill(
             row()
                 .linear_gradient(1.9, [(0., rgb(accent())), (1., rgb(palette().button_end))])
                 .box_shadow(shadow(0., 6., 18., rgb(accent()).alpha(0.25)))
-                .box_shadow(inset(1., tint(0.35))),
+                .box_shadow(inset(1., Color::WHITE.alpha(0.35))),
         ),
         Pill::Neutral => (rgb(ink()), chip(row()).hover(tint(0.09))),
         Pill::Danger => (

@@ -375,7 +375,7 @@ fn new_session(s: &Workspace, index: usize) -> El {
         .radius(8.)
         .continuous_corners()
         .fill(tint(0.04))
-        .box_shadow(inset(1., tint(0.06)))
+        .box_shadow(inset(1., rune::Color::WHITE.alpha(0.06)))
         .hover(tint(0.08))
         .press(tint(0.12))
         .cursor(Cursor::Pointer)

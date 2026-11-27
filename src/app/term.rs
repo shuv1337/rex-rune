@@ -1665,7 +1665,7 @@ impl TermColors {
 
     /// What the server's default background `frame_bg` draws as: `frame_bg` when a program
     /// chose it (`from_program`) and `keep_program_background` is on; otherwise `background`
-    /// when both are equally dark or light (Rex's built-in drop_shadow, or another owner's theme),
+    /// when both are equally dark or light (Rex's built-in black, or another owner's theme),
     /// so a single pane reads as one surface with the chrome; otherwise the server's own, so
     /// the default text drawn for it stays readable. Only that exact colour is replaced, so
     /// explicit backgrounds and inverse video's block keep theirs.

@@ -402,6 +402,12 @@ fn colour_search_anchored_keyboard_save_relaunch_and_inert_count_preview() {
     }
 }
 
+#[test]
+fn light_glyph_tint_does_not_overflow_into_another_channel() {
+    assert_eq!(glyph_tint(0, false), 0);
+    assert_eq!(glyph_tint(0x000001, false), 0x0000ff);
+}
+
 /// Actual tab, header and preview surfaces are composited in encoded sRGB.
 #[test]
 fn glyph_tints_contrast_on_supported_tab_and_preview_surfaces() {

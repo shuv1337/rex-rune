@@ -885,7 +885,7 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     );
     assert_eq!(
         sent[0].2["layout"]["block"]["options"],
-        serde_json::json!({"shell":"fish","theme":rex_rune::terminal_theme::TerminalTheme::midnight().args()}),
+        serde_json::json!({"shell":"fish","theme":{"background":"#001528","scheme":"dark"}}),
         "a declared theme goes into new blocks' layouts"
     );
     std::fs::remove_file(&ws.settings_path).ok();
@@ -5839,11 +5839,11 @@ fn chrome_palette_gallery_draw() {
         ws.settings.interface.tab_icon_color = TabIconColor::Always;
         ws.sidebar.toggle();
         let theme = ws.term_theme.as_ref().unwrap();
-        let output = format!(
-            "\x1b]11;#{:06x}\x07\x1b]10;#{:06x}\x07studio:~/src $ git branch --show-current\r\nmaster\r\nstudio:~/src $ ",
-            theme.background.unwrap(),
-            theme.foreground.unwrap()
-        );
+        let mut output = format!("\x1b]11;#{:06x}\x07", theme.background.unwrap());
+        if let Some(fg) = theme.foreground {
+            output.push_str(&format!("\x1b]10;#{fg:06x}\x07"));
+        }
+        output.push_str("studio:~/src $ git branch --show-current\r\nmaster\r\nstudio:~/src $ ");
         let (sender, _sent) = flume::unbounded();
         framed_terminal(&mut ws, "block:a", &sender, output.as_bytes());
         let fonts = super::fonts::load("IBM Plex Mono", &[]);
