@@ -31,6 +31,8 @@ mod prompt_wire_tests;
 mod server_controls_tests;
 #[path = "server_info_tests.rs"]
 mod server_info_tests;
+#[path = "session_close_tests.rs"]
+mod session_close_tests;
 #[cfg(unix)]
 #[path = "ssh_agent_tests.rs"]
 mod ssh_agent_tests;

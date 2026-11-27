@@ -598,6 +598,7 @@ async fn dependent_operations_wait_behind_held_keys() {
             "session.destroy" => HostCommand::Close {
                 kind: HumanClose::Session,
                 payload: json!({"session_id":SESSION}),
+                epoch: None,
             },
             "client.undo_close" => HostCommand::UndoClose { epoch },
             "focus_history.reverse" => HostCommand::ReverseFocusHistory {

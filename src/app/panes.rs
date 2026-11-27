@@ -868,7 +868,12 @@ fn empty(s: &Workspace) -> El {
     };
     col().key("empty").w_full().h_full().center().child(
         glass(
-            col().w(420.).padding(28.).gap(12.).items_center(),
+            col()
+                .w_frac(0.94)
+                .max_w(420.)
+                .padding(28.)
+                .gap(12.)
+                .items_center(),
             16.,
             false,
         )
@@ -884,17 +889,31 @@ fn empty(s: &Workspace) -> El {
         )
         .child(el().h(4.))
         .child(
-            pill(
-                "empty-action",
-                label,
-                Pill::Primary,
-                32.,
-                move |s: &mut Workspace, tx: &mut Tx| {
-                    s.perform(intent.clone(), tx);
-                    tx.blur();
-                },
-            )
-            .preserve_focus_on_press(true),
+            row()
+                .gap(8.)
+                .child(
+                    pill(
+                        "empty-action",
+                        label,
+                        Pill::Primary,
+                        32.,
+                        move |s: &mut Workspace, tx: &mut Tx| {
+                            s.perform(intent.clone(), tx);
+                            tx.blur();
+                        },
+                    )
+                    .preserve_focus_on_press(true),
+                )
+                .children((model.connected && model.selected.is_some()).then(|| {
+                    pill(
+                        "empty-close-session",
+                        "Close session",
+                        Pill::Neutral,
+                        32.,
+                        Workspace::close_session_on_screen,
+                    )
+                    .preserve_focus_on_press(true)
+                })),
         )
         .child(setup),
     )

@@ -11,6 +11,7 @@ use super::{
 use rex_rune::{
     connection::{
         Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, HumanClose, Options,
+        session_close::{self, Blocks},
     },
     layout::{Divider, shell_layout},
     platform::local::{default_socket_endpoint, env_endpoint},
@@ -41,6 +42,8 @@ pub struct HostState {
     pub prefetch: HashSet<String>,
     /// Settings-source diagnostic sets already announced for this host, across reconnects.
     pub keymap_notices: HashSet<String>,
+    /// Sessions awaiting a block inventory on this connection.
+    pub(super) session_close_checks: HashSet<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -524,6 +527,7 @@ impl Workspace {
             model,
             prefetch: HashSet::new(),
             keymap_notices: HashSet::new(),
+            session_close_checks: HashSet::new(),
         }
     }
 
@@ -675,6 +679,7 @@ impl Workspace {
             prompt_events,
             shared_writes,
             view_fetches,
+            session_close_checks,
         ) = {
             let mut shared = self.hosts[index]
                 .connection
@@ -697,6 +702,7 @@ impl Workspace {
             };
             let shared_writes = std::mem::take(&mut shared.shared_writes);
             let view_fetches = std::mem::take(&mut shared.view_fetches);
+            let session_close_checks = std::mem::take(&mut shared.session_close_checks);
             let mut cloned = shared.clone();
             cloned.prompt_events.clear();
             (
@@ -709,6 +715,7 @@ impl Workspace {
                 prompt_events,
                 shared_writes,
                 view_fetches,
+                session_close_checks,
             )
         };
         model.view_fetches = view_fetches;
@@ -791,6 +798,9 @@ impl Workspace {
                 }
             }
         }
+        if !model.connected || model.connection_epoch != self.hosts[index].model.connection_epoch {
+            self.hosts[index].session_close_checks.clear();
+        }
         self.hosts[index].model = model;
         if self.session_inspector_out_of_context() {
             self.close_panel(tx);
@@ -802,6 +812,9 @@ impl Workspace {
         }
         self.reconcile_copy_mode();
         self.reconcile_focus_history(index, tx);
+        for reply in session_close_checks {
+            self.finish_session_close_check(index, reply, tx);
+        }
         self.process_prompt_events(index, prompt_events, tx);
         self.announce_keymap_problems(index);
         let now = std::time::Instant::now();
@@ -828,6 +841,8 @@ impl Workspace {
                     "Returned client action skipped: only the person at this computer can undo a close."
                 } else if queued.action.action == super::actions::FOCUS_HISTORY_REVERSE {
                     "Returned client action skipped: only the person at this computer can step through focus history."
+                } else if queued.action.action == super::commands::CLOSE_SESSION {
+                    "Returned client action skipped: only the person at this computer can close a session."
                 } else {
                     "Returned client action skipped: a host cannot start a download or open the path browser."
                 });
@@ -2172,31 +2187,128 @@ impl Workspace {
                 self.session_request(&target, "session.move", payload);
             }
             SessionAction::Close => {
-                let host = &self.settings.hosts[target.host].label;
-                let description = match self.hosts[target.host]
-                    .model
-                    .views
-                    .get(&target.session)
-                    .map(|v| v.windows.len())
-                {
-                    Some(n) => format!(
-                        "Ends every program in its {n} tab{} on {host}. Closing the app itself leaves programs running.",
-                        if n == 1 { "" } else { "s" }
-                    ),
-                    None => format!(
-                        "Ends every program in this session on {host}. Closing the app itself leaves programs running."
-                    ),
-                };
-                let title = format!("Close {}?", target.label);
-                self.confirm(
-                    &title,
-                    "session.destroy",
-                    json!({"session_id": target.session}),
-                    &description,
-                );
-                self.panel.as_mut().unwrap().session = Some(target);
+                self.close_session(target, tx);
             }
         }
+    }
+
+    fn close_session(&mut self, target: SessionTarget, tx: &mut Tx) {
+        let host = &mut self.hosts[target.host];
+        if host.session_close_checks.contains(&target.session) {
+            return;
+        }
+        if host.model.connected
+            && host
+                .model
+                .views
+                .get(&target.session)
+                .is_some_and(|view| view.windows.is_empty())
+            && host
+                .connection
+                .commands
+                .send(HostCommand::CheckEmptySession {
+                    epoch: host.model.connection_epoch,
+                    session: target.session.clone(),
+                    deadline: std::time::Instant::now() + session_close::TIMEOUT,
+                })
+                .is_ok()
+        {
+            host.session_close_checks.insert(target.session.clone());
+            // Keep the switcher so cancelling a later confirmation can return to it.
+            if let Some(panel) = &mut self.panel
+                && matches!(panel.kind, PanelKind::Picker(true))
+            {
+                panel.session = Some(target);
+            } else if self.panel.is_some() {
+                self.close_panel(tx);
+            }
+        } else {
+            self.confirm_session_close(target, Blocks::Unknown);
+        }
+    }
+
+    fn finish_session_close_check(
+        &mut self,
+        index: usize,
+        reply: session_close::Reply,
+        tx: &mut Tx,
+    ) {
+        let host = &mut self.hosts[index];
+        if !host.model.connected
+            || host.model.connection_epoch != reply.epoch
+            || !host.session_close_checks.remove(&reply.session)
+            || reply.blocks == Blocks::SessionGone
+        {
+            return;
+        }
+        let Some(label) = host
+            .model
+            .sessions
+            .iter()
+            .find(|s| s.session_id == reply.session)
+            .map(|s| s.label.clone())
+        else {
+            return;
+        };
+        let still_empty = host
+            .model
+            .views
+            .get(&reply.session)
+            .is_some_and(|view| view.windows.is_empty());
+        if still_empty && reply.blocks == Blocks::Empty {
+            if self.panel.as_ref().is_some_and(|panel| {
+                matches!(panel.kind, PanelKind::Picker(true))
+                    && panel.session.as_ref().is_some_and(|target| {
+                        target.host == index && target.session == reply.session
+                    })
+            }) {
+                self.close_panel(tx);
+            }
+            self.send(
+                index,
+                HostCommand::Close {
+                    kind: HumanClose::Session,
+                    payload: json!({"session_id": reply.session}),
+                    epoch: Some(reply.epoch),
+                },
+            );
+        } else {
+            self.confirm_session_close(
+                SessionTarget {
+                    host: index,
+                    session: reply.session,
+                    label,
+                },
+                reply.blocks,
+            );
+        }
+    }
+
+    fn confirm_session_close(&mut self, target: SessionTarget, blocks: Blocks) {
+        let host = &self.settings.hosts[target.host].label;
+        let tab_count = self.hosts[target.host]
+            .model
+            .views
+            .get(&target.session)
+            .map(|v| v.windows.len())
+            .filter(|&n| n > 0);
+        let consequence = match tab_count {
+            Some(n) => format!(
+                "Ends every program in its {n} tab{} on {host}.",
+                if n == 1 { "" } else { "s" }
+            ),
+            None if blocks == Blocks::Present => format!(
+                "This session still has background programs on {host}. Closing it ends them."
+            ),
+            None => format!("Ends every program in this session on {host}."),
+        };
+        self.confirm(
+            &format!("Close {}?", target.label),
+            "session.destroy",
+            json!({"session_id": target.session}),
+            &format!("{consequence} Closing the app itself leaves programs running."),
+        );
+        self.panel.as_mut().unwrap().session = Some(target);
     }
 
     fn pane_action(&mut self, target: PaneTarget, action: PaneAction, tx: &mut Tx) {
@@ -2928,6 +3040,7 @@ impl Workspace {
                         HostCommand::Close {
                             kind: HumanClose::Session,
                             payload,
+                            epoch: None,
                         },
                     );
                     return;
@@ -2942,6 +3055,7 @@ impl Workspace {
                             HostCommand::Close {
                                 kind: HumanClose::Pane,
                                 payload,
+                                epoch: None,
                             },
                         );
                     }
@@ -2954,7 +3068,14 @@ impl Workspace {
                             } else {
                                 HumanClose::Tab
                             };
-                            self.send(self.active, HostCommand::Close { kind, payload });
+                            self.send(
+                                self.active,
+                                HostCommand::Close {
+                                    kind,
+                                    payload,
+                                    epoch: None,
+                                },
+                            );
                         }
                     }
                     None => self.request(&method, payload),

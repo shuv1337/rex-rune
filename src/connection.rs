@@ -31,6 +31,7 @@ pub mod ports;
 mod prefetch;
 mod program_resume;
 pub mod server_info;
+pub mod session_close;
 mod status_sweep;
 mod title_wake;
 pub mod titles;
@@ -413,6 +414,8 @@ pub struct HostModel {
     pub focus_history_result: Option<FocusHistoryResult>,
     /// Completed on-demand read-only session view fetches, drained once by the UI.
     pub view_fetches: Vec<(u64, ViewFetchOutcome)>,
+    /// Completed block inventory checks for a person's session close, drained once by the UI.
+    pub session_close_checks: Vec<session_close::Reply>,
     /// Most recent read-only directory reply; only its browser/request may consume it.
     pub directory: Option<Arc<directory::Reply>>,
     pub views: HashMap<String, session::ViewResponse>,
@@ -689,6 +692,14 @@ pub enum HostCommand {
     Close {
         kind: HumanClose,
         payload: Value,
+        /// A verified-empty close is only valid on the connection that verified it.
+        epoch: Option<u64>,
+    },
+    /// Read all blocks of an apparently empty session once, including detached blocks.
+    CheckEmptySession {
+        epoch: u64,
+        session: String,
+        deadline: Instant,
     },
     /// Undo only on the connection the person asked on, with no replay.
     UndoClose {
@@ -1139,6 +1150,7 @@ impl Shared {
                 m.program_resume_reading.clear();
                 m.program_resume_unsupported = false;
                 m.focus_history_result = None;
+                m.session_close_checks.clear();
             }
             for terminal in m.terminals.values() {
                 let mut pane = terminal.model.lock().expect("terminal model");
@@ -2499,6 +2511,7 @@ async fn run_host(
             retry = 0;
             prefetch.reset();
             view_fetches.reset();
+            let mut session_close_checks = session_close::Reader::default();
             let mut pace = tokio::time::interval(prefetch::PACE);
             pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut expiry = tokio::time::interval(Duration::from_millis(100));
@@ -2653,6 +2666,7 @@ async fn run_host(
                     reply = server_reads.finished(), if !exclusive && server_reads.in_flight() => server_info::record(shared, reply),
                     reply = hosts_reads.finished(), if !exclusive && hosts_reads.in_flight() => hosts::record(shared, reply),
                     _ = directory_reads.finished(shared), if !exclusive && directory_reads.in_flight() => {}
+                    _ = session_close_checks.finished(shared), if session_close_checks.in_flight() => {}
                     fetched = view_fetches.finished(), if !exclusive && view_fetches.in_flight() => {
                         match fetched {
                             view_fetch::Event::Reply { session, ids, result: Ok((seq, view)) } => {
@@ -2983,6 +2997,10 @@ async fn run_host(
                             directory_reads.start(&mut control, shared, *request).await?;
                             continue;
                         }
+                        if let HostCommand::CheckEmptySession { epoch, session, deadline } = command {
+                            session_close_checks.start(&mut control, shared, epoch, session, deadline).await?;
+                            continue;
+                        }
                         if let HostCommand::Download(request) = command {
                             downloads.start(&mut control, shared, &endpoint, *request, crate::download::new_ref).await?;
                             continue;
@@ -3218,6 +3236,8 @@ async fn run_host(
                 | HostCommand::PerformReply { .. }
                 | HostCommand::PromptReply { .. }
                 | HostCommand::FetchView { .. }
+                | HostCommand::CheckEmptySession { .. }
+                | HostCommand::Close { epoch: Some(_), .. }
                 | HostCommand::WatchPorts { .. }
                 | HostCommand::ReadPorts { .. }
                 | HostCommand::WatchProgramResume { .. }
@@ -3624,7 +3644,16 @@ async fn handle_command(
         }
         HostCommand::Close { .. } | HostCommand::Request { .. } => {
             let (method, mut payload) = match command {
-                HostCommand::Close { kind, mut payload } => {
+                HostCommand::Close {
+                    kind,
+                    mut payload,
+                    epoch,
+                } => {
+                    if epoch.is_some_and(|epoch| {
+                        epoch != shared.model.lock().expect("host model").connection_epoch
+                    }) {
+                        return Ok(CommandEffect::None);
+                    }
                     if control.welcome().api_revision >= UNDO_CLOSE_MIN_API_REVISION {
                         payload["undoable"] = json!(true);
                     }
@@ -3841,6 +3870,7 @@ async fn handle_command(
             }
         }
         HostCommand::ListDir(_)
+        | HostCommand::CheckEmptySession { .. }
         | HostCommand::Visibility(_)
         | HostCommand::Action { .. }
         | HostCommand::Prompts(_)

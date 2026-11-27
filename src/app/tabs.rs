@@ -561,6 +561,7 @@ impl Workspace {
                 HostCommand::Close {
                     kind: HumanClose::Tab,
                     payload,
+                    epoch: None,
                 },
             );
         };

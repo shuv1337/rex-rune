@@ -119,6 +119,7 @@ impl Workspace {
                     HostCommand::Close {
                         kind: HumanClose::Pane,
                         payload: json!({"session_id": target.session, "block_id": id}),
+                        epoch: None,
                     },
                 );
             }

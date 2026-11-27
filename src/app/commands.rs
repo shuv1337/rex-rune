@@ -396,7 +396,7 @@ impl Workspace {
         })
     }
 
-    /// Ask before closing the session on screen, as its sidebar menu does.
+    /// Close the session on screen through the same checks as its sidebar menu.
     pub fn close_session_on_screen(&mut self, tx: &mut Tx) {
         if !self.model().connected {
             return;

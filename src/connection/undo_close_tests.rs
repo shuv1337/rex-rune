@@ -8,7 +8,11 @@ fn close(host: &HostConnection, kind: HumanClose, target: Value) {
     let mut payload = target;
     payload["session_id"] = json!(SESSION);
     host.commands
-        .send(HostCommand::Close { kind, payload })
+        .send(HostCommand::Close {
+            kind,
+            payload,
+            epoch: None,
+        })
         .unwrap();
 }
 

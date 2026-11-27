@@ -187,6 +187,7 @@ fn main() -> Result<()> {
         host.commands.send(HostCommand::Close {
             kind,
             payload: fields,
+            epoch: None,
         })?;
         wait(&host, gone, |m| {
             let view = m.views.get(&sid);

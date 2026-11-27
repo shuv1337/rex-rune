@@ -712,7 +712,7 @@ fn undo_close_human_confirmations_mark_pane_tab_and_session_even_on_old_clients(
             assert!(
                 matches!(
                     rx.try_recv(),
-                    Ok(HostCommand::Close { kind: actual, payload })
+                    Ok(HostCommand::Close { kind: actual, payload, .. })
                         if actual == kind && payload["session_id"] == "s"
                             && payload.get("undoable").is_none()
                 ),

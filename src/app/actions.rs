@@ -361,6 +361,7 @@ impl Spec {
                 | Handler::GoToDirectory
                 | Handler::PairDevice
                 | Handler::StopServer
+                | Handler::CloseSession
                 | Handler::UndoClose
                 | Handler::FocusHistoryReverse
         )

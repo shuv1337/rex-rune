@@ -70,6 +70,8 @@ mod remote_session_tests;
 mod remote_tests;
 #[path = "server_page_tests.rs"]
 mod server_page_tests;
+#[path = "session_close_tests.rs"]
+mod session_close_tests;
 #[path = "session_word_tests.rs"]
 mod session_word_tests;
 #[path = "settings_nav_tests.rs"]
@@ -225,6 +227,7 @@ fn offline_launch(
                 model: Default::default(),
                 prefetch: Default::default(),
                 keymap_notices: Default::default(),
+                session_close_checks: Default::default(),
             });
         },
     );
@@ -1241,7 +1244,7 @@ fn requests(rx: &flume::Receiver<HostCommand>) -> Vec<(String, String, serde_jso
             HostCommand::Request { method, payload } => {
                 Some((method, payload["session_id"].as_str()?.to_owned(), payload))
             }
-            HostCommand::Close { kind, payload } => Some((
+            HostCommand::Close { kind, payload, .. } => Some((
                 kind.method().into(),
                 payload["session_id"].as_str()?.to_owned(),
                 payload,
