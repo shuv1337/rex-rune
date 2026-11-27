@@ -8,7 +8,7 @@ use crate::time::Instant;
 use super::*;
 
 pub(crate) struct Trace {
-    out: std::io::BufWriter<std::fs::File>,
+    out: Out,
     next_id: u32,
     ids: HashMap<String, u32>,
     described: HashMap<u32, (String, &'static str, &'static str)>,
@@ -42,8 +42,96 @@ pub(crate) struct FrameTiming {
     pub hz: Option<f64>,
 }
 
+/// Where the trace's lines go. Off the web a thread owns the file; the web has no threads and
+/// no disk to wait on.
+#[cfg(not(target_arch = "wasm32"))]
+type Out = TraceOut;
+#[cfg(target_arch = "wasm32")]
+type Out = std::io::BufWriter<std::fs::File>;
+
+/// The trace file's writer: each finished line goes over a channel to a thread that owns the
+/// file and writes it as it arrives, so the thread that draws never waits on the disk. Written
+/// from the frame's own thread, a line waited 60 to 220 ms on the growing file's lock in traced
+/// runs (about 5 KiB a frame through an 8 KiB buffer: a write call every frame or two), and the
+/// trace then showed a frame gap that the app did not have. A process that dies loses only the
+/// lines the thread had not written yet; `flush` waits until the file holds every line.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) struct TraceOut {
+    /// The line being built: `writeln!` arrives in pieces.
+    line: Vec<u8>,
+    lines: Option<std::sync::mpsc::Sender<TraceMsg>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum TraceMsg {
+    Lines(Vec<u8>),
+    /// Answered when every line sent before it is written.
+    Flush(std::sync::mpsc::SyncSender<()>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TraceOut {
+    pub(super) fn new(mut sink: impl Write + Send + 'static) -> TraceOut {
+        let (lines, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("rune-trace".into())
+            .spawn(move || {
+                for msg in rx {
+                    match msg {
+                        TraceMsg::Lines(bytes) => {
+                            sink.write_all(&bytes).ok();
+                        }
+                        TraceMsg::Flush(written) => {
+                            sink.flush().ok();
+                            written.send(()).ok();
+                        }
+                    }
+                }
+                sink.flush().ok();
+            })
+            .unwrap_or_else(|e| die(&format!("trace writer thread: {e}")));
+        TraceOut { line: Vec::new(), lines: Some(lines), thread: Some(thread) }
+    }
+
+    fn send_line(&mut self) {
+        if self.line.is_empty() { return; }
+        let bytes = std::mem::take(&mut self.line);
+        if let Some(lines) = &self.lines { lines.send(TraceMsg::Lines(bytes)).ok(); }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Write for TraceOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.line.extend_from_slice(buf);
+        if self.line.last() == Some(&b'\n') { self.send_line(); }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.send_line();
+        let (written, done) = std::sync::mpsc::sync_channel(1);
+        if let Some(lines) = &self.lines && lines.send(TraceMsg::Flush(written)).is_ok() { done.recv().ok(); }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for TraceOut {
+    fn drop(&mut self) {
+        self.send_line();
+        drop(self.lines.take());
+        if let Some(thread) = self.thread.take() { thread.join().ok(); }
+    }
+}
+
 pub(super) fn r2(v: f32) -> f64 {
     r2_f64(f64::from(v))
+}
+
+fn r3(v: f32) -> f64 {
+    (f64::from(v) * 1000.0).round() / 1000.0
 }
 
 fn r2_f64(v: f64) -> f64 {
@@ -60,7 +148,7 @@ impl Trace {
             std::fs::create_dir_all(d).ok();
         }
         let file = std::fs::File::create(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
-        let mut out = std::io::BufWriter::new(file);
+        let mut out = Out::new(file);
         let mut header = json!({
             "type": "header", "launch": "rune", "width": size.0, "height": size.1,
             "hz": fps, "scale": scale, "platform": "rune", "units": "pt", "clock": clock,
@@ -84,19 +172,23 @@ impl Trace {
         self.surface = Some((stats, app));
     }
 
-    /// Waits up to `wait` for the last frames' present times, then writes every held line.
+    /// Waits up to `wait` for the last frames' present times, writes every held line, then
+    /// waits until the file holds every line written so far: a run that ends by a fast exit
+    /// drops nothing, so this is where its last frames reach the file.
     pub(crate) fn settle_presents(&mut self, wait: std::time::Duration) {
         #[cfg(target_arch = "wasm32")]
         let _ = wait;
-        let Some(presents) = self.presents.as_mut() else { return };
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let until = crate::time::now() + wait;
-            while presents.waiting() && crate::time::now() < until {
-                std::thread::sleep(std::time::Duration::from_millis(2));
+        if let Some(presents) = self.presents.as_mut() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let until = crate::time::now() + wait;
+                while presents.waiting() && crate::time::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
             }
+            presents.flush(&mut self.out);
         }
-        presents.flush(&mut self.out);
+        self.out.flush().ok();
     }
 
     fn id(&mut self, key: &str) -> u32 {
@@ -343,14 +435,26 @@ impl Drop for Trace {
     }
 }
 
-#[cfg(any(test, feature = "hot"))]
+#[cfg(test)]
 #[inline(always)]
 pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
     tree_json_core(rt.core(), real_t)
 }
 
+fn shadow_json(s: &crate::el::Shadow) -> Value {
+    json!({
+        "x": r2(s.x),
+        "y": r2(s.y),
+        "blur": r2(s.blur),
+        "spread": r2(s.spread),
+        "color": s.color.hex(),
+        "inset": s.inset,
+    })
+}
+
 pub(crate) fn tree_json_core(rt: &crate::runtime::RuntimeCore, real_t: f64) -> Value {
     let videos = rt.tree.videos();
+    let shadows = rt.presented_shadows_by_path();
     // The pointer's shape (`Runtime::cursor`) and the element it is read from.
     let cursor = rt.cursor().css_name();
     let cursor_path = rt.cursor_path();
@@ -363,8 +467,10 @@ pub(crate) fn tree_json_core(rt: &crate::runtime::RuntimeCore, real_t: f64) -> V
                 "role": e.role,
                 "rect": e.rect.map(r2),
                 "opacity": (e.opacity * 1000.0).round() / 1000.0,
+                "layerOpacity": r3(e.layer_opacity),
                 "scale": (e.scale * 10000.0).round() / 10000.0,
                 "blur": r2(e.blur),
+                "backdropBlur": r2(e.backdrop_blur),
                 "radius": r2(e.radius),
                 "focusable": e.focusable, "focused": e.focused,
                 "focusVisible": e.focus_visible, "inert": e.inert,
@@ -439,8 +545,14 @@ pub(crate) fn tree_json_core(rt: &crate::runtime::RuntimeCore, real_t: f64) -> V
             if e.drag_out {
                 v["dragOut"] = true.into();
             }
+            if e.stuck.abs() > 0.001 {
+                v["stuck"] = r2(e.stuck).into();
+            }
             if e.material_fallback {
                 v["materialFallback"] = true.into();
+            }
+            if let Some(sh) = shadows.get(&e.path) {
+                v["shadows"] = sh.iter().map(shadow_json).collect::<Vec<_>>().into();
             }
             if let Some(c) = e.caret && !secure {
                 v["caret"] = c.map(r2).to_vec().into();

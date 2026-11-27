@@ -45,8 +45,7 @@ impl RuntimeCore {
             let fill = unpremul(over(overlay.premul(1.0), base.premul(1.0)));
             // Static fades, as they show: its own `dim` and the layer opacity of it and every
             // element it sits in.
-            let k = v.paint_alpha
-                * std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent).map(|j| self.tree.nodes[j].vis.layer_opacity).product::<f32>();
+            let k = v.paint_alpha * self.tree.effective_layer_opacity(i);
             let mut colors = [Color::TRANSPARENT; 6];
             colors[C_FILL] = fill.alpha(fill.a * k);
             if v.border_width() > 0.0 {
@@ -62,14 +61,14 @@ impl RuntimeCore {
                 colors[C_BORDER] = bc.alpha_times(k);
             }
             // As it paints: a hovered group's `El::group_color` mixes in.
-            let group = self.paint.inh_scratch.get(i).map_or(0.0, |h| h.group);
+            let group = group_lit(&self.scene, n, self.paint.inh_scratch.get(i).map_or(0.0, |h| h.group));
             if let Some(c) = paint_tracks::text_color(n) { colors[C_TEXT] = paint_tracks::group_tint(n, self.color(n.id, P_TEXT, c), group).alpha_times(k); }
             // A group's hover lands its colour as the pointer moves, as a hover fill does.
             if v.group_color.is_some() { pointer[0] = pointer[0].max(group); }
             let mut sizes = [0.0; 5];
             sizes[S_RADIUS] = p.radius.0[0];
             sizes[S_BORDER] = v.border_width();
-            sizes[S_BLUR] = self.paint.inh_scratch.get(i).map_or(p.blur, |h| h.blur);
+            sizes[S_BLUR] = self.paint.inh_scratch.get(i).map_or(p.blur, |h| self.paint.inh_cold_of(h).blur);
             sizes[S_BACKDROP] = v.backdrop_blur;
             if let Some(sh) = v.shadows.iter().find(|s| !s.inset) {
                 let at = self.shadow_at(n.id, 0, sh);

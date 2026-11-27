@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::a11y::roles;
 
+mod actions;
 pub(crate) mod patch;
 pub(crate) mod schedule;
 
@@ -38,6 +39,7 @@ pub(crate) struct A11yMirror {
     built: bool,
     root_dir: Option<&'static str>,
     root_lang: Option<parley::fontique::Language>,
+    focused_path: String,
     json: String,
     patch: patch::PatchState,
     patch_json: String,
@@ -108,6 +110,8 @@ pub(crate) struct A11yItem {
     /// Explicit HTML `dir` (`"rtl"` or `"ltr"`) when this item's resolved `Flow` flips from its
     /// mirror parent's; `None` when inherited.
     pub dir: Option<&'static str>,
+    /// Custom accessibility action id (`El::a11y_action`) when this button mirrors a custom action.
+    pub custom_action: Option<String>,
 }
 
 /// Extra WAI-ARIA states and relations mirrored onto a web DOM item.
@@ -115,15 +119,23 @@ pub(crate) struct A11yItem {
 pub(crate) struct MirrorAria {
     pub multiselectable: bool,
     pub required: bool,
+    pub multiline: bool,
+    pub read_only: bool,
+    pub invalid: bool,
+    pub role_description: Option<String>,
+    pub placeholder: Option<String>,
     pub has_popup: Option<&'static str>,
     pub orientation: Option<&'static str>,
     pub auto_complete: Option<&'static str>,
+    pub current: Option<&'static str>,
     pub controls: Option<String>,
     pub owns: Option<String>,
     pub row_count: Option<usize>,
     pub column_count: Option<usize>,
     pub row_index: Option<usize>,
     pub column_index: Option<usize>,
+    /// Starting ordinal for an ordered `<ol>` when `start != 1` (HTML `start` attribute).
+    pub list_start: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,13 +163,17 @@ impl A11yRun {
     fn plain(text: String) -> Self {
         A11yRun { text, href: None, path: None, link: None, description: None }
     }
+
+    fn is_plain(&self) -> bool {
+        self.href.is_none() && self.link.is_none()
+    }
 }
 
 impl A11yItem {
     fn new(kind: &'static str, path: &str, rect: [f32; 4]) -> Self {
         A11yItem { kind, path: path.to_owned(), rect, font_size: 0.0, level: None, expanded: None, text: String::new(),
             runs: Vec::new(), tag: None, role: None, parent: None, id: None, href: None, font: None, selectable: false, description: String::new(), value: String::new(), pressed: None, selected: None, checked: None, set: None,
-            live: None, range: None, value_text: String::new(), disabled: false, busy: false, scroll: None, aria: MirrorAria::default(), dir: None }
+            live: None, range: None, value_text: String::new(), disabled: false, busy: false, scroll: None, aria: MirrorAria::default(), dir: None, custom_action: None }
     }
 
     fn to_json(&self) -> Value {
@@ -191,6 +207,7 @@ impl A11yItem {
             self.scroll,
             &self.aria,
             self.dir,
+            self.custom_action.as_deref(),
         ))
     }
 }
@@ -314,6 +331,19 @@ fn link_description(help: Option<&str>, label: &str) -> Option<String> {
     (!trimmed.is_empty() && trimmed != label.trim()).then(|| trimmed.to_owned())
 }
 
+/// Whether a validated `check_href` value from `Link::id` (without an explicit `Link::href`)
+/// is a real URL rather than an opaque internal key such as `"doc-42"` or `"mention-1"`.
+fn is_inline_url(url: &str) -> bool {
+    url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("mailto:")
+        || url.starts_with('/')
+        || url.starts_with("./")
+        || url.starts_with("../")
+        || url.starts_with('?')
+        || (url.starts_with('#') && url.len() > 1)
+}
+
 fn text_runs(path: &str, spec: &crate::el::TextSpec) -> Vec<A11yRun> {
     if spec.cold.links.is_empty() {
         let t = clean_slice(spec, 0, spec.content.len());
@@ -323,7 +353,7 @@ fn text_runs(path: &str, spec: &crate::el::TextSpec) -> Vec<A11yRun> {
     let mut at = 0usize;
     let push_plain = |out: &mut Vec<A11yRun>, text: String| {
         if text.is_empty() { return; }
-        if let Some(last) = out.last_mut().filter(|r| r.href.is_none()) {
+        if let Some(last) = out.last_mut().filter(|r| r.is_plain()) {
             last.text.push_str(&text);
         } else {
             out.push(A11yRun::plain(text));
@@ -337,11 +367,12 @@ fn text_runs(path: &str, spec: &crate::el::TextSpec) -> Vec<A11yRun> {
         if lb > la {
             let label = clean_slice(spec, la, lb);
             if !label.is_empty() {
-                if let Ok(href) = crate::open_url::check_href(&link.id) {
+                if let Ok(href) = crate::open_url::check_href(link.href.as_deref().unwrap_or(&link.id)) {
                     let description = link_description(link.help.as_deref(), &label);
+                    let real_href = (link.href.is_some() || is_inline_url(&href)).then_some(href);
                     out.push(A11yRun {
                         text: label,
-                        href: Some(href),
+                        href: real_href,
                         path: Some(path.to_owned()),
                         link: Some(idx),
                         description,
@@ -547,14 +578,16 @@ impl RuntimeCore {
                 continue;
             }
             if n.inert || self.subtree_exiting(i) || n.vis.opacity <= 0.01 || n.a11y.hidden
-                || matches!(n.role, "none" | "presentation")
+                || matches!(n.role, "none" | "presentation" | "list-marker")
                 || crate::runtime::commit::inline::is_elided_inline_child(&self.tree.nodes, i)
             {
                 i = end;
                 last_flow_parent = None;
                 continue;
             }
-            if n.is_secure() {
+            // Non-input secure text and secure containers stay completely out of the DOM mirror.
+            // Secure inputs (password fields) are handled below with an always-empty value.
+            if n.is_secure() && n.input.is_none() {
                 i = end;
                 last_flow_parent = None;
                 continue;
@@ -591,12 +624,14 @@ impl RuntimeCore {
                 item_flows.push(node_flow);
             };
 
+
             let in_control = i < control_end;
             if let Some(inp) = n.input.as_deref() {
+                let secure = n.is_secure();
                 // Mirror editable comboboxes (`text_input(...).role("combobox")`) alongside
                 // non-editable comboboxes so `aria-autocomplete`, `aria-expanded`, `aria-haspopup`,
                 // and `aria-controls` stay readable both closed and while a popup is open.
-                if !in_control && n.role == "combobox" && rect[2] > 0.0 && rect[3] > 0.0 {
+                if !in_control && !secure && n.role == "combobox" && rect[2] > 0.0 && rect[3] > 0.0 {
                     let label = self.mirror_name(i).unwrap_or_else(|| inp.placeholder.clone());
                     let value = self.mirror_value(i).map(str::to_owned).unwrap_or_else(|| inp.edit.text.clone());
                     if !label.is_empty() || !value.is_empty() {
@@ -606,12 +641,33 @@ impl RuntimeCore {
                         item.expanded = n.a11y.expanded;
                         item.text = label;
                         item.description = self.mirror_description(i);
-                        item.disabled = n.a11y.disabled;
+                        item.disabled = self.node_disabled(i);
                         item.busy = busy;
                         item.value = value;
                         item.aria = self.mirror_aria(i);
                         push(&mut out, item);
                     }
+                } else if !in_control && self.focused_index() != Some(i) && rect[2] > 0.0 && rect[3] > 0.0 {
+                    // Mirror unfocused text_input, text_area, and password fields so touch
+                    // exploration, screen-reader form navigation, and getByRole('textbox') find
+                    // them before focus. Omit while focused so the bridge's active <textarea> or
+                    // <input type="password"> is the sole textbox in the tree. Secure fields
+                    // never place their value into the DOM mirror.
+                    let label = self.mirror_name(i).unwrap_or_else(|| inp.placeholder.clone());
+                    let value = if secure {
+                        String::new()
+                    } else {
+                        self.mirror_value(i).map(str::to_owned).unwrap_or_else(|| inp.edit.text.clone())
+                    };
+                    let mut item = A11yItem::new("textbox", &n.path, rect);
+                    item.role = Some(if !secure && n.role == "searchbox" { "searchbox" } else { "textbox" });
+                    item.text = label;
+                    item.description = self.mirror_description(i);
+                    item.disabled = self.node_disabled(i);
+                    item.busy = busy;
+                    item.value = value;
+                    item.aria = self.mirror_aria(i);
+                    push(&mut out, item);
                 }
                 i = end;
                 last_flow_parent = None;
@@ -621,14 +677,17 @@ impl RuntimeCore {
             let live_role = roles::default_live(n.role).and_then(|_| roles::container_aria(n.role));
             let text_aria = (n.text.is_some() && end == i + 1).then(|| roles::container_aria(n.role)).flatten();
             let raw_href = n.a11y.more.as_ref().and_then(|m| m.href.as_deref());
-            // A labelled `group` (a game's surface naming its keys, a set of controls) is a div
-            // with the role and its label; an unlabelled one adds nothing a reader would say unless
-            // it is a live region container.
-            let labelled_group = n.role == "group" && self.mirror_name(i).is_some();
+            // A labelled `group` (a game's surface naming its keys, a set of controls), an
+            // explicit `role("group")` with a role description, or a group carrying custom actions
+            // is a div with `role="group"`.
+            let explicit_group_rd = n.role == "group" && n.a11y.explicit_group && self.a11y_role_description(i).is_some();
+            let has_custom = n.handlers.get().is_some_and(|h| h.custom_a11y_actions.as_deref().is_some_and(|a| !a.is_empty()));
+            let labelled_group = n.role == "group" && (self.mirror_name(i).is_some() || explicit_group_rd || has_custom);
             let live_group = n.role == "group" && n.text.is_none() && n.handlers.on_press.is_none()
                 && raw_href.is_none() && live.is_some();
+            let ordered_list = n.role == "list" && n.a11y.more.as_deref().is_some_and(|m| m.list_start.is_some());
             let container_tag = (n.text.is_none() || (live_role.is_none() && text_aria.is_none()))
-                .then(|| roles::container_tag(n.role))
+                .then(|| if ordered_list { Some("ol") } else { roles::container_tag(n.role) })
                 .flatten()
                 .or((labelled_group || live_group).then_some("div"));
             let app_scroll = self.host.page.is_none() && n.scroll.is_some();
@@ -644,6 +703,7 @@ impl RuntimeCore {
                 item.id = anchor_id(n.key.as_deref());
                 item.text = self.mirror_name(i).unwrap_or_default();
                 item.description = self.mirror_description(i);
+                item.set = self.mirror_set_pos(i);
                 item.aria = self.mirror_aria(i);
                 if app_scroll {
                     let [sx, sy] = self.scroll.scrolls.get(&n.id).map_or([0.0, 0.0], |st| {
@@ -656,7 +716,9 @@ impl RuntimeCore {
                     scrollers.push((end, [f64::from(sx), f64::from(sy)]));
                 }
                 push(&mut out, item);
-                open.push((end, out.len() - 1));
+                let host = out.len() - 1;
+                open.push((end, host));
+                self.push_web_custom_actions(i, rect, Some(host), node_flow, None, &mut out, &mut item_flows);
                 last_flow_parent = None;
                 i += 1;
                 continue;
@@ -681,6 +743,7 @@ impl RuntimeCore {
                 let mut item = A11yItem::new("image", &n.path, rect);
                 item.text = label;
                 item.busy = busy;
+                item.aria = self.mirror_aria(i);
                 push(&mut out, item);
                 i = end;
                 last_flow_parent = None;
@@ -748,7 +811,7 @@ impl RuntimeCore {
                     if let Some(role) = control_role {
                         item.role = Some(role);
                         if self.a11y_role(i).is_some_and(roles::selectable_item) { item.selected = Some(n.focus.selected); }
-                        item.set = n.a11y.more.as_ref().and_then(|m| m.set);
+                        item.set = self.mirror_set_pos(i);
                     }
                     let checked = n.a11y.checked
                         .or_else(|| (n.role == "radio").then_some(if n.focus.selected { crate::el::Checked::True } else { crate::el::Checked::False }));
@@ -761,6 +824,7 @@ impl RuntimeCore {
                         }
                     }
                     push(&mut out, item);
+                    self.push_web_custom_actions(i, rect, parent, node_flow, item_dir, &mut out, &mut item_flows);
                     if nested_press {
                         control_end = control_end.max(end);
                         i += 1;
@@ -778,7 +842,8 @@ impl RuntimeCore {
                 if !runs.is_empty() || is_live_text {
                     let is_heading = n.role == "heading";
                     let text_disabled = self.node_disabled(i);
-                    let plain_text = !is_heading && !is_live_text && text_aria.is_none() && !busy && !text_disabled;
+                    let item_aria = self.mirror_aria(i);
+                    let plain_text = !is_heading && !is_live_text && text_aria.is_none() && !busy && !text_disabled && item_aria.role_description.is_none() && item_aria.current.is_none();
                     // Flowed word-by-word paragraphs (`pr_chips::flow`) put sibling words (or 1-word
                     // wrapper rows) inside one flex-wrap line row: merge consecutive inline text runs
                     // sharing that flow container so screen readers and Find-in-page see whole sentences.
@@ -795,7 +860,7 @@ impl RuntimeCore {
                     });
                     if plain_text && flow_group.is_some() && flow_group == last_flow_parent
                         && last_item_flow == Some(node_flow)
-                        && let Some(prev) = out.last_mut().filter(|it| it.kind == "text" && it.role.is_none() && it.live.is_none() && !it.busy)
+                        && let Some(prev) = out.last_mut().filter(|it| it.kind == "text" && it.role.is_none() && it.live.is_none() && !it.busy && it.aria.current.is_none())
                     {
                         merge_flow(prev, rect, runs);
                         i += 1;
@@ -812,7 +877,7 @@ impl RuntimeCore {
                     if plain_text && !caret_browsable && flow_group.is_none()
                         && let Some(prev) = inline.filter(|l| l.item + 1 == out.len() && l.parent == n.parent)
                         && let Some(gap) = prev.gap(n.target, spec.style, selectable, node_flow)
-                        && let Some(item) = out.last_mut().filter(|it| it.kind == "text" && it.role.is_none() && it.live.is_none() && !it.busy)
+                        && let Some(item) = out.last_mut().filter(|it| it.kind == "text" && it.role.is_none() && it.live.is_none() && !it.busy && it.aria.current.is_none())
                     {
                         join_inline(item, text_rect, runs, gap > spec.style.size * 0.15);
                         inline = Some(Inline { right: n.target[2], ..prev });
@@ -821,7 +886,7 @@ impl RuntimeCore {
                     }
                     let (plain, rich_runs) = if runs.is_empty() {
                         (String::new(), Vec::new())
-                    } else if runs.len() == 1 && runs[0].href.is_none() && flow_group.is_none() {
+                    } else if runs.len() == 1 && runs[0].is_plain() && flow_group.is_none() {
                         (runs.into_iter().next().unwrap().text, Vec::new())
                     } else {
                         (String::new(), runs)
@@ -833,6 +898,7 @@ impl RuntimeCore {
                     item.live = live;
                     item.disabled = text_disabled;
                     item.busy = busy;
+                    item.aria = item_aria;
                     item.text = plain;
                     item.runs = rich_runs;
                     item.id = if is_heading { anchor_id(n.key.as_deref()) } else { None };
@@ -870,6 +936,7 @@ impl RuntimeCore {
                 item.level = Some(n.a11y.level.unwrap_or(2).clamp(1, 6));
                 item.live = live;
                 item.busy = busy;
+                item.aria = self.mirror_aria(i);
                 item.text = lbl;
                 item.id = anchor_id(n.key.as_deref());
                 push(&mut out, item);
@@ -914,21 +981,58 @@ impl RuntimeCore {
         anchor_id(self.tree.nodes[j].key.as_deref())
     }
 
+    /// 1-based `(position, size)` for a mirrored ordered-set item or focus proxy: explicit
+    /// `El::position_in_set` wins over the enclosing `virtual_rows` list's index and total.
+    fn mirror_set_pos(&self, i: usize) -> Option<(usize, usize)> {
+        let n = &self.tree.nodes[i];
+        let role = self.a11y_role(i)?;
+        let parent_role = std::iter::successors(n.parent, |&p| self.tree.nodes[p].parent)
+            .find_map(|p| self.a11y_role(p))
+            .unwrap_or(accesskit::Role::Window);
+        if !roles::ordered_set_item_in(role, parent_role) {
+            return None;
+        }
+        n.a11y.more.as_ref().and_then(|m| m.set).or_else(|| {
+            let (index, total) = self.a11y_virtual_list_pos(i)?;
+            Some((index + 1, total))
+        })
+    }
+
     fn mirror_aria(&self, i: usize) -> MirrorAria {
         let n = &self.tree.nodes[i];
+        let secure = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent)
+            .any(|j| self.tree.nodes[j].is_secure());
         let mut aria = MirrorAria::default();
         if let Some(m) = n.a11y.more.as_deref() {
             aria.multiselectable = m.multiselectable;
             aria.required = m.required;
-            aria.has_popup = m.has_popup.map(crate::HasPopup::as_aria);
-            aria.orientation = m.orientation.map(crate::Orientation::as_aria);
-            aria.auto_complete = m.auto_complete.map(crate::AutoComplete::as_aria);
-            aria.controls = self.mirror_related_id(i, m.controls.as_deref());
-            aria.owns = self.mirror_related_id(i, m.owns.as_deref());
+            aria.read_only = m.read_only;
+            aria.invalid = m.invalid;
+            aria.role_description = self.a11y_role_description(i).map(str::to_owned);
+            aria.current = m.current.map(crate::Current::as_aria);
+            // Password inputs are exposed strictly as secure textboxes, never as comboboxes with
+            // popup/autocomplete/controls relations (matching HTML <input type="password">).
+            if !secure {
+                aria.has_popup = m.has_popup.map(crate::HasPopup::as_aria);
+                aria.orientation = m.orientation.map(crate::Orientation::as_aria);
+                aria.auto_complete = m.auto_complete.map(crate::AutoComplete::as_aria);
+                aria.controls = self.mirror_related_id(i, m.controls.as_deref());
+                aria.owns = self.mirror_related_id(i, m.owns.as_deref());
+            }
             aria.row_count = m.row_count;
             aria.column_count = m.column_count;
             aria.row_index = m.row_index;
             aria.column_index = m.column_index;
+            if n.role == "list" {
+                aria.list_start = m.list_start.filter(|&s| s != 1);
+            }
+        }
+        if let Some(inp) = n.input.as_deref() {
+            aria.multiline = !inp.single_line && !secure;
+            aria.read_only |= inp.access.is_none() || self.is_node_read_only(i);
+            if !inp.placeholder.is_empty() {
+                aria.placeholder = Some(inp.placeholder.clone());
+            }
         }
         aria
     }
@@ -959,6 +1063,7 @@ impl RuntimeCore {
         let follow = moving != mirror.moving || (moving && self.clock - mirror.built_at >= MOVING_EVERY);
         let root_dir = self.web_a11y_root_dir();
         let root_lang = self.web_a11y_root_lang();
+        let focused = self.kbd.focus.path().unwrap_or_default();
         mirror.commits != self.commit.commits
             || mirror.live_text_gen != self.frame.live_text_gen
             || mirror.viewport != vp
@@ -966,6 +1071,7 @@ impl RuntimeCore {
             || mirror.scroll_digest != sd
             || mirror.root_dir != Some(root_dir)
             || mirror.root_lang != root_lang
+            || mirror.focused_path != focused
             || follow
     }
 
@@ -1066,6 +1172,7 @@ impl RuntimeCore {
         let root_lang = self.web_a11y_root_lang();
         mirror.root_dir = Some(root_dir);
         mirror.root_lang = root_lang;
+        mirror.focused_path = self.kbd.focus.path().unwrap_or_default().to_owned();
         mirror.built = true;
         let items = self.web_a11y_items();
         let lang_str = root_lang.map(|l| l.to_string());
@@ -1083,7 +1190,8 @@ impl RuntimeCore {
         // Motion moves drawn boxes without a commit: follow it while it runs, and once more where it stops.
         let moving = self.animating;
         let follow = moving != mirror.moving || (moving && self.clock - mirror.built_at >= MOVING_EVERY);
-        if mirror.commits == self.commit.commits && mirror.live_text_gen == self.frame.live_text_gen && mirror.viewport == vp && mirror.zoom == zoom && mirror.scroll_digest == sd && !follow && !mirror.json.is_empty() {
+        let focused = self.kbd.focus.path().unwrap_or_default();
+        if mirror.commits == self.commit.commits && mirror.live_text_gen == self.frame.live_text_gen && mirror.viewport == vp && mirror.zoom == zoom && mirror.scroll_digest == sd && mirror.focused_path == focused && !follow && !mirror.json.is_empty() {
             return None;
         }
         mirror.moving = moving;
@@ -1094,6 +1202,7 @@ impl RuntimeCore {
         mirror.viewport = vp;
         mirror.zoom = zoom;
         mirror.scroll_digest = sd;
+        mirror.focused_path = focused.to_owned();
         mirror.built = true;
         let values: Vec<Value> = self.web_a11y_items().iter().map(A11yItem::to_json).collect();
         let next = serde_json::to_string(&values).unwrap_or_else(|_| "[]".into());
@@ -1135,18 +1244,24 @@ impl RuntimeCore {
         mirror.focus_at = at;
         // A field naming a highlighted row (`El::active_descendant`, the palette's): the row is
         // what a reader is told about, as the native trees hand it focus.
-        let next = self.focused_index().map(|i| match self.a11y_active_descendant(i) {
-            Some(row) => {
-                let mut item = self.web_focus_item(row);
-                if let Some(o) = item.as_object_mut() {
-                    o.insert("f".into(), json!(self.mirror_name(i).unwrap_or_default()));
-                    if let Some(ac) = self.mirror_aria(i).auto_complete {
-                        o.insert("fac".into(), json!(ac));
+        let next = self.focused_index().map(|i| {
+            // Secure inputs stay on the password focus proxy and never announce suggestion rows.
+            let in_secure = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent)
+                .any(|j| self.tree.nodes[j].is_secure());
+            let active = (!in_secure).then(|| self.a11y_active_descendant(i)).flatten();
+            match active {
+                Some(row) => {
+                    let mut item = self.web_focus_item(row);
+                    if let Some(o) = item.as_object_mut() {
+                        o.insert("f".into(), json!(self.mirror_name(i).unwrap_or_default()));
+                        if let Some(ac) = self.mirror_aria(i).auto_complete {
+                            o.insert("fac".into(), json!(ac));
+                        }
                     }
+                    item.to_string()
                 }
-                item.to_string()
+                None => self.web_focus_item(i).to_string(),
             }
-            None => self.web_focus_item(i).to_string(),
         }).unwrap_or_default();
         if mirror.focus_json == next { return None; }
         mirror.focus_json = next;
@@ -1179,7 +1294,9 @@ impl RuntimeCore {
         let focus_role = role.map_or("group", roles::focus_role);
         let mut o = serde_json::Map::new();
         o.insert("o".into(), json!(focus_role));
-        let name = self.mirror_name(i).unwrap_or_else(|| self.descendant_label(i, self.subtree_end(i)));
+        let name = self.mirror_name(i)
+            .or_else(|| n.input.as_deref().map(|inp| inp.placeholder.clone()).filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| self.descendant_label(i, self.subtree_end(i)));
         o.insert("t".into(), json!(name));
         let description = self.mirror_description(i);
         if !description.is_empty() { o.insert("d".into(), json!(description)); }
@@ -1193,22 +1310,29 @@ impl RuntimeCore {
                 None => {}
             }
         }
+        let in_secure = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent)
+            .any(|j| self.tree.nodes[j].is_secure());
         if let Some(s) = selected { o.insert("s".into(), json!(s)); }
-        if let Some(open) = n.a11y.expanded { o.insert("x".into(), json!(open)); }
-        if let Some((pos, size)) = n.a11y.more.as_ref().and_then(|m| m.set) { o.insert("n".into(), json!([pos, size])); }
+        if !in_secure && let Some(open) = n.a11y.expanded { o.insert("x".into(), json!(open)); }
+        if let Some((pos, size)) = self.mirror_set_pos(i) { o.insert("n".into(), json!([pos, size])); }
         if let Some(level) = n.a11y.level { o.insert("l".into(), json!(level)); }
         if n.a11y.disabled || n.inert { o.insert("dis".into(), json!(true)); }
         if n.a11y.more.as_deref().is_some_and(|m| m.busy) { o.insert("b".into(), json!(true)); }
-        let in_secure = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent)
-            .any(|j| self.tree.nodes[j].is_secure());
         if !in_secure && let Some(rg) = finite_range(n) { o.insert("rg".into(), json!(rg)); }
         if let Some(value) = self.mirror_value(i) { o.insert("v".into(), json!(value)); }
         let aria = self.mirror_aria(i);
         if aria.multiselectable { o.insert("ms".into(), json!(true)); }
         if aria.required { o.insert("rq".into(), json!(true)); }
+        if aria.multiline { o.insert("ml".into(), json!(true)); }
+        if aria.read_only { o.insert("ro".into(), json!(true)); }
+        if aria.invalid { o.insert("inv".into(), json!(true)); }
+        if let Some(rd) = aria.role_description.as_deref() { o.insert("rd".into(), json!(rd)); }
+        if let Some(ph) = aria.placeholder.as_deref() { o.insert("ph".into(), json!(ph)); }
+        if n.input.is_some() && in_secure { o.insert("sec".into(), json!(true)); }
         if let Some(hp) = aria.has_popup { o.insert("hp".into(), json!(hp)); }
         if let Some(or) = aria.orientation { o.insert("or".into(), json!(or)); }
         if let Some(ac) = aria.auto_complete { o.insert("ac".into(), json!(ac)); }
+        if let Some(cu) = aria.current { o.insert("cu".into(), json!(cu)); }
         if let Some(ct) = aria.controls.as_deref() { o.insert("ct".into(), json!(ct)); }
         if let Some(ow) = aria.owns.as_deref() { o.insert("ow".into(), json!(ow)); }
         if let Some(rc) = aria.row_count { o.insert("rc".into(), json!(rc)); }
@@ -1234,33 +1358,7 @@ impl RuntimeCore {
         Value::Object(o)
     }
 
-    /// Dispatches assistive-tech activation of a mirrored button or inline link.
-    pub(crate) fn web_a11y_action(&mut self, event: &serde_json::Value) -> bool {
-        let Some(path) = event["path"].as_str() else { return false };
-        match event["kind"].as_str() {
-            Some("a11y_press") => {
-                let Some(i) = self.live(path) else { return false };
-                if self.tree.nodes[i].a11y.disabled || !self.allowed(i) { return false; }
-                if self.tree.nodes[i].handlers.on_press.is_some() {
-                    self.frame.queue.push(Action::Press(path.to_owned(), crate::PointerButton::Primary, false, None));
-                    true
-                } else if self.tree.nodes[i].input.is_some() {
-                    self.queue_a11y(path.to_owned(), crate::a11y::actions::A11yAct::Focus(None));
-                    true
-                } else {
-                    self.queue_a11y_delegate(i, accesskit::Action::Click)
-                }
-            }
-            Some("a11y_link") => {
-                let Some(k) = event["link"].as_u64().and_then(|n| usize::try_from(n).ok()) else { return false };
-                let Some(i) = self.live(path) else { return false };
-                if self.node_disabled(i) || !self.allowed(i) || self.tree.nodes[i].text.as_ref().is_none_or(|t| k >= t.cold.links.len()) { return false; }
-                self.frame.queue.push(Action::Link(path.to_owned(), k, crate::PointerButton::Primary));
-                true
-            }
-            _ => false,
-        }
-    }
+
 }
 
 /// Joins one more flowed word run into the paragraph item before it.
@@ -1269,14 +1367,14 @@ fn merge_flow(prev: &mut A11yItem, rect: [f32; 4], runs: Vec<A11yRun>) {
     let needs_space = prev.runs.last().is_some_and(|r| !r.text.ends_with(char::is_whitespace))
         && runs.first().is_some_and(|r| !r.text.starts_with(char::is_whitespace) && !r.text.starts_with([')', ']', '.', ',', ';', ':']));
     if needs_space {
-        if let Some(last) = prev.runs.last_mut().filter(|r| r.href.is_none()) {
+        if let Some(last) = prev.runs.last_mut().filter(|r| r.is_plain()) {
             last.text.push(' ');
         } else {
             prev.runs.push(A11yRun::plain(" ".into()));
         }
     }
-    if runs.len() == 1 && runs[0].href.is_none()
-        && let Some(last) = prev.runs.last_mut().filter(|r| r.href.is_none())
+    if runs.len() == 1 && runs[0].is_plain()
+        && let Some(last) = prev.runs.last_mut().filter(|r| r.is_plain())
     {
         last.text.push_str(&runs[0].text);
     } else {
@@ -1332,7 +1430,7 @@ fn join_inline(prev: &mut A11yItem, rect: [f32; 4], mut runs: Vec<A11yRun>, gap:
     if gap && !ends_blank && runs.first().is_some_and(|r| !r.text.starts_with(char::is_whitespace)) {
         runs.insert(0, A11yRun::plain(" ".into()));
     }
-    if prev.runs.is_empty() && runs.iter().all(|r| r.href.is_none()) {
+    if prev.runs.is_empty() && runs.iter().all(|r| r.is_plain()) {
         for r in runs { prev.text.push_str(&r.text); }
         return;
     }
@@ -1341,7 +1439,7 @@ fn join_inline(prev: &mut A11yItem, rect: [f32; 4], mut runs: Vec<A11yRun>, gap:
     }
     for r in runs {
         match prev.runs.last_mut() {
-            Some(last) if last.href.is_none() && r.href.is_none() => last.text.push_str(&r.text),
+            Some(last) if last.is_plain() && r.is_plain() => last.text.push_str(&r.text),
             _ => prev.runs.push(r),
         }
     }
@@ -1353,3 +1451,6 @@ mod tests;
 #[cfg(test)]
 #[path = "a11y/mirror_tests.rs"]
 mod mirror_tests;
+#[cfg(test)]
+#[path = "a11y/link_tests.rs"]
+mod link_tests;

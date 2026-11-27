@@ -9,6 +9,8 @@ use crate::states::downcast;
 #[derive(Clone)]
 pub(crate) struct FocusSpec {
     pub physical: Option<crate::input::physical_input::Handler>,
+    /// [`crate::El::on_focus_lost`]: observes `PhysicalInput::FocusLost` without taking it.
+    pub focus_lost: Option<crate::input::physical_input::FocusLostFn>,
     pub enabled: bool,
     /// `focusable(false)`: not a Tab stop even where [`crate::Cx::web_focus`] would make it one.
     pub opt_out: bool,
@@ -74,6 +76,7 @@ pub(crate) struct FocusSpec {
 impl crate::cold::Empty for FocusSpec {
     const EMPTY: &'static Self = &FocusSpec {
         physical: None,
+        focus_lost: None,
         enabled: false,
         opt_out: false,
         disabled: false,
@@ -314,6 +317,8 @@ impl El {
     /// [`Tx::focus`](crate::Tx::focus)/[`Tx::blur`](crate::Tx::blur), text-field blur, modal
     /// autofocus/return, and removal or disabling while focused.
     ///
+    /// Stays silent on window deactivation and return (use
+    /// [`El::on_focus_lost`](Self::on_focus_lost) when window deactivation should also notify).
     /// Initial unfocused mounts fire nothing. Does not make the element focusable or a pointer
     /// hit target. Actual focus is kept separate from `:focus-visible`: read
     /// [`Tx::focus_visible`](crate::Tx::focus_visible) inside the callback to distinguish keyboard

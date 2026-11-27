@@ -43,18 +43,26 @@ pub(crate) struct WindowRequests {
     /// `AppHandle::focus` or `AppHandle::minimize`; last-wins (`cancel_minimize`).
     pub activation: Option<Activation>,
     pub position: Option<(i32, i32)>,
+    pub logical_position: Option<(f64, f64)>,
     pub place: Option<crate::windows::PlaceRequest>,
     /// `AppHandle::quit` or `AppHandle::relaunch`, and what follows the exit.
     pub quit: Option<crate::quit::After>,
     /// `AppHandle::wake` asked for `poll`.
     pub woken: bool,
+    /// `AppHandle::wake_urgent` asked for one-shot urgent frame admission on macOS.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub urgent: bool,
 }
 
 impl WindowRequests {
     /// Asks something of the window itself: show, hide or close it, focus or minimize it, or
     /// move it. A request added here reaches both `only_updates` and `Shared::window_pending`.
     fn asks_window(&self) -> bool {
-        self.window.is_some() || self.activation.is_some() || self.position.is_some() || self.place.is_some()
+        self.window.is_some()
+            || self.activation.is_some()
+            || self.position.is_some()
+            || self.logical_position.is_some()
+            || self.place.is_some()
     }
 
     /// A later open, hide, close or focus takes a minimize back out; a show leaves it, so a
@@ -67,7 +75,7 @@ impl WindowRequests {
     /// Nothing but updates: no wake for `poll`, no window, focus or geometry request.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn only_updates(&self) -> bool {
-        !self.woken && !self.asks_window()
+        !self.woken && !self.urgent && !self.asks_window()
     }
 }
 
@@ -93,6 +101,20 @@ impl<S> std::ops::Deref for Requests<S> {
     fn deref(&self) -> &WindowRequests { &self.window_requests }
 }
 
+/// Deferred overlay builders queued by `AppHandle::overlay`, closed once the owning host ends.
+#[cfg(not(target_arch = "wasm32"))]
+enum OverlayQueue {
+    Open(Vec<crate::overlay::OverlayBuilder>),
+    Closed,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for OverlayQueue {
+    fn default() -> Self {
+        Self::Open(Vec::new())
+    }
+}
+
 /// Non-generic shared state backing [`AppHandle<S>`] and the window host.
 #[derive(Default)]
 pub(crate) struct SharedCore {
@@ -103,6 +125,13 @@ pub(crate) struct SharedCore {
     /// `AppHandle::quit` was called, or the web app is ending.
     pub(crate) quitting: AtomicBool,
     pub(crate) window_error: Mutex<Option<String>>,
+    /// Shared terminal GPU-loss latch synced from `App::gpu_loss_policy` so any `AppHandle`
+    /// cloned before or after `.gpu_loss_policy(...)` sees the app's latch.
+    #[cfg(not(target_arch = "wasm32"))]
+    gpu_loss_latch: Mutex<Option<Arc<crate::render::loss_latch::GpuLossLatch>>>,
+    /// Overlays queued dynamically through `AppHandle::overlay`.
+    #[cfg(not(target_arch = "wasm32"))]
+    overlays: Mutex<OverlayQueue>,
 }
 
 impl SharedCore {
@@ -128,6 +157,10 @@ impl SharedCore {
         self.request(|q| q.woken = true);
     }
 
+    pub(crate) fn wake_urgent(&self) {
+        self.request(|q| { q.woken = true; q.urgent = true; });
+    }
+
     pub(crate) fn open(&self) {
         self.request(|q| { q.window = Some(WindowRequest::Open(None)); q.cancel_minimize(); });
     }
@@ -145,12 +178,16 @@ impl SharedCore {
     }
 
     pub(crate) fn set_position(&self, position: (i32, i32)) {
-        self.request(|q| { q.position = Some(position); q.place = None; });
+        self.request(|q| { q.position = Some(position); q.logical_position = None; q.place = None; });
+    }
+
+    pub(crate) fn set_logical_position(&self, position: (f64, f64)) {
+        self.request(|q| { q.logical_position = Some(position); q.position = None; q.place = None; });
     }
 
     pub(crate) fn place(&self, display: crate::DisplayTarget, placement: crate::OverlayPlacement) {
         let place = crate::windows::PlaceRequest::new(display, placement);
-        self.request(|q| { q.place = Some(place); q.position = None; });
+        self.request(|q| { q.place = Some(place); q.position = None; q.logical_position = None; });
     }
 
     pub(crate) fn activate(&self, token: String) {
@@ -200,6 +237,19 @@ impl SharedCore {
         self.window_error.lock().unwrap().clone()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_gpu_loss_latch(
+        &self,
+        latch: Option<Arc<crate::render::loss_latch::GpuLossLatch>>,
+    ) {
+        *self.gpu_loss_latch.lock().unwrap_or_else(|e| e.into_inner()) = latch;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn gpu_loss_latch(&self) -> Option<Arc<crate::render::loss_latch::GpuLossLatch>> {
+        self.gpu_loss_latch.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     pub(crate) fn set_window_error(&self, error: Option<String>) {
         *self.window_error.lock().unwrap() = error;
     }
@@ -223,6 +273,49 @@ impl SharedCore {
 
     pub(crate) fn take_place(&self) -> Option<crate::windows::PlaceRequest> {
         self.requests.lock().unwrap().place.take()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn push_overlay(&self, builder: crate::overlay::OverlayBuilder) -> bool {
+        let rejected = match &mut *self.overlays.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            OverlayQueue::Open(pending) => {
+                pending.push(builder);
+                None
+            }
+            OverlayQueue::Closed => Some(builder),
+        };
+        if let Some(builder) = rejected {
+            drop(builder);
+            false
+        } else {
+            self.wake();
+            true
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn has_overlays(&self) -> bool {
+        match &*self.overlays.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            OverlayQueue::Open(pending) => !pending.is_empty(),
+            OverlayQueue::Closed => false,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_overlays(&self) -> Vec<crate::overlay::OverlayBuilder> {
+        match &mut *self.overlays.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            OverlayQueue::Open(pending) => std::mem::take(pending),
+            OverlayQueue::Closed => Vec::new(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn close_overlays(&self) {
+        let dropped = std::mem::replace(
+            &mut *self.overlays.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            OverlayQueue::Closed,
+        );
+        drop(dropped);
     }
 }
 
@@ -299,6 +392,63 @@ impl<S> Shared<S> {
     /// Whether any typed updates wait for `take_updates`.
     pub(crate) fn has_updates(&self) -> bool {
         !self.updates.lock().unwrap().is_empty()
+    }
+}
+
+impl<S: 'static> AppHandle<S> {
+    /// Wake the event loop so `AppSpec::poll` runs, also while the window is hidden, and arm
+    /// one-shot urgent frame admission on macOS so the next drawn frame may bypass display-link
+    /// `Wait` once by advancing its target to now.
+    ///
+    /// Duplicate urgent wakes before that frame claims pacing coalesce into one admission. Normal
+    /// display-link pacing resumes immediately after (even if drawable acquisition or presentation
+    /// fails), leaving drawable backpressure and recovery behavior unchanged. On platforms without
+    /// a display link this behaves like [`wake`](Self::wake).
+    #[inline]
+    pub fn wake_urgent(&self) { self.shared.core.wake_urgent(); }
+
+    /// Like [`update`](Self::update), and arms one-shot urgent frame admission on macOS for the
+    /// resulting frame (see [`wake_urgent`](Self::wake_urgent)).
+    ///
+    /// For conditional updates that may leave state unchanged, call
+    /// [`Tx::request_urgent_frame`](crate::Tx::request_urgent_frame) inside
+    /// [`update_if`](Self::update_if) when returning `true`.
+    pub fn update_urgent(&self, f: impl FnOnce(&mut S, &mut Tx) + Send + 'static) {
+        self.update_if(move |s, tx| {
+            f(s, tx);
+            tx.request_urgent_frame();
+            true
+        });
+    }
+
+    /// Adds a transparent overlay to the running app from any thread and returns its
+    /// [`OverlayHandle`](crate::OverlayHandle) immediately.
+    ///
+    /// `build` runs on the UI thread in the next event-loop turn (or at startup if called before
+    /// [`App::run`]) and returns the overlay's configuration and initial state. Requests queued on
+    /// the returned handle before `build` runs (such as `show`, `update`, or `close`) apply as
+    /// soon as the overlay connects. Inherits this app's fonts, font families, font smoothing
+    /// (unless overridden on [`ConfiguredOverlay`](crate::ConfiguredOverlay)), emoji family,
+    /// prewarmed effects, and GPU-loss policy. Headless runs and web (`wasm32`) return a
+    /// disconnected handle.
+    pub fn overlay<T: 'static, C: Into<crate::ConfiguredOverlay<T>>>(
+        &self,
+        build: impl FnOnce() -> (C, T) + Send + 'static,
+    ) -> crate::overlay::OverlayHandle<T> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (builder, handle) = crate::overlay::make_pending_overlay(build);
+            if self.shared.core.push_overlay(builder) {
+                handle
+            } else {
+                crate::overlay::OverlayHandle::disconnected()
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = build;
+            crate::overlay::OverlayHandle::disconnected()
+        }
     }
 }
 

@@ -39,6 +39,10 @@ pub struct WheelEvent {
     /// Whole notches of a mouse wheel on a platform whose browsers ease them (macOS, Windows,
     /// and Linux): an unclaimed delta eases there as Chromium's does (`Runtime::set_wheel_glide`).
     pub notch: bool,
+    /// It came from a two-finger touchscreen pan rather than a mouse wheel or trackpad scroll.
+    /// Touch pan deltas reach [`El::on_wheel`] handlers only (locked to the `Began` owner) and
+    /// never fall through to scroll views.
+    pub touch: bool,
 }
 
 impl WheelEvent {
@@ -48,8 +52,29 @@ impl WheelEvent {
     pub fn at(mut self, x: f32, y: f32) -> Self { self.x = x; self.y = y; self }
     pub fn mods(mut self, mods: Mods) -> Self { self.mods = mods; self }
     pub fn phase(mut self, phase: GesturePhase) -> Self { self.phase = phase; self }
+    /// Marks this event as post-lift coasting momentum (`WheelEvent::momentum`), such as macOS
+    /// trackpad inertia.
+    ///
+    /// ```
+    /// use rune::{GesturePhase, WheelEvent};
+    ///
+    /// let ev = WheelEvent::new(0.0, -4.0).phase(GesturePhase::Moved).momentum(true);
+    /// assert!(ev.momentum);
+    /// assert!(!WheelEvent::new(0.0, -4.0).momentum);
+    /// ```
+    pub fn momentum(mut self, momentum: bool) -> Self { self.momentum = momentum; self }
     pub fn precise(mut self, precise: bool) -> Self { self.precise = precise; self }
     pub fn notch(mut self, notch: bool) -> Self { self.notch = notch; self }
+    /// Marks this event as a two-finger touchscreen pan delta (`WheelEvent::touch`).
+    ///
+    /// ```
+    /// use rune::WheelEvent;
+    ///
+    /// let ev = WheelEvent::new(12.0, -8.0).touch(true);
+    /// assert!(ev.touch);
+    /// assert!(!WheelEvent::new(12.0, -8.0).touch);
+    /// ```
+    pub fn touch(mut self, touch: bool) -> Self { self.touch = touch; self }
 }
 
 /// A pinch an [`El::on_magnify`] handler sees.
@@ -76,6 +101,17 @@ impl MagnifyEvent {
     pub fn new(delta: f32) -> Self { Self { delta, ..Self::default() } }
     pub fn at(mut self, x: f32, y: f32) -> Self { self.x = x; self.y = y; self }
     pub fn phase(mut self, phase: GesturePhase) -> Self { self.phase = phase; self }
+    /// Marks this event as coming from Ctrl + wheel (`MagnifyEvent::wheel`) rather than a
+    /// trackpad or touchscreen pinch gesture.
+    ///
+    /// ```
+    /// use rune::MagnifyEvent;
+    ///
+    /// let ev = MagnifyEvent::new(0.2).wheel(true);
+    /// assert!(ev.wheel);
+    /// assert!(!MagnifyEvent::new(0.2).wheel);
+    /// ```
+    pub fn wheel(mut self, wheel: bool) -> Self { self.wheel = wheel; self }
 }
 
 /// A two-finger rotation an [`El::on_rotate`] handler sees.
@@ -176,22 +212,144 @@ impl El {
     ///
     /// A canvas pans with plain deltas and zooms with ⌘ (`mods.cmd`) or pinch
     /// ([`El::on_magnify`]). Off macOS a trackpad pinch arrives as a Ctrl + wheel, which goes
-    /// to `on_magnify` when an element here has one.
+    /// to `on_magnify` when an element here has one. On a touchscreen, two-finger midpoint
+    /// movement also reaches `on_wheel` with `WheelEvent::touch == true` and `precise == true`
+    /// (handler-only, locked to the `Began` owner, never falling through to scroll views),
+    /// emitted before [`El::on_magnify`] and [`El::on_rotate`] on the same move so pan and zoom
+    /// keep both fingers pinned to their world points.
+    ///
+    /// ```no_run
+    /// # use rune::{El, MagnifyEvent, RotateEvent, WheelEvent, el};
+    /// # struct Chart;
+    /// # impl Chart {
+    /// #     fn pan_by(&mut self, _: f32, _: f32) {}
+    /// #     fn zoom_by(&mut self, _: f32) {}
+    /// #     fn zoom_at(&mut self, _: f32, _: [f32; 2]) {}
+    /// #     fn rotate_by(&mut self, _: f32, _: [f32; 2]) {}
+    /// # }
+    /// let _: El = el()
+    ///     .on_wheel(|s: &mut Chart, e: WheelEvent, tx| {
+    ///         if e.touch || e.precise { s.pan_by(e.dx, e.dy); } else { s.zoom_by(e.dy); }
+    ///         tx.live_only(); true
+    ///     })
+    ///     .on_magnify(|s: &mut Chart, e: MagnifyEvent, tx| { s.zoom_at(1.0 + e.delta, [e.x, e.y]); tx.live_only(); true })
+    ///     .on_rotate(|s: &mut Chart, e: RotateEvent, tx| { s.rotate_by(e.degrees, [e.x, e.y]); tx.live_only(); true });
+    /// ```
     pub fn on_wheel<S: 'static>(mut self, f: impl Fn(&mut S, WheelEvent, &mut Tx) -> bool + 'static) -> Self {
         self.canvas_input().wheel = Some(Rc::new(move |s, e, tx| f(state::<S>(s), e, tx)));
         self
     }
 
-    /// Trackpad pinches over this element: return true to take one. The innermost handler
-    /// under the pointer hears it first. macOS reports pinches; Ctrl + wheel also reaches
-    /// `on_magnify` (with `MagnifyEvent::wheel == true`), using `1.2^ticks - 1` for line-delta
-    /// notches and `dy / 200` for pixel-precise deltas.
+    /// [`El::on_wheel`] for a component that doesn't read the app's state, so it works in any
+    /// app.
+    ///
+    /// Receives the [`WheelEvent`] in this element's own layout points and a [`Tx`]. Return `true`
+    /// to consume the delta (and own the rest of a phased gesture, including momentum), or `false`
+    /// to let outer handlers and native scroll views handle it. Also receives two-finger
+    /// touchscreen midpoint pan deltas (`WheelEvent::touch == true`).
+    ///
+    /// ```
+    /// use rune::{El, Live, Tx, WheelEvent, el};
+    ///
+    /// let paused = Live::new(0.0_f32);
+    /// let p = paused.clone();
+    /// let _strip: El = el()
+    ///     .size(200.0, 60.0)
+    ///     .on_wheel_any(move |ev: WheelEvent, tx: &mut Tx| {
+    ///         if ev.dx != 0.0 {
+    ///             p.set(1.0);
+    ///             tx.live_only();
+    ///         }
+    ///         false
+    ///     });
+    /// ```
+    pub fn on_wheel_any(mut self, f: impl Fn(WheelEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.canvas_input().wheel = Some(Rc::new(move |_, e, tx| f(e, tx)));
+        self
+    }
+
+    /// Trackpad and touchscreen two-finger pinches over this element: return `true` to take one.
+    /// The innermost handler under the pointer (or fingers' midpoint) hears it first. Phased
+    /// non-wheel pinches (`Began` / `Moved` / `Ended` from macOS trackpads and touchscreens, with
+    /// `MagnifyEvent::wheel == false`) lock the accepting `Began` handler until `Ended` even if
+    /// the pointer or midpoint drifts outside its bounds. Ctrl + wheel also reaches `on_magnify`
+    /// (with `MagnifyEvent::wheel == true`), using `1.2^ticks - 1` for line-delta notches and
+    /// `dy / 200` for pixel-precise deltas.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, MagnifyEvent, Runtime, TouchPhase, el};
+    /// # fn view(_: &f32, _: &mut Cx<f32>) -> El {
+    /// #     el().size(200.0, 200.0).on_magnify(|zoom: &mut f32, e: MagnifyEvent, tx| {
+    /// #         *zoom *= 1.0 + e.delta;
+    /// #         tx.live_only();
+    /// #         true
+    /// #     })
+    /// # }
+    /// let mut rt = Runtime::new(1.0f32, view, (200.0, 200.0), Env::new(true, 1.0));
+    /// rt.frame(0.0);
+    /// rt.touch(1, TouchPhase::Started, 60.0, 100.0, 0.0);
+    /// rt.touch(2, TouchPhase::Started, 140.0, 100.0, 0.01);
+    /// rt.touch(2, TouchPhase::Moved, 180.0, 100.0, 0.02);
+    /// rt.touch(2, TouchPhase::Ended, 180.0, 100.0, 0.03);
+    /// rt.touch(1, TouchPhase::Ended, 60.0, 100.0, 0.04);
+    /// rt.frame(1.0 / 60.0);
+    /// assert!(rt.state > 1.0);
+    /// ```
     pub fn on_magnify<S: 'static>(mut self, f: impl Fn(&mut S, MagnifyEvent, &mut Tx) -> bool + 'static) -> Self {
         self.canvas_input().magnify = Some(Rc::new(move |s, e, tx| f(state::<S>(s), e, tx)));
         self
     }
 
-    /// Two-finger trackpad rotation over this element (macOS): return true to take it.
+    /// [`El::on_magnify`] for a component that doesn't read the app's state, so it works in any
+    /// app.
+    ///
+    /// Receives the [`MagnifyEvent`] in this element's own layout points and a [`Tx`]. Return
+    /// `true` to consume the pinch (locking a phased trackpad or touchscreen pinch until `Ended`),
+    /// or `false` to pass it to outer handlers. Also receives Ctrl + wheel zooms
+    /// (`MagnifyEvent::wheel == true`).
+    ///
+    /// ```
+    /// use rune::{El, Live, MagnifyEvent, Tx, el};
+    ///
+    /// let zoom = Live::new(1.0_f32);
+    /// let z = zoom.clone();
+    /// let _canvas: El = el()
+    ///     .size(200.0, 200.0)
+    ///     .on_magnify_any(move |ev: MagnifyEvent, tx: &mut Tx| {
+    ///         z.set((z.get() * (1.0 + ev.delta)).clamp(0.25, 4.0));
+    ///         tx.live_only();
+    ///         true
+    ///     });
+    /// ```
+    pub fn on_magnify_any(mut self, f: impl Fn(MagnifyEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.canvas_input().magnify = Some(Rc::new(move |_, e, tx| f(e, tx)));
+        self
+    }
+
+    /// Two-finger trackpad (macOS) and touchscreen rotation over this element: return `true` to
+    /// take it. Degrees are positive counterclockwise. Phased rotations (`Began` / `Moved` /
+    /// `Ended`) lock the accepting `Began` handler until `Ended` even if the pointer or midpoint
+    /// leaves its bounds; touchscreen rotation activates after an 8° angular slop with at least
+    /// 16 pt between the fingers (slop subtracted on activation).
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, GesturePhase, RotateEvent, Runtime, TouchPhase, el};
+    /// # fn view(_: &f32, _: &mut Cx<f32>) -> El {
+    /// #     el().size(200.0, 200.0).on_rotate(|angle: &mut f32, e: RotateEvent, tx| {
+    /// #         if e.phase == GesturePhase::Moved { *angle += e.degrees; tx.live_only(); }
+    /// #         true
+    /// #     })
+    /// # }
+    /// let mut rt = Runtime::new(0.0f32, view, (200.0, 200.0), Env::new(true, 1.0));
+    /// rt.frame(0.0);
+    /// rt.touch(1, TouchPhase::Started, 100.0, 100.0, 0.0);
+    /// rt.touch(2, TouchPhase::Started, 180.0, 100.0, 0.01);
+    /// rt.touch(2, TouchPhase::Moved, 156.57, 43.43, 0.02); // 45 deg CCW
+    /// rt.touch(2, TouchPhase::Ended, 156.57, 43.43, 0.03);
+    /// rt.touch(1, TouchPhase::Ended, 100.0, 100.0, 0.04);
+    /// rt.frame(1.0 / 60.0);
+    /// assert!(rt.state > 30.0);
+    /// ```
     pub fn on_rotate<S: 'static>(mut self, f: impl Fn(&mut S, RotateEvent, &mut Tx) -> bool + 'static) -> Self {
         self.canvas_input().rotate = Some(Rc::new(move |s, e, tx| f(state::<S>(s), e, tx)));
         self
@@ -273,3 +431,7 @@ impl Tx {
     /// Other handlers see `Primary`.
     pub fn button(&self) -> PointerButton { self.button }
 }
+
+#[cfg(test)]
+#[path = "canvas_input_tests.rs"]
+mod tests;

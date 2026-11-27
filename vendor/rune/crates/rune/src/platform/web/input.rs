@@ -8,7 +8,7 @@ extern "C" {
     #[wasm_bindgen(js_name = isMac)]
     fn is_mac() -> bool;
     fn mount(canvas: &web_sys::HtmlCanvasElement, callback: &js_sys::Function, embedded: bool, fit_height: bool, document: bool) -> JsValue;
-    fn sync(handle: &JsValue, key: &str, text: &str, base: usize, anchor: u32, focus: u32, secure: bool);
+    fn sync(handle: &JsValue, key: &str, text: &str, base: usize, anchor: u32, focus: u32, secure: bool, single_line: bool, input_mode: &str, autofill: &str, peer_key: &str, peer_secure: bool, peer_autofill: &str, peer_type: &str);
     #[wasm_bindgen(js_name = syncCopy)]
     fn sync_copy(handle: &JsValue, text: &str);
     #[wasm_bindgen(js_name = syncA11y)]
@@ -39,8 +39,14 @@ extern "C" {
     fn sync_media_keys(handle: &JsValue, enabled: bool);
     #[wasm_bindgen(js_name = syncWheel)]
     fn sync_wheel(handle: &JsValue, used: bool);
+    #[wasm_bindgen(js_name = syncGesture)]
+    fn sync_gesture(handle: &JsValue, used: bool);
+    #[wasm_bindgen(js_name = syncKey)]
+    fn sync_key(handle: &JsValue, used: bool);
     #[wasm_bindgen(js_name = syncCaret)]
     fn sync_caret(handle: &JsValue, x: f32, y: f32, w: f32, h: f32);
+    #[wasm_bindgen(js_name = syncVisualViewport)]
+    fn sync_visual_viewport(handle: &JsValue, top: f32, bottom: f32, layout_height: f32);
     #[wasm_bindgen(js_name = cancelIme)]
     fn cancel_ime(handle: &JsValue);
     #[wasm_bindgen(js_name = syncFamilies)]
@@ -81,7 +87,7 @@ pub(super) struct Mode {
 }
 
 pub(super) struct Bridge {
-    handle: JsValue,
+    pub(super) handle: JsValue,
     _callback: Closure<dyn FnMut(String)>,
     dispose_viewport: js_sys::Function,
     mods: ModifiersState,
@@ -98,6 +104,9 @@ pub(super) struct Bridge {
     scroll_x: Vec<(String, f32, bool)>,
     /// The IME area the page's text field was last put at.
     caret: Option<[f32; 4]>,
+    /// Latest unzoomed visual viewport band `[top, bottom, layout_h]` and last value synced to JS.
+    visual_viewport: Option<[f32; 3]>,
+    visual_viewport_sent: Option<[f32; 3]>,
     /// `Tx::announce`'s calls the page's live regions have said.
     announced: u32,
     /// Explicit state machine scheduling deferred/off-rAF mirror flushes.
@@ -135,7 +144,7 @@ impl Bridge {
         let handle = mount(canvas, callback.as_ref().unchecked_ref(), embedded, fit_height, document);
         Self { handle, _callback: callback, dispose_viewport, mods: ModifiersState::empty(), is_mac: is_mac(), control_click: false,
             mirror: Default::default(), a11y: Default::default(),
-            copy_cache: String::new(), fit_height, document, page: None, scroll_x: Vec::new(), caret: None, announced: 0, a11y_seq: Default::default(), a11y_schedule: Default::default(), families: Default::default(), media_keys: false }
+            copy_cache: String::new(), fit_height, document, page: None, scroll_x: Vec::new(), caret: None, visual_viewport: None, visual_viewport_sent: None, announced: 0, a11y_seq: Default::default(), a11y_schedule: Default::default(), families: Default::default(), media_keys: false }
     }
 
     /// The first frame is on screen: a page swaps its static export for the live mirror.
@@ -144,6 +153,12 @@ impl Bridge {
     /// Opens `show` as the page's own menu, its top-left at its window point.
     pub(super) fn show_menu(&self, show: &crate::popup_menu::Show, dark: bool) {
         show_menu(&self.handle, &show.menu.to_json().to_string(), show.at.0, show.at.1, show.min_width, dark);
+    }
+
+    fn sync_mirror(&self) {
+        let m = &self.mirror;
+        let (pk, ps, pa, pt) = m.peer.as_ref().map_or(("", false, "", ""), |p| (p.key.as_str(), p.secure, p.autofill, p.html_type));
+        sync(&self.handle, &m.key, &m.text, m.base, m.anchor, m.focus, m.secure, m.single_line, m.input_mode.as_html(), m.autofill.map_or("", crate::Autofill::as_html), pk, ps, pa, pt);
     }
 }
 impl Drop for Bridge {
@@ -180,9 +195,12 @@ impl Running {
         if reset {
             cancel_ime(&self.input.handle);
         }
-        if self.app.rt().web_context(&mut self.input.mirror) || reset {
-            let m = &self.input.mirror;
-            sync(&self.input.handle, &m.key, &m.text, m.base, m.anchor, m.focus, m.secure);
+        // While a finger is still down, wait for the touch release (`TouchPhase::Ended`, which
+        // calls `sync_input(true)` inside the `touchend` gesture) instead of focusing the hidden
+        // input prematurely from a mid-tap `requestAnimationFrame` outside any user gesture.
+        let defer_touch_sync = !focus && self.app.rt().touching();
+        if !defer_touch_sync && (self.app.rt().web_context(&mut self.input.mirror) || reset) {
+            self.input.sync_mirror();
         }
         let next_copy = self.app.copy_text().unwrap_or_default();
         if self.input.copy_cache != next_copy {
@@ -200,6 +218,11 @@ impl Running {
         if self.input.caret != caret {
             self.input.caret = caret;
             if let Some([x, y, w, h]) = self.input.caret { sync_caret(&self.input.handle, x, y, w, h); }
+        }
+        if self.input.visual_viewport != self.input.visual_viewport_sent {
+            self.input.visual_viewport_sent = self.input.visual_viewport;
+            let [top, bottom, layout_h] = self.input.visual_viewport.unwrap_or([0.0; 3]);
+            sync_visual_viewport(&self.input.handle, top, bottom, layout_h);
         }
         let (sans, mono) = rt.font_families();
         if !self.input.document && (self.input.families.0 != sans || self.input.families.1 != mono) {
@@ -278,16 +301,80 @@ impl Running {
     /// false when a whole frame has to run inside this event instead.
     fn sync_live_edit(&mut self) -> bool {
         let Some(changed) = self.app.web_edit_context(&mut self.input.mirror) else { return false };
-        if changed {
-            let m = &self.input.mirror;
-            sync(&self.input.handle, &m.key, &m.text, m.base, m.anchor, m.focus, m.secure);
-        }
+        if changed { self.input.sync_mirror(); }
         true
+    }
+
+    fn apply_viewport(&mut self, event: &serde_json::Value, window: &Arc<Window>) -> bool {
+        let insets = std::array::from_fn(|i| event["insets"][i].as_f64().unwrap_or(0.0).max(0.0) as f32);
+        let h = event["h"].as_f64().unwrap_or(0.0).max(0.0) as f32;
+        let visual = web_math::platform_events::parse_visual_viewport(&event["visual"]);
+        let visual_y = visual
+            .filter(|&[top, bottom, layout_h]| top > 1.0 || layout_h - bottom > 1.0)
+            .map(|[top, bottom, _]| (top, bottom));
+        let visual_moved = self.input.visual_viewport != visual;
+        if visual_moved {
+            self.input.visual_viewport = visual;
+            self.app.rt_mut().set_visual_viewport_y(visual_y);
+        }
+        // A phone reports the visual viewport on every scroll frame as its toolbar moves;
+        // skip work unless safe area, largest viewport, or visual keyboard band moved.
+        let moved = LARGE_VIEWPORT.replace(h) != h;
+        let insets_moved = INSETS.replace(insets) != insets;
+        if !insets_moved && !moved {
+            if !visual_moved { return false; }
+            if self.app.rt().web_has_editable_focus() {
+                if visual_y.is_some() { self.app.rt_mut().request_caret_follow(); }
+                return true;
+            }
+            self.input.visual_viewport_sent = visual;
+            let [top, bottom, layout_h] = visual.unwrap_or([0.0; 3]);
+            sync_visual_viewport(&self.input.handle, top, bottom, layout_h);
+            return false;
+        }
+        if moved { self.resize_surface(window, window.inner_size(), window.scale_factor() as f32); }
+        self.app.rt_mut().invalidate();
+        true
+    }
+
+    fn apply_primary_pointer(&mut self, event: &serde_json::Value) -> bool {
+        let pointer = web_math::platform_events::parse_primary_pointer(event);
+        if PRIMARY_POINTER.replace(pointer) == pointer { return false; }
+        self.app.rt_mut().invalidate();
+        true
+    }
+
+    fn finish_focus(&mut self, focus: web_math::platform_events::FocusChange, window: &Arc<Window>) {
+        if !focus.focused {
+            self.input.mods = ModifiersState::empty();
+            self.input.control_click = false;
+            if focus.changed {
+                self.cursor.apply(window, crate::el::Cursor::Default, false);
+            }
+        }
+    }
+
+    fn commit_dom_frame(&mut self, window: &Arc<Window>, activate: bool) {
+        self.app.frame(0.0);
+        self.apply_frame_requests(window);
+        self.clipboard.flush_core(self.app.rt_mut());
+        self.sync_input(activate);
+    }
+
+    fn commit_hidden(&mut self, window: &Arc<Window>) {
+        crate::input::host_events::hide_reset(self.app.rt_mut(), &mut self.input.mods, &mut self.input.control_click);
+        hide_menu(&self.input.handle);
+        self.app.resolve_popup(None).ok();
+        self.cursor.apply(window, crate::el::Cursor::Default, false);
+        // Commit cancellation, FocusLost, FinishIme and poll now: browsers pause rAF while hidden.
+        self.commit_dom_frame(window, false);
+        self.app.rt_mut().rest();
     }
 
     /// Handles one DOM event. Returns whether a frame must be drawn: a page's scroll only draws
     /// when it moves the band (the browser's compositor scrolls the pixels Rune already drew).
     pub(super) fn input_event(&mut self, event: &mut serde_json::Value, window: &Arc<Window>) -> bool {
+        use web_math::platform_events::{self as pe, InitAction, VisibilityAction};
         if event["kind"].as_str() == Some("mods") {
             let next = crate::input::host_events::modifiers_from_flags(
                 event["shift"].as_bool().unwrap_or(false),
@@ -301,19 +388,12 @@ impl Running {
         }
         if event["kind"].as_str() == Some("pointer_cancel") {
             let lost_capture = event["lost_capture"].as_bool().unwrap_or(false);
-            if !crate::input::host_events::pointer_cancel(
-                self.app.rt_mut(),
-                &mut self.input.control_click,
-                lost_capture,
-            ) {
+            if !crate::input::host_events::pointer_cancel(self.app.rt_mut(), &mut self.input.control_click, lost_capture) {
                 return false;
             }
             self.full_redraw = true;
             self.cursor.apply(window, crate::el::Cursor::Default, false);
-            self.app.frame(0.0);
-            self.apply_frame_requests(window);
-            self.clipboard.flush_core(self.app.rt_mut());
-            self.sync_input(false);
+            self.commit_dom_frame(window, false);
             return true;
         }
         match event["kind"].as_str() {
@@ -329,18 +409,20 @@ impl Running {
                 self.run_a11y_schedule(event);
                 return false;
             }
-            Some("a11y_flush") => {
-                self.run_a11y_schedule(crate::runtime::web_a11y::schedule::ScheduleEvent::ConsumerDemand);
+            Some("a11y_flush") => { self.run_a11y_schedule(crate::runtime::web_a11y::schedule::ScheduleEvent::ConsumerDemand); return false; }
+            Some("file_dialog") => { let ok = super::file_dialog::handle_event(self.app.rt_mut(), event); if ok { self.full_redraw = true; } return ok; }
+            Some("gesture_start") => {
+                let point = event["x"].as_f64().zip(event["y"].as_f64())
+                    .map(|(x, y)| crate::input::host_events::window_point(self.app.rt(), x as f32, y as f32));
+                let used = crate::input::host_events::web_gesture_start(self.app.rt(), point, self.input.document, self.input.fit_height);
+                sync_gesture(&self.input.handle, used);
                 return false;
             }
             Some("touch_hold_confirm") => {
                 let attempt = crate::machine::Attempt(event["attempt"].as_u64().unwrap_or(0) as u32);
                 if !self.app.confirm_touch_hold(attempt) { return false; }
                 self.full_redraw = true;
-                self.app.frame(0.0);
-                self.apply_frame_requests(window);
-                self.clipboard.flush_core(self.app.rt_mut());
-                self.sync_input(false);
+                self.commit_dom_frame(window, false);
                 return true;
             }
             Some("touch_hold") => {
@@ -352,103 +434,63 @@ impl Running {
                     crate::input::time::record_last(now);
                 }
                 self.full_redraw = true;
-                self.app.frame(0.0);
-                self.apply_frame_requests(window);
-                self.clipboard.flush_core(self.app.rt_mut());
-                self.sync_input(false);
+                self.commit_dom_frame(window, false);
                 return true;
             }
             _ => {}
         }
         self.full_redraw = true;
-        let mut activate = false;
-        let mut flush_a11y = false;
+        let (mut activate, mut a11y_press, mut flush_a11y) = (false, false, false);
+        let is_key = event["kind"].as_str() == Some("key");
         // What a person typed, scrolled, hovered, pasted or activated through the page's own
         // elements is live input too: stamp its arrival time (`Tx::input_time`) and `last_input`.
         let _input = event["kind"].as_str().is_some_and(crate::input::time::is_web_dom_input)
             .then(crate::input::time::arrived_now);
         match event["kind"].as_str() {
-            Some("viewport") => {
-                let insets = std::array::from_fn(|i| event["insets"][i].as_f64().unwrap_or(0.0).max(0.0) as f32);
-                let h = event["h"].as_f64().unwrap_or(0.0).max(0.0) as f32;
-                // A phone reports the visual viewport on every scroll frame as its toolbar moves;
-                // when neither the safe area nor the largest viewport moved, there's nothing to do.
-                let moved = LARGE_VIEWPORT.replace(h) != h;
-                if INSETS.replace(insets) == insets && !moved { return false; }
-                if moved { self.resize_surface(window, window.inner_size(), window.scale_factor() as f32); }
-                self.app.rt_mut().invalidate();
+            // Startup snapshot combining viewport, motion, primary pointer, contrast, focus and
+            // visibility so cold boot runs at most one synchronous `app.frame(0.0)` pass.
+            Some("init") => {
+                let viewport_changed = self.apply_viewport(event, window);
+                let pointer_changed = self.apply_primary_pointer(event);
+                let init = self.app.apply_init(&self.shared, event, viewport_changed, pointer_changed);
+                self.finish_focus(init.focus, window);
+                if init.clear_presented { self.last_presented = None; }
+                match init.action {
+                    InitAction::CommitHidden => { self.commit_hidden(window); return false; }
+                    InitAction::CommitFrame => {}
+                    InitAction::NoOp => return false,
+                }
             }
+            Some("viewport") => if !self.apply_viewport(event, window) { return false; },
             Some("dpr") => {
                 let size = window.inner_size();
                 let scale = event["scale"].as_f64().unwrap_or_else(|| window.scale_factor()).max(0.5) as f32;
                 self.resize_surface(window, size, scale);
             }
-            Some("motion") => self.app.rt_mut().set_system_reduced_motion(event["reduced"].as_bool().unwrap_or(false)),
-            Some("languages") => {
-                let langs = event["languages"].as_array().map(|list| {
-                    list.iter().filter_map(|v| v.as_str()).map(str::to_owned).collect::<Vec<_>>()
-                }).unwrap_or_default();
-                self.app.rt_mut().set_languages(langs);
-            }
+            Some("motion") => if !pe::apply_motion(self.app.rt_mut(), event) { return false; },
+            Some("transparency") => if !pe::apply_transparency(self.app.rt_mut(), event) { return false; },
+            Some("languages") => if !pe::apply_languages(self.app.rt_mut(), event) { return false; },
             // The primary pointer can or can't hover (a mouse or a touch screen), read by views
             // through `Cx::hover_none`.
-            Some("primary_pointer") => {
-                let pointer = match (event["hover"].as_bool(), event["coarse"].as_bool()) {
-                    (Some(false), Some(true)) => PrimaryPointer::Touch,
-                    (Some(false), _) => PrimaryPointer::NoHover,
-                    _ => PrimaryPointer::Hover,
-                };
-                if PRIMARY_POINTER.replace(pointer) == pointer { return false; }
-                self.app.rt_mut().invalidate();
-            }
-            // The browser's `forced-colors` (a contrast theme) and its system colours, as sRGB bytes:
-            // Canvas, CanvasText, Highlight, HighlightText, GrayText, ButtonFace, ButtonText, LinkText.
-            Some("contrast") => {
-                let colors: Option<Vec<crate::Color>> = event["colors"].as_array().map(|list| list.iter().map(|c| {
-                    let d = |i: usize| crate::color::srgb_decode(c[i].as_f64().unwrap_or(0.0) as f32 / 255.0);
-                    crate::Color { r: d(0), g: d(1), b: d(2), a: 1.0 }
-                }).collect());
-                let contrast = colors.filter(|c| c.len() == 8).map(|c| crate::SystemContrast {
-                    window: c[0], text: c[1], highlight: c[2], highlight_text: c[3], disabled: c[4], button: c[5], button_text: c[6], link: c[7],
-                });
-                self.app.rt_mut().set_system_contrast(contrast);
-            }
+            Some("primary_pointer") => if !self.apply_primary_pointer(event) { return false; },
+            // The browser's `forced-colors` system colours and `prefers-contrast: more` preference.
+            Some("contrast") => if !pe::apply_contrast(self.app.rt_mut(), event) { return false; },
+            // The browser's default font size (root `font-size` / 16px), for `Cx::system_text_scale`.
+            Some("text_scale") => if !pe::apply_text_scale(self.app.rt_mut(), event) { return false; },
             Some("focus") => {
-                let focused = event["focused"].as_bool().unwrap_or(false);
-                self.app.window_focus(focused);
-                if !focused {
-                    self.input.mods = ModifiersState::empty();
-                    self.input.control_click = false;
-                    self.cursor.apply(window, crate::el::Cursor::Default, false);
+                let focus = self.app.apply_focus(event);
+                if focus.changed {
+                    self.observability.report_focus(event["focused"].as_bool().unwrap_or(false));
                 }
+                self.finish_focus(focus, window);
+                if !focus.changed { return false; }
             }
-            Some("visibility") => {
-                let visible = event["visible"].as_bool().unwrap_or(false);
-                self.last_presented = None;
-                self.shared.set_visible(visible);
-                self.app.set_live_visible(visible);
-                if !visible {
-                    crate::input::host_events::hide_reset(
-                        self.app.rt_mut(),
-                        &mut self.input.mods,
-                        &mut self.input.control_click,
-                    );
-                    hide_menu(&self.input.handle);
-                    self.app.resolve_popup(None).ok();
-                    self.cursor.apply(window, crate::el::Cursor::Default, false);
-                    // Commit cancellation, FocusLost, FinishIme and poll now: browsers pause rAF
-                    // while the tab is hidden.
-                    self.app.frame(0.0);
-                    self.apply_frame_requests(window);
-                    self.clipboard.flush_core(self.app.rt_mut());
-                    self.sync_input(false);
-                    return false;
-                }
-                if event["focused"].as_bool().unwrap_or(false) {
-                    self.app.window_focus(true);
-                }
-                return true;
-            }
+            Some("visibility") => match self.app.apply_visibility(&self.shared, event) {
+                VisibilityAction::NoOp => return false,
+                VisibilityAction::Redraw => return true,
+                VisibilityAction::Hide => { self.last_presented = None; self.commit_hidden(window); return false; }
+                VisibilityAction::Show => { self.last_presented = None; return true; }
+            },
             Some("leave") => {
                 if self.app.rt().touching() || self.app.rt().pointer_locked() { return false; }
                 self.app.rt_mut().pointer_leave();
@@ -484,6 +526,9 @@ impl Running {
                 if kind == "edit" && self.sync_live_edit() { return true; }
             }
             Some("sync") => self.input.mirror.invalidate(), // Composition's final sync was deferred by the DOM.
+            Some("field_blur") => {
+                if !self.app.rt_mut().web_field_blur(event["key"].as_str().unwrap_or_default()) { return false; }
+            }
             Some("paste") => {
                 let text = match event["text"].take() {
                     serde_json::Value::String(s) => s,
@@ -508,8 +553,17 @@ impl Running {
                     self.app.web_secure_replace(event["key"].as_str().unwrap_or_default(), text);
                 }
             }
-            Some("key") => activate = self.app.web_key(event),
-            Some("a11y_press" | "a11y_link") => { let _ = self.app.rt_mut().web_a11y_action(event); flush_a11y = true; }
+            Some("autofill") => {
+                if let serde_json::Value::String(text) = event["text"].take() {
+                    self.app.web_autofill(event["key"].as_str().unwrap_or_default(), text, event["secure"].as_bool() == Some(true));
+                }
+            }
+            Some("key") => { self.app.rt_mut().take_key_consumed(); activate = self.app.web_key(event); }
+            Some("a11y_press" | "a11y_link" | "a11y_custom") => {
+                let _ = self.app.rt_mut().web_a11y_action(event);
+                a11y_press = matches!(event["kind"].as_str(), Some("a11y_press" | "a11y_custom"));
+                flush_a11y = true;
+            }
             // The page's menu (`showMenu`) was picked from or dismissed.
             Some("menu") => {
                 if self.app.resolve_popup(event["id"].as_str()).is_err() { self.app.resolve_popup(None).ok(); }
@@ -551,16 +605,11 @@ impl Running {
                 let dy_pages = event["dy"].as_f64().unwrap_or(0.0) as f32;
                 let shift = !self.input.is_mac && mods.shift && !mods.ctrl;
                 let (dx, dy) = crate::input::host_events::wheel_page_delta(self.app.rt(), dx_pages, dy_pages, shift);
-                let (redraw, wheel_used) = crate::input::host_events::web_wheel(
-                    self.app.rt_mut(),
-                    dx,
-                    dy,
-                    mods,
-                    crate::GesturePhase::Moved,
-                    false,
-                    self.input.document,
-                    self.input.fit_height,
-                );
+                let notch = dx_pages.fract() == 0.0 && dy_pages.fract() == 0.0;
+                let input = crate::input::host_events::WheelInput {
+                    dx, dy, ticks: None, mods, phase: crate::GesturePhase::Moved, precise: false, notch, pinch: false,
+                };
+                let (redraw, wheel_used) = crate::input::host_events::web_wheel(self.app.rt_mut(), input, self.input.document, self.input.fit_height);
                 if let Some(used) = wheel_used { sync_wheel(&self.input.handle, used); }
                 return redraw;
             }
@@ -583,8 +632,11 @@ impl Running {
         }
         // Commit within the DOM event: clipboard, link and soft-keyboard APIs need activation.
         self.app.frame(0.0);
+        if is_key { sync_key(&self.input.handle, self.app.rt_mut().take_key_consumed()); }
         self.apply_frame_requests(window);
         self.clipboard.flush_core(self.app.rt_mut());
+        let activate = (activate || (a11y_press && self.app.rt().web_has_editable_focus()))
+            && self.app.rt().popup_menu().is_none();
         self.sync_input(activate);
         if flush_a11y {
             self.run_a11y_schedule(crate::runtime::web_a11y::schedule::ScheduleEvent::ConsumerDemand);
@@ -595,7 +647,7 @@ impl Running {
     pub(super) fn window_input(&mut self, event: &WindowEvent, window: &Arc<Window>) -> bool {
         let scale = window.scale_factor() as f32;
         let mut activate = crate::input::host_events::WebActivate::Never;
-        let mut immediate = false;
+        let (mut immediate, mut is_key_down) = (false, false);
         match event {
             WindowEvent::ModifiersChanged(mods) => {
                 return self.app.sync_modifiers(&mut self.input.mods, mods.state());
@@ -665,21 +717,16 @@ impl Running {
                 // rely on wheel_delta to swap vertical into horizontal (it never double-swaps
                 // when dx != 0).
                 let shift = !self.input.is_mac && self.input.mods.shift_key() && !self.input.mods.control_key();
-                let (dx, dy) = crate::runtime::wheel_delta(*delta, scale, shift, crate::runtime::LINE_POINTS);
+                let (dx, dy) = crate::runtime::wheel_delta(*delta, scale, shift, self.app.rt().wheel_line().unwrap_or(crate::runtime::LINE_POINTS));
                 let precise = matches!(delta, winit::event::MouseScrollDelta::PixelDelta(_));
+                let notch = crate::input::host_events::line_delta_is_notch(*delta, self.input.is_mac, !self.input.is_mac);
                 // Browsers give WheelEvent no gesture phase (always Moved), matching unphased
                 // desktop mouse wheels so WheelLock uses its idle timeout.
                 let phase = crate::input::host_events::gesture_phase(*phase);
-                let (redraw, wheel_used) = crate::input::host_events::web_wheel(
-                    self.app.rt_mut(),
-                    dx,
-                    dy,
-                    crate::window::map_mods(self.input.mods),
-                    phase,
-                    precise,
-                    self.input.document,
-                    self.input.fit_height,
-                );
+                let input = crate::input::host_events::WheelInput {
+                    dx, dy, ticks: None, mods: crate::window::map_mods(self.input.mods), phase, precise, notch, pinch: false,
+                };
+                let (redraw, wheel_used) = crate::input::host_events::web_wheel(self.app.rt_mut(), input, self.input.document, self.input.fit_height);
                 if let Some(used) = wheel_used { sync_wheel(&self.input.handle, used); }
                 if !redraw { return false; }
             }
@@ -687,19 +734,26 @@ impl Running {
             WindowEvent::KeyboardInput { event, .. }
                 if self.input.document && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab) => return false,
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                self.observability.report_key(
+                    event.state == ElementState::Pressed,
+                    event.repeat,
+                    self.app.rt().has_focus(),
+                    crate::input::time::current(),
+                );
                 // Browsers expose no synchronous layout key_without_modifiers, so `key_base`
                 // derives `Tx::key_base` from `KeyboardEvent.key` when unmodified (or for shifted
                 // letters) while physical US positions arrive in `physical_key`.
-                if !self.app.keyboard(event, self.input.mods) { return false; }
+                is_key_down = event.state == ElementState::Pressed;
+                if is_key_down { self.app.rt_mut().take_key_consumed(); }
+                if !self.app.keyboard(event, self.input.mods) {
+                    if is_key_down { sync_key(&self.input.handle, false); }
+                    return false;
+                }
                 immediate = true;
                 // Any key that puts Rune's focus in a field (Tab, or a shortcut such as the
                 // prompt's) hands the page's own field the browser's focus, so a screen reader is
                 // in a real text field with its text, not on the canvas's stand-in for it.
-                activate = if event.state == ElementState::Pressed {
-                    crate::input::host_events::WebActivate::Always
-                } else {
-                    crate::input::host_events::WebActivate::Never
-                };
+                activate = if is_key_down { crate::input::host_events::WebActivate::Always } else { crate::input::host_events::WebActivate::Never };
             }
             // On a canvas as tall as its content the browser takes vertical pans and cancels the
             // touch; taps and horizontal drags stay Rune's.
@@ -727,6 +781,7 @@ impl Running {
         // commit before the DOM handler returns (clipboard, links and keyboard focus).
         if immediate {
             self.app.frame(0.0);
+            if is_key_down { sync_key(&self.input.handle, self.app.rt_mut().take_key_consumed()); }
             self.apply_frame_requests(window);
             self.clipboard.flush_core(self.app.rt_mut());
             let focus = activate.should_activate(self.app.rt());

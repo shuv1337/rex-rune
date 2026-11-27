@@ -43,10 +43,21 @@ class FakeNode {
 
     get attributes() { return [...this._attrs].map(([name, value]) => ({ name, value })); }
     setAttribute(name, value) { this._attrs.set(name, String(value)); }
-    removeAttribute(name) { this._attrs.delete(name); }
+    removeAttribute(name) {
+        this._attrs.delete(name);
+        if (name === 'href') delete this.href;
+        if (name === 'target') delete this.target;
+        if (name === 'rel') delete this.rel;
+    }
     getAttribute(name) { return this._attrs.get(name) ?? null; }
+    hasAttribute(name) { return this._attrs.has(name); }
 
     get firstElementChild() { return this.children[0] ?? null; }
+    get previousElementSibling() {
+        if (!this.parentElement) return null;
+        const i = this.parentElement.children.indexOf(this);
+        return i > 0 ? this.parentElement.children[i - 1] : null;
+    }
     get nextElementSibling() {
         if (!this.parentElement) return null;
         const i = this.parentElement.children.indexOf(this);
@@ -118,6 +129,7 @@ class FakeNode {
             for (const child of node.children) {
                 if (parts.some(sel => {
                     if (sel === 'a[target="_blank"]') return child.tagName === 'A' && child.target === '_blank';
+                    if (sel === 'a[href]') return child.tagName === 'A' && typeof child.href === 'string' && child.href.length > 0;
                     return child.tagName === sel.toUpperCase();
                 })) out.push(child);
                 walk(child);
@@ -129,6 +141,10 @@ class FakeNode {
 
     getBoundingClientRect() {
         return { left: 0, top: 0, right: 160, bottom: 80, width: 160, height: 80 };
+    }
+
+    getClientRects() {
+        return [];
     }
 
     contains(node) {
@@ -158,11 +174,17 @@ class FakeNode {
         if (prev) prev.dispatchEvent({ type: 'blur' });
         if (this.onFocus) this.onFocus();
     }
+
+    blur() {
+        if (globalThis.document?.activeElement !== this) return;
+        globalThis.document.activeElement = globalThis.document.body;
+        this.dispatchEvent({ type: 'blur' });
+    }
 }
 
 let coarsePointer = false;
 
-function installDom() {
+function installDom({ platform = 'Linux x86_64' } = {}) {
     const body = new FakeNode('body');
     const head = new FakeNode('head');
     const doc = new FakeNode('#document');
@@ -180,7 +202,7 @@ function installDom() {
     Object.defineProperty(globalThis, 'document', { value: doc, configurable: true });
     Object.defineProperty(globalThis, 'window', { value: win, configurable: true });
     Object.defineProperty(globalThis, 'navigator', {
-        value: { platform: 'Linux x86_64', standalone: false },
+        value: { platform, standalone: false },
         configurable: true,
     });
     Object.defineProperty(globalThis, 'matchMedia', {
@@ -199,9 +221,9 @@ function installDom() {
 installDom();
 const bridge = await import('./bridge.js');
 
-function setup({ embedded = false, fitHeight = false, page = false, coarse = false } = {}) {
+function setup({ embedded = false, fitHeight = false, page = false, coarse = false, platform = 'Linux x86_64' } = {}) {
     coarsePointer = coarse;
-    const { doc, win, body } = installDom();
+    const { doc, win, body } = installDom({ platform });
     globalThis.innerWidth = 800;
     const canvas = doc.createElement('canvas');
     body.append(canvas);
@@ -316,7 +338,7 @@ test('activate restores backward non-collapsed selection without echoing a selec
     bridge.destroy(h);
 });
 
-test('sync keeps inputMode none on coarse pointers when reclaiming focus from canvas', async () => {
+test('sync sets inputMode text before reclaiming focus from canvas on coarse pointers', async () => {
     const { doc, canvas, h } = setup({ coarse: true });
     await Promise.resolve();
     assert.equal(doc.activeElement, canvas);
@@ -324,10 +346,9 @@ test('sync keeps inputMode none on coarse pointers when reclaiming focus from ca
 
     bridge.sync(h, 'field', 'hello', 0, 5, 5, false);
     assert.equal(doc.activeElement, h.textarea);
-    assert.equal(h.textarea.inputMode, 'none');
+    assert.equal(h.textarea.inputMode, 'text');
     assert.equal(h.textarea.selectionStart, 5);
 
-    // An explicit tap activates the soft keyboard.
     bridge.activate(h);
     assert.equal(h.textarea.inputMode, 'text');
     bridge.destroy(h);
@@ -1140,7 +1161,8 @@ test('syncA11y sets aria-description on inline link anchors while preserving tex
     assert.equal(anchors[0].getAttribute('title'), null);
 
     assert.equal(anchors[1].textContent, 'notes');
-    assert.equal(anchors[1].href, '#');
+    assert.equal(anchors[1].href, '/notes');
+    assert.equal(anchors[1].target, undefined);
     assert.equal(anchors[1].getAttribute('aria-description'), 'Local notes');
 
     assert.equal(anchors[2].textContent, 'plain');
@@ -1559,7 +1581,7 @@ test('page mode mouse release focusing a field via sync + activate focuses texta
     bridge.destroy(h);
 });
 
-test('coarse pointer release focusing a field via sync + activate restores inputMode text', async () => {
+test('coarse pointer release focusing a field via sync + activate has inputMode text at focus time', async () => {
     const { doc, canvas, h } = setup({ coarse: true });
     await Promise.resolve();
     assert.equal(doc.activeElement, canvas);
@@ -1568,10 +1590,10 @@ test('coarse pointer release focusing a field via sync + activate restores input
     bridge.sync(h, '', '', 0, 0, 0, false);
     assert.equal(h.textarea.inputMode, 'none');
 
-    // sync() alone reclaims focus from canvas but keeps inputMode none; activate() sets text.
+    // sync() sets inputMode text before focusing so iOS Safari opens the virtual keyboard at focus time.
     bridge.sync(h, 'editor', 'Recalled text', 0, 13, 13, false);
     assert.equal(doc.activeElement, h.textarea);
-    assert.equal(h.textarea.inputMode, 'none');
+    assert.equal(h.textarea.inputMode, 'text');
 
     bridge.activate(h);
     assert.equal(doc.activeElement, h.textarea);
@@ -1848,10 +1870,34 @@ test('consumer demand triggers flush the mirror and timer helpers pass attempt a
         bridge.cancelA11y(h);
         assert.equal(active.has(idleId), false, 'cancelA11y cancels pending requestIdleCallback');
 
+        timers.length = 0;
         bridge.scheduleA11yIdle(h, 6, 100);
+        const backstop6 = timers.find(t => t.kind === 'timeout');
         const idleId2 = timers.at(-1).id;
         active.get(idleId2).fn();
         assert.deepEqual(events.pop(), { kind: 'a11y_idle', attempt: 6 });
+        assert.equal(active.has(backstop6.id), false, 'firing requestIdleCallback clears its setTimeout backstop');
+
+        // Stalled requestIdleCallback (e.g. idle WebGL2 frame with no next rAF): the bounded
+        // setTimeout backstop fires a11y_idle once and cancels the stalled idle callback.
+        timers.length = 0;
+        bridge.scheduleA11yIdle(h, 7, 100);
+        const backstop = timers.find(t => t.kind === 'timeout');
+        const stalledIdle = timers.find(t => t.kind === 'idle');
+        assert.ok(backstop && stalledIdle, 'scheduleA11yIdle arms both requestIdleCallback and setTimeout backstop');
+        assert.ok(backstop.ms <= 16, `backstop fires within one 60 Hz frame, got ${backstop.ms}ms`);
+        active.get(backstop.id).fn();
+        assert.deepEqual(events.pop(), { kind: 'a11y_idle', attempt: 7 });
+        assert.equal(active.has(stalledIdle.id), false, 'backstop cancels stalled requestIdleCallback');
+
+        // cancelA11y cancels both requestIdleCallback and its setTimeout backstop.
+        timers.length = 0;
+        bridge.scheduleA11yIdle(h, 8, 100);
+        const b8 = timers.find(t => t.kind === 'timeout');
+        const i8 = timers.find(t => t.kind === 'idle');
+        bridge.cancelA11y(h);
+        assert.equal(active.has(b8.id), false, 'cancelA11y clears backstop timer');
+        assert.equal(active.has(i8.id), false, 'cancelA11y clears requestIdleCallback');
     } finally {
         globalThis.setTimeout = origSetTimeout;
         globalThis.clearTimeout = origClearTimeout;
@@ -2534,6 +2580,56 @@ test('syncA11y applies root dir/lang, per-item dir overrides, and logical text-a
     bridge.destroy(h);
 });
 
+test('syncA11y and focusA11y mirror, patch, and clear aria-roledescription on mirror nodes, proxy, and fields', () => {
+    const { h } = setup();
+
+    // Full snapshot sets aria-roledescription on mirrored article and button.
+    bridge.syncA11y(h, JSON.stringify([
+        { k: 'group', p: '#0/row-1', r: [0, 0, 200, 32], g: 'article', t: 'Row one', rd: 'card' },
+        { k: 'button', p: '#0/chip', r: [0, 36, 100, 24], t: 'Today', rd: 'divider' },
+    ]));
+    const article = h.a11yNodes.get('article:#0/row-1');
+    const chip = h.a11yNodes.get('button:#0/chip');
+    assert.equal(article.getAttribute('aria-roledescription'), 'card');
+    assert.equal(chip.getAttribute('aria-roledescription'), 'divider');
+
+    // Incremental patch updates and clears aria-roledescription.
+    bridge.syncA11y(h, JSON.stringify({
+        p: 1,
+        u: [
+            { k: 'group', p: '#0/row-1', r: [0, 0, 200, 32], g: 'article', t: 'Row one', rd: 'tile' },
+            { k: 'button', p: '#0/chip', r: [0, 36, 100, 24], t: 'Today' },
+        ],
+    }));
+    assert.equal(article.getAttribute('aria-roledescription'), 'tile');
+    assert.equal(chip.getAttribute('aria-roledescription'), null);
+
+    // focusA11y sets aria-roledescription on focus proxy and clears it on next focus.
+    bridge.focusA11y(h, JSON.stringify({ o: 'article', t: 'Row one', rd: 'card' }));
+    let proxy = h.focusProxies[h.focusTurn];
+    assert.equal(proxy.getAttribute('role'), 'article');
+    assert.equal(proxy.getAttribute('aria-roledescription'), 'card');
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'button', t: 'Save' }));
+    proxy = h.focusProxies[h.focusTurn];
+    assert.equal(proxy.getAttribute('aria-roledescription'), null);
+
+    // Focused textbox and password field mirror and clear aria-roledescription.
+    bridge.focusA11y(h, JSON.stringify({ o: 'textbox', t: 'Command', rd: 'command bar' }));
+    assert.equal(h.textarea.getAttribute('aria-roledescription'), 'command bar');
+    assert.equal(h.password.getAttribute('aria-roledescription'), null);
+
+    bridge.focusA11y(h, JSON.stringify({ o: 'textbox', t: 'PIN', sec: true, rd: 'PIN input' }));
+    assert.equal(h.password.getAttribute('aria-roledescription'), 'PIN input');
+    assert.equal(h.textarea.getAttribute('aria-roledescription'), null);
+
+    bridge.focusA11y(h, '');
+    assert.equal(h.textarea.getAttribute('aria-roledescription'), null);
+    assert.equal(h.password.getAttribute('aria-roledescription'), null);
+
+    bridge.destroy(h);
+});
+
 test('syncA11y and focusA11y mirror, patch, and clear aria-autocomplete on mirror nodes, proxy, and textarea', () => {
     const { h } = setup();
 
@@ -2826,7 +2922,7 @@ test('armed external link keeps clicks/middle/modified/right-click with browser,
     }
 });
 
-test('requestPointerLock handles unadjustedMovement fallback, motion delivery, Escape exit, and refusal', async () => {
+test('requestPointerLock requests plain lock synchronously, upgrades unadjustedMovement in place, and handles exit and refusal', async () => {
     const { events, doc, canvas, h } = setup();
     const flushMicrotasks = () => new Promise(r => queueMicrotask(r));
     const calls = [];
@@ -2840,12 +2936,12 @@ test('requestPointerLock handles unadjustedMovement fallback, motion delivery, E
         }
     };
     try {
-        // 1. NotSupportedError on { unadjustedMovement: true } ignores intermediate pointerlockerror
-        // and retries plain requestPointerLock(), caching the fallback for later locks.
+        // 1. Plain requestPointerLock() runs synchronously on the first click; once locked,
+        // in-place { unadjustedMovement: true } upgrade rejecting with NotSupportedError
+        // (even alongside pointerlockerror) keeps the plain lock intact and caches fallback.
         canvas.requestPointerLock = opts => {
             calls.push(opts);
             if (opts && opts.unadjustedMovement) {
-                // Reproduce Chromium firing pointerlockerror alongside NotSupportedError rejection.
                 doc.dispatchEvent({ type: 'pointerlockerror' });
                 const err = new Error('not supported');
                 err.name = 'NotSupportedError';
@@ -2853,14 +2949,20 @@ test('requestPointerLock handles unadjustedMovement fallback, motion delivery, E
             }
             return Promise.resolve().then(() => {
                 doc.pointerLockElement = canvas;
+                // Even a stray pointerlockerror arriving between promise resolution and
+                // pointerlockchange must not abort the pending lock.
+                doc.dispatchEvent({ type: 'pointerlockerror' });
                 doc.dispatchEvent({ type: 'pointerlockchange' });
             });
         };
         bridge.requestPointerLock(h);
+        assert.deepEqual(calls, [undefined], 'first call is synchronous plain requestPointerLock()');
         await flushMicrotasks();
         await flushMicrotasks();
         await flushMicrotasks();
-        assert.deepEqual(calls, [{ unadjustedMovement: true }, undefined]);
+        assert.deepEqual(calls, [undefined, { unadjustedMovement: true }]);
+        assert.equal(doc.pointerLockElement, canvas, 'plain lock stays intact after NotSupportedError upgrade');
+        assert.equal(exitCalls, 0);
         assert.deepEqual(events, [{ kind: 'pointer_lock', locked: true }]);
 
         // 2. While locked, mouse pointermove sends movementX/movementY; touch and zero deltas are ignored.
@@ -2878,7 +2980,7 @@ test('requestPointerLock handles unadjustedMovement fallback, motion delivery, E
         doc.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', movementX: 25, movementY: 5 });
         assert.deepEqual(events, [{ kind: 'pointer_lock', locked: false }]);
 
-        // 4. Subsequent request skips unadjustedMovement (cached), and SecurityError refusal
+        // 4. Subsequent grant skips unadjustedMovement upgrade (cached), and SecurityError refusal
         // (e.g. Chrome cooldown or unfocused document) reports locked: false without retrying.
         calls.length = 0;
         events.length = 0;
@@ -2894,14 +2996,35 @@ test('requestPointerLock handles unadjustedMovement fallback, motion delivery, E
         assert.deepEqual(calls, [undefined]);
         assert.deepEqual(events, [{ kind: 'pointer_lock', locked: false, refused: true }]);
 
-        // 5. Legacy non-Promise browser: pointerlockerror reports refusal.
+        // 5. On a browser that DOES support unadjustedMovement, the in-place upgrade succeeds
+        // and its second pointerlockchange does not emit a duplicate locked: true event.
+        h.pointerLockUnadjustedFailed = false;
+        calls.length = 0;
+        events.length = 0;
+        canvas.requestPointerLock = opts => {
+            calls.push(opts);
+            return Promise.resolve().then(() => {
+                doc.pointerLockElement = canvas;
+                doc.dispatchEvent({ type: 'pointerlockchange' });
+            });
+        };
+        bridge.requestPointerLock(h);
+        await flushMicrotasks();
+        await flushMicrotasks();
+        await flushMicrotasks();
+        assert.deepEqual(calls, [undefined, { unadjustedMovement: true }]);
+        assert.deepEqual(events, [{ kind: 'pointer_lock', locked: true }]);
+        doc.pointerLockElement = null;
+        doc.dispatchEvent({ type: 'pointerlockchange' });
+
+        // 6. Legacy non-Promise browser: pointerlockerror reports refusal.
         events.length = 0;
         canvas.requestPointerLock = () => undefined;
         bridge.requestPointerLock(h);
         doc.dispatchEvent({ type: 'pointerlockerror' });
         assert.deepEqual(events, [{ kind: 'pointer_lock', locked: false, refused: true }]);
 
-        // 6. exitPointerLock cancels a pending request so a stale late grant exits immediately,
+        // 7. exitPointerLock cancels a pending request so a stale late grant exits immediately,
         // and destroy() exits an active lock.
         events.length = 0;
         canvas.requestPointerLock = () => new Promise(() => {});
@@ -2920,3 +3043,2066 @@ test('requestPointerLock handles unadjustedMovement fallback, motion delivery, E
     }
     assert.equal(doc.pointerLockElement, null);
 });
+
+test('coarse-pointer focus sites set inputMode=text and inert=false before focus() on plain and password inputs, and reset when unfocused', async () => {
+    const captureFocus = (h, log) => {
+        const opacityOf = el => el.style.cssText.match(/opacity:([^;]+)/)?.[1] ?? '';
+        for (const [name, el] of [['textarea', h.textarea], ['password', h.password]]) {
+            const orig = el.focus.bind(el);
+            el.focus = opts => {
+                log.push({
+                    field: name,
+                    inputMode: el.inputMode,
+                    inert: el.inert,
+                    opacity: opacityOf(el),
+                });
+                return orig(opts);
+            };
+        }
+    };
+
+    // Site 1: mount startup microtask with an initially focused plain field, then password field.
+    for (const [secure, expectedField] of [[false, 'textarea'], [true, 'password']]) {
+        const { doc, h } = setup({ coarse: true });
+        const log = [];
+        try {
+            captureFocus(h, log);
+            assert.equal(h.textarea.inputMode, 'none');
+            assert.equal(h.password.inputMode, 'none');
+            assert.equal(h.textarea.inert, true);
+            assert.equal(h.password.inert, true);
+            // Simulate an autofocused field synced before mount's microtask runs (activeElement is still body).
+            bridge.sync(h, 'auto', secure ? '' : 'hi', 0, secure ? 0 : 2, secure ? 0 : 2, secure);
+            assert.equal(log.length, 0, 'body activeElement waits for mount microtask');
+            await Promise.resolve();
+            assert.deepEqual(log, [{ field: expectedField, inputMode: 'text', inert: false, opacity: '0' }]);
+            assert.equal(doc.activeElement, secure ? h.password : h.textarea);
+        } finally {
+            bridge.destroy(h);
+        }
+    }
+
+    // Site 2: sync() when activeElement === canvas (tap path on iOS Safari), for plain & password fields,
+    // plus Site 3: activate(), and reset when no editable field is focused (!key).
+    const { doc, canvas, h } = setup({ coarse: true });
+    const log = [];
+    try {
+        captureFocus(h, log);
+        await Promise.resolve();
+        assert.equal(doc.activeElement, canvas);
+
+        // Plain field via sync() while canvas is active.
+        bridge.sync(h, 'plain', 'hello', 0, 5, 5, false);
+        assert.deepEqual(log, [{ field: 'textarea', inputMode: 'text', inert: false, opacity: '0' }]);
+        assert.equal(doc.activeElement, h.textarea);
+        assert.equal(h.password.inert, true);
+
+        // Blur / non-editable focus resets both hidden inputs back to inputMode='none' and inert=true.
+        log.length = 0;
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        assert.equal(doc.activeElement, canvas);
+        assert.equal(h.textarea.inputMode, 'none');
+        assert.equal(h.password.inputMode, 'none');
+        assert.equal(h.textarea.inert, true);
+        assert.equal(h.password.inert, true);
+
+        // Password field via sync() while canvas is active.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        assert.deepEqual(log, [{ field: 'password', inputMode: 'text', inert: false, opacity: '0' }]);
+        assert.equal(doc.activeElement, h.password);
+        assert.equal(h.password.value, '', 'password input value stays empty');
+        assert.equal(h.textarea.inert, true);
+
+        // Switching directly from password field to plain field via sync() -> activate().
+        log.length = 0;
+        bridge.sync(h, 'plain', 'abc', 0, 3, 3, false);
+        assert.deepEqual(log, [{ field: 'textarea', inputMode: 'text', inert: false, opacity: '0' }]);
+        assert.equal(doc.activeElement, h.textarea);
+
+        // Site 3: direct activate() from an unfocused body element.
+        log.length = 0;
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        doc.activeElement = doc.body;
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        assert.equal(log.length, 0);
+        bridge.activate(h);
+        assert.deepEqual(log, [{ field: 'password', inputMode: 'text', inert: false, opacity: '0' }]);
+        assert.equal(doc.activeElement, h.password);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('syncA11y mirrors unfocused textboxes, forwards click/focus to a11y_press, and focusA11y syncs textarea/password with zero duplicate proxies', () => {
+    const { events, h } = setup();
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'textbox', p: '#0/name', r: [16, 16, 240, 32], o: 'textbox', t: 'Name', v: 'Ada', rq: true, ph: 'Your name' },
+            { k: 'textbox', p: '#0/reason', r: [16, 56, 240, 72], o: 'textbox', t: 'Reason', v: 'Line 1\nLine 2', ml: true, ph: 'Explain why' },
+            { k: 'textbox', p: '#0/pw', r: [16, 136, 240, 32], o: 'textbox', t: 'Password', rq: true, ph: 'Enter password' },
+            { k: 'textbox', p: '#0/ro', r: [16, 176, 240, 32], o: 'textbox', t: 'Token', v: 'fixed', ro: true },
+            { k: 'textbox', p: '#0/dis', r: [16, 216, 240, 32], o: 'textbox', t: 'Locked', v: 'nope', dis: true },
+            { k: 'textbox', p: '#0/bad', r: [16, 256, 240, 32], o: 'textbox', t: 'Email', v: 'bad@', inv: true },
+        ]));
+
+        const name = h.a11yNodes.get('div:#0/name');
+        assert.equal(name.getAttribute('role'), 'textbox');
+        assert.equal(name.getAttribute('aria-label'), 'Name');
+        assert.equal(name.getAttribute('aria-required'), 'true');
+        assert.equal(name.getAttribute('aria-placeholder'), 'Your name');
+        assert.equal(name.getAttribute('aria-multiline'), null);
+        assert.equal(name.textContent, 'Ada');
+
+        const reason = h.a11yNodes.get('div:#0/reason');
+        assert.equal(reason.getAttribute('aria-multiline'), 'true');
+        assert.equal(reason.textContent, 'Line 1\nLine 2');
+
+        const pw = h.a11yNodes.get('div:#0/pw');
+        assert.equal(pw.getAttribute('role'), 'textbox');
+        assert.equal(pw.getAttribute('aria-label'), 'Password');
+        assert.equal(pw.textContent, '', 'password mirror node carries no secret value');
+
+        assert.equal(h.a11yNodes.get('div:#0/ro').getAttribute('aria-readonly'), 'true');
+        assert.equal(h.a11yNodes.get('div:#0/dis').getAttribute('aria-disabled'), 'true');
+        assert.equal(h.a11yNodes.get('div:#0/bad').getAttribute('aria-invalid'), 'true');
+
+        // Click and focus on an enabled mirror textbox send a11y_press; disabled ignores both.
+        name.dispatchEvent({ type: 'click', preventDefault() {} });
+        reason.dispatchEvent({ type: 'focus' });
+        const dis = h.a11yNodes.get('div:#0/dis');
+        dis.dispatchEvent({ type: 'click', preventDefault() {} });
+        dis.dispatchEvent({ type: 'focus' });
+        assert.deepEqual(events, [
+            { kind: 'a11y_press', path: '#0/name' },
+            { kind: 'a11y_press', path: '#0/reason' },
+        ]);
+
+        // Focusing multiline Reason syncs aria-label + aria-multiline onto h.textarea and clears both focus proxies.
+        bridge.focusA11y(h, JSON.stringify({ o: 'textbox', t: 'Reason', ml: true, ph: 'Explain why', inv: true }));
+        assert.equal(h.textarea.getAttribute('aria-label'), 'Reason');
+        assert.equal(h.textarea.getAttribute('aria-multiline'), 'true');
+        assert.equal(h.textarea.getAttribute('aria-placeholder'), 'Explain why');
+        assert.equal(h.textarea.getAttribute('aria-invalid'), 'true');
+        assert.equal(h.canvas.getAttribute('aria-activedescendant'), null);
+        for (const p of h.focusProxies) {
+            assert.equal(p.getAttribute('role'), null, 'canvas focus proxies hold no duplicate textbox role');
+            assert.equal(p.getAttribute('aria-label'), null);
+        }
+
+        // Focusing password field syncs aria-label + states onto h.password and resets h.textarea.
+        bridge.focusA11y(h, JSON.stringify({ o: 'textbox', t: 'Password', sec: true, rq: true, ph: 'Enter password' }));
+        assert.equal(h.password.getAttribute('aria-label'), 'Password');
+        assert.equal(h.password.getAttribute('aria-required'), 'true');
+        assert.equal(h.password.getAttribute('aria-placeholder'), 'Enter password');
+        assert.equal(h.password.value, '');
+        assert.equal(h.textarea.getAttribute('aria-label'), 'Text input');
+        assert.equal(h.textarea.getAttribute('aria-multiline'), null);
+        for (const p of h.focusProxies) {
+            assert.equal(p.getAttribute('role'), null);
+        }
+
+        // Clearing focus resets both hidden fields cleanly.
+        bridge.focusA11y(h, '');
+        assert.equal(h.password.getAttribute('aria-label'), 'Password input');
+        assert.equal(h.password.getAttribute('aria-required'), null);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('syncVisualViewport shifts covered focused fields above the keyboard without blurring or resizing, and clears on retract or blur', () => {
+    const { doc, body, canvas, h } = setup({ coarsePointer: true });
+    const cpu = doc.createElement('canvas');
+    cpu.setAttribute('data-rune-cpu', '');
+    body.insertBefore(cpu, canvas);
+    try {
+        // Focus password field at mid-screen (y=260..284), already visible above h=362.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        bridge.syncCaret(h, 24, 260, 2, 24);
+        assert.equal(doc.activeElement, h.password);
+        assert.equal(h.password.inert, false);
+        assert.equal(h.password.inputMode, 'text');
+
+        bridge.syncVisualViewport(h, 0, 389, 699);
+        bridge.syncVisualViewport(h, 0, 362, 699);
+        assert.equal(doc.activeElement, h.password, 'visualViewport shrink must not blur focused password input');
+        assert.equal(h.password.inert, false);
+        assert.equal(h.password.inputMode, 'text');
+        assert.equal(canvas.style.transform || '', '', 'already-visible field needs no canvas shift');
+        assert.equal(cpu.style.transform || '', '');
+        assert.equal(h.a11y.style.transform || '', '');
+
+        // Move focus to a lower plain field (y=520..544) covered by the keyboard (visBottom=362).
+        bridge.sync(h, 'bottom', 'hi', 0, 2, 2, false);
+        bridge.syncCaret(h, 24, 520, 2, 24);
+        assert.equal(doc.activeElement, h.textarea);
+        // shift = min(544 + 16 - 362, 520 - 16, 699 - 362) = 198
+        assert.equal(canvas.style.transform, 'translate3d(0, -198px, 0)');
+        assert.equal(cpu.style.transform, 'translate3d(0, -198px, 0)');
+        assert.equal(h.a11y.style.transform, 'translate3d(0, -198px, 0)');
+        assert.equal(h.textarea.style.top, '322px', 'hidden input tracks visual shifted caret position');
+
+        // Keyboard retracts back to full layout height: transform clears cleanly while keeping focus.
+        bridge.syncVisualViewport(h, 0, 699, 699);
+        assert.equal(canvas.style.transform, '');
+        assert.equal(cpu.style.transform, '');
+        assert.equal(h.a11y.style.transform, '');
+        assert.equal(h.textarea.style.top, '520px');
+        assert.equal(doc.activeElement, h.textarea);
+
+        // Re-open keyboard and blur: clearing focus resets transform immediately.
+        bridge.syncVisualViewport(h, 0, 362, 699);
+        assert.equal(canvas.style.transform, 'translate3d(0, -198px, 0)');
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        assert.equal(canvas.style.transform, '');
+        assert.equal(cpu.style.transform, '');
+        assert.equal(h.a11y.style.transform, '');
+        assert.equal(h.textarea.inert, true);
+        assert.equal(h.password.inert, true);
+    } finally {
+        bridge.destroy(h);
+        cpu.remove();
+    }
+
+    // Embedded and document (page) modes must never overwrite canvas transform.
+    for (const opts of [{ embedded: true }, { page: true }]) {
+        const ctx = setup(opts);
+        try {
+            bridge.sync(ctx.h, 'f', 'abc', 0, 3, 3, false);
+            bridge.syncCaret(ctx.h, 24, 520, 2, 24);
+            bridge.syncVisualViewport(ctx.h, 0, 362, 699);
+            assert.equal(ctx.canvas.style.transform || '', '');
+        } finally {
+            bridge.destroy(ctx.h);
+        }
+    }
+});
+
+test('external hidden-input blur reports field_blur, ignores window/menu/sync blurs, and activate refocuses already-focused input', async () => {
+    const { doc, body, canvas, win, events, h } = setup({ coarse: true });
+    let focusedDoc = true;
+    doc.hasFocus = () => focusedDoc;
+    const focusCalls = [];
+    for (const [name, el] of [['textarea', h.textarea], ['password', h.password]]) {
+        const orig = el.focus.bind(el);
+        el.focus = opts => {
+            focusCalls.push({ name, wasActive: doc.activeElement === el, inputMode: el.inputMode, inert: el.inert });
+            return orig(opts);
+        };
+    }
+    try {
+        await Promise.resolve();
+        // 1. Focus password field, then blur externally to body (iOS keyboard dismissal with no pointer event).
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        assert.equal(doc.activeElement, h.password);
+        events.length = 0;
+
+        doc.activeElement = body;
+        h.password.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }]);
+
+        // Rust answers with sync(h, '', ...) -> clears key and sets inert without stealing focus to canvas.
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        assert.equal(doc.activeElement, body);
+        assert.equal(h.password.inert, true);
+        assert.equal(h.password.inputMode, 'none');
+
+        // 2. External blur to canvas (Lyzev trace: focusout next=BODY, focusin <CANVAS>) emits field_blur,
+        // and a non-gesture sync() before the microtask must not silently reclaim focus from canvas.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        focusCalls.length = 0;
+
+        canvas.focus();
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        assert.equal(doc.activeElement, canvas, 'sync must not reclaim focus while an external blur is pending');
+        assert.equal(focusCalls.length, 0);
+        await Promise.resolve();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }]);
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // 3. Re-tapping an already-focused field still invokes focus() inside activate() so WebKit runs elementDidRefocus.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        assert.equal(doc.activeElement, h.password);
+        focusCalls.length = 0;
+        bridge.activate(h);
+        assert.deepEqual(focusCalls, [{ name: 'password', wasActive: true, inputMode: 'text', inert: false }]);
+
+        // 4. Window blur (!document.hasFocus()) does NOT emit field_blur (handled by window_focus).
+        events.length = 0;
+        focusedDoc = false;
+        doc.activeElement = body;
+        h.password.dispatchEvent({ type: 'blur' });
+        win.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        assert.deepEqual(events, []);
+        focusedDoc = true;
+
+        // 5. Internal sync() clearing focus or switching fields does NOT emit field_blur.
+        bridge.activate(h);
+        events.length = 0;
+        bridge.sync(h, 'plain', 'hi', 0, 2, 2, false);
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        await Promise.resolve();
+        assert.deepEqual(events, []);
+
+        // 6. Blur during an active touch defers until pointerup: activate() suppresses it, otherwise it emits field_blur.
+        bridge.sync(h, 'plain', 'hi', 0, 2, 2, false);
+        bridge.activate(h);
+        events.length = 0;
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'touch', pointerId: 7, timeStamp: 10 });
+        canvas.focus();
+        await Promise.resolve();
+        assert.deepEqual(events, [], 'blur held while touch is down');
+        win.dispatchEvent({ type: 'pointerup', target: canvas, pointerType: 'touch', pointerId: 7, timeStamp: 20 });
+        bridge.activate(h);
+        await Promise.resolve();
+        assert.deepEqual(events, [], 'activate() inside pointerup cancels deferred field_blur');
+
+        // Touch cancelled without activate() flushes the deferred field_blur.
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'touch', pointerId: 8, timeStamp: 30 });
+        canvas.focus();
+        win.dispatchEvent({ type: 'pointercancel', target: canvas, pointerType: 'touch', pointerId: 8, timeStamp: 40 });
+        await Promise.resolve();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'plain' }]);
+
+        // 7. Holding keyboard shift across pointerdown -> pointerup for mouse, pen, and touch.
+        for (const [pointerType, pid] of [['mouse', 11], ['pen', 12], ['touch', 13]]) {
+            bridge.sync(h, 'bottom', 'hi', 0, 2, 2, false);
+            bridge.activate(h);
+            bridge.syncCaret(h, 24, 520, 2, 24);
+            bridge.syncVisualViewport(h, 0, 362, 699);
+            assert.equal(canvas.style.transform, 'translate3d(0, -198px, 0)');
+
+            // pointerdown blurs the field in Rune -> sync(h, '', ...) runs while pointer is held.
+            win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType, pointerId: pid, timeStamp: 50 });
+            bridge.sync(h, '', '', 0, 0, 0, false);
+            assert.equal(canvas.style.transform, 'translate3d(0, -198px, 0)', `${pointerType}: transform stays held until pointerup`);
+
+            // Window bubble pointerup clears transform after target-phase canvas pointerup has finished.
+            win.dispatchEvent({ type: 'pointerup', target: canvas, pointerType, pointerId: pid, timeStamp: 60 });
+            assert.equal(canvas.style.transform, '', `${pointerType}: transform clears after pointerup`);
+        }
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('next-frame focus reconciliation clears stale caret across transient window blur, delayed activeElement, visualViewport retract, and visibility return with zero idle rAFs', async () => {
+    const origRaf = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
+    const origCancel = Object.getOwnPropertyDescriptor(globalThis, 'cancelAnimationFrame');
+    const rafQueue = [];
+    let nextRafId = 1;
+    let rafScheduled = 0;
+    Object.defineProperty(globalThis, 'requestAnimationFrame', {
+        configurable: true,
+        value: cb => {
+            rafScheduled += 1;
+            const id = nextRafId++;
+            rafQueue.push({ id, cb });
+            return id;
+        },
+    });
+    Object.defineProperty(globalThis, 'cancelAnimationFrame', {
+        configurable: true,
+        value: id => {
+            const idx = rafQueue.findIndex(item => item.id === id);
+            if (idx >= 0) rafQueue.splice(idx, 1);
+        },
+    });
+    const flushRaf = () => {
+        const batch = rafQueue.splice(0, rafQueue.length);
+        for (const item of batch) item.cb(0);
+    };
+
+    const { doc, body, win, events, h } = setup({ coarse: true });
+    let focusedDoc = true;
+    doc.hasFocus = () => focusedDoc;
+    try {
+        await Promise.resolve();
+
+        // 1. Transient window blur + field blur -> window focus with activeElement === body.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        focusedDoc = false;
+        doc.activeElement = body;
+        h.password.dispatchEvent({ type: 'blur' });
+        win.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        assert.deepEqual(events, [], 'window blur alone does not emit field_blur');
+        focusedDoc = true;
+        win.dispatchEvent({ type: 'focus' });
+        flushRaf();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }]);
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // 2. blur fires while document.activeElement briefly still reports h.password, then settles to body before rAF.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        h.password.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        assert.deepEqual(events, [], 'microtask defers when activeElement is still h.password');
+        doc.activeElement = body;
+        flushRaf();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }]);
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // 3. visualViewport retracts to 699 after a suppressed blur left activeElement === body.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        bridge.syncVisualViewport(h, 0, 362, 699);
+        focusedDoc = false;
+        doc.activeElement = body;
+        h.password.dispatchEvent({ type: 'blur' });
+        win.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        focusedDoc = true;
+        bridge.syncVisualViewport(h, 0, 699, 699);
+        flushRaf();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }]);
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // 4. visibilitychange returning from hidden when DOM focus left h.password.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        doc.hidden = true;
+        doc.dispatchEvent({ type: 'visibilitychange' });
+        doc.activeElement = body;
+        h.password.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        assert.deepEqual(events, []);
+        doc.hidden = false;
+        doc.dispatchEvent({ type: 'visibilitychange' });
+        flushRaf();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }]);
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // 5. No blur (DOM input stays active across keyboard open/retract) keeps focus and schedules 0 rAFs.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        const rafBefore = rafScheduled;
+        bridge.syncVisualViewport(h, 0, 362, 699);
+        bridge.syncVisualViewport(h, 0, 699, 699);
+        assert.equal(rafScheduled, rafBefore, 'focused input across visualViewport resize schedules zero rAFs');
+        assert.deepEqual(events, []);
+    } finally {
+        bridge.destroy(h);
+        if (origRaf) Object.defineProperty(globalThis, 'requestAnimationFrame', origRaf);
+        else delete globalThis.requestAnimationFrame;
+        if (origCancel) Object.defineProperty(globalThis, 'cancelAnimationFrame', origCancel);
+        else delete globalThis.cancelAnimationFrame;
+    }
+});
+
+test('rapid mouse clicks reusing pointerId=1 cancel stale pointer-end fallback timer so second press keeps keyboard shift', () => {
+    const origSetTimeout = globalThis.setTimeout;
+    const origClearTimeout = globalThis.clearTimeout;
+    const timers = new Map();
+    let nextTimer = 1;
+    Object.defineProperty(globalThis, 'setTimeout', {
+        configurable: true,
+        value: (fn, _ms) => {
+            const id = nextTimer++;
+            timers.set(id, fn);
+            return id;
+        },
+    });
+    Object.defineProperty(globalThis, 'clearTimeout', {
+        configurable: true,
+        value: id => { timers.delete(id); },
+    });
+    const flushTimers = () => {
+        const batch = [...timers.entries()];
+        timers.clear();
+        for (const [, fn] of batch) fn();
+    };
+
+    const { canvas, win, h } = setup({ coarse: true });
+    try {
+        // Press 1 (mouse pointerId=1): focus bottom field, shift up, click and release.
+        bridge.sync(h, 'bottom', 'hi', 0, 2, 2, false);
+        bridge.activate(h);
+        bridge.syncCaret(h, 24, 520, 2, 24);
+        bridge.syncVisualViewport(h, 0, 362, 699);
+        assert.equal(canvas.style.transform, 'translate3d(0, -198px, 0)');
+
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'mouse', pointerId: 1, timeStamp: 10 });
+        win.dispatchEvent({ type: 'pointerup', target: canvas, pointerType: 'mouse', pointerId: 1, timeStamp: 20 });
+
+        // Press 2 (same mouse pointerId=1) starts BEFORE Press 1's fallback setTimeout(0) has fired.
+        // Press 2 blurs the bottom field on pointerdown -> sync('', ...) runs while pointer is held.
+        win.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'mouse', pointerId: 1, timeStamp: 25 });
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        assert.equal(canvas.style.transform, 'translate3d(0, -198px, 0)');
+
+        // Stale timer from Press 1 fires mid-Press 2: must NOT delete Press 2's pid=1 or drop shift!
+        flushTimers();
+        assert.equal(canvas.style.transform, 'translate3d(0, -198px, 0)', 'stale timer from first press must not drop keyboard shift during second press');
+
+        // Press 2 releases: transform now clears cleanly.
+        win.dispatchEvent({ type: 'pointerup', target: canvas, pointerType: 'mouse', pointerId: 1, timeStamp: 35 });
+        assert.equal(canvas.style.transform, '');
+    } finally {
+        bridge.destroy(h);
+        Object.defineProperty(globalThis, 'setTimeout', { configurable: true, value: origSetTimeout });
+        Object.defineProperty(globalThis, 'clearTimeout', { configurable: true, value: origClearTimeout });
+    }
+});
+
+test('blur/focusout with activeElement lagging past first rAF still reconciles on trailing check, and a new focus cancels it', async () => {
+    const origRaf = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
+    const origCancel = Object.getOwnPropertyDescriptor(globalThis, 'cancelAnimationFrame');
+    const origSetTimeout = globalThis.setTimeout;
+    const origClearTimeout = globalThis.clearTimeout;
+    const rafQueue = [];
+    const timers = new Map();
+    let nextId = 1;
+    Object.defineProperty(globalThis, 'requestAnimationFrame', {
+        configurable: true,
+        value: cb => { const id = nextId++; rafQueue.push({ id, cb }); return id; },
+    });
+    Object.defineProperty(globalThis, 'cancelAnimationFrame', {
+        configurable: true,
+        value: id => { const i = rafQueue.findIndex(x => x.id === id); if (i >= 0) rafQueue.splice(i, 1); },
+    });
+    Object.defineProperty(globalThis, 'setTimeout', {
+        configurable: true,
+        value: (fn, _ms) => { const id = nextId++; timers.set(id, fn); return id; },
+    });
+    Object.defineProperty(globalThis, 'clearTimeout', {
+        configurable: true,
+        value: id => { timers.delete(id); },
+    });
+    const flushRaf = () => { for (const x of rafQueue.splice(0)) x.cb(0); };
+    const flushTimers = () => { const batch = [...timers.entries()]; timers.clear(); for (const [, fn] of batch) fn(); };
+
+    const { doc, body, events, h } = setup({ coarse: true });
+    doc.hasFocus = () => true;
+    try {
+        await Promise.resolve();
+        // 1. blur/focusout fires while activeElement lags past the first rAF, then settles to body.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        h.password.dispatchEvent({ type: 'blur' });
+        h.password.dispatchEvent({ type: 'focusout' });
+        await Promise.resolve();
+        flushRaf(); // rAF1 fires while activeElement is still h.password (e.g. 16.6ms < 20ms lag)
+        assert.deepEqual(events, []);
+        doc.activeElement = body; // activeElement settles after rAF1
+        flushTimers();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }]);
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // 2. If a new focus/activate arrives before the trailing check fires, the stale check is cancelled.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        h.password.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        flushRaf();
+        bridge.activate(h);
+        flushTimers();
+        assert.deepEqual(events, []);
+    } finally {
+        bridge.destroy(h);
+        if (origRaf) Object.defineProperty(globalThis, 'requestAnimationFrame', origRaf);
+        else delete globalThis.requestAnimationFrame;
+        if (origCancel) Object.defineProperty(globalThis, 'cancelAnimationFrame', origCancel);
+        else delete globalThis.cancelAnimationFrame;
+        Object.defineProperty(globalThis, 'setTimeout', { configurable: true, value: origSetTimeout });
+        Object.defineProperty(globalThis, 'clearTimeout', { configurable: true, value: origClearTimeout });
+    }
+});
+
+test('delayed activeElement settle at 60ms, 500ms, 2s, and 5s+input reconciles with zero idle timers and preserves protected focus', async () => {
+    const origRaf = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
+    const origCancel = Object.getOwnPropertyDescriptor(globalThis, 'cancelAnimationFrame');
+    const origSetTimeout = globalThis.setTimeout;
+    const origClearTimeout = globalThis.clearTimeout;
+    let now = 0;
+    let nextId = 1;
+    const scheduled = new Map();
+    const scheduleAt = (fn, delay) => {
+        const id = nextId++;
+        scheduled.set(id, { at: now + Math.max(0, delay || 0), fn });
+        return id;
+    };
+    const cancelId = id => { scheduled.delete(id); };
+    Object.defineProperty(globalThis, 'requestAnimationFrame', {
+        configurable: true,
+        value: cb => scheduleAt(() => cb(now), 16),
+    });
+    Object.defineProperty(globalThis, 'cancelAnimationFrame', {
+        configurable: true,
+        value: cancelId,
+    });
+    Object.defineProperty(globalThis, 'setTimeout', {
+        configurable: true,
+        value: (fn, ms) => scheduleAt(fn, ms),
+    });
+    Object.defineProperty(globalThis, 'clearTimeout', {
+        configurable: true,
+        value: cancelId,
+    });
+    const advanceTo = async targetMs => {
+        while (true) {
+            let earliest = null;
+            for (const [id, entry] of scheduled) {
+                if (entry.at <= targetMs && (!earliest || entry.at < earliest.at || (entry.at === earliest.at && id < earliest.id))) {
+                    earliest = { id, at: entry.at, fn: entry.fn };
+                }
+            }
+            if (!earliest) break;
+            scheduled.delete(earliest.id);
+            now = earliest.at;
+            earliest.fn();
+            await Promise.resolve();
+        }
+        now = Math.max(now, targetMs);
+    };
+
+    const { doc, win, body, canvas, events, h } = setup({ coarse: true });
+    doc.hasFocus = () => true;
+    try {
+        await Promise.resolve();
+        // Idle page with no focused field schedules zero timers or rAFs.
+        assert.equal(scheduled.size, 0, 'idle unfocused page schedules zero timers');
+
+        // 1. Settle at 60 ms, 500 ms, and 2,000 ms after blur/focusout.
+        for (const settleMs of [60, 500, 2000]) {
+            bridge.sync(h, 'pw', '', 0, 0, 0, true);
+            bridge.activate(h);
+            events.length = 0;
+            const start = now;
+            h.password.dispatchEvent({ type: 'blur' });
+            h.password.dispatchEvent({ type: 'focusout' });
+            await Promise.resolve();
+            // Advance just before settleMs: activeElement is still h.password -> no premature blur.
+            await advanceTo(start + settleMs - 1);
+            assert.deepEqual(events, [], `no blur before activeElement settles at ${settleMs}ms`);
+            // activeElement settles to body at settleMs.
+            await advanceTo(start + settleMs);
+            doc.activeElement = body;
+            // Reconciles within bounded back-off without any extra user event.
+            await advanceTo(start + settleMs + 1300);
+            assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }], `reconciles settle at ${settleMs}ms`);
+            assert.equal(scheduled.size, 0, `no lingering timers after ${settleMs}ms reconcile`);
+            bridge.sync(h, '', '', 0, 0, 0, false);
+        }
+
+        // 2. If iOS keeps h.password focused across the entire back-off, it never blurs and stops with 0 timers.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        const keepStart = now;
+        h.password.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        await advanceTo(keepStart + 10000);
+        assert.deepEqual(events, [], 'keeping h.password as activeElement never emits field_blur');
+        assert.equal(scheduled.size, 0, 'bounded back-off stops completely with 0 timers');
+
+        // 3. Settle arbitrarily late (5,000 ms, past the bounded back-off): caught by focusin or next user input.
+        doc.activeElement = canvas;
+        doc.dispatchEvent({ type: 'focusin', target: canvas });
+        await Promise.resolve();
+        assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }], 'document focusin catches arbitrarily late focus transfer');
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // And when late settle goes to body (no focusin), next user input (keydown / wheel / pointermove) catches it.
+        for (const [label, fire] of [
+            ['keydown', () => win.dispatchEvent({ type: 'keydown', target: body, key: 'Escape' })],
+            ['wheel', () => win.dispatchEvent({ type: 'wheel', target: canvas, deltaY: 10 })],
+            ['pointermove', () => win.dispatchEvent({ type: 'pointermove', target: canvas, pointerType: 'mouse', pointerId: 1 })],
+        ]) {
+            bridge.sync(h, 'pw', '', 0, 0, 0, true);
+            bridge.activate(h);
+            events.length = 0;
+            const lateStart = now;
+            h.password.dispatchEvent({ type: 'blur' });
+            await Promise.resolve();
+            await advanceTo(lateStart + 5000);
+            assert.equal(scheduled.size, 0, `back-off stopped before 5s (${label})`);
+            assert.deepEqual(events, []);
+            doc.activeElement = body;
+            fire();
+            await Promise.resolve();
+            assert.deepEqual(events, [{ kind: 'field_blur', key: 'pw' }], `5s late settle to body caught by ${label}`);
+            assert.equal(scheduled.size, 0);
+            bridge.sync(h, '', '', 0, 0, 0, false);
+        }
+
+        // 4. Protected visualViewport relayout while activeElement stays h.password schedules 0 timers and emits 0 blurs.
+        bridge.sync(h, 'pw', '', 0, 0, 0, true);
+        bridge.activate(h);
+        events.length = 0;
+        bridge.syncVisualViewport(h, 0, 362, 699);
+        bridge.syncVisualViewport(h, 0, 699, 699);
+        await Promise.resolve();
+        assert.equal(scheduled.size, 0, 'protected visualViewport resize schedules 0 timers');
+        assert.deepEqual(events, []);
+
+        // 5. In-gesture refocus cancels an active back-off immediately with 0 blurs and 0 timers.
+        const tapStart = now;
+        h.password.dispatchEvent({ type: 'blur' });
+        await Promise.resolve();
+        await advanceTo(tapStart + 60);
+        assert.ok(scheduled.size > 0, 'back-off is active before refocus');
+        bridge.activate(h);
+        assert.equal(scheduled.size, 0, 'activate() cancels active back-off immediately');
+        await advanceTo(tapStart + 5000);
+        assert.deepEqual(events, []);
+    } finally {
+        bridge.destroy(h);
+        if (origRaf) Object.defineProperty(globalThis, 'requestAnimationFrame', origRaf);
+        else delete globalThis.requestAnimationFrame;
+        if (origCancel) Object.defineProperty(globalThis, 'cancelAnimationFrame', origCancel);
+        else delete globalThis.cancelAnimationFrame;
+        Object.defineProperty(globalThis, 'setTimeout', { configurable: true, value: origSetTimeout });
+        Object.defineProperty(globalThis, 'clearTimeout', { configurable: true, value: origClearTimeout });
+    }
+});
+
+test('syncA11y mirrors ordered lists as <ol> with start attribute and preserves native list markers on <ol>/<li> while keeping <ul> list-style:none', () => {
+    const { h } = setup();
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'group', g: 'ol', p: '#0/ord1', r: [0, 0, 200, 40] },
+            { k: 'group', g: 'li', p: '#0/ord1/i0', r: [0, 0, 200, 20], a: 0 },
+            { k: 'text', p: '#0/ord1/i0/b0', r: [20, 0, 180, 20], t: 'First', a: 1 },
+            { k: 'group', g: 'ol', p: '#0/ord3', r: [0, 50, 200, 40], st: 3 },
+            { k: 'group', g: 'li', p: '#0/ord3/i0', r: [0, 50, 200, 20], a: 3 },
+            { k: 'text', p: '#0/ord3/i0/b0', r: [20, 50, 180, 20], t: 'Third', a: 4 },
+            { k: 'group', g: 'ul', p: '#0/bul', r: [0, 100, 200, 40] },
+            { k: 'group', g: 'li', p: '#0/bul/i0', r: [0, 100, 200, 20], a: 6 },
+            { k: 'text', p: '#0/bul/i0/b0', r: [20, 100, 180, 20], t: 'Bullet', a: 7 },
+        ]));
+
+        const [ol1, ol3, ul] = h.a11y.children;
+        assert.equal(ol1.tagName, 'OL');
+        assert.equal(ol1.getAttribute('start'), null, 'default start=1 omits start attribute');
+        assert.equal(ol1.children[0].tagName, 'LI');
+        assert.ok(!ol1.style.cssText.includes('list-style:none'), '<ol> keeps native decimal marker semantics');
+        assert.ok(!ol1.children[0].style.cssText.includes('list-style:none'), '<li> inherits list-style from parent list');
+
+        assert.equal(ol3.tagName, 'OL');
+        assert.equal(ol3.getAttribute('start'), '3', 'ordered list starting at 3 sets start="3"');
+        assert.equal(ol3.children[0].tagName, 'LI');
+
+        assert.equal(ul.tagName, 'UL');
+        assert.equal(ul.getAttribute('start'), null);
+        assert.ok(ul.style.cssText.includes('list-style:none'), '<ul> keeps list-style:none');
+
+        // Patch start from 3 -> 5 -> cleared (default 1).
+        bridge.syncA11y(h, JSON.stringify({ p: 1, u: [{ k: 'group', g: 'ol', p: '#0/ord3', r: [0, 50, 200, 40], st: 5 }] }));
+        assert.equal(ol3.getAttribute('start'), '5');
+        bridge.syncA11y(h, JSON.stringify({ p: 1, u: [{ k: 'group', g: 'ol', p: '#0/ord3', r: [0, 50, 200, 40] }] }));
+        assert.equal(ol3.getAttribute('start'), null);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('same-origin block El::href and relative inline links support native browser link interactions while routing plain clicks through Rune', () => {
+    const { win, canvas, events, h } = setup();
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300 });
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'link', p: '#0/chat', r: [10, 10, 120, 24], t: 'Chat 123', h: '/chat/123' },
+            { k: 'link', p: '#0/ext', r: [10, 40, 120, 24], t: 'External', h: 'https://example.com/docs' },
+            {
+                k: 'text', p: '#0/msg', r: [10, 80, 300, 24],
+                u: [
+                    { t: 'See ' },
+                    { t: 'thread', h: '/chat/456', p: '#0/msg', i: 0 },
+                    { t: ' or ' },
+                    { t: '@alice', p: '#0/msg', i: 1 },
+                    { t: ' or ' },
+                    { t: 'bad', h: 'javascript:alert(1)', p: '#0/msg', i: 2 },
+                ],
+            },
+        ]));
+
+        // 1. Block El::href("/chat/123"): pointer-events:auto, real href, no target="_blank".
+        const chat = h.a11yNodes.get('a:#0/chat');
+        assert.equal(chat.href, '/chat/123');
+        assert.equal(chat.target, undefined);
+        assert.match(chat.style.cssText, /pointer-events:auto;/);
+        chat.getClientRects = () => [{ left: 10, top: 10, right: 130, bottom: 34, width: 120, height: 24 }];
+
+        // Hovering over canvas coords of a block El::href must NOT arm/disarm it via hoverLink.
+        canvas.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', buttons: 0, clientX: 50, clientY: 20 });
+        assert.equal(h.hoverLink, null, 'block El::href stays permanently armed without entering hoverLink');
+        win.dispatchEvent({ type: 'blur' });
+        assert.notEqual(chat.style.pointerEvents, 'none', 'disarmLink must never disable block El::href');
+
+        // Plain unmodified primary click prevents browser navigation and routes through a11y_press.
+        events.length = 0;
+        let prevented = false;
+        chat.dispatchEvent({ type: 'click', button: 0, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true);
+        assert.deepEqual(events, [{ kind: 'a11y_press', path: '#0/chat' }]);
+
+        // Middle-click and Cmd/Ctrl/Shift/Alt+click stay with the browser (not prevented, no a11y_press).
+        for (const mod of [
+            { button: 1 },
+            { button: 0, metaKey: true },
+            { button: 0, ctrlKey: true },
+            { button: 0, shiftKey: true },
+            { button: 0, altKey: true },
+        ]) {
+            events.length = 0;
+            prevented = false;
+            chat.dispatchEvent({ type: 'click', ...mod, preventDefault() { prevented = true; } });
+            assert.equal(prevented, false, `modified/middle click stays native: ${JSON.stringify(mod)}`);
+            assert.deepEqual(events, []);
+        }
+
+        // External block El::href keeps target="_blank" and lets plain click navigate natively.
+        const ext = h.a11yNodes.get('a:#0/ext');
+        assert.equal(ext.target, '_blank');
+        events.length = 0;
+        prevented = false;
+        ext.dispatchEvent({ type: 'click', button: 0, preventDefault() { prevented = true; } });
+        assert.equal(prevented, false);
+        assert.deepEqual(events, []);
+
+        // Promoted drag (> 4px) starting on same-origin block El::href suppresses trailing click (no a11y_press).
+        events.length = 0;
+        h.a11y.dispatchEvent({ type: 'pointerdown', target: chat, pointerType: 'mouse', pointerId: 4, button: 0, buttons: 1, clientX: 40, clientY: 20 });
+        win.dispatchEvent({ type: 'pointermove', target: chat, pointerType: 'mouse', pointerId: 4, button: -1, buttons: 1, clientX: 80, clientY: 20 });
+        win.dispatchEvent({ type: 'pointerup', target: chat, pointerType: 'mouse', pointerId: 4, button: 0, buttons: 0, clientX: 80, clientY: 20 });
+        prevented = false;
+        chat.dispatchEvent({ type: 'click', button: 0, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true, 'promoted drag cancels trailing click');
+        assert.deepEqual(events.filter(e => e.kind === 'a11y_press'), [], 'promoted drag must not fire a11y_press');
+
+        // 2. Inline relative link "/chat/456" vs opaque action link "@alice" vs unsafe "javascript:".
+        const msg = h.a11yNodes.get('p:#0/msg');
+        const anchors = msg.children.filter(c => c.tagName === 'A');
+        assert.equal(anchors.length, 2, 'unsafe javascript: link collapses to plain text');
+        const [relLink, opaqueLink] = anchors;
+        assert.equal(relLink.href, '/chat/456');
+        assert.equal(relLink.target, undefined);
+        assert.equal(opaqueLink.href, '#');
+        assert.equal(opaqueLink._opaqueLink, true);
+
+        relLink.getClientRects = () => [{ left: 40, top: 80, right: 100, bottom: 100, width: 60, height: 20 }];
+        opaqueLink.getClientRects = () => [{ left: 120, top: 80, right: 170, bottom: 100, width: 50, height: 20 }];
+
+        // Hovering over the opaque action link does NOT arm it.
+        canvas.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', buttons: 0, clientX: 140, clientY: 90 });
+        assert.equal(h.hoverLink, null, 'opaque non-URL inline link must not be hover-armed');
+
+        // Hovering over the relative inline link arms pointer-events:auto for status bar / middle / right click.
+        canvas.dispatchEvent({ type: 'pointermove', pointerType: 'mouse', buttons: 0, clientX: 60, clientY: 90 });
+        assert.equal(h.hoverLink, relLink);
+        assert.equal(relLink.style.pointerEvents, 'auto');
+
+        // Unmodified primary click sends a11y_link; Cmd/Ctrl/middle click stays with browser.
+        events.length = 0;
+        prevented = false;
+        relLink.dispatchEvent({ type: 'click', button: 0, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true);
+        assert.deepEqual(events, [{ kind: 'a11y_link', path: '#0/msg', link: 0 }]);
+
+        for (const mod of [{ button: 1 }, { button: 0, metaKey: true }, { button: 0, ctrlKey: true }]) {
+            events.length = 0;
+            prevented = false;
+            relLink.dispatchEvent({ type: 'click', ...mod, preventDefault() { prevented = true; } });
+            assert.equal(prevented, false);
+            assert.deepEqual(events, []);
+        }
+
+        // Pointer leave disarms the inline relative link back to none.
+        relLink.dispatchEvent({ type: 'pointerleave' });
+        assert.equal(h.hoverLink, null);
+        assert.equal(relLink.style.pointerEvents, 'none');
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('macOS right-click armMenu flushes layout synchronously and does not suppress contextmenu if engine still targets canvas', () => {
+    const { doc, win, canvas, events, h } = setup({ platform: 'MacIntel' });
+    try {
+        assert.equal(bridge.isMac(), true);
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'text', p: '#0/p', r: [10, 10, 200, 30], t: 'Hello macOS' },
+        ]));
+        const p = h.a11yNodes.get('p:#0/p');
+        let flushCalls = 0;
+        p.getBoundingClientRect = () => {
+            if (p.style.pointerEvents === 'auto') flushCalls++;
+            return { left: 10, top: 10, right: 210, bottom: 40, width: 200, height: 30 };
+        };
+
+        // 1. macOS right-click on text arms p, flushes layout synchronously on pointerdown, and sends secondary_browser.
+        events.length = 0;
+        bridge.syncSecondary(h, 'text');
+        canvas.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'mouse', button: 2, clientX: 50, clientY: 20, shiftKey: false, preventDefault() {} });
+        assert.equal(h.menu, 'browser');
+        assert.equal(p.style.pointerEvents, 'auto');
+        assert.ok(flushCalls >= 1, 'armMenu flushes layout synchronously after setting pointerEvents=auto');
+        assert.deepEqual(events.filter(e => e.kind !== 'mods'), [{ kind: 'a11y_flush' }, { kind: 'secondary_browser' }]);
+
+        // Safari/Firefox race: contextmenu still resolves event.target === canvas -> MUST NOT preventDefault when h.menu === 'browser'.
+        let prevented = false;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, button: 2, preventDefault() { prevented = true; } });
+        assert.equal(prevented, false, 'contextmenu must not be suppressed after armMenu armed browser menu');
+
+        // Window blur disarms the browser menu and restores pointerEvents.
+        win.dispatchEvent({ type: 'blur' });
+        assert.equal(h.menu, '');
+        assert.equal(p.style.pointerEvents, undefined);
+
+        // 2. macOS Ctrl+click (button=0, ctrlKey=true) also triggers armAt on pointerdown.
+        events.length = 0;
+        bridge.syncSecondary(h, 'text');
+        canvas.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'mouse', button: 0, ctrlKey: true, clientX: 50, clientY: 20, shiftKey: false, preventDefault() {} });
+        assert.equal(h.menu, 'browser');
+        prevented = false;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, button: 0, ctrlKey: true, preventDefault() { prevented = true; } });
+        assert.equal(prevented, false);
+        win.dispatchEvent({ type: 'blur' });
+
+        // 3. Rune-owned right-click (secondary === 'app' without Shift) sets h.menu = 'rune' and DOES preventDefault.
+        events.length = 0;
+        bridge.syncSecondary(h, 'app');
+        canvas.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'mouse', button: 2, clientX: 50, clientY: 20, shiftKey: false, preventDefault() {} });
+        assert.equal(h.menu, 'rune');
+        assert.deepEqual(events.filter(e => e.kind !== 'mods'), []);
+        prevented = false;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, button: 2, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true, 'Rune-owned contextmenu stays suppressed for browser');
+        assert.equal(h.menu, '');
+
+        // 4. Shift+right-click overrides 'app' claim so browser menu opens even if target === canvas.
+        events.length = 0;
+        bridge.syncSecondary(h, 'app');
+        canvas.dispatchEvent({ type: 'pointerdown', target: canvas, pointerType: 'mouse', button: 2, clientX: 50, clientY: 20, shiftKey: true, preventDefault() {} });
+        assert.equal(h.menu, 'browser');
+        prevented = false;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, button: 2, shiftKey: true, preventDefault() { prevented = true; } });
+        assert.equal(prevented, false, 'Shift+right-click opens browser menu even when target === canvas');
+        win.dispatchEvent({ type: 'blur' });
+
+        // 5. Stray un-armed contextmenu on canvas (h.menu === '') is still suppressed.
+        prevented = false;
+        doc.dispatchEvent({ type: 'contextmenu', target: canvas, button: 2, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true, 'un-armed canvas contextmenu remains prevented');
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('semantic single-line inputMode/autofill use hidden <form> <input> and support paired credential autofill', () => {
+    const { doc, canvas, events, h } = setup({ coarse: true });
+    try {
+        canvas.focus();
+        assert.equal(h.form.tagName, 'FORM');
+        assert.equal(h.form.getAttribute('novalidate'), '');
+        assert.equal(h.form.getAttribute('autocomplete'), 'on');
+        assert.deepEqual(h.form.children, [h.input, h.password]);
+        let submitPrevented = false;
+        h.form.dispatchEvent({ type: 'submit', preventDefault() { submitPrevented = true; } });
+        assert.equal(submitPrevented, true);
+
+        const focusModes = [];
+        h.input.onFocus = () => focusModes.push(h.input.inputMode);
+        bridge.sync(h, 'email', '', 0, 0, 0, false, true, 'email', 'username', 'pw', true, 'current-password', 'password');
+        assert.equal(doc.activeElement, h.input);
+        assert.deepEqual(focusModes, ['email'], 'inputMode must be email before focus() on coarse pointers');
+        assert.equal(h.input.type, 'text', 'active email input stays selection-safe type=text');
+        assert.equal(h.input.inputMode, 'email');
+        assert.equal(h.input.getAttribute('autocapitalize'), 'none');
+        assert.equal(h.input.getAttribute('autocorrect'), 'off');
+        assert.equal(h.input.spellcheck, false);
+        assert.equal(h.input.autocomplete, 'username');
+        assert.equal(h.textarea.inert, true);
+        assert.equal(h.password.inert, false, 'paired password peer is exposed to password managers');
+        assert.equal(h.password.getAttribute('aria-hidden'), 'true');
+        assert.equal(h.password.autocomplete, 'current-password');
+
+        events.length = 0;
+        h.input.value = 'a@b.co';
+        h.input.setSelectionRange(6, 6, 'forward');
+        h.input.dispatchEvent({ type: 'input', isComposing: false });
+        assert.deepEqual(events, [{
+            kind: 'edit', key: 'email', base: 0, expected: '', start: 0, end: 0, text: 'a@b.co', anchor: 6, focus: 6,
+        }]);
+
+        events.length = 0;
+        h.password.value = 'pw-from-manager';
+        h.password.dispatchEvent({ type: 'input' });
+        assert.equal(h.password.value, '');
+        assert.deepEqual(events, [{ kind: 'autofill', key: 'pw', text: 'pw-from-manager', secure: true }]);
+
+        bridge.focusA11y(h, JSON.stringify({ o: 'textbox', t: 'Email address', rq: true }));
+        assert.equal(h.input.getAttribute('aria-label'), 'Email address');
+        assert.equal(h.input.getAttribute('aria-required'), 'true');
+        assert.equal(h.textarea.getAttribute('aria-label'), 'Text input');
+
+        events.length = 0;
+        bridge.sync(h, 'pw', '', 0, 0, 0, true, true, 'text', 'new-password', 'email', false, 'username', 'email');
+        assert.equal(doc.activeElement, h.password);
+        assert.equal(h.password.autocomplete, 'new-password');
+        assert.equal(h.input.inert, false);
+        assert.equal(h.input.getAttribute('aria-hidden'), 'true');
+        assert.equal(h.input.type, 'email', 'unfocused email peer exposes type=email to password managers');
+        assert.equal(h.input.autocomplete, 'username');
+        h.input.value = 'ada@example.com';
+        h.input.dispatchEvent({ type: 'input' });
+        assert.equal(h.input.value, '');
+        assert.deepEqual(events, [{ kind: 'autofill', key: 'email', text: 'ada@example.com', secure: false }]);
+
+        bridge.sync(h, 'search', '', 0, 0, 0, false, true, 'search', '');
+        assert.equal(h.field, h.input);
+        assert.equal(h.input.type, 'search');
+        assert.equal(h.input.inputMode, 'search');
+        assert.equal(h.input.getAttribute('enterkeyhint'), 'search');
+        assert.equal(h.password.inert, true, 'no peer leaves password inert');
+
+        bridge.sync(h, 'site', '', 0, 0, 0, false, true, 'url', 'url');
+        assert.equal(h.input.type, 'url');
+        assert.equal(h.input.inputMode, 'url');
+        assert.equal(h.input.getAttribute('enterkeyhint'), null);
+        assert.equal(h.input.autocomplete, 'url');
+
+        bridge.sync(h, 'kbd-only', '', 0, 0, 0, false, true, 'none', 'off');
+        assert.equal(h.input.inputMode, 'none');
+        assert.equal(h.input.autocomplete, 'off');
+
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        assert.equal(h.textarea.inert, true);
+        assert.equal(h.input.inert, true);
+        assert.equal(h.password.inert, true);
+        assert.equal(h.peerKey, '');
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('paste and drop accept non-PNG raster images via createImageBitmap transcode and reject SVG/oversized', async () => {
+    const origCreateBitmap = globalThis.createImageBitmap;
+    const origOffscreen = globalThis.OffscreenCanvas;
+    const { events, h } = setup();
+    try {
+        const fakePngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+        let bitmapCalls = 0;
+        let closedCount = 0;
+        let nextSize = [4, 4];
+        Object.defineProperty(globalThis, 'createImageBitmap', {
+            value: async () => {
+                bitmapCalls++;
+                return { width: nextSize[0], height: nextSize[1], close() { closedCount++; } };
+            },
+            configurable: true,
+        });
+        Object.defineProperty(globalThis, 'OffscreenCanvas', {
+            value: class FakeOffscreenCanvas {
+                constructor(w, bh) { this.width = w; this.height = bh; }
+                getContext() { return { drawImage() {} }; }
+                async convertToBlob(opts) {
+                    assert.equal(opts.type, 'image/png');
+                    return new Blob([fakePngBytes], { type: 'image/png' });
+                }
+            },
+            configurable: true,
+        });
+
+        bridge.sync(h, 'editor', '', 0, 0, 0, false);
+        const jpegFile = new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' });
+        h.textarea.dispatchEvent({
+            type: 'paste',
+            preventDefault() {},
+            clipboardData: {
+                items: [{ kind: 'file', type: 'image/jpeg', getAsFile: () => jpegFile }],
+                files: [jpegFile],
+                getData: () => '',
+            },
+        });
+        assert.equal(events.at(-1).kind, 'paste');
+        assert.equal(events.at(-1).image, true);
+
+        const captured = [];
+        const ctx2 = setup();
+        try {
+            const h2 = bridge.mount(ctx2.canvas, msg => {
+                const ev = JSON.parse(msg);
+                if (ev.kind === 'paste' && ev.image) captured.push(bridge.pastedImage(h2, 1024));
+            }, false, false, false);
+            try {
+                bridge.sync(h2, 'url', '', 0, 0, 0, false, true, 'url', '');
+                const webpFile = new Blob([new Uint8Array([0x52, 0x49, 0x46, 0x46])], { type: 'image/webp' });
+                h2.input.dispatchEvent({
+                    type: 'paste',
+                    preventDefault() {},
+                    clipboardData: {
+                        items: [{ kind: 'file', type: 'image/webp', getAsFile: () => webpFile }],
+                        files: [webpFile],
+                        getData: () => '',
+                    },
+                });
+                const outWebp = await captured.pop();
+                assert.deepEqual(outWebp, fakePngBytes);
+                assert.equal(bitmapCalls, 1);
+                assert.equal(closedCount, 1);
+
+                const rawPng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9, 9, 9]);
+                const pngFile = new Blob([rawPng], { type: 'image/png' });
+                h2.input.dispatchEvent({
+                    type: 'paste',
+                    preventDefault() {},
+                    clipboardData: {
+                        items: [
+                            { kind: 'file', type: 'image/jpeg', getAsFile: () => jpegFile },
+                            { kind: 'file', type: 'image/png', getAsFile: () => pngFile },
+                        ],
+                        files: [jpegFile, pngFile],
+                        getData: () => '',
+                    },
+                });
+                const outPng = await captured.pop();
+                assert.deepEqual(outPng, rawPng);
+                assert.equal(bitmapCalls, 1, 'PNG fast path must skip createImageBitmap');
+
+                ctx2.canvas.dispatchEvent({
+                    type: 'drop',
+                    preventDefault() {},
+                    dataTransfer: { files: [jpegFile] },
+                });
+                const outDrop = await captured.pop();
+                assert.deepEqual(outDrop, fakePngBytes);
+                assert.equal(bitmapCalls, 2);
+                assert.equal(closedCount, 2);
+
+                const svgFile = new Blob(['<svg/>'], { type: 'image/svg+xml' });
+                h2.input.dispatchEvent({
+                    type: 'paste',
+                    preventDefault() {},
+                    clipboardData: {
+                        items: [{ kind: 'file', type: 'image/svg+xml', getAsFile: () => svgFile }],
+                        files: [svgFile],
+                        getData: () => '',
+                    },
+                });
+                assert.equal(captured.length, 0, 'image/svg+xml must not set image:true');
+
+                nextSize = [10000, 10000];
+                h2.input.dispatchEvent({
+                    type: 'paste',
+                    preventDefault() {},
+                    clipboardData: {
+                        items: [{ kind: 'file', type: 'image/jpeg', getAsFile: () => jpegFile }],
+                        files: [jpegFile],
+                        getData: () => '',
+                    },
+                });
+                const outTooBig = await captured.pop();
+                assert.equal(outTooBig, undefined);
+                assert.equal(closedCount, 3);
+            } finally {
+                bridge.destroy(h2);
+            }
+        } finally {
+            bridge.destroy(ctx2.h);
+        }
+    } finally {
+        bridge.destroy(h);
+        Object.defineProperty(globalThis, 'createImageBitmap', { value: origCreateBitmap, configurable: true });
+        Object.defineProperty(globalThis, 'OffscreenCanvas', { value: origOffscreen, configurable: true });
+    }
+});
+
+test('showMenu clamps to window.visualViewport for mobile keyboards and pinch-zoom, and syncCaret offsets embedded/page canvases without visualViewport drift', () => {
+    const { doc, win, h } = setup();
+    try {
+        Object.defineProperty(globalThis, 'innerWidth', { value: 390, configurable: true });
+        Object.defineProperty(globalThis, 'innerHeight', { value: 844, configurable: true });
+        win.visualViewport = { offsetLeft: 0, offsetTop: 0, width: 390, height: 360, scale: 1 };
+        const spec = JSON.stringify({ items: [{ id: 'a', title: 'Cut' }, { id: 'b', title: 'Copy' }] });
+        bridge.showMenu(h, spec, 20, 320, 160, false);
+        const menu = doc.body.children.find(n => n.getAttribute('data-rune-menu') === '');
+        assert.ok(menu);
+        assert.ok(menu.style.cssText.includes('max-height:352px'), 'max-height must follow visualViewport');
+        assert.equal(menu.style.top, '240px', 'menu must flip above software keyboard');
+        bridge.hideMenu(h);
+
+        Object.defineProperty(globalThis, 'innerWidth', { value: 800, configurable: true });
+        Object.defineProperty(globalThis, 'innerHeight', { value: 600, configurable: true });
+        win.visualViewport = { offsetLeft: 100, offsetTop: 150, width: 400, height: 300, scale: 2 };
+        bridge.showMenu(h, spec, 450, 420, 160, false);
+        const zoomedMenu = doc.body.children.find(n => n.getAttribute('data-rune-menu') === '');
+        assert.ok(zoomedMenu);
+        assert.ok(zoomedMenu.style.cssText.includes('max-height:292px'));
+        assert.equal(zoomedMenu.style.left, '336px');
+        assert.equal(zoomedMenu.style.top, '340px');
+        bridge.hideMenu(h);
+
+        bridge.sync(h, 'f', 'hi', 0, 2, 2, false);
+        bridge.syncCaret(h, 40, 200, 2, 20);
+        assert.equal(h.textarea.style.left, '40px');
+        assert.equal(h.textarea.style.top, '200px');
+        assert.equal(h.input.style.left, '40px');
+        assert.equal(h.input.style.top, '200px');
+        assert.equal(h.password.style.left, '40px');
+        assert.equal(h.password.style.top, '200px');
+
+        const embCanvas = doc.createElement('canvas');
+        let embRect = { left: 120, top: 180, right: 520, bottom: 480, width: 400, height: 300 };
+        embCanvas.getBoundingClientRect = () => embRect;
+        doc.body.append(embCanvas);
+        const he = bridge.mount(embCanvas, () => {}, true, false, false);
+        try {
+            bridge.sync(he, 'f', 'hi', 0, 2, 2, false, true, 'email', '');
+            bridge.syncCaret(he, 15, 25, 2, 18);
+            assert.equal(he.input.style.left, '135px');
+            assert.equal(he.input.style.top, '205px');
+
+            embRect = { left: 120, top: 60, right: 520, bottom: 360, width: 400, height: 300 };
+            win.dispatchEvent({ type: 'scroll' });
+            assert.equal(he.input.style.left, '135px');
+            assert.equal(he.input.style.top, '85px');
+        } finally {
+            bridge.destroy(he);
+        }
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('syncA11y and focusA11y expose role="feed" and aria-posinset/aria-setsize on non-button articles', () => {
+    const { h } = setup();
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'group', p: '#0/rows', r: [0, 0, 400, 240], g: 'div', o: 'feed', t: 'Activity', i: 'rows' },
+            { k: 'group', p: '#0/rows/row-11', r: [0, 40, 400, 40], g: 'article', a: 0, t: 'Row 11', i: 'row-11', n: [12, 400] },
+        ]));
+        const feed = h.a11yNodes.get('div:#0/rows');
+        const article = h.a11yNodes.get('article:#0/rows/row-11');
+        assert.ok(feed);
+        assert.ok(article);
+        assert.equal(feed.getAttribute('role'), 'feed');
+        assert.equal(feed.getAttribute('aria-label'), 'Activity');
+        assert.equal(feed.getAttribute('aria-posinset'), null);
+        assert.equal(feed.getAttribute('aria-setsize'), null);
+        assert.equal(article.tagName, 'ARTICLE');
+        assert.equal(article.getAttribute('role'), null);
+        assert.equal(article.getAttribute('aria-posinset'), '12');
+        assert.equal(article.getAttribute('aria-setsize'), '400');
+
+        // Clearing item.n in an update removes stale aria-posinset/aria-setsize from the article.
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'group', p: '#0/rows', r: [0, 0, 400, 240], g: 'div', o: 'feed', t: 'Activity', i: 'rows' },
+            { k: 'group', p: '#0/rows/row-11', r: [0, 40, 400, 40], g: 'article', a: 0, t: 'Row 11', i: 'row-11' },
+        ]));
+        assert.equal(article.getAttribute('aria-posinset'), null);
+        assert.equal(article.getAttribute('aria-setsize'), null);
+
+        // focusA11y exposes role="article" with aria-posinset and aria-setsize on the focus proxy.
+        bridge.focusA11y(h, JSON.stringify({ o: 'article', t: 'Row 11', n: [12, 400] }));
+        const proxy = h.focusProxies[h.focusTurn];
+        assert.equal(proxy.getAttribute('role'), 'article');
+        assert.equal(proxy.getAttribute('aria-label'), 'Row 11');
+        assert.equal(proxy.getAttribute('aria-posinset'), '12');
+        assert.equal(proxy.getAttribute('aria-setsize'), '400');
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('legacy writeClipboard fallback does not emit spurious field_blur or hijack copyText while a Rune field is focused', async () => {
+    const platformMod = await import('./platform.js');
+    const origNav = globalThis.navigator;
+    const { doc, events, h } = setup();
+    try {
+        // Focus a Rune text field with a backward selection and Shift held.
+        bridge.sync(h, 'notes', 'hello world', 1, 8, 2, false, false);
+        bridge.activate(h);
+        h.textarea.dispatchEvent({ type: 'focus' });
+        h.shift = true;
+        events.length = 0;
+
+        // Wire browser-like relatedTarget + focusin/focusout/select + execCommand on the test DOM.
+        const origFocus = h.textarea.focus.bind(h.textarea);
+        const origCreate = doc.createElement;
+        let copiedText = null;
+        doc.createElement = (tag) => {
+            const el = origCreate(tag);
+            el.select = () => {
+                el.selectionStart = 0;
+                el.selectionEnd = el.value.length;
+            };
+            el.focus = () => {
+                const prev = doc.activeElement;
+                if (prev === el) return;
+                doc.activeElement = el;
+                if (prev) {
+                    prev.dispatchEvent({ type: 'blur', relatedTarget: el });
+                    prev.dispatchEvent({ type: 'focusout', relatedTarget: el });
+                }
+                doc.dispatchEvent({ type: 'focusin', target: el });
+                if (el.onFocus) el.onFocus();
+            };
+            return el;
+        };
+        h.textarea.focus = () => {
+            const prev = doc.activeElement;
+            origFocus();
+            if (prev !== h.textarea) h.textarea.dispatchEvent({ type: 'focus' });
+        };
+        doc.execCommand = (cmd) => {
+            assert.equal(cmd, 'copy');
+            const active = doc.activeElement;
+            const copyEvent = {
+                type: 'copy',
+                target: active,
+                defaultPrevented: false,
+                preventDefault() { this.defaultPrevented = true; },
+                clipboardData: { setData(_, val) { copiedText = val; } },
+            };
+            doc.dispatchEvent(copyEvent);
+            if (!copyEvent.defaultPrevented) copiedText = active.value;
+            return true;
+        };
+
+        Object.defineProperty(globalThis, 'navigator', { value: {}, configurable: true });
+        await platformMod.writeClipboard('copied value', '', new Uint8Array());
+        await Promise.resolve();
+
+        assert.equal(copiedText, 'copied value');
+        assert.equal(doc.activeElement, h.textarea);
+        assert.equal(h.textarea.selectionStart, 2);
+        assert.equal(h.textarea.selectionEnd, 8);
+        assert.equal(h.textarea.selectionDirection, 'backward');
+        assert.equal(h.shift, true, 'transient clipboard focus hop must not drop held Shift');
+        assert.equal(events.some(e => e.kind === 'field_blur'), false, 'must not emit spurious field_blur');
+
+        // Also verify document copy listener with h.copyText does not hijack fallback copy when unfocused.
+        bridge.sync(h, '', '', 0, 0, 0, false, false);
+        bridge.syncCopy(h, 'stale selectable text');
+        doc.activeElement = doc.body;
+        copiedText = null;
+        await platformMod.writeClipboard('button copy', '', new Uint8Array());
+        assert.equal(copiedText, 'button copy');
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', { value: origNav, configurable: true });
+        bridge.destroy(h);
+    }
+});
+
+test('syncA11y and focusA11y mirror, patch, and clear aria-current on mirror nodes, proxy, and inputs', () => {
+    const { h } = setup();
+    try {
+        bridge.syncA11y(h, JSON.stringify([
+            { k: 'group', g: 'nav', p: '#0/nav', r: [0, 0, 200, 100], t: 'Sections' },
+            { k: 'link', p: '#0/nav/home', a: 0, r: [0, 0, 200, 32], t: 'Home', h: '/', cu: 'page' },
+            { k: 'button', p: '#0/nav/step', a: 0, r: [0, 36, 200, 32], t: 'Step 2', cu: 'step' },
+            { k: 'link', p: '#0/nav/other', a: 0, r: [0, 72, 200, 28], t: 'Settings', h: '/settings' },
+        ]));
+        const home = h.a11yNodes.get('a:#0/nav/home');
+        const step = h.a11yNodes.get('button:#0/nav/step');
+        const other = h.a11yNodes.get('a:#0/nav/other');
+        assert.equal(home.getAttribute('aria-current'), 'page');
+        assert.equal(step.getAttribute('aria-current'), 'step');
+        assert.equal(other.getAttribute('aria-current'), null);
+
+        bridge.syncA11y(h, JSON.stringify({
+            p: 1,
+            u: [
+                { k: 'link', p: '#0/nav/home', r: [0, 0, 200, 32], t: 'Home', h: '/', cu: 'location' },
+                { k: 'button', p: '#0/nav/step', r: [0, 36, 200, 32], t: 'Step 2' },
+            ],
+        }));
+        assert.equal(home.getAttribute('aria-current'), 'location');
+        assert.equal(step.getAttribute('aria-current'), null);
+
+        bridge.focusA11y(h, JSON.stringify({ o: 'link', t: 'Home', cu: 'page' }));
+        let proxy = h.focusProxies[h.focusTurn];
+        assert.equal(proxy.getAttribute('role'), 'link');
+        assert.equal(proxy.getAttribute('aria-current'), 'page');
+
+        bridge.focusA11y(h, JSON.stringify({ o: 'link', t: 'Settings' }));
+        proxy = h.focusProxies[h.focusTurn];
+        assert.equal(proxy.getAttribute('aria-current'), null);
+
+        bridge.focusA11y(h, JSON.stringify({ o: 'textbox', t: 'Today', cu: 'date' }));
+        assert.equal(h.textarea.getAttribute('aria-current'), 'date');
+        bridge.focusA11y(h, '');
+        assert.equal(h.textarea.getAttribute('aria-current'), null);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('syncA11y renders custom accessibility actions as non-tabbable buttons that dispatch a11y_custom', () => {
+    const { h, events: sent } = setup({ page: true });
+    try {
+        const items = [
+            { k: 'group', g: 'article', p: '0/row-1', r: [0, 0, 240, 40], t: 'Row one' },
+            { k: 'button', p: '0/row-1', r: [0, 0, 1, 1], t: 'Open', a: 0, ca: 'open' },
+            { k: 'button', p: '0/row-1', r: [0, 0, 1, 1], t: 'More', a: 0, ca: 'more' },
+        ];
+        bridge.syncA11y(h, JSON.stringify(items));
+
+        const article = h.a11yByPath.get('0/row-1');
+        assert.ok(article, 'row article stays registered in a11yByPath');
+        assert.equal(article.tagName, 'ARTICLE');
+        const buttons = article.children.filter(c => c.tagName === 'BUTTON');
+        assert.equal(buttons.length, 2);
+        assert.equal(buttons[0].textContent, 'Open');
+        assert.equal(buttons[0].tabIndex, -1, 'custom actions must never become Tab stops even in document mode');
+        assert.equal(buttons[0].getAttribute('data-rune-a11y-action'), 'open');
+        assert.equal(buttons[1].textContent, 'More');
+        assert.equal(buttons[1].tabIndex, -1);
+        assert.equal(buttons[1].getAttribute('data-rune-a11y-action'), 'more');
+
+        sent.length = 0;
+        let prevented = false;
+        buttons[1].dispatchEvent({ type: 'click', preventDefault() { prevented = true; } });
+        assert.ok(prevented);
+        assert.deepEqual(sent, [{ kind: 'a11y_custom', path: '0/row-1', id: 'more' }]);
+
+        // Incremental patch removes one action without touching the other.
+        bridge.syncA11y(h, JSON.stringify({
+            p: 1,
+            d: ['button:0/row-1\x1fmore'],
+            o: { 'article:0/row-1': ['button:0/row-1\x1fopen'] },
+        }));
+        assert.equal(article.children.filter(c => c.tagName === 'BUTTON').length, 1);
+        assert.equal(h.a11yByPath.get('0/row-1'), article);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('keydown forwards Space, sibling control keys, printable shortcuts, and Cmd/Ctrl+V on stray proxies after text focus ends', () => {
+    const { doc, canvas, events, h } = setup();
+    try {
+        // While a Rune text field is active on textarea, input, or password, Space and ordinary
+        // characters stay browser text input and Cmd/Ctrl+V stays un-prevented for paste.
+        const activeConfigs = [
+            { field: h.textarea, args: ['plain', 'hi', 0, 2, 2, false] },
+            { field: h.input, args: ['email', 'hi', 0, 2, 2, false, true, 'email', 'email'] },
+            { field: h.password, args: ['secret', '', 0, 0, 0, true] },
+        ];
+        for (const { field, args } of activeConfigs) {
+            events.length = 0;
+            bridge.sync(h, ...args);
+            bridge.activate(h);
+            assert.equal(dispatchKeydown(field, { key: ' ', code: 'Space' }), false);
+            assert.equal(dispatchKeydown(field, { key: 'j', code: 'KeyJ' }), false);
+            assert.equal(dispatchKeydown(field, { key: 'v', code: 'KeyV', ctrlKey: true }), false);
+            assert.equal(events.length, 0);
+        }
+
+        // End text focus: h.key becomes '' and h.field resets to h.textarea.
+        bridge.sync(h, '', '', 0, 0, 0, false);
+
+        // Simulate DOM focus lingering on each hidden proxy (textarea, semantic input, or password)
+        // for a turn after text focus ended, even with residual value/selection.
+        for (const field of [h.textarea, h.input, h.password]) {
+            events.length = 0;
+            field._inert = false;
+            field.value = 'stale';
+            field.selectionStart = 2;
+            field.selectionEnd = 3;
+            doc.activeElement = field;
+
+            assert.equal(dispatchKeydown(field, { key: ' ', code: 'Space' }), true);
+            assert.equal(doc.activeElement, canvas, 'stray proxy focus must return to canvas after forwarding Space');
+            assert.deepEqual(events[0], {
+                kind: 'key',
+                key: ' ',
+                code: 'Space',
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+                repeat: false,
+            });
+
+            // Sibling editing/control keys, printable shortcuts, and Ctrl+V also forward on every proxy.
+            events.length = 0;
+            doc.activeElement = field;
+            for (const [k, code, extra] of [
+                ['Enter', 'Enter', {}],
+                ['Tab', 'Tab', {}],
+                ['Escape', 'Escape', {}],
+                ['Backspace', 'Backspace', {}],
+                ['Delete', 'Delete', {}],
+                ['ArrowDown', 'ArrowDown', {}],
+                ['Insert', 'Insert', {}],
+                ['j', 'KeyJ', {}],
+                ['v', 'KeyV', { ctrlKey: true }],
+            ]) {
+                assert.equal(dispatchKeydown(field, { key: k, code, ...extra }), true, field.tagName + ' ' + k);
+            }
+            assert.deepEqual(events.map(e => e.key), ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowDown', 'Insert', 'j', 'v']);
+
+            // Browser shortcuts stay un-prevented when !h.key (F5/F12 untouched; Ctrl+R forwarded un-prevented).
+            events.length = 0;
+            assert.equal(dispatchKeydown(field, { key: 'F5', code: 'F5' }), false);
+            assert.equal(dispatchKeydown(field, { key: 'F12', code: 'F12' }), false);
+            assert.equal(dispatchKeydown(field, { key: 'r', code: 'KeyR', ctrlKey: true }), false);
+            assert.deepEqual(events.map(e => e.key), ['r']);
+        }
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('beforeinput forwards Space, Enter, and Delete/Backspace from stray proxies when text focus has ended', () => {
+    const { doc, body, events, h } = setup({ page: true });
+    try {
+        // Active field: beforeinput insertText ' ' is left to browser editing.
+        bridge.sync(h, 'field', 'abc', 0, 1, 1, false);
+        bridge.activate(h);
+        assert.equal(dispatchBeforeInput(h.textarea, { inputType: 'insertText', data: ' ' }), false);
+        assert.equal(events.length, 0);
+
+        // Focus leaves text; simulate stray focus remaining on h.input in page mode.
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        h.input._inert = false;
+        h.input.value = 'abc';
+        h.input.selectionStart = 1;
+        h.input.selectionEnd = 1;
+        doc.activeElement = h.input;
+
+        assert.equal(dispatchBeforeInput(h.input, { inputType: 'insertText', data: ' ' }), true);
+        assert.equal(doc.activeElement, body, 'page mode releases stray proxy focus via blur instead of focusing canvas');
+        assert.equal(dispatchBeforeInput(h.input, { inputType: 'insertLineBreak' }), true);
+        assert.equal(dispatchBeforeInput(h.input, { inputType: 'deleteContentBackward' }), true);
+        assert.equal(dispatchBeforeInput(h.input, { inputType: 'deleteContentForward' }), true);
+        assert.deepEqual(events.map(e => e.key), [' ', 'Enter', 'Backspace', 'Delete']);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('sync clearing text focus tears down IME composition, ignores trailing composition/select events, and blurs fallback proxy', async () => {
+    const { doc, body, canvas, events, h } = setup();
+    try {
+        bridge.sync(h, 'field', 'hi', 0, 2, 2, false);
+        bridge.activate(h);
+        assert.equal(doc.activeElement, h.textarea);
+
+        // Start IME composition and simulate a non-focusable canvas whose focus() is a no-op.
+        h.textarea.dispatchEvent({ type: 'compositionstart' });
+        h.textarea.value = 'hini';
+        h.textarea.dispatchEvent({ type: 'compositionupdate', data: 'ni' });
+        assert.equal(h.composing, true);
+        assert.equal(h.composition, 'ni');
+
+        const origFocus = canvas.focus.bind(canvas);
+        canvas.focus = () => {};
+        bridge.sync(h, '', '', 0, 0, 0, false);
+        canvas.focus = origFocus;
+
+        assert.equal(h.composing, false);
+        assert.equal(h.composition, '');
+        assert.equal(doc.activeElement, body, 'active.blur() fallback must clear proxy focus when canvas.focus() does not take it');
+
+        // Wait a microtask to ensure the queued compositionupdate microtask drops silently.
+        await Promise.resolve();
+        assert.equal(events.length, 0);
+
+        // Trailing compositionend/compositionstart/compositionupdate/select after !h.key must not
+        // emit edit/preedit/sync/selection or leave h.composing stuck true.
+        h.textarea.value = 'committed';
+        h.textarea.dispatchEvent({ type: 'compositionend' });
+        assert.equal(h.textarea.value, '');
+        h.textarea.dispatchEvent({ type: 'compositionstart' });
+        h.textarea.dispatchEvent({ type: 'compositionupdate', data: 'late' });
+        doc.activeElement = h.textarea;
+        h.textarea.dispatchEvent({ type: 'select' });
+        await Promise.resolve();
+
+        assert.equal(h.composing, false);
+        assert.equal(h.composition, '');
+        assert.equal(events.length, 0);
+
+        // Space keydown is not blocked by stale IME state and forwards cleanly.
+        assert.equal(dispatchKeydown(h.textarea, { key: ' ', code: 'Space' }), true);
+        assert.deepEqual(events.map(e => e.key), [' ']);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('Safari gesturestart and gesturechange only prevent native pinch-zoom when Rune claims it', () => {
+    const { doc, win, body } = installDom({ platform: 'MacIntel' });
+    const canvas = doc.createElement('canvas');
+    canvas.getBoundingClientRect = () => ({ left: 10, top: 20, right: 410, bottom: 320, width: 400, height: 300 });
+    body.append(canvas);
+    const events = [];
+    let shouldClaim = false;
+    let h;
+    h = bridge.mount(canvas, msg => {
+        const ev = JSON.parse(msg);
+        events.push(ev);
+        if (ev.kind === 'gesture_start') bridge.syncGesture(h, shouldClaim);
+    }, false, false, false);
+    const dispatchGesture = (type, target, extra = {}) => {
+        let prevented = false;
+        doc.dispatchEvent({ type, target, preventDefault() { prevented = true; }, ...extra });
+        return prevented;
+    };
+    try {
+        // 1. Unclaimed gesturestart/gesturechange on canvas leaves Safari pinch-zoom untouched.
+        shouldClaim = false;
+        assert.equal(dispatchGesture('gesturestart', canvas, { clientX: 60, clientY: 90 }), false);
+        assert.deepEqual(events, [{ kind: 'gesture_start', x: 50, y: 70 }]);
+        assert.equal(dispatchGesture('gesturechange', canvas), false);
+        dispatchGesture('gestureend', canvas);
+
+        // 2. Claimed gesturestart/gesturechange prevents Safari zoom until gestureend.
+        events.length = 0;
+        shouldClaim = true;
+        assert.equal(dispatchGesture('gesturestart', canvas, { clientX: 110, clientY: 120 }), true);
+        assert.deepEqual(events, [{ kind: 'gesture_start', x: 100, y: 100 }]);
+        assert.equal(dispatchGesture('gesturechange', canvas), true);
+        dispatchGesture('gestureend', canvas);
+        assert.equal(dispatchGesture('gesturechange', canvas), false, 'gestureend clears active claim');
+
+        // 3. Window blur clears active gesture claim so stray gesturechange is not prevented.
+        assert.equal(dispatchGesture('gesturestart', canvas, { clientX: 50, clientY: 50 }), true);
+        win.dispatchEvent({ type: 'blur' });
+        assert.equal(dispatchGesture('gesturechange', canvas), false);
+
+        // 4. Armed a11y child is owned by Rune; missing clientX/clientY omits x/y so Rust uses pointer().
+        events.length = 0;
+        const link = doc.createElement('a');
+        h.a11y.append(link);
+        shouldClaim = true;
+        assert.equal(dispatchGesture('gesturestart', link), true);
+        assert.deepEqual(events, [{ kind: 'gesture_start' }]);
+        dispatchGesture('gestureend', link);
+
+        // 5. Gesture outside Rune's elements (host page in embedded mode) never queries or prevents.
+        events.length = 0;
+        const hostDiv = doc.createElement('div');
+        body.append(hostDiv);
+        shouldClaim = true;
+        assert.equal(dispatchGesture('gesturestart', hostDiv, { clientX: 15, clientY: 25 }), false);
+        assert.deepEqual(events, []);
+        assert.equal(dispatchGesture('gesturechange', hostDiv), false);
+    } finally {
+        bridge.destroy(h);
+    }
+
+    // 6. Document mode (page=true) and fitHeight=true never install gesturestart blockers.
+    for (const opts of [{ embedded: false, fitHeight: false, page: true }, { embedded: true, fitHeight: true, page: false }]) {
+        const s = setup(opts);
+        try {
+            let prevented = false;
+            s.doc.dispatchEvent({
+                type: 'gesturestart', target: s.canvas, clientX: 40, clientY: 40,
+                preventDefault() { prevented = true; },
+            });
+            assert.equal(prevented, false);
+            assert.equal(s.events.some(e => e.kind === 'gesture_start'), false);
+        } finally {
+            bridge.destroy(s.h);
+        }
+    }
+});
+
+test('keydown leaves browser shortcuts un-prevented in focused text inputs unless Rune consumes them', () => {
+    const { doc, body } = installDom({ platform: 'Linux x86_64' });
+    const canvas = doc.createElement('canvas');
+    body.append(canvas);
+    const events = [];
+    let consumeKeys = new Set();
+    let h;
+    h = bridge.mount(canvas, msg => {
+        const ev = JSON.parse(msg);
+        events.push(ev);
+        if (ev.kind === 'key') bridge.syncKey(h, consumeKeys.has(ev.key.toLowerCase()));
+    }, false, false, false);
+    try {
+        const activeConfigs = [
+            { field: h.textarea, args: ['plain', 'hello', 0, 2, 2, false] },
+            { field: h.input, args: ['single', 'hello', 0, 2, 2, false, true, 'search', ''] },
+            { field: h.password, args: ['secret', '', 0, 0, 0, true] },
+        ];
+        const browserChords = [
+            { key: 'l', code: 'KeyL', ctrlKey: true },
+            { key: 'r', code: 'KeyR', ctrlKey: true },
+            { key: 'R', code: 'KeyR', ctrlKey: true, shiftKey: true },
+            { key: 'f', code: 'KeyF', ctrlKey: true },
+            { key: 'g', code: 'KeyG', ctrlKey: true },
+            { key: 'G', code: 'KeyG', ctrlKey: true, shiftKey: true },
+            { key: 't', code: 'KeyT', ctrlKey: true },
+            { key: 'w', code: 'KeyW', ctrlKey: true },
+            { key: 'n', code: 'KeyN', ctrlKey: true },
+            { key: '=', code: 'Equal', ctrlKey: true },
+            { key: '+', code: 'Equal', ctrlKey: true, shiftKey: true },
+            { key: '-', code: 'Minus', ctrlKey: true },
+            { key: '0', code: 'Digit0', ctrlKey: true },
+            { key: 'i', code: 'KeyI', ctrlKey: true, altKey: true },
+            { key: 'j', code: 'KeyJ', ctrlKey: true, altKey: true },
+            { key: 'u', code: 'KeyU', ctrlKey: true, altKey: true },
+            { key: 'I', code: 'KeyI', ctrlKey: true, shiftKey: true },
+            { key: 'J', code: 'KeyJ', ctrlKey: true, shiftKey: true },
+            { key: 'C', code: 'KeyC', ctrlKey: true, shiftKey: true },
+        ];
+        for (const { field, args } of activeConfigs) {
+            bridge.sync(h, ...args);
+            bridge.activate(h);
+            consumeKeys = new Set();
+            events.length = 0;
+            for (const chord of browserChords) {
+                assert.equal(
+                    dispatchKeydown(field, chord),
+                    false,
+                    `${field.tagName} unconsumed browser shortcut ${chord.key} must not call preventDefault`,
+                );
+            }
+            assert.equal(events.length, browserChords.length, 'browser chords still offer app handlers a turn');
+
+            // When an app handler explicitly consumes a browser shortcut (e.g. in-app Cmd/Ctrl+F or zoom),
+            // syncKey(h, true) prevents the browser's default action.
+            consumeKeys = new Set(['f', 'l', '+', '0']);
+            assert.equal(dispatchKeydown(field, { key: 'f', code: 'KeyF', ctrlKey: true }), true);
+            assert.equal(dispatchKeydown(field, { key: 'l', code: 'KeyL', ctrlKey: true }), true);
+            assert.equal(dispatchKeydown(field, { key: '+', code: 'Equal', ctrlKey: true, shiftKey: true }), true);
+            assert.equal(dispatchKeydown(field, { key: '0', code: 'Digit0', ctrlKey: true }), true);
+            assert.equal(dispatchKeydown(field, { key: 'r', code: 'KeyR', ctrlKey: true }), false);
+
+            // Text-editing and non-browser chords stay prevented even when consumeKeys is empty.
+            consumeKeys = new Set();
+            const editingChords = [
+                { key: 'a', code: 'KeyA', ctrlKey: true },
+                { key: 'c', code: 'KeyC', ctrlKey: true },
+                { key: 'x', code: 'KeyX', ctrlKey: true },
+                { key: 'z', code: 'KeyZ', ctrlKey: true },
+                { key: 'Z', code: 'KeyZ', ctrlKey: true, shiftKey: true },
+                { key: 'y', code: 'KeyY', ctrlKey: true },
+                { key: 'b', code: 'KeyB', ctrlKey: true },
+                { key: 'i', code: 'KeyI', ctrlKey: true },
+                { key: 'u', code: 'KeyU', ctrlKey: true },
+                { key: 'k', code: 'KeyK', ctrlKey: true },
+                { key: 'w', code: 'KeyW', ctrlKey: true, altKey: true },
+                { key: 'ArrowLeft', code: 'ArrowLeft', ctrlKey: true },
+                { key: 'Enter', code: 'Enter', ctrlKey: true },
+            ];
+            for (const chord of editingChords) {
+                assert.equal(
+                    dispatchKeydown(field, chord),
+                    true,
+                    `${field.tagName} editing/app chord ${chord.key} must stay prevented`,
+                );
+            }
+            // Cmd/Ctrl+V stays un-prevented in focused fields so the browser fires paste.
+            events.length = 0;
+            assert.equal(dispatchKeydown(field, { key: 'v', code: 'KeyV', ctrlKey: true }), false);
+            assert.equal(events.length, 0);
+        }
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('keydown handles macOS DevTools, PWA window shortcuts, and canvas synchronous copy cleanly', () => {
+    // macOS DevTools chords (including Option-transformed glyphs) vs non-DevTools chords.
+    const mac = setup({ platform: 'MacIntel' });
+    try {
+        bridge.sync(mac.h, 'field', 'hello', 0, 5, 5, false);
+        bridge.activate(mac.h);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'l', code: 'KeyL', metaKey: true }), false);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'f', code: 'KeyF', metaKey: true }), false);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'C', code: 'KeyC', metaKey: true, shiftKey: true }), false);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'c', code: 'KeyC', metaKey: true, altKey: true }), false);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'Dead', code: 'KeyI', metaKey: true, altKey: true }), false);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: '∆', code: 'KeyJ', metaKey: true, altKey: true }), false);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'ç', code: 'KeyC', metaKey: true, altKey: true }), false);
+        // Plain Cmd+C in a focused field stays prevented for Rune text copy.
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'c', code: 'KeyC', metaKey: true }), true);
+        // Cmd+Shift+I is not macOS DevTools; Cmd+Option+G (Dvorak physical KeyU) is not View Source.
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'I', code: 'KeyI', metaKey: true, shiftKey: true }), true);
+        assert.equal(dispatchKeydown(mac.h.textarea, { key: 'g', code: 'KeyU', metaKey: true, altKey: true }), true);
+
+        // Installed app window (PWA): Cmd/Ctrl+T/W/N belong to the app even inside a text field,
+        // while Cmd/Ctrl+L/R/F still pass through to the browser unless consumed.
+        const origNav = globalThis.navigator;
+        Object.defineProperty(globalThis, 'navigator', {
+            value: { platform: 'MacIntel', standalone: true },
+            configurable: true,
+        });
+        try {
+            assert.equal(dispatchKeydown(mac.h.textarea, { key: 't', code: 'KeyT', metaKey: true }), true);
+            assert.equal(dispatchKeydown(mac.h.textarea, { key: 'w', code: 'KeyW', metaKey: true }), true);
+            assert.equal(dispatchKeydown(mac.h.textarea, { key: 'n', code: 'KeyN', metaKey: true }), true);
+            assert.equal(dispatchKeydown(mac.h.textarea, { key: 'r', code: 'KeyR', metaKey: true }), false);
+            assert.equal(dispatchKeydown(mac.h.textarea, { key: 'f', code: 'KeyF', metaKey: true }), false);
+        } finally {
+            Object.defineProperty(globalThis, 'navigator', { value: origNav, configurable: true });
+        }
+
+        // Unfocused canvas: browser shortcuts stay un-prevented until syncKey(h, true), and plain
+        // Cmd+C with read-only El::selectable copyText stays un-prevented so document copy fires.
+        bridge.sync(mac.h, '', '', 0, 0, 0, false);
+        assert.equal(dispatchKeydown(mac.canvas, { key: 'f', code: 'KeyF', metaKey: true }), false);
+        bridge.syncKey(mac.h, true);
+        assert.equal(dispatchKeydown(mac.canvas, { key: 'f', code: 'KeyF', metaKey: true }), true);
+        // syncKey resets after each keydown so it never leaks to the next key.
+        assert.equal(dispatchKeydown(mac.canvas, { key: 'r', code: 'KeyR', metaKey: true }), false);
+
+        bridge.syncCopy(mac.h, 'selected text');
+        bridge.syncKey(mac.h, true);
+        assert.equal(dispatchKeydown(mac.canvas, { key: 'c', code: 'KeyC', metaKey: true }), false);
+        bridge.syncCopy(mac.h, '');
+        bridge.syncKey(mac.h, true);
+        assert.equal(dispatchKeydown(mac.canvas, { key: 'c', code: 'KeyC', metaKey: true }), true);
+    } finally {
+        bridge.destroy(mac.h);
+    }
+});
+test('openFilePicker handles open, multi-select, cancel, read, and save-download/FSA handles', async () => {
+    const { doc, body, events, h } = setup();
+    try {
+        // 1. Single/multi open via <input type="file">.
+        let clickedInput = null;
+        const origCreate = doc.createElement;
+        doc.createElement = tag => {
+            const node = origCreate.call(doc, tag);
+            node.click = () => { clickedInput = node; };
+            return node;
+        };
+        const filters = JSON.stringify([{ name: 'CSV', extensions: ['csv', '*.tsv'] }]);
+        bridge.openFilePicker(h, 7, 'open', true, filters, '');
+        assert.ok(clickedInput, 'picker should click a hidden <input type="file">');
+        assert.equal(clickedInput.type, 'file');
+        assert.equal(clickedInput.multiple, true);
+        assert.equal(clickedInput.accept, '.csv,.tsv');
+        assert.equal(clickedInput.parentElement, body);
+
+        // Deliver two picked files and claim + read them.
+        const fileA = { name: 'a.csv', async arrayBuffer() { return new TextEncoder().encode('col1,col2').buffer; } };
+        const fileB = { name: 'b.tsv', async arrayBuffer() { return new TextEncoder().encode('x\ty').buffer; } };
+        clickedInput.files = [fileA, fileB];
+        let claimedIds = [];
+        const origSend = h.send;
+        h.send = (ev, after) => {
+            events.push(ev);
+            if (ev.files) {
+                for (const f of ev.files) {
+                    assert.equal(bridge.claimPickedFile(f.id), true);
+                    claimedIds.push(f.id);
+                }
+            }
+            after?.();
+        };
+        clickedInput.dispatchEvent({ type: 'change' });
+        assert.equal(clickedInput.parentElement, null, 'input removed after change');
+        const openEv = events.at(-1);
+        assert.equal(openEv.kind, 'file_dialog');
+        assert.equal(openEv.id, 7);
+        assert.deepEqual(openEv.files.map(f => f.name), ['a.csv', 'b.tsv']);
+        assert.equal(new TextDecoder().decode(await bridge.readPickedFile(claimedIds[0])), 'col1,col2');
+        assert.equal(bridge.pickedFile(claimedIds[0]), fileA);
+        await assert.rejects(() => bridge.writePickedFile(claimedIds[0], new Uint8Array([1])), /read-only/);
+        for (const id of claimedIds) bridge.releasePickedFile(id);
+        assert.equal(bridge.pickedFile(claimedIds[0]), undefined);
+
+        // 2. Cancel event answers cancel: true.
+        clickedInput = null;
+        bridge.openFilePicker(h, 8, 'open', false, '[]', '');
+        assert.equal(clickedInput.multiple, false);
+        clickedInput.dispatchEvent({ type: 'cancel' });
+        assert.deepEqual(events.at(-1), { kind: 'file_dialog', id: 8, cancel: true });
+
+        // 3. Save picker with showSaveFilePicker (FSA) supports writing + AbortError cancellation.
+        const written = [];
+        let fsaOpts = null;
+        globalThis.showSaveFilePicker = async (opts) => {
+            fsaOpts = opts;
+            return {
+                name: 'chosen.json',
+                async createWritable() {
+                    return {
+                        async write(bytes) { written.push(new Uint8Array(bytes)); },
+                        async close() {},
+                    };
+                },
+            };
+        };
+        try {
+            claimedIds = [];
+            bridge.openFilePicker(h, 9, 'save', false, JSON.stringify([{ name: 'JSON', extensions: ['json'] }]), 'out.json');
+            await new Promise(r => setTimeout(r, 0));
+            assert.equal(fsaOpts.suggestedName, 'out.json');
+            assert.deepEqual(fsaOpts.types[0].accept['application/octet-stream'], ['.json']);
+            assert.equal(events.at(-1).id, 9);
+            assert.equal(events.at(-1).files[0].name, 'chosen.json');
+            await bridge.writePickedFile(claimedIds[0], new TextEncoder().encode('{"saved":1}'));
+            assert.equal(new TextDecoder().decode(written[0]), '{"saved":1}');
+            bridge.releasePickedFile(claimedIds[0]);
+
+            // AbortError maps to cancel: true.
+            globalThis.showSaveFilePicker = async () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; };
+            bridge.openFilePicker(h, 10, 'save', false, '[]', 'out.json');
+            await new Promise(r => setTimeout(r, 0));
+            assert.deepEqual(events.at(-1), { kind: 'file_dialog', id: 10, cancel: true });
+        } finally {
+            delete globalThis.showSaveFilePicker;
+        }
+
+        // 4. Fallback save picker without showSaveFilePicker triggers <a download> on write.
+        claimedIds = [];
+        let clickedLink = null;
+        doc.createElement = tag => {
+            const node = origCreate.call(doc, tag);
+            node.click = () => { clickedLink = node; };
+            return node;
+        };
+        const origCreateObj = URL.createObjectURL;
+        const origRevokeObj = URL.revokeObjectURL;
+        URL.createObjectURL = () => 'blob:test-save';
+        URL.revokeObjectURL = () => {};
+        try {
+            bridge.openFilePicker(h, 11, 'save', false, '[]', 'backup.txt');
+            await Promise.resolve();
+            assert.equal(events.at(-1).id, 11);
+            assert.equal(events.at(-1).files[0].name, 'backup.txt');
+            await bridge.writePickedFile(claimedIds[0], new TextEncoder().encode('data'));
+            assert.ok(clickedLink);
+            assert.equal(clickedLink.download, 'backup.txt');
+            assert.equal(clickedLink.href, 'blob:test-save');
+            bridge.releasePickedFile(claimedIds[0]);
+        } finally {
+            URL.createObjectURL = origCreateObj;
+            URL.revokeObjectURL = origRevokeObj;
+            h.send = origSend;
+        }
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('syncWebImages renders display-only <img> elements without crossOrigin, reuses nodes, nests clips, and cleans up', () => {
+    const { h, doc } = setup();
+    try {
+        // Lazy layer creation: empty sync creates no DOM layer.
+        bridge.syncWebImages(h, '[]');
+        assert.equal(h.webImages, null);
+
+        // 1. Mount two unclipped images: layer sits directly before a11y, aria-hidden, pointer-events:none.
+        bridge.syncWebImages(h, JSON.stringify([
+            { id: '10', u: 'https://cdn.example.com/a.png', r: [20, 30, 64, 48], rad: [12, 12, 12, 12], f: 'cover', p: '0% 100%', n: true, o: 0.75 },
+            { id: '20', u: 'https://cdn.example.com/b.png', r: [100, 30, 40, 40], m: [0, 1, -1, 0, 140, 30] },
+        ]));
+        assert.ok(h.webImages, 'webImages layer must be created');
+        assert.equal(h.webImages.getAttribute('data-rune-web-images'), '');
+        assert.equal(h.webImages.getAttribute('aria-hidden'), 'true');
+        assert.ok(h.webImages.style.cssText.includes('pointer-events:none'));
+        const bodyKids = doc.body.children;
+        assert.ok(bodyKids.indexOf(h.webImages) < bodyKids.indexOf(h.a11y), 'webImages must precede a11y in DOM order');
+        assert.equal(h.webImages.children.length, 2);
+
+        const imgA = h.webImages.children[0];
+        const imgB = h.webImages.children[1];
+        assert.equal(imgA.tagName, 'IMG');
+        assert.equal(imgA.src, 'https://cdn.example.com/a.png');
+        assert.equal(imgA.crossOrigin, undefined, 'must never set crossOrigin so cross-origin images display without CORS');
+        assert.equal(imgA.getAttribute('crossorigin'), null);
+        assert.equal(imgA.alt, '');
+        assert.equal(imgA.decoding, 'async');
+        assert.equal(imgA.draggable, false);
+        assert.equal(imgA.getAttribute('aria-hidden'), 'true');
+        assert.ok(imgA.style.cssText.includes('left:20px;top:30px;width:64px;height:48px'));
+        assert.ok(imgA.style.cssText.includes('object-fit:cover;object-position:0% 100%'));
+        assert.ok(imgA.style.cssText.includes('border-radius:12px 12px 12px 12px'));
+        assert.ok(imgA.style.cssText.includes('image-rendering:pixelated'));
+        assert.ok(imgA.style.cssText.includes('opacity:0.75'));
+        assert.ok(imgB.style.cssText.includes('transform:matrix(0,1,-1,0,140,30)'));
+
+        // 2. Add hard clip + rounded clip wrapper and reorder B before A: must reuse exact same <img> elements.
+        let srcWrites = 0;
+        const origSrc = imgA.src;
+        Object.defineProperty(imgA, 'src', {
+            get() { return origSrc; },
+            set() { srcWrites += 1; },
+            configurable: true,
+        });
+        bridge.syncWebImages(h, JSON.stringify([
+            { id: '20', u: 'https://cdn.example.com/b.png', r: [100, 30, 40, 40] },
+            {
+                id: '10',
+                u: 'https://cdn.example.com/a.png',
+                r: [20, 30, 64, 48],
+                c: [10, 40, 80, 38],
+                rc: [[15, 25, 90, 80, 16, 16, 16, 16]],
+            },
+        ]));
+        assert.equal(srcWrites, 0, 'moving or clipping an image must not reassign img.src');
+        assert.equal(h.webImages.children.length, 2);
+        assert.equal(h.webImages.children[0], imgB, 'paint order must update in DOM');
+        const outerClip = h.webImages.children[1];
+        assert.equal(outerClip.tagName, 'DIV');
+        assert.ok(outerClip.style.cssText.includes('left:10px;top:40px;width:80px;height:38px;overflow:hidden'));
+        const roundClip = outerClip.children[0];
+        assert.equal(roundClip.tagName, 'DIV');
+        // Relative to outerClip origin (10, 40): (15-10, 25-40) = (5, -15).
+        assert.ok(roundClip.style.cssText.includes('left:5px;top:-15px;width:90px;height:80px;overflow:hidden;pointer-events:none;border-radius:16px 16px 16px 16px'));
+        assert.equal(roundClip.children[0], imgA, 'imgA must be moved inside nested clip wrappers without recreation');
+        // Relative to roundClip origin (15, 25): (20-15, 30-25) = (5, 5).
+        assert.ok(imgA.style.cssText.includes('left:5px;top:5px;width:64px;height:48px'));
+
+        // 3. Unwrap back to 0 clips and remove imgB: imgA stays reused directly in layer.
+        bridge.syncWebImages(h, JSON.stringify([
+            { id: '10', u: 'https://cdn.example.com/a.png', r: [24, 34, 64, 48] },
+        ]));
+        assert.equal(h.webImages.children.length, 1);
+        assert.equal(h.webImages.children[0], imgA);
+        assert.ok(imgA.style.cssText.includes('left:24px;top:34px;width:64px;height:48px'));
+
+        // 4. Keyboard shift moves webImages alongside canvas and a11y.
+        bridge.sync(h, 'field', 'abc', 0, 3, 3, false);
+        bridge.syncCaret(h, 20, 420, 2, 20);
+        bridge.syncVisualViewport(h, 0, 300, 600);
+        assert.ok(h.webImages.style.transform.includes('translate3d(0, -'), 'keyboard shift must translate webImages');
+
+        // 5. Empty sync removes layer cleanly.
+        bridge.syncWebImages(h, '[]');
+        assert.equal(h.webImages, null);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+
+test('syncWebImages follows page height in document mode and cleans up on destroy', () => {
+    const { h } = setup({ page: true });
+    try {
+        bridge.syncPage(h, 1800, false);
+        bridge.syncWebImages(h, JSON.stringify([
+            { id: '1', u: '/hero.webp', r: [0, 900, 320, 180] },
+        ]));
+        assert.ok(h.webImages);
+        assert.ok(h.webImages.style.cssText.includes('position:absolute'));
+        assert.ok(h.webImages.style.cssText.includes('height:1800px'));
+
+        bridge.syncPage(h, 2400, false);
+        assert.equal(h.webImages.style.height, '2400px');
+
+        const layer = h.webImages;
+        bridge.destroy(h);
+        assert.equal(h.webImages, null);
+        assert.equal(layer.parentElement, null);
+    } finally {
+        bridge.destroy(h);
+    }
+});
+

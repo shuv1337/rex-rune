@@ -62,9 +62,9 @@ rexrs = { git = "https://github.com/a10y/rexrs", rev = "780be3f9f0455c758273e571
 # Rune is pre-1.0 and pinned to a `dev` revision.
 # No Hunspell or Rune default fonts. Rex supplies its own fonts, so rune-text
 # does not need sibling assets that are absent from Nix's flat Cargo vendor tree.
-rune = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false, features = ["accessibility", "dbus", "metal-backend", "ogg-audio", "svg", "tooling"], optional = true }
-rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", optional = true }
-rune-theme-opencode = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", optional = true }
+rune = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false, features = ["accessibility", "dbus", "metal-backend", "ogg-audio", "svg", "tooling"], optional = true }
+rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", optional = true }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -124,14 +124,14 @@ rexrs = { path = "vendor/rexrs" }
 
 [patch.crates-io]
 # Rune's upstream workspace patches must also apply in its consumers.
-winit = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-sctk-adwaita = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-parley_engine = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-wgpu-hal = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-naga = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-accesskit_macos = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-accesskit_atspi_common = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
+winit = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+parley_engine = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+naga = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
 # The pinned C image iterator exposed through a safe Rust render wrapper.
 ghostty-vt = { path = "vendor/ghostty-vt" }
 

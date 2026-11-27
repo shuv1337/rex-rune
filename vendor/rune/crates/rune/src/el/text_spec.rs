@@ -67,6 +67,9 @@ impl TextFlags {
     /// [`El::selectable`](crate::El::selectable) gave the element its `Cursor::Text`, which an
     /// [`El::selection_enabled`](crate::El::selection_enabled)`(false)` subtree takes back.
     pub(crate) const SELECTABLE_CURSOR: u8 = 1 << 1;
+    /// [`El::link_menu`](crate::El::link_menu)`(false)`: suppress Rune's default Open Link / Copy Link
+    /// context menu on inline [`Link`] spans.
+    pub(crate) const NO_LINK_MENU: u8 = 1 << 2;
 
     #[inline(always)]
     pub(crate) const fn has(self, bit: u8) -> bool { self.0 & bit != 0 }
@@ -114,6 +117,8 @@ pub(crate) struct InlineAnchor {
 pub(crate) struct TextCold {
     /// Plain live run. Layout is measured from the authored placeholder before latching it.
     pub(crate) live: Option<crate::LiveText>,
+    /// App-positioned glyph-less text layer (`rune::positioned_text`), shared via `Arc`.
+    pub(crate) positioned: Option<crate::text::PositionedText>,
     pub(crate) links: Vec<Link>,
     pub(crate) on_link: Option<LinkFn>,
     pub(crate) on_link_secondary: Option<LinkSecondaryFn>,
@@ -177,6 +182,7 @@ pub(crate) struct TextCold {
 impl Empty for TextCold {
     const EMPTY: &'static Self = &TextCold {
         live: None,
+        positioned: None,
         links: Vec::new(),
         on_link: None,
         on_link_secondary: None,
@@ -246,6 +252,29 @@ impl TextSpec {
         }
     }
 
+    /// A glyph-less positioned text layer backed by `positioned` (selectable by default,
+    /// leaving `content` empty so view builds copy zero bytes).
+    pub(crate) fn new_positioned(positioned: crate::text::PositionedText) -> TextSpec {
+        let mut spec = TextSpec::new(String::new());
+        spec.selectable = true;
+        spec.flags.set(TextFlags::SELECTABLE_CURSOR, true);
+        spec.cold.positioned = Some(positioned);
+        spec
+    }
+
+    /// The backing `PositionedText`, when this text was created with `rune::positioned_text`.
+    #[inline(always)]
+    pub(crate) fn positioned(&self) -> Option<&crate::text::PositionedText> {
+        self.cold.positioned.as_ref()
+    }
+
+    /// The text's content bytes: `positioned.text()` when backed by `PositionedText`, else
+    /// `self.content`.
+    #[inline(always)]
+    pub(crate) fn content_str(&self) -> &str {
+        self.cold.positioned.as_ref().map_or(self.content.as_str(), crate::text::PositionedText::text)
+    }
+
     #[inline(always)]
     pub(crate) const fn greedy(&self) -> bool { self.flags.has(TextFlags::GREEDY) }
 
@@ -278,7 +307,7 @@ impl TextSpec {
 impl std::fmt::Debug for TextSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TextSpec")
-            .field("content", &if self.redacted { "[redacted]" } else { &self.content })
+            .field("content", &if self.redacted { "[redacted]" } else { self.content_str() })
             .field("style", &self.style)
             .field("color", &self.color)
             .field("align", &self.align)
@@ -303,6 +332,9 @@ pub(crate) fn wipe_string(s: &mut String) {
 pub(crate) fn wipe_links(links: &mut Vec<Link>) {
     for link in links.iter_mut() {
         wipe_string(&mut link.id);
+        if let Some(href) = &mut link.href {
+            wipe_string(href);
+        }
         if let Some(label) = &mut link.label {
             wipe_string(label);
         }
@@ -409,13 +441,13 @@ impl TextSpec {
 
     /// The string as authored, before [`El::text_case`](crate::El::text_case).
     pub(crate) fn source_text(&self) -> &str {
-        self.source.as_ref().map_or(&self.content, |s| &s.text)
+        self.source.as_ref().map_or_else(|| self.content_str(), |s| &s.text)
     }
 
     /// The authored text of `content[start..end]`.
     pub(crate) fn source_slice(&self, start: u32, end: u32) -> Option<&str> {
         match &self.source {
-            None => self.content.get(start as usize..end as usize),
+            None => self.content_str().get(start as usize..end as usize),
             Some(s) => s.text.get(s.source(start, false) as usize..s.source(end, true) as usize),
         }
     }
@@ -613,4 +645,29 @@ pub(crate) enum Elide {
     Middle,
     /// [`El::truncate_head`](crate::El::truncate_head) and [`El::elide_head`](crate::El::elide_head): keeps the end.
     Head,
+}
+
+impl crate::El {
+    /// Whether right-clicking (or pressing the context-menu key on) an inline [`Link`] span with
+    /// a real address opens Rune's default Open Link / Copy Link context menu (`true` by default).
+    ///
+    /// The default menu appears only for non-redacted `role("link")` spans that carry an explicit
+    /// [`Link::href`] or an `id` passing [`crate::open_url::check`] (`http:`, `https:`,
+    /// `mailto:`), and yields to [`El::on_link_secondary`] and any element or ancestor
+    /// [`El::on_secondary_press`]. Pass `false` to opt out while keeping plain selectable-text
+    /// Copy.
+    ///
+    /// ```
+    /// use rune::{Link, text};
+    ///
+    /// let _plain = text("See https://example.com")
+    ///     .link(Link::new(4..23, "https://example.com"))
+    ///     .link_menu(false);
+    /// ```
+    pub fn link_menu(mut self, on: bool) -> Self {
+        if let Some(t) = &mut self.text {
+            t.flags.set(TextFlags::NO_LINK_MENU, !on);
+        }
+        self
+    }
 }

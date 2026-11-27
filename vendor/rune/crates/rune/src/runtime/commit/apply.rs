@@ -11,12 +11,14 @@ impl RuntimeCore {
     /// state (or latched a follow-up focus request), so `commit` can reflect it in the same frame.
     pub(in crate::runtime) fn apply(&mut self, app: &mut dyn AppDriver, measured: Measured, tx: &Tx) -> bool {
         let _apply_time = crate::frame::profile::Scope::new(crate::frame::profile::Phase::Apply);
-        let Measured { layout: mut taffy, mut nodes, reduced_motion, time_scale, defaults, titlebar, caret_read, memo_flattened, memo_reused, taken_paths, .. } = measured;
+        let Measured { layout: mut taffy, mut nodes, reduced_motion, time_scale, defaults, titlebar, caret_read, wm_state_read, primary_pointer_read, memo_flattened, memo_reused, taken_paths, above_fit_styles, .. } = measured;
         let rebound_press = self.rebound_press_path(&nodes);
         self.commit.defaults = defaults;
         if crate::tooling::interaction::active() { self.interaction_reused(&memo_reused); }
         let mut scratch = std::mem::take(&mut self.commit.apply_scratch);
         self.edit.caret_watch = caret_read;
+        if let Some(read) = wm_state_read { self.host.wm_state_read = read; }
+        if let Some(read) = primary_pointer_read { self.host.primary_pointer_read = read; }
         let reduced_motion_unchanged = reduced_motion == self.reduced_motion;
         if !reduced_motion_unchanged {
             self.reduced_motion = reduced_motion;
@@ -110,7 +112,7 @@ impl RuntimeCore {
         let keeps_flights = tx.commit.snaps() && !tx.commit.lands() && !first && !concealing;
         self.scene.keep_flights(keeps_flights);
         let now = self.t;
-        if self.host.fit_height && let Some(root) = nodes.first() { self.fit_window(root.local.h, tx, first); }
+        if self.host.content_sizing.fits_any() && let Some(root) = nodes.first() { self.fit_window((root.local.w, root.local.h), tx, first); }
         let mut held = std::mem::take(&mut scratch.held);
         let holds = self.motion.landing_holds(&nodes, &self.tree.nodes, self.paint.seen(), &self.scene, !instant && !tx.relayout && !tx.window_step, self.reduced_motion, &mut held);
 
@@ -414,12 +416,17 @@ impl RuntimeCore {
             let shift = nodes[i].vis.offset;
             if !slid.is_empty() && nodes[i].parent.is_some_and(|p| slid[p]) { slid[i] = true; }
             // A moving sequence plays on top of `El::offset` and `El::rotate`; between plays they
-            // aim at its resting pose so a change still springs (`step_loops_into_scene`).
+            // aim at its resting pose so a change still springs (`step_loops_into_scene`). While
+            // the sequence actively plays, `step_loops_into_scene` owns both channels so an
+            // unrelated commit doesn't start a spring back toward `rest`.
             let sequence_rest = match nodes[i].looping.as_deref().map(|l| l.kind) {
                 Some(rune_motion::LoopKind::Sequence(q)) if q.moves() => Some(q.rest()),
                 _ => None,
             };
-            if (nodes[i].looping.is_none() || sequence_rest.is_some()) && !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Offset)
+            let sequence_playing = sequence_rest.is_some()
+                && !self.reduced_motion
+                && self.motion.loop_active(id, self.scene.store().node_time(id));
+            if (nodes[i].looping.is_none() || (sequence_rest.is_some() && !sequence_playing)) && !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Offset)
                 && (shift != [0.0; 2] || reorder_jump != 0.0 || self.scene.store().has(id, prop::OFFSET))
             {
                 let lift = sequence_rest.map_or([0.0; 2], |b| b.translate);
@@ -468,7 +475,8 @@ impl RuntimeCore {
                 }
             }
             let turn = nodes[i].vis.rotate + sequence_rest.map_or(0.0, |b| b.rotate);
-            if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rotation)
+            if !sequence_playing
+                && !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rotation)
                 && (turn != 0.0 || self.scene.store().has(id, prop::ROTATION))
             {
                 self.snap_or_animate(id, prop::ROTATION, turn, rest_quiet, 0.0, nodes[i].vis.rotate_motion.as_deref().copied(), spring_l);
@@ -611,7 +619,7 @@ impl RuntimeCore {
         self.motion.sync_loops(&self.tree.nodes, &self.scene, self.t, self.clock, self.time_scale, time_scaled, any_loop, tx.commit.lands() || self.reduced_motion);
         taffy.compact_if_sparse(|me, slot| self.tree.nodes[me as usize].taffy = slot);
         self.commit.layout = taffy;
-        self.commit.reuse.built(self.env.scale, self.paint.srgb_blend());
+        self.commit.reuse.built(self.env.scale, self.paint.srgb_blend(), above_fit_styles);
         self.text.end_commit();
         self.commit.dirty = false;
         self.commit.relayout = false;

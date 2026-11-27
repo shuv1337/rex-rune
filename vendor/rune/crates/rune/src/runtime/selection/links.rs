@@ -210,7 +210,16 @@ impl RuntimeCore {
     fn span_inline_boxes(&self, n: &Node, rect: [f32; 4], z: f32, spans: impl IntoIterator<Item = (u32, u32)>) -> Vec<(usize, [f32; 4])> {
         let mut spans = spans.into_iter().peekable();
         if spans.peek().is_none() { return Vec::new(); }
-        let (Some(spec), Some(laid)) = (&n.text, &n.text_layout) else { return Vec::new() };
+        let Some(spec) = &n.text else { return Vec::new() };
+        if let Some(pt) = spec.positioned() {
+            let tf = super::positioned::PositionedTransform::from_window_box(n, pt, rect, z);
+            let mut out = Vec::new();
+            for (k, (start, end)) in spans.enumerate() {
+                pt.for_each_range_box(start as usize, end as usize, |r| out.push((k, tf.rect_x0y0x1y1(r))));
+            }
+            return out;
+        }
+        let Some(laid) = &n.text_layout else { return Vec::new() };
         let flow = laid.view();
         let s = self.env.scale;
         let [ox, oy] = origin(n, spec, flow, rect, s, z);
@@ -233,7 +242,16 @@ impl RuntimeCore {
     fn span_boxes_indexed(&self, n: &Node, rect: [f32; 4], z: f32, spans: impl IntoIterator<Item = (usize, u32, u32)>) -> Vec<(usize, [f32; 4])> {
         let mut spans = spans.into_iter().peekable();
         if spans.peek().is_none() { return Vec::new(); }
-        let (Some(spec), Some(laid)) = (&n.text, &n.text_layout) else { return Vec::new() };
+        let Some(spec) = &n.text else { return Vec::new() };
+        if let Some(pt) = spec.positioned() {
+            let tf = super::positioned::PositionedTransform::from_window_box(n, pt, rect, z);
+            let mut out = Vec::new();
+            for (k, start, end) in spans {
+                pt.for_each_range_box(start as usize, end as usize, |r| out.push((k, tf.rect_x0y0x1y1(r))));
+            }
+            return out;
+        }
+        let Some(laid) = &n.text_layout else { return Vec::new() };
         let flow = laid.view();
         let s = self.env.scale;
         let [ox, oy] = origin(n, spec, flow, rect, s, z);
@@ -269,6 +287,40 @@ impl RuntimeCore {
         self.span_boxes(n, rect, z, spec.cold.links.iter().map(|l| (l.start, l.end)))
     }
 
+    /// Each inline icon of node `i` that has a name or a tooltip (`InlineIcon::label`,
+    /// `InlineIcon::help`): its pill's index and the icon's own square in window points
+    /// (x0, y0, x1, y1), for border box `rect`.
+    pub(crate) fn inline_icon_boxes(&self, i: usize, rect: [f32; 4]) -> Vec<(usize, [f32; 4])> {
+        let n = &self.tree.nodes[i];
+        let (Some(spec), Some(laid)) = (n.text.as_deref(), n.text_layout.as_ref()) else { return Vec::new() };
+        let said = |p: &crate::text::PillChip| p.bare.as_deref().is_some_and(|b| b.label.is_some() || b.help.is_some());
+        if !spec.cold.pills.iter().any(said) { return Vec::new(); }
+        let flow = laid.view();
+        let s = self.env.scale;
+        let z = self.paint.drawn_scale.get(i).copied().unwrap_or(1.0);
+        let [ox, oy] = origin(n, spec, flow, rect, s, z);
+        let px = s / z.max(1e-4);
+        let (mut out, mut found) = (Vec::new(), Vec::new());
+        for piece in flow.pieces() {
+            let pills = piece.pills(&spec.cold.pills);
+            found.clear();
+            crate::text::bare_icons(piece.layout, &pills, s, [0.0, piece.y], &mut found);
+            for &(k, at, size) in &found {
+                if !said(&pills[k]) { continue; }
+                // A paragraph's pills are its own: the text's is the one whose word starts there.
+                let k = if piece.is_whole() {
+                    k
+                } else {
+                    let start = piece.content(pills[k].start as usize) as u32;
+                    let Some(k) = spec.cold.pills.iter().position(|p| p.start == start && said(p)) else { continue };
+                    k
+                };
+                out.push((k, [ox + at[0] / px, oy + at[1] / px, ox + (at[0] + size[0]) / px, oy + (at[1] + size[1]) / px]));
+            }
+        }
+        out
+    }
+
     /// Like [`Self::link_boxes`], laying out only link `k` of node `i`.
     pub(crate) fn link_boxes_for(&self, i: usize, k: usize, rect: [f32; 4]) -> Vec<(usize, [f32; 4])> {
         let n = &self.tree.nodes[i];
@@ -299,9 +351,25 @@ impl RuntimeCore {
         spans: impl IntoIterator<Item = (u32, u32)>,
     ) -> Option<usize> {
         let n = &self.tree.nodes[i];
-        let (Some(spec), Some(laid)) = (n.text.as_deref(), n.text_layout.as_ref()) else { return None };
+        let spec = n.text.as_deref()?;
         let (rect, ux, uy) = self.unturned_box_and_point(i, x, y);
         if !ux.is_finite() || !uy.is_finite() { return None; }
+        if let Some(pt) = spec.positioned() {
+            let z = self.paint.drawn_scale.get(i).copied().unwrap_or(1.0);
+            let tf = super::positioned::PositionedTransform::from_window_box(n, pt, rect, z);
+            for (k, (start, end)) in spans.into_iter().enumerate() {
+                let mut matched = false;
+                pt.for_each_range_box(start as usize, end as usize, |r| {
+                    let b = tf.rect_x0y0x1y1(r);
+                    if contains([b[0] - scroll_x, b[1], b[2] - scroll_x, b[3]], ux, uy) {
+                        matched = true;
+                    }
+                });
+                if matched { return Some(k); }
+            }
+            return None;
+        }
+        let laid = n.text_layout.as_ref()?;
         let flow = laid.view();
         let s = self.env.scale;
         let z = self.paint.drawn_scale.get(i).copied().unwrap_or(1.0);
@@ -340,6 +408,42 @@ impl RuntimeCore {
         self.span_at(i, x, y, 0.0, spec.cold.links.iter().map(|l| (l.start, l.end)))
     }
 
+    /// Index of the replaced pill (`El::pill_inline_image`) in text field `i` whose inline image
+    /// box contains window point `(x, y)` (shifted left by `scroll_x` window points), if any.
+    fn replaced_pill_at(&self, i: usize, x: f32, y: f32, scroll_x: f32) -> Option<usize> {
+        let n = &self.tree.nodes[i];
+        let spec = n.text.as_deref()?;
+        let is_replaced = |p: &crate::text::PillChip| p.bare.as_deref().is_some_and(|b| b.replace.is_some());
+        if !spec.cold.pills.iter().any(is_replaced) { return None; }
+        let laid = n.text_layout.as_ref()?;
+        let (rect, ux, uy) = self.unturned_box_and_point(i, x, y);
+        if !ux.is_finite() || !uy.is_finite() { return None; }
+        let flow = laid.view();
+        let s = self.env.scale;
+        let z = self.paint.drawn_scale.get(i).copied().unwrap_or(1.0);
+        let [ox, oy] = origin(n, spec, flow, rect, s, z);
+        let px = s / z.max(1e-4);
+        if !(px > 0.0 && px.is_finite() && ox.is_finite() && oy.is_finite()) { return None; }
+        let py = (uy - oy) * px;
+        let margin = (spec.style.line_px() * s * 4.0).max(128.0);
+        let mut found = Vec::new();
+        for piece in flow.pieces_in(py - margin, py + margin) {
+            let pills = piece.pills(&spec.cold.pills);
+            found.clear();
+            crate::text::bare_icons(piece.layout, &pills, s, [0.0, piece.y], &mut found);
+            for &(k, at, size) in &found {
+                if !is_replaced(&pills[k]) { continue; }
+                let r = [ox + at[0] / px - scroll_x, oy + at[1] / px, ox + (at[0] + size[0]) / px - scroll_x, oy + (at[1] + size[1]) / px];
+                if contains(r, ux, uy) {
+                    if piece.is_whole() { return Some(k); }
+                    let start = piece.content(pills[k].start as usize) as u32;
+                    return spec.cold.pills.iter().position(|p| p.start == start && is_replaced(p));
+                }
+            }
+        }
+        None
+    }
+
     /// The id of the `Mark::Pill` in text field `i` under window point `(x, y)`, if any.
     pub(in crate::runtime) fn input_pill_at(&self, i: usize, x: f32, y: f32) -> Option<String> {
         let n = &self.tree.nodes[i];
@@ -349,6 +453,11 @@ impl RuntimeCore {
         if pills.is_empty() { return None; }
         let z = self.paint.drawn_scale.get(i).copied().unwrap_or(1.0);
         let scroll_x = if input.single_line { self.edit.input_scroll.get(&n.path).copied().unwrap_or(0.0) * z } else { 0.0 };
+        if let Some(k) = self.replaced_pill_at(i, x, y, scroll_x)
+            && let Some(&(_, _, id)) = pills.get(k)
+        {
+            return Some(id.to_owned());
+        }
         self.span_at(i, x, y, scroll_x, pills.iter().map(|&(s, e, _)| (s, e)))
             .map(|k| pills[k].2.to_owned())
     }
@@ -383,7 +492,7 @@ impl RuntimeCore {
         let path = &self.tree.nodes[i].path;
         let hovered = self.pointer.pos.filter(|_| self.pointer.hovered.as_deref() == Some(path))
             .and_then(|(x, y)| self.link_at(i, x, y));
-        let pressed = self.pointer.press_held().filter(|h| h.path == *path && h.inside()).and_then(|h| h.link).filter(|&k| hovered == Some(k));
+        let pressed = self.pointer.press_held().filter(|h| h.path == *path && h.inside() && !h.moved).and_then(|h| h.link).filter(|&k| hovered == Some(k));
         let focused = self.edit.link_focus().filter(|_| self.kbd.focus.keyboard() && self.kbd.focus.path() == Some(path));
         (hovered, pressed, focused)
     }
@@ -584,7 +693,7 @@ impl RuntimeCore {
                 let (x1, y1) = (r[2].min(v[0] + v[2]), r[3].min(v[1] + v[3]));
                 let words = (!spec.redacted).then(|| spec.source_slice(l.start, l.end).map(str::to_owned)).flatten();
                 elements.push(ElementInfo {
-                    stuck: 0.0,
+                    backdrop_blur: 0.0, stuck: 0.0,
                     material_fallback: false,
                     border_color: None,
                     description: None,
@@ -753,7 +862,7 @@ impl RuntimeCore {
                 let (x1, y1) = (r[2].min(v[0] + v[2]), r[3].min(v[1] + v[3]));
                 let words = spec.source_slice(h.start, h.end).map(str::to_owned);
                 elements.push(ElementInfo {
-                    stuck: 0.0,
+                    backdrop_blur: 0.0, stuck: 0.0,
                     material_fallback: false,
                     border_color: None,
                     description: None,

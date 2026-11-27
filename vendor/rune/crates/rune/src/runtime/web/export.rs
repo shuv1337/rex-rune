@@ -95,8 +95,14 @@ impl RuntimeCore {
         let href = n.a11y.more.as_ref().and_then(|m| m.href.as_deref()).and_then(|u| crate::open_url::check_href(u).ok());
         let label = n.label.as_deref().filter(|s| !s.trim().is_empty());
         let pixels = n.vis.cold.pixels.as_ref().filter(|_| n.vis.cold.pixels_wrap.is_none() && i + 1 == self.subtree_end(i));
-        let pixels_url = pixels.and_then(|p| p.source_url());
-        let tag: &'static str = if let Some(t) = roles::container_tag(n.role) {
+        let web_img = n.vis.cold.web_image.as_deref().filter(|_| i + 1 == self.subtree_end(i));
+        let pixels_url = pixels.and_then(|p| p.source_url()).or_else(|| web_img.map(|w| w.url.as_ref()));
+        let list_start = (n.role == "list")
+            .then(|| n.a11y.more.as_deref().and_then(|m| m.list_start))
+            .flatten();
+        let tag: &'static str = if list_start.is_some() {
+            "ol"
+        } else if let Some(t) = roles::container_tag(n.role) {
             t
         } else if href.is_some() {
             "a"
@@ -114,7 +120,12 @@ impl RuntimeCore {
         if matches!(tag, "a" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6") || roles::container_tag(n.role).is_some() {
             if let Some(id) = anchor_id(n.key.as_deref()) { write!(attrs, " id=\"{id}\"").ok(); }
         }
-        if let Some(role) = roles::container_aria(n.role) { write!(attrs, " role=\"{role}\"").ok(); }
+        if let Some(start) = list_start.filter(|&s| s != 1) { write!(attrs, " start=\"{start}\"").ok(); }
+        let mut has_aria_role = false;
+        if let Some(role) = roles::container_aria(n.role) {
+            write!(attrs, " role=\"{role}\"").ok();
+            has_aria_role = true;
+        }
         if let Some(h) = &href { write!(attrs, " href=\"{}\"", escape(h)).ok(); }
         if let Some(url) = pixels_url {
             let [x0, y0, x1, y1] = n.target;
@@ -125,13 +136,44 @@ impl RuntimeCore {
             // Images below the first screen wait until the reader scrolls near them.
             if y0 > 900.0 { attrs.push_str(" loading=\"lazy\""); }
         } else if let Some(l) = label.filter(|_| n.text.is_none() && tag != "a") {
-            let role = matches!(n.role, "image" | "img").then_some(" role=\"img\"").unwrap_or("");
+            let role = if matches!(n.role, "image" | "img") {
+                has_aria_role = true;
+                " role=\"img\""
+            } else {
+                ""
+            };
             write!(attrs, "{role} aria-label=\"{}\"", escape(l)).ok();
         }
-        if n.a11y.hidden { attrs.push_str(" aria-hidden=\"true\""); }
+        if !n.a11y.hidden && let Some(rd) = self.a11y_role_description(i) {
+            let implicit_role = !matches!(tag, "div" | "span");
+            if !implicit_role && !has_aria_role {
+                let extra_role = if n.role == "group" && n.a11y.explicit_group {
+                    Some("group")
+                } else if n.role == "button" {
+                    Some("button")
+                } else if n.role == "progressbar" {
+                    Some("progressbar")
+                } else if matches!(n.role, "image" | "img") {
+                    Some("img")
+                } else {
+                    roles::web_control_role(n.role)
+                };
+                if let Some(role) = extra_role {
+                    write!(attrs, " role=\"{role}\"").ok();
+                    has_aria_role = true;
+                }
+            }
+            if implicit_role || has_aria_role {
+                write!(attrs, " aria-roledescription=\"{}\"", escape(rd)).ok();
+            }
+        }
+        if !n.a11y.hidden && let Some(cur) = n.a11y.more.as_deref().and_then(|m| m.current) {
+            write!(attrs, " aria-current=\"{}\"", cur.as_aria()).ok();
+        }
+        if n.a11y.hidden || n.role == "list-marker" { attrs.push_str(" aria-hidden=\"true\""); }
         let mut decls = css::layout(&self.commit.layout.style(n.taffy).to_style(), i == 0);
         let [x0, y0, x1, y1] = n.target;
-        css::paint(&n.vis, (x1 - x0, y1 - y0), &mut decls);
+        css::paint(&n.vis, (x1 - x0, y1 - y0), self.host.system_reduced_transparency, &mut decls);
         if let Some(spec) = n.text.as_deref().filter(|t| !t.redacted && !n.is_secure()) {
             css::text(spec, &mut decls);
             inner = css::text_html(spec);
@@ -139,12 +181,16 @@ impl RuntimeCore {
             inner = css::svg(shape, (x1 - x0, y1 - y0));
         }
         if tag == "img" {
-            let fit = match n.vis.cold.pixels_fit {
-                None => "fill",
-                Some(crate::SurfaceFit::Fit) => "contain",
-                Some(crate::SurfaceFit::Fill) => "cover",
+            let fit = if let Some(w) = web_img {
+                crate::web_image::css_fit(w.fit, n.vis.cold.surface_place.unscaled)
+            } else {
+                crate::web_image::css_fit(n.vis.cold.pixels_fit, n.vis.cold.surface_place.unscaled)
             };
             decls.push(("object-fit", fit.into()));
+            let pos = crate::web_image::css_position(n.vis.cold.surface_place.anchor);
+            if pos != "50% 50%" {
+                decls.push(("object-position", pos.into()));
+            }
             if n.vis.cold.image_filter == crate::ImageFilter::Nearest {
                 decls.push(("image-rendering", "pixelated".into()));
             }

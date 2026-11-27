@@ -99,6 +99,28 @@ pub(crate) fn display_bounds(id: u32) -> [f64; 4] {
     [r.origin.x, r.origin.y, r.size.width, r.size.height]
 }
 
+/// Connected macOS displays' global top-left point bounds (`CGDisplayBounds`) and backing scale
+/// factors, plus `NSScreen::mainScreen`'s backing scale as the fallback scale.
+pub(crate) fn screen_bounds() -> (Vec<crate::window::placement::MacScreenBounds>, f64) {
+    let Some(mtm) = MainThreadMarker::new() else { return (Vec::new(), 1.0); };
+    let fallback = NSScreen::mainScreen(mtm)
+        .map(|s| s.backingScaleFactor())
+        .filter(|s| *s > 0.0 && s.is_finite())
+        .unwrap_or(1.0);
+    let screens = NSScreen::screens(mtm)
+        .iter()
+        .map(|s| {
+            let [x, y, w, h] = display_bounds(screen_id(&s));
+            crate::window::placement::MacScreenBounds {
+                origin_pt: (x, y),
+                size_pt: (w, h),
+                scale: s.backingScaleFactor(),
+            }
+        })
+        .collect();
+    (screens, fallback)
+}
+
 pub(crate) fn overlay_rect(at: crate::overlay::Placement, options: &OverlayOptions) -> Option<NSRect> {
     overlay_rect_on(at, options, None)
 }
@@ -124,28 +146,42 @@ fn contains_appkit_rect(r: NSRect, pointer: NSPoint) -> bool {
         && pointer.y > r.origin.y && pointer.y <= r.origin.y + r.size.height
 }
 
-pub(super) fn overlay_rect_on(at: crate::overlay::Placement, options: &OverlayOptions, previous: Option<u32>) -> Option<NSRect> {
+fn target_screen(options: &OverlayOptions, previous: Option<u32>) -> Option<objc2::rc::Retained<NSScreen>> {
     use winit::platform::macos::MonitorHandleExtMacOS;
     let mtm = MainThreadMarker::new()?;
     let screens = NSScreen::screens(mtm);
     let pointer = NSEvent::mouseLocation();
-    let screen = screens.iter().find(|screen| match &options.display {
-        DisplayTarget::UnderPointer => {
-            contains_pointer(screen, pointer)
-        }
+    screens.iter().find(|screen| match &options.display {
+        DisplayTarget::UnderPointer => contains_pointer(&screen, pointer),
         DisplayTarget::Id(_) | DisplayTarget::Native(_) => {
-            let native = screen_id(screen);
+            let native = screen_id(&screen);
             match options.display {
                 DisplayTarget::Id(ref id) => native == id.0.native_id(),
                 DisplayTarget::Native(crate::NativeDisplayId::MacOS(id)) => native == id,
                 _ => false,
             }
-        },
+        }
         DisplayTarget::Primary => false,
-    }).or_else(|| screens.iter().find(|s| options.display == DisplayTarget::UnderPointer && previous == Some(screen_id(s))))
-        .or_else(|| screens.iter().next())?;
-    let frame = screen.frame();
-    let [x, y, w, h] = crate::overlay::options::local_rect(at, options.placement, (frame.size.width as f32, frame.size.height as f32));
+    }).or_else(|| screens.iter().find(|s| options.display == DisplayTarget::UnderPointer && previous == Some(screen_id(&s))))
+        .or_else(|| screens.iter().next())
+}
+
+pub(crate) fn overlay_screen_area(options: &OverlayOptions) -> Option<(f32, f32)> {
+    overlay_screen_area_on(options, None)
+}
+
+pub(super) fn overlay_screen_area_on(options: &OverlayOptions, previous: Option<u32>) -> Option<(f32, f32)> {
+    let frame = target_screen(options, previous)?.frame();
+    Some((frame.size.width as f32, frame.size.height as f32))
+}
+
+pub(super) fn overlay_rect_on(at: crate::overlay::Placement, options: &OverlayOptions, previous: Option<u32>) -> Option<NSRect> {
+    overlay_rect_on_sized(at, options, previous, crate::ContentSizing::Fixed)
+}
+
+pub(super) fn overlay_rect_on_sized(at: crate::overlay::Placement, options: &OverlayOptions, previous: Option<u32>, sizing: crate::ContentSizing) -> Option<NSRect> {
+    let frame = target_screen(options, previous)?.frame();
+    let [x, y, w, h] = crate::overlay::sizing::local_rect_for(at, options.placement, (frame.size.width as f32, frame.size.height as f32), sizing);
     Some(NSRect::new(NSPoint::new(frame.origin.x + x as f64, frame.origin.y + frame.size.height - (y + h) as f64), NSSize::new(w as f64, h as f64)))
 }
 

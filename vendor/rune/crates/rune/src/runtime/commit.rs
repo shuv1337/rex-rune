@@ -178,6 +178,35 @@ impl CommitState {
         self.commit_gen = generation;
     }
 
+    pub(in crate::runtime) fn rest(&mut self) {
+        fn shrink_map<K: Eq + std::hash::Hash, V, S: std::hash::BuildHasher>(m: &mut std::collections::HashMap<K, V, S>, floor: usize) {
+            let cap = (m.len().saturating_mul(2)).max(floor);
+            if m.capacity() > cap { m.shrink_to(cap); }
+        }
+        fn shrink_set<K: Eq + std::hash::Hash, S: std::hash::BuildHasher>(s: &mut std::collections::HashSet<K, S>, floor: usize) {
+            let cap = (s.len().saturating_mul(2)).max(floor);
+            if s.capacity() > cap { s.shrink_to(cap); }
+        }
+        self.memo.rest();
+        self.apply_scratch.rest();
+        shrink_map(&mut self.layout_seen.rects, 32);
+        let reads_cap = (self.layout_seen.reads.len().saturating_mul(2)).max(32);
+        if self.layout_seen.reads.capacity() > reads_cap { self.layout_seen.reads.shrink_to(reads_cap); }
+        shrink_map(&mut self.layout_fired, 32);
+        shrink_map(&mut self.screen_fired, 32);
+        shrink_map(&mut self.drawn_fired, 32);
+        shrink_map(&mut self.visible_fired, 32);
+        shrink_set(&mut self.mounted_seen, 64);
+        shrink_map(&mut self.virtuals, 16);
+        self.virtual_items.rest();
+        shrink_set(&mut self.virtual_culled, 16);
+        shrink_map(&mut self.virtual_inputs, 16);
+        let fit_cap = (self.reuse.above_fit_styles.len().saturating_mul(2)).max(16);
+        if self.reuse.above_fit_styles.capacity() > fit_cap {
+            self.reuse.above_fit_styles.shrink_to(fit_cap);
+        }
+    }
+
     #[cfg(debug_assertions)]
     #[inline]
     pub(in crate::runtime) fn last_commit_clock(&self) -> f64 {
@@ -398,18 +427,25 @@ pub(super) struct Measurement<'a> {
     pub(super) app: &'a dyn ViewDriver,
     pub(super) env: Env,
     pub(super) viewport: (f32, f32),
-    pub(super) fit_height: bool,
+    pub(super) content_sizing: crate::ContentSizing,
+    pub(super) content_limits: crate::overlay::sizing::SizeLimits,
     pub(super) system_reduced_motion: bool,
     pub(super) pointer_locked: bool,
     pub(super) titlebar_inset: f32,
     pub(super) chrome: crate::ChromeInsets,
+    pub(super) safe_area: [f32; 4],
     pub(super) maximized: bool,
     pub(super) full_screen: bool,
+    pub(super) window_backdrop: crate::WindowBackdrop,
+    pub(super) window_backdrop_supported: u8,
+    pub(super) renderer_kind: crate::RendererKind,
     /// Caption buttons drawn over the view's root.
     pub(super) caption: Option<crate::titlebar::Caption>,
     pub(super) system_accent: crate::SystemAccent,
     pub(super) system_contrast: Option<crate::SystemContrast>,
     pub(super) system_increased_contrast: bool,
+    pub(super) system_text_scale: f32,
+    pub(super) system_reduced_transparency: bool,
     pub(super) system_scroll_bars: crate::platform::scroll_bars::SystemScrollBars,
     pub(super) system_languages: Option<Rc<[String]>>,
     pub(super) languages_gen: u64,
@@ -454,6 +490,10 @@ pub(super) struct Measurement<'a> {
     pub(super) kept_lists: Vec<(String, Vec<bool>)>,
     pub(super) caret: Option<(String, [f32; 4])>,
     pub(super) caret_read: bool,
+    pub(super) wm_state: crate::WindowManagerState,
+    pub(super) wm_state_read: bool,
+    pub(super) primary_pointer: cx::PrimaryPointer,
+    pub(super) primary_pointer_read: bool,
     pub(super) layout_seen: layout_read::LayoutRects,
     pub(super) layout_reads: layout_read::LayoutReads,
 }
@@ -469,6 +509,8 @@ pub(super) struct Measured {
     pub(super) defaults: cx::ViewDefaults,
     pub(super) titlebar: crate::titlebar::TitlebarSet,
     pub(super) caret_read: bool,
+    pub(super) wm_state_read: Option<bool>,
+    pub(super) primary_pointer_read: Option<bool>,
     pub(super) layout_reads: layout_read::LayoutReads,
     pub(super) memo_flattened: Option<Vec<memo_reuse::PendingFlat>>,
     pub(super) memo_reused: Vec<memo_reuse::ReusedSpan>,
@@ -476,6 +518,9 @@ pub(super) struct Measured {
     /// The selection as the measure began, before reused `memo` subtrees left the last
     /// commit's nodes.
     pub(super) selection: Vec<layout_read::SelectedRange>,
+    /// Authored styles of `anchored_fit` overlays whose max-size `fit_anchored` clamped in this
+    /// pass, so a later `Relayout` restores them before re-fitting at the new viewport.
+    pub(super) above_fit_styles: Vec<(usize, CompactStyle)>,
 }
 
 impl RuntimeCore {

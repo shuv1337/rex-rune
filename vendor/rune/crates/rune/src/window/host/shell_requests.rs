@@ -53,6 +53,7 @@ impl Host {
         #[cfg(target_os = "macos")]
         { w.native.prime.stop(); }
         w.window.set_minimized(true);
+        self.placement_watch.mark_dirty();
     }
 
     /// `Tx::set_title`: shows a title set since the window last showed one, hidden or covered
@@ -66,6 +67,14 @@ impl Host {
     pub(in crate::window) fn apply_tx_color_scheme(&mut self) {
         if let Some(scheme) = self.app.rt_mut().host.window_color_scheme.take() {
             self.set_color_scheme(scheme);
+        }
+    }
+
+    /// `Tx::set_window_backdrop`: applies a per-window system backdrop requested since the shell
+    /// last checked, retaining it on `Host` across native window recreation.
+    pub(in crate::window) fn apply_tx_window_backdrop(&mut self) {
+        if let Some(backdrop) = self.app.rt_mut().host.window_backdrop_request.take() {
+            self.set_window_backdrop(backdrop);
         }
     }
 

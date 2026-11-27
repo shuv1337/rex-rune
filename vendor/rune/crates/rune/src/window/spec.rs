@@ -180,7 +180,10 @@ pub struct WindowOptions {
     pub click_through: bool,
     pub always_on_top: bool,
     pub visible: bool,
-    /// Physical desktop coordinates, not points. Use a display's position unchanged.
+    /// Physical desktop coordinates, not points. Use a display's position unchanged. On macOS,
+    /// resolved against connected displays' backing scales; for unambiguous mixed-scale placement
+    /// when physical display rects overlap, prefer [`App::logical_position`](crate::App::logical_position)
+    /// or [`App::window_placement`](crate::App::window_placement).
     pub position: Option<(i32, i32)>,
     /// Physical content size; overrides AppSpec's logical size when set.
     pub physical_size: Option<(u32, u32)>,
@@ -784,6 +787,10 @@ impl<S: 'static> WindowSpec<S> {
         srgb_blend(enabled: bool);
         /// This window's font smoothing (`App::font_smoothing`).
         font_smoothing(mode: crate::FontSmoothing);
+        /// Whether whole mouse-wheel notches glide rather than jump (`App::wheel_glide`).
+        wheel_glide(on: bool);
+        /// Window points scrolled per mouse-wheel line/notch (`App::wheel_line`).
+        wheel_line(points: f32);
         /// Maximum number of native `El::system_material` views this window may host at once
         /// (default [`crate::MAX_NATIVE_MATERIALS`], clamped to 64), like
         /// [`App::max_native_materials`].
@@ -852,6 +859,21 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         color_scheme(scheme: crate::ColorScheme);
+        /// Opt-in whole-window system backdrop material, like [`App::window_backdrop`].
+        /// On Windows 11, DWM draws the material only while the window is the foreground window
+        /// and shows its own flat fallback while unfocused (so a non-activating window never shows
+        /// the live material even while [`Cx::window_backdrop`](crate::Cx::window_backdrop) is
+        /// active); pair with [`Self::on_focus`] if the view needs to distinguish focused state.
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, WindowBackdrop, WindowOptions, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("notes", AppSpec::new("Notes", (480.0, 360.0), || (), |_, _| el()))
+        ///     .options(WindowOptions { transparent: true, ..Default::default() })
+        ///     .window_backdrop(WindowBackdrop::Mica);
+        /// let _ = spec;
+        /// ```
+        window_backdrop(backdrop: crate::WindowBackdrop);
         /// Send `Key::Modifier` presses and releases to this window, like `App::modifier_keys`.
         modifier_keys();
         /// Deliver hardware media transport keys ([`Key::Media`](crate::Key::Media)) to this window, like [`App::media_keys`](crate::App::media_keys).
@@ -868,6 +890,17 @@ impl<S: 'static> WindowSpec<S> {
         tab_visits_controls(on: bool);
         /// Release this window's GPU device and renderer when it closes, like `App::release_gpu_when_closed`.
         release_gpu_when_closed();
+        /// Sets how this window responds to GPU device loss or uncaptured errors, like
+        /// [`App::gpu_loss_policy`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, GpuLossPolicy, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("main", AppSpec::new("Main", (800.0, 600.0), || (), |_, _| el()))
+        ///     .gpu_loss_policy(GpuLossPolicy::Terminal);
+        /// let _ = spec;
+        /// ```
+        gpu_loss_policy(policy: crate::GpuLossPolicy);
         /// Configure CPU-first startup and handover for this window, like [`App::cpu_first`].
         ///
         /// ```no_run
@@ -878,6 +911,28 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         cpu_first(mode: crate::CpuFirst);
+        /// Configure native keyboard dispatch timing for this window, like
+        /// [`App::keyboard_dispatch`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, KeyboardDispatch, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("transport", AppSpec::new("Transport", (800.0, 520.0), || (), |_, _| el()))
+        ///     .keyboard_dispatch(KeyboardDispatch::Immediate);
+        /// let _ = spec;
+        /// ```
+        keyboard_dispatch(mode: crate::KeyboardDispatch);
+        /// Configure the Windows drag-only synchronized resize path for this window, like
+        /// [`App::resize_sync`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, ResizeSync, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("settings", AppSpec::new("Settings", (620.0, 520.0), || (), |_, _| el()))
+        ///     .resize_sync(ResizeSync::On);
+        /// let _ = spec;
+        /// ```
+        resize_sync(mode: crate::ResizeSync);
         /// Name the effect pipelines this window compiles ahead of their first use, like [`App::prewarm_effects`].
         ///
         /// ```no_run
@@ -898,6 +953,16 @@ impl<S: 'static> WindowSpec<S> {
         on_ime(f: fn(&mut S, &crate::Ime, &mut crate::Tx) -> bool);
         /// Fallback handler for text-field menus when native pop-ups are unavailable, like `App::on_field_menu`.
         on_field_menu(f: fn(&mut S, crate::FieldMenuRequest, &mut crate::Tx));
+        /// Fallback handler for pop-up and context menus when native pop-ups are unavailable
+        /// (such as Linux), like [`App::on_popup_menu`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, PopupMenuRequest, Tx, WindowSpec, el};
+        ///
+        /// let _spec = WindowSpec::new("main", AppSpec::new("Main", (480.0, 320.0), || (), |_, _| el()))
+        ///     .on_popup_menu(|_: &mut (), _req: PopupMenuRequest, _tx: &mut Tx| {});
+        /// ```
+        on_popup_menu(f: fn(&mut S, crate::PopupMenuRequest, &mut crate::Tx));
         /// Intercepts a native close request before hiding or closing this window, like
         /// [`App::on_close_request`].
         ///
@@ -911,6 +976,17 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         on_close_request(f: fn(&mut S, &mut crate::Tx) -> crate::CloseResponse);
+        /// [`App::on_quit_request`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, QuitResponse, WindowSpec, el};
+        ///
+        /// let _window = WindowSpec::new("notes", AppSpec::new("Notes", (480.0, 320.0), || true, |_, _| el()))
+        ///     .on_quit_request(|dirty, _| {
+        ///         if *dirty { QuitResponse::Defer } else { QuitResponse::Quit }
+        ///     });
+        /// ```
+        on_quit_request(f: fn(&mut S, &mut crate::Tx) -> crate::QuitResponse);
         /// Runs whenever this window closes, like `App::on_close`.
         on_close(f: fn(&mut S, &mut crate::Tx));
         /// Runs in this window when the app starts to quit, like `App::on_quit`.
@@ -950,6 +1026,8 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         on_display_close(f: impl FnOnce() + 'static);
+        /// Runs on the UI thread when connected displays change, like [`App::on_displays`].
+        on_displays(f: impl FnMut(&crate::DisplayEvent, &[crate::Display]) + 'static);
         /// Reports each of this window's frames, like `App::on_frame_encoded`. A spec made with
         /// `WindowSpec::from_app` keeps its app's hook unless this replaces it; windows `App::window`
         /// adds have their own.
@@ -970,6 +1048,13 @@ impl<S: 'static> WindowSpec<S> {
         on_frame_presented(f: impl FnMut(&crate::FramePresented) + 'static);
         /// Runs on the UI thread after each drawn frame of this window with its runtime, like `App::on_frame_drawn`.
         on_frame_drawn(f: impl FnMut(&crate::Runtime<S>) + 'static);
+        /// Reports each CPU wall-time frame, runtime, glyph/atlas, and text stage boundary for
+        /// this window, like [`App::on_frame_stage`].
+        on_frame_stage(f: impl FnMut(&crate::FrameStageEvent) + 'static);
+        /// Reports native key receipt on this window before routing, like [`App::on_window_key`].
+        on_window_key(f: impl FnMut(&crate::WindowKeyEvent) + 'static);
+        /// Reports native focus changes on this window, like [`App::on_window_focus`].
+        on_window_focus(f: impl FnMut(&crate::WindowFocusEvent) + 'static);
         /// Cap frame pacing (Hz) for motion no recent user input is steering in this window
         /// (`0.0`, default = uncapped display rate), like [`App::ambient_fps`].
         ///
@@ -987,6 +1072,24 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         ambient_fps(fps: f32);
+        /// Cap the swap chain's frame latency on macOS (`1` = 2 drawables, `2` = 3 drawables;
+        /// clamped to `1..=2`, default `2`), like [`App::frame_latency`]. Ignored on Windows,
+        /// Linux, and the web.
+        ///
+        /// With two drawables a frame that runs late waits instead of overlapping the next; at
+        /// 120 Hz that can show as a dropped frame during fast animation, whereas for a rarely
+        /// animating window it is the right trade. Applied at surface creation rather than live.
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, WindowSpec, el};
+        ///
+        /// let _spec = WindowSpec::new(
+        ///     "panel",
+        ///     AppSpec::new("Panel", (488.0, 873.0), || (), |_, _| el()),
+        /// )
+        /// .frame_latency(1);
+        /// ```
+        frame_latency(frames: u32);
         /// Keep this window's layout reads across launches, like `App::layout_seed`.
         layout_seed(seed: Option<crate::LayoutSeed>, keep: impl FnMut(crate::LayoutSeed) + 'static);
         /// Draw every frame of this window through `compositor`, like `App::compositor`.
@@ -1003,6 +1106,7 @@ impl<S: 'static> WindowSpec<S> {
     }
     pub fn options(mut self, options: WindowOptions) -> Self {
         self.options = options;
+        self.app.placement.override_from_options(&self.options);
         self.app.macos_window = MacWindowOptions::default();
         self.app.windows_window = WindowsWindowOptions::default();
         self
@@ -1010,6 +1114,7 @@ impl<S: 'static> WindowSpec<S> {
     pub fn configured_options(mut self, options: ConfiguredWindowOptions) -> Self {
         let ConfiguredWindowOptions { options, native, windows } = options;
         self.options = options;
+        self.app.placement.override_from_options(&self.options);
         self.app.macos_window = native;
         self.app.windows_window = windows;
         self

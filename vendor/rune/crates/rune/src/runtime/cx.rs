@@ -47,6 +47,28 @@ pub fn commit_generation() -> u64 {
     COMMITS.get()
 }
 
+/// Primary pointer capability and hover mode (`Cx::hover_none`, `Cx::touch_controls`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PrimaryPointer {
+    /// Fine/hover-capable primary pointer (mouse, trackpad, pen/stylus).
+    #[default]
+    Hover,
+    /// Primary pointer cannot hover, but is not coarse touch (web `(hover: none)` without `(pointer: coarse)`).
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    NoHover,
+    /// Coarse touch primary pointer that cannot hover (`Cx::touch_controls` and `Cx::hover_none`).
+    Touch,
+}
+
+impl PrimaryPointer {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[inline]
+    pub(crate) const fn hover_none(self) -> bool { !matches!(self, Self::Hover) }
+
+    #[inline]
+    pub(crate) const fn touch_controls(self) -> bool { matches!(self, Self::Touch) }
+}
+
 /// Type-erased view context owned inside [`Cx<S>`] and constructed by non-generic
 /// [`Measurement`](super::commit::Measurement).
 #[derive(Clone)]
@@ -56,6 +78,9 @@ pub(crate) struct CxCore {
     pub(super) chrome: crate::ChromeInsets,
     pub(super) maximized: bool,
     pub(super) full_screen: bool,
+    pub(super) window_backdrop: crate::WindowBackdrop,
+    pub(super) window_backdrop_supported: u8,
+    pub(super) renderer_kind: crate::RendererKind,
     /// `Cx::caption_color`, read once the view returns.
     pub(super) caption_color: Option<Color>,
     /// `Cx::foreground` and `Cx::focus_ring`, read once the view returns.
@@ -65,6 +90,8 @@ pub(crate) struct CxCore {
     pub(super) system_accent: crate::SystemAccent,
     pub(super) system_contrast: Option<crate::SystemContrast>,
     pub(super) system_increased_contrast: bool,
+    pub(super) system_text_scale: f32,
+    pub(super) system_reduced_transparency: bool,
     pub(super) system_scroll_bars: crate::platform::scroll_bars::SystemScrollBars,
     pub(super) system_languages: Option<Rc<[String]>>,
     pub(super) system_reduced_motion: bool,
@@ -75,6 +102,12 @@ pub(crate) struct CxCore {
     pub(super) zoom: f32,
     pub(super) caret: Option<(String, [f32; 4])>,
     pub(super) caret_read: std::cell::Cell<bool>,
+    pub(super) wm_state: crate::WindowManagerState,
+    pub(super) wm_state_read: std::cell::Cell<bool>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) primary_pointer: PrimaryPointer,
+    pub(super) primary_pointer_read: std::cell::Cell<bool>,
+    pub(super) safe_area: [f32; 4],
     pub(super) layout: layout_read::LayoutRects,
     pub(super) layout_reads: std::cell::RefCell<layout_read::LayoutReads>,
 }
@@ -95,6 +128,8 @@ impl CxCore {
         self.zoom = other.zoom;
         self.defaults = other.defaults;
         self.caret_read.set(self.caret_read.get() || other.caret_read.get());
+        self.wm_state_read.set(self.wm_state_read.get() || other.wm_state_read.get());
+        self.primary_pointer_read.set(self.primary_pointer_read.get() || other.primary_pointer_read.get());
         let mut reads = self.layout_reads.borrow_mut();
         for read in other.layout_reads.into_inner() {
             layout_read::note_read_at(&mut reads, &read.key, read.same, read.at);
@@ -106,10 +141,14 @@ impl CxCore {
     }
 
     pub(crate) fn clear_chrome(&mut self) {
+        self.wm_state = crate::WindowManagerState::default();
         self.titlebar_inset = 0.0;
         self.chrome = crate::ChromeInsets::default();
         self.maximized = false;
         self.full_screen = false;
+        self.window_backdrop = crate::WindowBackdrop::None;
+        self.window_backdrop_supported = 0;
+        self.renderer_kind = crate::RendererKind::Gpu;
     }
 
     pub(crate) fn env(&self) -> Env { self.env }
@@ -118,6 +157,11 @@ impl CxCore {
     pub(crate) fn chrome_insets(&self) -> crate::ChromeInsets { self.chrome }
     pub(crate) fn is_maximized(&self) -> bool { self.maximized }
     pub(crate) fn is_full_screen(&self) -> bool { self.full_screen }
+    pub(crate) fn window_backdrop(&self) -> crate::WindowBackdrop { self.window_backdrop }
+    pub(crate) fn window_backdrop_supported(&self, backdrop: crate::WindowBackdrop) -> bool {
+        backdrop.is_supported_in(self.window_backdrop_supported)
+    }
+    pub(crate) fn renderer_kind(&self) -> crate::RendererKind { self.renderer_kind }
     pub(crate) fn caption_color(&mut self, color: Color) { self.caption_color = Some(color); }
     pub(crate) fn foreground(&mut self, color: Color) { self.defaults.foreground = Some(color); }
     pub(crate) fn focus_ring(&mut self, width: f32, offset: f32, color: Color) {
@@ -131,22 +175,30 @@ impl CxCore {
     pub(crate) fn set_titlebar(&mut self, titlebar: crate::Titlebar) { self.titlebar.titlebar = Some(titlebar); }
     pub(crate) fn accent(&self) -> Color { self.system_accent.accent(self.env.system_dark) }
     pub(crate) fn focus_color(&self) -> Color { self.system_accent.focus(self.env.system_dark) }
-    pub(crate) fn safe_area(&self) -> [f32; 4] { safe_area_insets() }
+    pub(crate) fn safe_area(&self) -> [f32; 4] { self.safe_area }
     pub(crate) fn hover_none(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         { crate::platform::web::hover_none() }
         #[cfg(not(target_arch = "wasm32"))]
-        { false }
+        {
+            self.primary_pointer_read.set(true);
+            self.primary_pointer.hover_none()
+        }
     }
     pub(crate) fn touch_controls(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         { crate::platform::web::touch_controls() }
         #[cfg(not(target_arch = "wasm32"))]
-        { false }
+        {
+            self.primary_pointer_read.set(true);
+            self.primary_pointer.touch_controls()
+        }
     }
     pub(crate) fn system_contrast(&self) -> Option<crate::SystemContrast> { self.system_contrast }
     pub(crate) fn system_increased_contrast(&self) -> bool { self.system_increased_contrast }
+    pub(crate) fn system_reduced_transparency(&self) -> bool { self.system_reduced_transparency }
     pub(crate) fn system_reduced_motion(&self) -> bool { self.system_reduced_motion }
+    pub(crate) fn system_text_scale(&self) -> f32 { self.system_text_scale }
     pub(crate) fn pointer_locked(&self) -> bool { self.pointer_locked }
     pub(crate) fn system_languages(&self) -> &[String] {
         match &self.system_languages {
@@ -168,6 +220,18 @@ impl CxCore {
         let rect = caret_of(&self.caret, key);
         crate::memo::read_caret(key, rect);
         rect
+    }
+    pub(crate) fn decoration_mode(&self) -> crate::DecorationMode {
+        self.wm_state_read.set(true);
+        self.wm_state.decoration_mode
+    }
+    pub(crate) fn tiled_edges(&self) -> Option<crate::TiledEdges> {
+        self.wm_state_read.set(true);
+        self.wm_state.tiled_edges
+    }
+    pub(crate) fn window_actions(&self) -> crate::WindowActions {
+        self.wm_state_read.set(true);
+        self.wm_state.actions
     }
 }
 
@@ -227,6 +291,99 @@ impl<S> Cx<S> {
     /// window would.
     #[inline(always)]
     pub fn chrome_insets(&self) -> crate::ChromeInsets { self.core.chrome_insets() }
+    /// Confirmed decoration mode reported by the window manager or compositor.
+    ///
+    /// - **Linux Wayland**: read directly from `xdg-decoration` / `xdg_toplevel` configure state
+    ///   (`Unknown` before the initial configure, `Server` or `Client` afterwards; never inferred
+    ///   from capabilities). Layer-shell overlays are not toplevels and stay `Unknown`.
+    /// - **Linux X11**: read from `_NET_FRAME_EXTENTS` (any non-zero extent ->
+    ///   [`DecorationMode::Server`], all zeroes -> [`DecorationMode::Client`]), preserving the
+    ///   non-fullscreen mode during full screen and across the asynchronous frame-restore
+    ///   transition after leaving full screen. When absent, reports [`DecorationMode::Client`] only
+    ///   if the app requested no native frame (`WindowOptions { borderless: true, .. }`), an EWMH
+    ///   WM is managing the window, and the WM did not reparent it into a frame (Mutter omits
+    ///   `_NET_FRAME_EXTENTS` on frameless windows); otherwise [`DecorationMode::Unknown`]. Never
+    ///   infers `Server` from `is_decorated()` or missing actions.
+    /// - **macOS, Windows, web, overlays, adopted macOS panels, staged playground subviews, and
+    ///   headless runs**: [`DecorationMode::Unknown`] unless set in headless runs with
+    ///   [`Runtime::set_window_manager_state`].
+    ///
+    /// Views that read this accessor (and their `memo` closures) rebuild automatically when it
+    /// changes.
+    ///
+    /// ```
+    /// # use rune::{Cx, DecorationMode, El, text};
+    /// fn header(_: &(), cx: &mut Cx<()>) -> El {
+    ///     text(match cx.decoration_mode() {
+    ///         DecorationMode::Client => "CSD",
+    ///         DecorationMode::Server => "SSD",
+    ///         _ => "Unknown",
+    ///     })
+    /// }
+    /// ```
+    #[inline(always)]
+    pub fn decoration_mode(&self) -> crate::DecorationMode { self.core.decoration_mode() }
+    /// Confirmed per-edge tiled state reported by the window manager or compositor.
+    ///
+    /// Returns `None` when unknown and `Some(TiledEdges::NONE)` when known untiled.
+    ///
+    /// - **Linux Wayland**: reports the exact `xdg_toplevel` `TILED_*` states sent by the
+    ///   compositor when `xdg_toplevel.version() >= 2` (a desktop extension that half-tiles via
+    ///   vertical maximize without horizontal constraints reports only top and bottom), and `None`
+    ///   before initial configure, on v1 compositors, or for layer-shell overlays.
+    /// - **Linux X11**: read from `_GTK_EDGE_CONSTRAINTS` (preferring the reparented parent frame
+    ///   for server-decorated windows under Mutter; bits 0=top, 2=right, 4=bottom, 6=left), with
+    ///   maximized windows reporting `Some(TiledEdges::ALL)` (matching GTK4 and Wayland) and
+    ///   `_NET_WM_STATE_MAXIMIZED_VERT`/`HORZ` half-tiles refined against `_NET_WORKAREA`. Returns
+    ///   `Some(TiledEdges::NONE)` when absent while advertised in `_NET_SUPPORTED`, and `None`
+    ///   otherwise.
+    /// - **macOS, Windows, web, overlays, adopted macOS panels, staged playground subviews, and
+    ///   headless runs**: `None` unless set in headless runs with
+    ///   [`Runtime::set_window_manager_state`].
+    ///
+    /// Views that read this accessor (and their `memo` closures) rebuild automatically when it
+    /// changes.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, el};
+    /// fn frame(_: &(), cx: &mut Cx<()>) -> El {
+    ///     let tiled = cx.tiled_edges().is_some_and(|e| e.any());
+    ///     el().radius(if tiled { 0.0 } else { 10.0 })
+    /// }
+    /// ```
+    #[inline(always)]
+    pub fn tiled_edges(&self) -> Option<crate::TiledEdges> { self.core.tiled_edges() }
+    /// Window actions the window manager allows for this window, with `None` for any action the
+    /// platform or window manager did not report.
+    ///
+    /// - **Linux Wayland**: `window_menu`, `minimize`, and `fullscreen` from
+    ///   `xdg_toplevel::wm_capabilities` when `xdg_toplevel.version() >= 5` (`None` below v5 or
+    ///   before initial configure); `maximize` combines `wm_capabilities` with window resizability
+    ///   (reporting `Some(false)` for non-resizable windows, matching GTK4, while `fullscreen`
+    ///   remains `Some(true)` where the compositor allows it); `close` reports `Some(true)` once
+    ///   configured when the close button is enabled (matching GTK4's `deletable` property). All
+    ///   `None` before initial configure or for layer-shell overlays.
+    /// - **Linux X11**: `minimize`, `maximize` (`_NET_WM_ACTION_MAXIMIZE_HORZ` and
+    ///   `_NET_WM_ACTION_MAXIMIZE_VERT`, including `Some(false)` in full screen or on non-resizable
+    ///   windows when Mutter omits them), `fullscreen`, and `close` from per-window
+    ///   `_NET_WM_ALLOWED_ACTIONS`; `window_menu` from `_GTK_SHOW_WINDOW_MENU` in root
+    ///   `_NET_SUPPORTED`.
+    /// - **macOS, Windows, web, overlays, adopted macOS panels, staged playground subviews, and
+    ///   headless runs**: all `None` unless set in headless runs with
+    ///   [`Runtime::set_window_manager_state`].
+    ///
+    /// Views that read this accessor (and their `memo` closures) rebuild automatically when it
+    /// changes.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, text};
+    /// fn buttons(_: &(), cx: &mut Cx<()>) -> El {
+    ///     let can_max = cx.window_actions().maximize != Some(false);
+    ///     text(if can_max { "Maximize" } else { "No maximize" })
+    /// }
+    /// ```
+    #[inline(always)]
+    pub fn window_actions(&self) -> crate::WindowActions { self.core.window_actions() }
     /// Whether the host window is currently maximized (zoomed on macOS), as confirmed by the
     /// window system. The view and any `memo` closures rebuild automatically when this changes;
     /// `Tx::toggle_maximized` never flips it optimistically before the OS confirms the change.
@@ -272,6 +429,95 @@ impl<S> Cx<S> {
     /// ```
     #[inline(always)]
     pub fn is_full_screen(&self) -> bool { self.core.is_full_screen() }
+    /// The whole-window system backdrop material currently active behind this window or overlay,
+    /// as confirmed by the operating system.
+    ///
+    /// On Windows 11, this reports that `DWMWA_SYSTEMBACKDROP_TYPE` was accepted by DWM, not that
+    /// the dynamic material is visibly rendered in the current frame: by Microsoft design, Windows
+    /// draws Mica, Mica Alt, and Desktop Acrylic only while the window is the foreground window
+    /// and shows its own solid neutral fallback when unfocused. Consequently, a window or
+    /// non-activating overlay (`KeyPolicy::None`) that never takes focus never displays the live
+    /// material even while `cx.window_backdrop().is_active()` is `true`. Pair with
+    /// [`App::on_focus`](crate::App::on_focus),
+    /// [`ConfiguredOverlay::on_focus`](crate::ConfiguredOverlay::on_focus), or
+    /// [`El::on_window_focus`](crate::El::on_window_focus) if the view needs to tell "active and
+    /// focused" from "active". On Linux Wayland, [`WindowBackdrop::Blur`](crate::WindowBackdrop::Blur)
+    /// reports that a blur region is attached to the surface (`ext_background_effect_v1` with
+    /// `Capability::Blur` or `org_kde_kwin_blur_manager`); neither Wayland protocol ties blur to
+    /// focus, though visual appearance remains subject to compositor policy.
+    ///
+    /// Returns [`WindowBackdrop::None`](crate::WindowBackdrop::None) whenever no backdrop was
+    /// requested or the platform cannot activate one (Windows builds before 22621, opaque
+    /// windows, plain HWND swap chains, the CPU painter, software/WARP adapters, DWM error,
+    /// X11/XWayland, unsupported Wayland compositors, macOS, web, staged playground subviews, and
+    /// headless runs unless set via [`Runtime::set_window_backdrop`]). The view and any `memo`
+    /// closures rebuild automatically when this changes.
+    ///
+    /// ```
+    /// # use rune::{Color, Cx, El, WindowBackdrop, el};
+    /// struct State { focused: bool }
+    /// fn root(s: &State, cx: &mut Cx<State>) -> El {
+    ///     let base = rune::tok::theme(cx.system_dark()).bg;
+    ///     let bg = match cx.window_backdrop() {
+    ///         WindowBackdrop::Blur => base.alpha(0.75),
+    ///         b if b.is_active() && s.focused => Color::TRANSPARENT,
+    ///         _ => base,
+    ///     };
+    ///     el().w_full().h_full().fill(bg)
+    /// }
+    /// ```
+    #[inline(always)]
+    pub fn window_backdrop(&self) -> crate::WindowBackdrop { self.core.window_backdrop() }
+    /// Whether the active surface and OS/compositor can currently activate `backdrop`, even while
+    /// [`WindowBackdrop::None`](crate::WindowBackdrop::None) is selected.
+    ///
+    /// [`WindowBackdrop::None`](crate::WindowBackdrop::None) always returns `true`. On Linux
+    /// Wayland, [`WindowBackdrop::Blur`](crate::WindowBackdrop::Blur) returns `true` when the
+    /// surface is transparent on a GPU swap chain and the compositor advertises
+    /// `ext_background_effect_v1` with `Capability::Blur` or `org_kde_kwin_blur_manager`; on
+    /// Windows 11 Build 22621+, `Mica`, `MicaAlt`, and `Acrylic` return `true` on eligible
+    /// transparent DirectComposition hardware-GPU surfaces. Memo-tracked: views and `memo`
+    /// closures rebuild automatically when compositor capabilities change at runtime.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, Runtime, WindowBackdrop, el, text};
+    /// fn view(_: &(), cx: &mut Cx<()>) -> El {
+    ///     let label = if cx.window_backdrop_supported(WindowBackdrop::Blur) {
+    ///         "Blur available"
+    ///     } else {
+    ///         "Blur unavailable"
+    ///     };
+    ///     el().child(text(label))
+    /// }
+    /// let mut rt = Runtime::new((), view, (200.0, 80.0), Env::default());
+    /// rt.set_window_backdrop_supported(WindowBackdrop::Blur, true);
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn window_backdrop_supported(&self, backdrop: crate::WindowBackdrop) -> bool {
+        self.core.window_backdrop_supported(backdrop)
+    }
+    /// Which rendering backend is actively presenting this window or overlay
+    /// ([`RendererKind::Gpu`] or [`RendererKind::Cpu`]).
+    ///
+    /// Reports [`RendererKind::Cpu`] for a Windows overlay running on the opt-in CPU layered path
+    /// ([`ConfiguredOverlay::renderer`](crate::ConfiguredOverlay::renderer)) and for ordinary
+    /// desktop windows while drawing on the CPU during [`CpuFirst`](crate::CpuFirst) startup.
+    /// Defaults to [`RendererKind::Gpu`] elsewhere and in headless runs unless set via
+    /// [`Runtime::set_renderer_kind`](crate::Runtime::set_renderer_kind). Changes invalidate the
+    /// view and any `memo` scope that reads it.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, RendererKind, Runtime, el};
+    /// fn view(_: &(), cx: &mut Cx<()>) -> El {
+    ///     if cx.renderer_kind().is_cpu() { el() } else { el().blur(8.0) }
+    /// }
+    /// let mut rt = Runtime::new((), view, (200.0, 100.0), Env::default());
+    /// rt.set_renderer_kind(RendererKind::Cpu);
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn renderer_kind(&self) -> crate::RendererKind { self.core.renderer_kind() }
     /// The colour of the Windows caption buttons' symbols (Electron's `titleBarOverlay`
     /// `symbolColor`), for a titlebar whose colours follow the app's theme rather than the
     /// system's light or dark setting: by default black in light mode, white in dark. Their
@@ -366,17 +612,28 @@ impl<S> Cx<S> {
     /// their own draw their default focus ring in it.
     #[inline(always)]
     pub fn focus_color(&self) -> Color { self.core.focus_color() }
-    /// Browser safe-area insets in points, in top/right/bottom/left order. Zero on native.
-    /// Apply these inside a full-canvas root so backgrounds can extend to the screen edges.
+    /// Safe-area insets in logical points, in `[top, right, bottom, left]` order: the host
+    /// override from [`Runtime::set_safe_area`](crate::Runtime::set_safe_area), else browser
+    /// insets on the web, else `[0.0; 4]`. Apply these inside a full-canvas root so backgrounds
+    /// can extend to the screen edges.
     #[inline(always)]
     pub fn safe_area(&self) -> [f32; 4] { self.core.safe_area() }
-    /// The primary pointer can't hover: a browser's `(hover: none)`, a phone's or tablet's touch
-    /// screen. What a mouse would reveal on hover (a code block's Copy, a row's actions) should
-    /// show without it. False natively. A change re-runs the view.
+    /// The primary pointer can't hover: on the web, the browser's `(hover: none)` media query;
+    /// natively, tracks the window's primary pointer - starting `true` on touch-first postures
+    /// (Windows slate mode or touchscreen without a mouse, and iOS), switching to `true` on
+    /// finger touch input, and returning to `false` on mouse, trackpad, or pen input (or when
+    /// leaving tablet mode). What a mouse would reveal on hover (a code block's Copy, a row's
+    /// actions) should show without it. Defaults to `false` in headless runs; a change re-runs
+    /// the view and its memos.
     #[inline(always)]
     pub fn hover_none(&self) -> bool { self.core.hover_none() }
-    /// A page's primary pointer is coarse and can't hover. Use this for a phone or tablet's
-    /// controls rather than the viewport width: a narrow window can still have a mouse.
+    /// Whether the primary pointer is coarse touch and can't hover: on the web, the browser's
+    /// `(hover: none)` and `(pointer: coarse)` media queries; natively, tracks the window's
+    /// primary pointer - starting `true` on touch-first postures (Windows slate mode or touchscreen
+    /// without a mouse, and iOS), switching to `true` on finger touch input, and returning to
+    /// `false` on mouse, trackpad, or pen input (or when leaving tablet mode). Use this for
+    /// touch-sized controls rather than viewport width: a narrow window can still have a mouse.
+    /// Defaults to `false` in headless runs; a change re-runs the view and its memos.
     #[inline(always)]
     pub fn touch_controls(&self) -> bool { self.core.touch_controls() }
     /// The system's contrast theme when one is on (Windows' Contrast themes, high contrast):
@@ -384,14 +641,33 @@ impl<S> Cx<S> {
     /// (CSS `forced-colors: active`). None otherwise. A change re-runs the view.
     #[inline(always)]
     pub fn system_contrast(&self) -> Option<crate::SystemContrast> { self.core.system_contrast() }
-    /// Whether the system asks for more contrast: macOS's Increase Contrast, or a Windows contrast
-    /// theme (when [`Self::system_contrast`] is also there). A view can draw its stronger edges for
-    /// it while keeping its own colours. A change re-runs the view.
+    /// Whether the system asks for more contrast: macOS's Increase Contrast, a Windows contrast
+    /// theme (when [`Self::system_contrast`] is also there), Linux's XDG desktop portal
+    /// `org.freedesktop.appearance` `contrast` setting (such as GNOME's High Contrast), or a
+    /// browser's `(prefers-contrast: more)` or `(forced-colors: active)` media query. A view can
+    /// draw its stronger edges for it while keeping its own colours. A change re-runs the view.
     #[inline(always)]
     pub fn system_increased_contrast(&self) -> bool { self.core.system_increased_contrast() }
+    /// Whether the system asks apps to reduce transparency: macOS's Reduce Transparency
+    /// (Accessibility > Display), Windows' Transparency effects turned off, or the browser's
+    /// `prefers-reduced-transparency: reduce`. While true, [`El::backdrop_blur`] draws only its
+    /// fill without blurring, and views can pick opaque fills instead of translucent tints. A
+    /// change re-runs the view and its memos.
+    #[inline(always)]
+    pub fn system_reduced_transparency(&self) -> bool { self.core.system_reduced_transparency() }
     /// The host's OS accessibility preference, independent of this commit's override.
     #[inline(always)]
     pub fn system_reduced_motion(&self) -> bool { self.core.system_reduced_motion() }
+    /// The system's text-size scale factor (`1.0` by default): Windows Settings > Accessibility >
+    /// Text size (`UISettings.TextScaleFactor`, `1.0..=2.25`), iOS Dynamic Type relative to the
+    /// default `Large` body size, Linux's `org.gnome.desktop.interface` `text-scaling-factor`,
+    /// and the browser's root `font-size` divided by `16px` on the web (`1.0` on macOS).
+    ///
+    /// Re-runs the view and its memos when the preference changes. Headless captures can override
+    /// it with `RUNE_TEXT_SCALE=<factor>`. Apps decide whether to pass this to [`Cx::zoom`] or
+    /// scale only their type ramp.
+    #[inline(always)]
+    pub fn system_text_scale(&self) -> f32 { self.core.system_text_scale() }
     /// Whether an element in this window currently holds pointer lock
     /// ([`El::pointer_lock`](crate::El::pointer_lock)).
     ///

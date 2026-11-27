@@ -13,9 +13,10 @@
 //! shows it again makes its targets afresh.
 //!
 //! Either way the runtime's caches go back to what the screen on show uses: text layouts the last
-//! two commits didn't use and their glyph runs (`TextSystem::rest`), images no element showed in
-//! the last frame and the CPU copies of pages left empty (`ImageAtlas::rest`). Then the app's
-//! `App::on_rest` runs, for its own caches.
+//! commit didn't use and their glyph runs (`TextSystem::rest`), images no element showed in the
+//! last frame and the CPU copies of pages left empty (`ImageAtlas::rest`), dormant scene slots,
+//! oversized node/paint/memo buffers, and companion thread-local caches (`RuntimeCore::rest`).
+//! Then the app's `App::on_rest` runs, for its own caches.
 
 use std::time::Duration;
 
@@ -99,3 +100,16 @@ pub(crate) fn low_memory() -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn low_memory() -> bool { false }
+/// Whether `give_back(false)` (visible idle rest after [`REST_AFTER`]) should issue one
+/// non-blocking `Device::poll(Poll)` before trimming renderer caches.
+///
+/// Always `true` on macOS: Metal retains each presented frame's `MTLCommandBuffer`,
+/// `CAMetalDrawable` (IOSurface), and `Keep` texture/buffer references in its retire queue
+/// until the next submit or poll, and polling on macOS is a non-blocking shared-event read
+/// with no DX12 post-poll penalty. Elsewhere, poll only when recyclable oversized staging
+/// chunks are in flight (avoiding the 4–9 ms Intel Iris Xe DX12 post-poll cost).
+pub(crate) const fn should_poll_on_idle_rest(is_macos: bool, oversized_in_flight: bool) -> bool {
+    is_macos || oversized_in_flight
+}
+
+pub(crate) use super::heap_trim::{maybe_trim_heap, set_trim_enabled as set_heap_trim_enabled};

@@ -57,7 +57,7 @@ fn a_window_resize_step_keeps_springs_and_flights_going() {
 fn a_window_that_fits_its_content_refits_after_a_user_resize() {
     fn view(_: &(), _: &mut Cx<()>) -> El { col().key("root").w_full().child(el().size(100.0, 90.0)) }
     let mut rt = Runtime::new((), view, (300.0, 400.0), Env::new(true, 1.0));
-    rt.host.fit_height = true;
+    rt.host.set_fit_height(true);
     let height = rt.content_height();
     rt.set_viewport((300.0, height), 1.0);
     rt.frame(0.0);
@@ -80,7 +80,7 @@ fn a_hidden_window_that_fits_its_content_learns_its_height_before_it_shows() {
         col().key("root").w_full().children((0..s.0).map(|_| el().size(100.0, 40.0)))
     }
     let mut rt = Runtime::new((1, false), view, (300.0, 400.0), Env::new(true, 1.0));
-    rt.host.fit_height = true;
+    rt.host.set_fit_height(true);
     let height = rt.content_height();
     rt.set_viewport((300.0, height), 1.0);
     rt.frame(0.0);
@@ -455,4 +455,32 @@ fn full_screen_transition_and_failed_revert_keep_inset_and_memo_in_sync() {
     assert_eq!(rt.presented("inset").unwrap().0[2], inset);
     assert_eq!(rt.presented("titlebar").unwrap().0[2], 40.0 + inset);
     assert_eq!((builds.get(), memo_builds.get()), (3, 3));
+}
+
+#[test]
+fn a_handler_that_queues_work_or_requests_a_poll_has_its_work_polled_in_the_same_frame() {
+    #[derive(Default)]
+    struct App { queued: Vec<u32>, done: Vec<u32>, request: bool }
+    fn view(_: &App, _: &mut Cx<App>) -> El {
+        el().key("go").size(40.0, 40.0).on_press_tx(|s: &mut App, tx: &mut Tx| {
+            s.queued.push(1);
+            if s.request { tx.request_poll(); }
+        })
+    }
+    fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
+        let any = !s.queued.is_empty();
+        s.done.append(&mut s.queued);
+        any
+    }
+    for request in [false, true] {
+        let mut rt = Runtime::new(App { request, ..App::default() }, view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.poll = Some(poll);
+        rt.frame(0.0);
+        rt.pointer_down(20.0, 20.0);
+        rt.pointer_up(20.0, 20.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.done, [1], "request={request}: work queued by a mutating press is polled in the same frame");
+        assert!(rt.state.queued.is_empty());
+        assert_eq!(rt.wake_deadline(), None, "request={request}: no extra wake is left armed");
+    }
 }

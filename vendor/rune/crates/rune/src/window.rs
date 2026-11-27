@@ -22,6 +22,8 @@ use winit::window::Window;
 use winit::raw_window_handle::HasWindowHandle;
 
 use crate::app::WindowRequest;
+#[cfg(all(test, target_os = "linux", feature = "test-gpu-noop"))]
+use crate::frame::surface_stats::SurfaceMeter;
 use crate::frame::surface_stats::SurfaceStats;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::Gpu;
@@ -40,10 +42,12 @@ use crate::tooling::Chrome;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod app_events;
+mod backdrop;
 #[cfg(not(target_arch = "wasm32"))]
 mod chrome;
 mod color_scheme;
 mod cpu_first;
+pub(crate) mod display_queue;
 pub(crate) mod displays;
 mod event_loop;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -54,11 +58,14 @@ pub(crate) mod geometry;
 mod handle;
 #[cfg(not(target_arch = "wasm32"))]
 mod host;
+mod keyboard_dispatch;
 mod keys;
 #[cfg(not(target_arch = "wasm32"))]
 mod panic_trap;
+pub(crate) mod placement;
 #[cfg(not(target_arch = "wasm32"))]
 mod pointer_lock;
+mod resize_sync;
 pub(crate) mod present;
 pub mod spec;
 mod state;
@@ -72,17 +79,25 @@ mod warm_frame;
 mod wayland_wake;
 #[cfg(target_os = "windows")]
 mod win32;
+pub(crate) mod wm_state;
 /// `crate::warm_gpu_cache` on Windows (`win32::handover`).
 #[cfg(target_os = "windows")]
 pub(crate) fn warm_gpu_cache() -> Result<(), String> { win32::handover::warm_gpu_cache() }
 
+pub use backdrop::WindowBackdrop;
 pub use color_scheme::ColorScheme;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use color_scheme::{app_color_scheme, set_app_color_scheme_state, sync_window_theme, window_theme_for_platform};
+pub(crate) use color_scheme::{ThemePlatform, app_color_scheme, set_app_color_scheme_state, sync_window_theme, window_theme_for_platform};
 pub use cpu_first::CpuFirst;
-#[cfg(target_arch = "wasm32")]
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(unused_imports))]
 pub(crate) use cpu_first::WebStart;
 pub use handle::WindowHandle;
+pub use keyboard_dispatch::KeyboardDispatch;
+#[cfg(target_os = "macos")]
+pub(crate) use keyboard_dispatch::should_redraw_after_polled_keys;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use keyboard_dispatch::step_immediate_core;
+pub use resize_sync::ResizeSync;
 #[cfg(not(target_arch = "wasm32"))]
 pub use event_loop::run;
 #[cfg(test)]
@@ -90,10 +105,17 @@ pub(crate) use event_loop::finish_run;
 pub(crate) use event_loop::run_windows;
 #[cfg(any(test, target_os = "windows", all(unix, not(target_os = "ios"), not(target_os = "android"))))]
 pub(crate) use file_drop::FileStep;
-pub(crate) use keys::{consumed_from, consumed_mods, key_base, map_key_event, map_mods, platform_text};
+#[cfg(any(test, target_arch = "wasm32", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+pub(crate) use keys::consumed_from;
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+pub(crate) use keys::pick_typed_text;
+pub(crate) use keys::{consumed_mods, key_base, map_key_event, map_mods, platform_text};
 #[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) use keys::web_key_base_str;
 pub(crate) use state::frame;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub use state::heap_trim::test_support as heap_trim_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use state::rest;
 #[cfg(not(target_arch = "wasm32"))]
@@ -101,13 +123,13 @@ pub(crate) use state::{Rest, RestEffect, RestEvent};
 pub(crate) use state::{Life, Minimize, MinimizeEvent, Sight};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use surface::{
-    Backoff, BackoffEffect, BackoffEvent, HiddenPace, acquire_checked, configure,
-    configure_checked, reblend_core, poll_timer_deadline_core, surface_config,
+    Backoff, BackoffEffect, BackoffEvent, ConfigureError, HiddenPace, acquire_checked, configure,
+    configure_checked, frame_latency, reblend_core, poll_timer_deadline_core, surface_config,
     timer_deadline_core, timer_wants_frame_core,
 };
-pub(crate) use surface::{ConfigureError, Missed, Presented, TIMER_FRAME, rebuild_renderer_core};
+pub(crate) use surface::{Missed, Presented, TIMER_FRAME, rebuild_renderer_core};
 #[cfg(target_arch = "wasm32")]
-pub(crate) use surface::configure_then;
+pub(crate) use surface::{configure_then, damage};
 #[cfg(target_os = "macos")]
 pub(crate) use surface::native::Prime;
 #[cfg(test)]
@@ -116,6 +138,8 @@ pub(crate) use surface::{
     HIDDEN_REFRESH, OCCLUDED_MAX, OCCLUDED_RETRY, TIMEOUT_RETRY, TIMER_FRAME_STALL, TimerFrame,
     timer_deadline, timer_wants_frame, wall_wake_deadline,
 };
+#[cfg(all(test, target_os = "linux", feature = "test-gpu-noop"))]
+use surface::acquire;
 #[cfg(target_os = "windows")]
 pub(crate) use win32::poll_pace;
 #[cfg(target_os = "windows")]
@@ -134,7 +158,7 @@ pub(crate) use host::app::{TypedWindowApp, WindowApp};
 #[cfg(test)]
 use state::{WakeFacts, WakeWork};
 #[cfg(all(test, target_os = "macos"))]
-use surface::LaunchDrawables;
+pub(crate) use surface::LaunchDrawables;
 #[cfg(test)]
 use surface::{SurfaceRetries, composing};
 
@@ -163,12 +187,15 @@ pub(crate) enum WakeEvent {
     Window(usize, WindowRequest),
     Focus(usize),
     Position(usize, (i32, i32)),
+    LogicalPosition(usize, (f64, f64)),
     #[cfg(not(target_arch = "wasm32"))]
     Level(usize, bool),
     #[cfg(not(target_arch = "wasm32"))]
     ExcludeFromCapture(usize, bool),
     #[cfg(not(target_arch = "wasm32"))]
     ColorScheme(usize, crate::ColorScheme),
+    #[cfg(not(target_arch = "wasm32"))]
+    WindowBackdrop(usize, crate::WindowBackdrop),
     /// App-wide color scheme changed (`AppHandle::set_color_scheme`): every host syncs with
     /// `app_color_scheme()`.
     #[cfg(not(target_arch = "wasm32"))]
@@ -187,6 +214,10 @@ pub(crate) enum WakeEvent {
     /// with `true` the session ends now and the windows close.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Quit(bool),
+    /// macOS `applicationShouldTerminate:` deferred to `App::on_quit_request` hooks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    QuitRequest,
     /// An assistive client asked something of a surface's accessibility tree (`crate::a11y`):
     /// the host answers at the end of the turn this wakes.
     #[cfg_attr(not(feature = "accessibility"), allow(dead_code))]
@@ -207,6 +238,15 @@ pub(crate) enum WakeEvent {
     /// wakes the immediate next turn so `about_to_wait` drains it without entering `ControlFlow::Poll`.
     #[cfg(not(target_arch = "wasm32"))]
     LayerPending,
+    /// Windows/macOS: the OS reported a display configuration change; re-query and notify `App::on_displays`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+    DisplaysChanged,
+    /// Windows: system effects policy changed (Transparency effects, Energy/Battery Saver,
+    /// `CompositionCapabilities`, High Contrast, or Remote Desktop); every host reconciles
+    /// `El::system_material` native vs fallback state.
+    #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+    MaterialPolicyChanged,
 }
 
 /// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
@@ -227,15 +267,27 @@ pub(crate) trait AnyHost {
     /// Whether this host has unread platform events already queued in memory (for example a
     /// Wayland layer surface whose queue filled during a mid-turn read).
     fn has_pending_platform_events(&self) -> bool { false }
+    /// Called when the Wayland compositor cancels our owned primary-selection source so the
+    /// runtime clears its last-written dedup hash.
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    fn primary_selection_lost(&mut self) {}
     /// The turn ends: the next frame it wants is asked for, or a paint put off runs (`redraw`).
     fn turn_ends(&mut self, _event_loop: &ActiveEventLoop, _now: Instant) {}
     fn finished(&self) -> bool { false }
+    /// Whether overlays were queued through this host's `AppHandle::overlay`.
+    fn has_pending_overlays(&self) -> bool { false }
+    /// Builds and returns any overlays queued through this host's `AppHandle::overlay`.
+    fn take_pending_overlays(&mut self) -> Vec<Box<dyn crate::overlay::PendingOverlay>> { Vec::new() }
     /// Whether this host has ever created a native window.
     fn has_shown(&self) -> bool { false }
     /// The error that finished this host when its first window couldn't be created.
     fn take_startup_error(&mut self) -> Option<String> { None }
     /// The OS is ending the app without Rune asking: run close hooks before the hosts drop.
     fn terminate(&mut self) {}
+    /// Whether this live host has `App::on_quit_request` registered (overlays return false).
+    fn has_quit_request(&self) -> bool { false }
+    /// Asks `App::on_quit_request` inside a normal update transaction (overlays return None).
+    fn quit_request_hook(&mut self, _event_loop: &ActiveEventLoop) -> Option<crate::QuitResponse> { None }
     /// The app starts to quit: runs `App::on_quit` (including in a window whose close ended the app).
     fn quit_hook(&mut self) {}
     /// The app quits: off the screen now, before any hook runs.
@@ -265,6 +317,10 @@ pub(crate) trait AnyHost {
     /// Syncs this host's native window theme with the current process-wide `app_color_scheme()`.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn apply_app_color_scheme(&mut self) {}
+    /// Windows: reconciles `El::system_material` native vs fallback state after a system effects
+    /// policy notification.
+    #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+    fn on_material_policy_changed(&mut self) {}
 }
 
 /// Collects startup creation errors from finished hosts and returns whether any loop-keeping host
@@ -325,6 +381,10 @@ struct Windows {
     /// `App::on_display_close` hooks collected from started windows, run once on the UI thread
     /// before the event loop drops windows and tears down the native display.
     on_display_close: Vec<crate::app::OnDisplayClose>,
+    /// `App::on_displays` hooks, last snapshot, and platform display-change watcher.
+    display_watch: displays::DisplayWatch,
+    /// Closed overlay host slots available for reuse by subsequent overlays.
+    free_overlay_slots: Vec<usize>,
 }
 #[cfg(not(target_arch = "wasm32"))]
 impl Windows {
@@ -372,25 +432,49 @@ impl Windows {
                 let mut args = self.args.clone();
                 (args.scene, args.size) = (None, None);
                 let mut overlays = Vec::new();
+                let mut on_displays = Vec::new();
                 let slot = self.hosts.len();
-                let host = spec.start(args, Start { proxy: self.proxy.clone(), slot, gpu: self.gpu.clone(), wayland, traced: false, overlays: &mut overlays, on_display_close: &mut self.on_display_close });
+                let host = spec.start(args, Start { proxy: self.proxy.clone(), slot, gpu: self.gpu.clone(), wayland, traced: false, overlays: &mut overlays, on_display_close: &mut self.on_display_close, on_displays: &mut on_displays });
                 self.hosts.push(host);
                 if let Some(Some(host)) = self.hosts.get_mut(slot) { host.resumed(event_loop); }
+                self.display_watch.add_hooks(on_displays, event_loop, None, &self.proxy);
                 self.connect_overlays(overlays, event_loop);
             }
+            app_events::sync_quit_request_hooks(&self.hosts);
+        }
+    }
+
+    /// Builds and connects any overlays queued through `AppHandle::overlay`.
+    fn connect_requested_overlays(&mut self, event_loop: &ActiveEventLoop) {
+        if self.factory.is_some() { return; }
+        loop {
+            let mut overlays = Vec::new();
+            for host in self.hosts.iter_mut().flatten() {
+                if !host.finished() && host.has_pending_overlays() {
+                    overlays.extend(host.take_pending_overlays());
+                }
+            }
+            if overlays.is_empty() { return; }
+            self.connect_overlays(overlays, event_loop);
         }
     }
 
     fn connect_overlays(&mut self, overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>, event_loop: &ActiveEventLoop) {
         for mut overlay in overlays {
-            let (slot, proxy) = (self.hosts.len(), self.proxy.clone());
+            let reused = self.free_overlay_slots.pop();
+            let slot = reused.unwrap_or(self.hosts.len());
+            let proxy = self.proxy.clone();
             let frame_proxy = proxy.clone();
             let slot_proxy = proxy.clone();
             overlay.connect(Arc::new(move || { proxy.send_event(WakeEvent::App(slot)).ok(); }),
                 Arc::new(move || { frame_proxy.send_event(WakeEvent::DisplayTick(slot)).ok(); }),
                 Arc::new(move || { slot_proxy.send_event(WakeEvent::FrameSlot(slot)).ok(); }), self.gpu.clone());
             overlay.resumed(event_loop);
-            self.hosts.push(Some(overlay));
+            if let Some(slot) = reused {
+                self.hosts[slot] = Some(overlay);
+            } else {
+                self.hosts.push(Some(overlay));
+            }
         }
     }
 
@@ -399,7 +483,10 @@ impl Windows {
         if self.panic.is_panicking() {
             return;
         }
-        if !event_loop.exiting() { self.open_requested(event_loop); }
+        if !event_loop.exiting() {
+            self.open_requested(event_loop);
+            self.connect_requested_overlays(event_loop);
+        }
         let _ = collect_startup_errors(&mut self.hosts, &mut self.any_shown, &mut self.startup_error);
         let ok = self.startup_error.is_none();
         #[cfg(not(target_arch = "wasm32"))]
@@ -407,12 +494,30 @@ impl Windows {
         #[cfg(target_arch = "wasm32")]
         let fast_exit = false;
         let exiting = event_loop.exiting();
+        let no_main = !self.hosts.iter().flatten().any(|h| h.keeps_loop() && !h.finished());
+        if no_main && !exiting {
+            self.display_watch.shutdown();
+        }
+        let closed_overlays: Vec<usize> = if !(no_main && fast_exit) {
+            self.hosts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| {
+                    h.as_ref()
+                        .filter(|h| h.finished() && !h.keeps_loop() && h.key().is_none())
+                        .map(|_| i)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let should_exit = app_events::cleanup_hosts(&mut self.hosts, &mut self.on_display_close, !exiting && ok, exiting, fast_exit, crate::quit::send);
+        self.free_overlay_slots.extend(closed_overlays);
         // Another window's quit: a menu still tracking would hold the loop open.
         if exiting || should_exit {
             for host in self.hosts.iter_mut().flatten() { host.cancel_menus(); }
         }
-        if should_exit {
+        if should_exit && !(ok && crate::quit::programmatic_quit()) {
             event_loop.exit();
         }
     }
@@ -449,6 +554,7 @@ pub(crate) struct Start<'a> {
     traced: bool,
     overlays: &'a mut Vec<Box<dyn crate::overlay::PendingOverlay>>,
     on_display_close: &'a mut Vec<crate::app::OnDisplayClose>,
+    on_displays: &'a mut Vec<crate::app::OnDisplays>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -500,11 +606,13 @@ impl ApplicationHandler<WakeEvent> for Windows {
             let trace_window = this.args.window.clone().or_else(|| specs.first().map(|s| s.key().to_owned()));
             let mut overlays = Vec::new();
             let mut on_display_close = Vec::new();
+            let mut on_displays = Vec::new();
             this.hosts = start_all(specs, |slot, spec| {
                 let traced = trace_window.as_deref() == Some(spec.key());
-                spec.start(this.args.clone(), Start { proxy: this.proxy.clone(), slot, gpu: this.gpu.clone(), wayland, traced, overlays: &mut overlays, on_display_close: &mut on_display_close })
+                spec.start(this.args.clone(), Start { proxy: this.proxy.clone(), slot, gpu: this.gpu.clone(), wayland, traced, overlays: &mut overlays, on_display_close: &mut on_display_close, on_displays: &mut on_displays })
             }, |host| host.resumed(event_loop));
             this.on_display_close.extend(on_display_close);
+            this.display_watch.add_hooks(on_displays, event_loop, Some(&displays), &this.proxy);
             this.connect_overlays(overlays, event_loop);
             // A launch with no window makes its menu bar now; a window's first frame made it.
             #[cfg(target_os = "macos")]
@@ -519,8 +627,14 @@ impl ApplicationHandler<WakeEvent> for Windows {
                 let proxy = this.proxy.clone();
                 crate::open_url::instance::on_relaunch(move || proxy.send_event(WakeEvent::Reopen).is_ok());
             }
-            let proxy = this.proxy.clone();
-            crate::quit::install(move |ending| proxy.send_event(WakeEvent::Quit(ending)).is_ok());
+            #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+            {
+                let proxy = this.proxy.clone();
+                crate::system_material::windows::set_policy_waker(std::sync::Arc::new(move || {
+                    proxy.send_event(WakeEvent::MaterialPolicyChanged).ok();
+                }));
+            }
+            app_events::install_quit(&this.hosts, &this.proxy);
             crate::open_url::incoming::settle();
             // A window opened at launch took it; a GPU kept for a later one would sit idle until then.
             crate::render::discard_prewarm();
@@ -532,7 +646,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
             let _handling = crate::quit::handling();
             let slot = match &event {
                 WakeEvent::DisplayTick(i) | WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
-                    | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) | WakeEvent::ExcludeFromCapture(i, _) | WakeEvent::ColorScheme(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _)
+                    | WakeEvent::Position(i, _) | WakeEvent::LogicalPosition(i, _) | WakeEvent::Level(i, _) | WakeEvent::ExcludeFromCapture(i, _) | WakeEvent::ColorScheme(i, _) | WakeEvent::WindowBackdrop(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _)
                     | WakeEvent::A11y(i) | WakeEvent::FrameSlot(i) | WakeEvent::GpuReady(i) | WakeEvent::ResizeSync(i) => *i,
                 WakeEvent::Reopen => {
                     this.reopen(event_loop);
@@ -545,6 +659,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
                     this.cleanup(event_loop);
                     return;
                 }
+                WakeEvent::QuitRequest => { this.quit_request(event_loop); this.cleanup(event_loop); return; }
                 WakeEvent::Turn => { #[cfg(not(target_arch = "wasm32"))] this.turn(event_loop); return; }
                 WakeEvent::FileDrop => return,
                 WakeEvent::AppColorScheme => {
@@ -557,7 +672,23 @@ impl ApplicationHandler<WakeEvent> for Windows {
                     let _ = wayland_wake::step(&mut this.wayland_wake, wayland_wake::Event::WakeReceived);
                     return;
                 }
+                WakeEvent::DisplaysChanged => {
+                    this.display_watch.refresh(event_loop);
+                    this.cleanup(event_loop);
+                    return;
+                }
+                #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+                WakeEvent::MaterialPolicyChanged => {
+                    for host in this.hosts.iter_mut().flatten() {
+                        host.on_material_policy_changed();
+                    }
+                    return;
+                }
             };
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            if matches!(event, WakeEvent::App(_)) {
+                crate::platform::wayland::primary_selection::wire::drain_completed_reads(false);
+            }
             if let Some(Some(host)) = this.hosts.get_mut(slot) {
                 host.user_event(event_loop, event);
             }
@@ -615,17 +746,49 @@ impl ApplicationHandler<WakeEvent> for Windows {
             #[cfg(target_os = "macos")]
             crate::platform::macos::launch::settle();
             crate::cursor::os::make_pending(event_loop);
+            if !event_loop.exiting() {
+                this.display_watch.poll(event_loop);
+            }
             let mut animating = false;
             for host in this.hosts.iter_mut().flatten() {
                 animating |= host.about_to_wait(event_loop);
             }
-            // A window an idle hook closed (`App::on_window_geometry`) goes before the loop sleeps.
-            if this.hosts.iter().flatten().any(|host| host.finished()) { this.cleanup(event_loop); }
+            let wayland = is_wayland(event_loop);
+            if wayland && !event_loop.exiting() {
+                display_queue::dispatch_pending();
+                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                if crate::platform::wayland::primary_selection::wire::dispatch_pending() {
+                    for host in this.hosts.iter_mut().flatten() {
+                        host.primary_selection_lost();
+                    }
+                }
+            }
+            // A window or overlay that closed, or an overlay queued via `AppHandle::overlay`,
+            // is reconciled before the loop sleeps.
+            if this.hosts.iter().flatten().any(|host| host.finished() || host.has_pending_overlays()) {
+                this.cleanup(event_loop);
+            }
             // The frames windows want next (`redraw`), and on Windows the paints the system keeps
             // putting off behind another window's.
             let now = crate::time::now();
             for host in this.hosts.iter_mut().flatten() { host.turn_ends(event_loop, now); }
-            let effects = wayland_wake::about_to_wait(&mut this.wayland_wake, &this.hosts);
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            let primary_watch = wayland
+                && !event_loop.exiting()
+                && crate::platform::wayland::primary_selection::wire::needs_wake_on_read();
+            #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+            let primary_watch = false;
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            let primary_pending = primary_watch
+                && crate::platform::wayland::primary_selection::wire::has_pending_events();
+            #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+            let primary_pending = false;
+            let has_display_watch = wayland
+                && !event_loop.exiting()
+                && (display_queue::has_watches() || this.display_watch.needs_wayland_wake() || primary_watch);
+            let has_pending_display = has_display_watch
+                && (display_queue::has_pending() || this.display_watch.has_pending_wayland_events() || primary_pending);
+            let effects = wayland_wake::about_to_wait(&mut this.wayland_wake, &this.hosts, has_display_watch, has_pending_display);
             this.apply_wayland_wake(event_loop, effects);
             // Layer surfaces have no redraw events: keep turning while one animates (its vsync
             // paces the loop). Hosts whose only motion is an ambient loop sleep until its next step.
@@ -661,6 +824,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
         let fast_hook = crate::quit::fast_exit_hook();
         #[cfg(target_arch = "wasm32")]
         let fast_hook: Option<fn()> = None;
+        self.display_watch.shutdown();
         let step = app_events::exiting_hosts(
             &mut self.hosts,
             &mut self.on_display_close,
@@ -691,7 +855,13 @@ impl ApplicationHandler<WakeEvent> for Windows {
             },
             || {
                 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-                crate::platform::wayland_drop::shutdown();
+                {
+                    crate::platform::wayland::primary_selection::wire::shutdown();
+                    crate::platform::wayland::drop::shutdown();
+                    crate::platform::wayland::backdrop::shutdown();
+                    crate::platform::wayland::presentation::shutdown();
+                    crate::platform::wayland::serial::wire::shutdown();
+                }
                 crate::marks::mark("windows.dropped");
                 crate::clipboard::shutdown();
             },
@@ -794,7 +964,11 @@ pub(crate) fn touch_core_at(rt: &mut RuntimeCore, app: &mut dyn AppDriver, touch
         TouchPhase::Ended => crate::TouchPhase::Ended,
         TouchPhase::Cancelled => crate::TouchPhase::Cancelled,
     };
-    rt.touch(app, touch.id, phase, touch.location.x as f32 / scale, touch.location.y as f32 / scale, time);
+    #[cfg(target_os = "windows")]
+    let pointer = crate::platform::win32::touch_input::current_primary_pointer();
+    #[cfg(not(target_os = "windows"))]
+    let pointer = crate::runtime::PrimaryPointer::Touch;
+    rt.touch_with_pointer(app, touch.id, phase, touch.location.x as f32 / scale, touch.location.y as f32 / scale, time, pointer);
 }
 
 /// Hands a winit touch to the runtime, timed on a clock that starts with the first touch.

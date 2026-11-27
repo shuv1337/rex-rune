@@ -364,7 +364,7 @@ Three dependencies are vendored with small, documented patches and wired in
 through `[patch]` in [`Cargo.toml`](../Cargo.toml):
 
 - [`vendor/rune/`](../vendor/rune/README.md): just the `rune` crate from
-  `anomalyco/rune` at `983e33b9` (MIT), with local Linux window and GSettings
+  `anomalyco/rune` at `f1b079cc` (MIT), with local Linux window and GSettings
   fixes. The other Rune crates and upstream registry patches stay at the same
   pinned git revision.
 - [`vendor/rexrs/`](../vendor/rexrs/REX-RUNE.md): `a10y/rexrs` at `780be3f` (MIT

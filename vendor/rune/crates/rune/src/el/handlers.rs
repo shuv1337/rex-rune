@@ -19,6 +19,34 @@ impl El {
         }
         self
     }
+    /// [`El::on_press_tx`] for a component that doesn't read the app's state, so it works in any
+    /// app.
+    ///
+    /// Preserves [`El::on_press_tx`] activation semantics: promotes a default `"group"` role to
+    /// `"button"`, supports pointer, touch, keyboard (Space / Return), and assistive-technology
+    /// activation, and exposes [`Tx::press_point`] and [`Tx::button`].
+    ///
+    /// ```
+    /// use rune::{El, Live, Tx, el};
+    ///
+    /// let dismissed = Live::new(0.0_f32);
+    /// let d = dismissed.clone();
+    /// let _close: El = el()
+    ///     .key("dismiss")
+    ///     .size(24.0, 24.0)
+    ///     .on_press_tx_any(move |tx: &mut Tx| {
+    ///         d.set(1.0);
+    ///         tx.live_only();
+    ///     });
+    /// ```
+    #[inline]
+    pub fn on_press_tx_any(mut self, f: impl Fn(&mut Tx) + 'static) -> Self {
+        self.handlers.on_press = Some(Rc::new(move |_, tx| f(tx)));
+        if self.role == RoleTag::GROUP {
+            self.role = RoleTag::BUTTON;
+        }
+        self
+    }
     /// A press on a surface that isn't a control: a pane that clears a selection or takes
     /// keyboard routing when clicked, a scrim that closes what it covers. It runs as
     /// [`El::on_press`] does under the pointer, but the element stays what its role says (it
@@ -105,24 +133,31 @@ impl El {
         self.handlers.touch_at_once = true;
         self
     }
-    /// A finger that lands within `width` points of the window's `edge` (measured from the
-    /// safe area's edge where the host reports one) and first moves mostly away from it, past
-    /// the touch slop, drives this element's `f` as an [`El::on_drag`] would: Down where it
-    /// landed, then Move, then Up (check [`Drag::cancelled`]). It wins over everything under
-    /// the finger: a child's `on_drag` or [`El::touch_drags_at_once`], a scroll viewport's pan,
-    /// a tap. A child's drag that already heard Down hears a cancelled Up, and nothing is
-    /// pressed. A first move along the edge or back toward it leaves the touch to the content,
-    /// as iOS's `UIScreenEdgePanGestureRecognizer` does. So an [`El::touch_drags_at_once`]
-    /// element inside a zone waits for the touch slop before it drags (it still has no long
-    /// press). An `on_edge_drag` element that leaves the tree mid-gesture hears nothing more,
-    /// not even a final Up, unlike an `on_drag` whose element leaves.
+    /// A finger that lands within `width` points of the window's `edge` (measured across
+    /// `[0, safe_inset + width]` using [`Runtime::set_safe_area`](crate::Runtime::set_safe_area)
+    /// or browser safe-area insets) and first moves mostly away from it, past the 8 pt touch slop,
+    /// drives this element's `f` as an [`El::on_drag`] would: `Down` where it landed, then
+    /// `Move`, then `Up` (check [`Drag::cancelled`] and [`Drag::edge`]). It wins over
+    /// everything under the finger: a child's `on_drag` or [`El::touch_drags_at_once`], a
+    /// scroll viewport's pan, a tap. A child's drag that already heard `Down` hears a cancelled
+    /// `Up`, and nothing is pressed. A first move along the edge or back toward it leaves the
+    /// touch to the content, as iOS's `UIScreenEdgePanGestureRecognizer` does. So an
+    /// [`El::touch_drags_at_once`] element inside a zone waits for the touch slop before it drags
+    /// (it still has no long press). If the element unmounts, turns inert, loses its handler, or
+    /// the gesture is cancelled by Escape, focus loss, a modal, or `cancel_pointer`, `f` hears
+    /// a cancelled `Phase::Up` just as `on_drag` does.
     ///
-    /// Put it on an ancestor of what's at the edge: the app root for a drawer, an item page for
-    /// a back swipe. Where several on the finger's hit path take the same touch, the innermost
-    /// wins, so an open page's back swipe beats the root's drawer. A mouse never starts one.
+    /// One element may attach multiple edges independently (for example `Left` and `Right`),
+    /// and corners disambiguate by swipe direction. Put it on an ancestor of what's at the edge:
+    /// the app root for a drawer, an item page for a back swipe. Where several on the finger's
+    /// hit path take the same edge, the innermost wins; raised overlays and modals occlude
+    /// claimants beneath them. A mouse never starts an edge drag; once active, a second finger is
+    /// ignored while an unclaimed pending edge touch yields to a two-finger pinch/pan/rotate.
     ///
-    /// On iOS the system's own edge gestures can still take the touch first; a host that wants
-    /// the swipe defers them with `preferredScreenEdgesDeferringSystemGestures`.
+    /// On iOS a host defers system edge gestures with `preferredScreenEdgesDeferringSystemGestures`
+    /// (or SwiftUI `.defersSystemGestures(on:)`) and forwards `UIView.safeAreaInsets` through
+    /// [`Runtime::set_safe_area`](crate::Runtime::set_safe_area); on Android, use
+    /// `View.setSystemGestureExclusionRects` and `WindowInsets`.
     ///
     /// ```
     /// # use rune::{Drag, Phase, SwipeEdge, col};
@@ -132,7 +167,11 @@ impl El {
     /// });
     /// ```
     pub fn on_edge_drag<S: 'static>(mut self, edge: SwipeEdge, width: f32, f: impl Fn(&mut S, &mut Drag, &mut Tx) + 'static) -> Self {
-        self.handlers.edge_drag = Some((edge, width.max(0.0), Rc::new(move |s, d, tx| f(downcast::<S>(s), d, tx))));
+        let w = if width.is_finite() { width.max(0.0) } else { 0.0 };
+        self.handlers
+            .edge_drags
+            .get_or_insert_with(Default::default)
+            .set(edge, w, Rc::new(move |s, d, tx| f(downcast::<S>(s), d, tx)));
         self
     }
     /// A menu button: a mouse's primary button runs [`El::on_press`] as it goes down, and that
@@ -180,6 +219,20 @@ pub enum SwipeEdge {
     Bottom,
 }
 
+impl SwipeEdge {
+    pub(crate) const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
+
+    #[inline]
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+            Self::Top => 2,
+            Self::Bottom => 3,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Down,
@@ -216,6 +269,8 @@ pub struct Drag {
     pub(crate) window: [f32; 2],
     /// The pointer in desktop pixels, when a native window hosts the view.
     pub(crate) screen: Option<(i32, i32)>,
+    /// The window edge an [`El::on_edge_drag`] swipe started from (`None` for [`El::on_drag`]).
+    pub(crate) edge: Option<SwipeEdge>,
 }
 
 impl Drag {
@@ -223,6 +278,28 @@ impl Drag {
     /// pointer was taken away). Put back whatever the drag moved.
     pub fn cancelled(&self) -> bool {
         self.cancelled
+    }
+
+    /// Which window edge started this gesture inside [`El::on_edge_drag`], or `None` inside
+    /// [`El::on_drag`].
+    ///
+    /// ```
+    /// # use rune::{Cx, Drag, El, Env, Runtime, SwipeEdge, TouchPhase, col};
+    /// # fn view(_: &Option<SwipeEdge>, _: &mut Cx<Option<SwipeEdge>>) -> El {
+    /// #     col().size(200.0, 200.0).on_edge_drag(SwipeEdge::Left, 20.0, |s: &mut Option<SwipeEdge>, d: &mut Drag, _| {
+    /// #         *s = d.edge();
+    /// #     })
+    /// # }
+    /// let mut rt = Runtime::new(None, view, (200.0, 200.0), Env::new(true, 1.0));
+    /// rt.frame(0.0);
+    /// rt.touch(1, TouchPhase::Started, 5.0, 100.0, 0.0);
+    /// rt.touch(1, TouchPhase::Moved, 40.0, 100.0, 0.02);
+    /// rt.touch(1, TouchPhase::Ended, 40.0, 100.0, 0.04);
+    /// rt.frame(1.0 / 60.0);
+    /// assert_eq!(rt.state, Some(SwipeEdge::Left));
+    /// ```
+    pub fn edge(&self) -> Option<SwipeEdge> {
+        self.edge
     }
 
     /// The resolved layout direction of the dragged element (`Direction::Ltr` or
@@ -289,15 +366,20 @@ pub struct PointerPress {
 
 /// Where the pointer is, for [`El::on_pointer_move_local`],
 /// [`El::on_secondary_press_local`], [`El::on_any_press`], [`El::on_drop_move`],
-/// [`Tx::press_point`] and [`Tx::drop_point`]: `x` and `y` in the element's own layout points, as
-/// [`Drag`] and [`crate::WheelEvent`] give them (from its top-left as drawn, divided by any
-/// scale it draws at, so they hold on a zoomed canvas), the same point in window points
-/// for a context menu's anchor, and whether any mouse button is currently held down.
+/// [`Tx::press_point`] and [`Tx::drop_point`]: `x`, `y`, `w` and `h` in the element's own
+/// layout points, as [`Drag`] gives them (`x` and `y` from its top-left as drawn, divided by
+/// any scale it draws at, so they hold on a zoomed canvas, and `w` and `h` as its laid-out
+/// size in the same units), the same point in window points for a context menu's anchor, and
+/// whether any mouse button is currently held down.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PointerEvent {
     pub x: f32,
     pub y: f32,
+    /// The element's width in its own layout points (same units as `x`, matching [`Drag::w`]).
+    pub w: f32,
+    /// The element's height in its own layout points (same units as `y`, matching [`Drag::h`]).
+    pub h: f32,
     pub window_x: f32,
     pub window_y: f32,
     /// Whether any mouse button is currently held down anywhere in the window (cleared on
@@ -382,11 +464,11 @@ impl El {
     /// the press, taking hits, or changing focus or hover (like DOM capture-phase `pointerdown`
     /// or AppKit's `addLocalMonitorForEventsMatchingMask:`).
     ///
-    /// Receives the [`crate::PointerButton`] and a [`PointerEvent`] with the press point in
-    /// both this element's own layout points (`x`, `y`) and window points (`window_x`,
-    /// `window_y`), with `pressing == true` and [`Tx::button`] set to the pressed button.
-    /// Inside or outside is the observer's choice: compare `(p.x, p.y)` against the element's
-    /// size or `(p.window_x, p.window_y)` against its layout rect.
+    /// Receives the [`crate::PointerButton`] and a [`PointerEvent`] with the press point and
+    /// element size in this element's own layout points (`x`, `y`, `w`, `h`) and window points
+    /// (`window_x`, `window_y`), with `pressing == true` and [`Tx::button`] set to the pressed
+    /// button. Inside or outside is the observer's choice: compare `(p.x, p.y)` against
+    /// `(p.w, p.h)` or `(p.window_x, p.window_y)` against its layout rect.
     ///
     /// Only a button-down that starts a new gesture fires observers: a chorded button-down while
     /// another button or pointer capture is held is ignored. Observers run before that press's
@@ -404,7 +486,7 @@ impl El {
     /// #         .children(s.open.then(|| {
     /// #             el().key("popup").absolute(100.0, 10.0).size(80.0, 60.0)
     /// #                 .on_any_press(|s: &mut App, _btn: PointerButton, p: PointerEvent, _| {
-    /// #                     if p.x < 0.0 || p.y < 0.0 || p.x > 80.0 || p.y > 60.0 {
+    /// #                     if p.x < 0.0 || p.y < 0.0 || p.x > p.w || p.y > p.h {
     /// #                         s.open = false;
     /// #                     }
     /// #                 })
@@ -448,9 +530,11 @@ impl El {
     ///   back to `Confined`; `zwp_relative_pointer_v1` deltas are already in logical surface units.
     /// - **X11**: `Locked` is unsupported so it falls back to `CursorGrabMode::Confined`
     ///   (`xcb_grab_pointer`); XInput2 `RawMotion` counts are divided by `scale_factor()`.
-    /// - **Web**: inside the primary press user gesture, calls
-    ///   `canvas.requestPointerLock({ unadjustedMovement: true })` and caches a fallback to plain
-    ///   `canvas.requestPointerLock()` if the browser rejects with `NotSupportedError`.
+    /// - **Web**: inside the primary press user gesture, calls plain `canvas.requestPointerLock()`
+    ///   synchronously so the first click never depends on an asynchronous retry; once
+    ///   `pointerlockchange` confirms the lock, upgrades in place to `{ unadjustedMovement: true }`
+    ///   where supported (caching `NotSupportedError` so the plain lock stays intact and later
+    ///   locks skip the upgrade).
     ///   [`Cx::pointer_locked`](crate::Cx::pointer_locked) stays `false` until the browser grants
     ///   lock (`pointerlockchange`), relative deltas come from `PointerEvent.movementX`/`movementY`
     ///   in CSS pixels (logical points, independent of `Cx::zoom`), and browser-driven exits

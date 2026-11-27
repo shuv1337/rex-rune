@@ -36,7 +36,8 @@ env = dict(PATH=os.environ["PATH"], HOME=str(work / "home"),
     '<auth>EXTERNAL</auth><policy context="default"><allow own="*"/>'
     '<allow send_destination="*"/><allow receive_sender="*"/></policy></busconfig>')
 source = (ROOT / "vendor/rune/crates/rune/src/platform/preferences.rs").read_text()
-start = source.index('#[cfg(target_os = "linux")]\nunsafe fn with_gsettings<T>')
+# Extract the function without its module-relative visibility for this Linux probe.
+start = source.index('unsafe fn with_gsettings<T>')
 end = source.index('\n#[cfg(target_os = "linux")]\nunsafe fn gnome_double_click_ms', start)
 (work / "src").mkdir()
 (work / "src/main.rs").write_text(source[start:end] + '''

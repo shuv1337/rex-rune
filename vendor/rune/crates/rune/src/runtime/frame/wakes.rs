@@ -10,6 +10,16 @@ impl RuntimeCore {
         self.wall_start.map_or(self.clock, |t| t.elapsed().as_secs_f64())
     }
 
+    /// Clock seconds of the live input event currently being dispatched (on macOS, the hardware
+    /// `NSEvent.timestamp()` mapped onto `wall_start` via `crate::input::time::current()`),
+    /// falling back to [`Self::now_clock`] when no native event timestamp or wall clock is active.
+    pub(crate) fn input_clock(&self) -> f64 {
+        if let (Some(start), Some(at)) = (self.wall_start, crate::input::time::current()) {
+            return at.saturating_duration_since(start).as_secs_f64();
+        }
+        self.now_clock()
+    }
+
     /// The window's size in its points and its scale. The view lays out in them over its zoom
     /// ([`Cx::zoom`]), at the scale times the zoom.
     pub fn set_viewport(&mut self, viewport: (f32, f32), scale: f32) {
@@ -34,9 +44,11 @@ impl RuntimeCore {
 
     /// Whether the change needs a layout.
     pub(in crate::runtime) fn change_viewport(&mut self, viewport: (f32, f32), scale: f32) -> bool {
-        // A window that fits its content lays out the same at any height: its own resize
-        // mustn't cut short the layout springs it is following.
-        if self.host.fit_height && viewport.0 == self.viewport.0 && scale == self.env.scale {
+        // A window or overlay that fits content on an axis lays out the same when only fitted
+        // axes change: its own resize must not loop relayout or cut short child springs.
+        let fixed_w_same = self.host.content_sizing.fits_width() || viewport.0 == self.viewport.0;
+        let fixed_h_same = self.host.content_sizing.fits_height() || viewport.1 == self.viewport.1;
+        if self.host.content_sizing.fits_any() && fixed_w_same && fixed_h_same && scale == self.env.scale {
             self.viewport = viewport;
             return false;
         }
@@ -56,11 +68,12 @@ impl RuntimeCore {
     }
 
     /// Queue a native focus transition. Repeated notifications do not repeat the callback.
-    /// Losing focus is also `keys_lost`.
-    pub(crate) fn window_focus(&mut self, app: &mut dyn AppDriver, focused: bool) {
+    /// Losing focus is also `keys_lost`. Returns whether the window's focus state changed.
+    pub(crate) fn window_focus(&mut self, app: &mut dyn AppDriver, focused: bool) -> bool {
         // Every focus gain, even one a hide without blur left unreported.
-        if focused { self.kbd.keys_lost = false; }
-        if self.host.window_focused != Some(focused) {
+        if focused { self.kbd.keys_lost = false; self.kbd.focus_lost_sent = false; }
+        let changed = self.host.window_focused != Some(focused);
+        if changed {
             // Refocused, the pointer where it was hovers again; blurred, it waits for a move.
             if focused && self.host.window_focused == Some(false) { self.pointer.hover_paused = false; }
             // A selection takes its active or inactive pair (`El::selection_style`): a focused
@@ -84,6 +97,7 @@ impl RuntimeCore {
             // Deliver the cancelled Up before FocusLost can commit a view that removes its
             // grip (or the focus callback clears the app's drag state).
             if !focused {
+                self.dismiss_popup_menu_fallback(app);
                 self.cancel_pointer();
                 self.kbd.held = physical_dispatch::Activation::Up;
             }
@@ -100,9 +114,11 @@ impl RuntimeCore {
             }
         }
         if !focused { self.edit.clear_input_click(); self.wheel_lost(); }
+        changed
     }
 
     /// The last focus change the window reported was a gain.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn window_has_focus(&self) -> bool { self.host.window_focused == Some(true) }
 
     /// The window gets no more keys: it lost focus or hid, which may never report a blur. The

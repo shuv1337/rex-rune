@@ -65,14 +65,21 @@ pub struct VisualCold {
     /// Colour whose RGB and alpha tint `pixels`'s alpha mask (`El::pixels_tint`); `None` draws
     /// the image's own colours.
     pub(crate) pixels_tint: Option<Color>,
+    /// Display-only web `<img>` URL and fit (`El::web_image`, `El::web_image_fit`).
+    pub(crate) web_image: Option<Rc<crate::web_image::WebImage>>,
     /// Sampling filter for `pixels` (`El::image_filter`); `Linear` by default.
     pub(crate) image_filter: crate::ImageFilter,
+    /// Opt-in image context menu (`El::image_menu`).
+    pub(crate) image_menu: Option<Rc<crate::ImageMenu>>,
     /// An effect slot (`El::effect`).
     pub(crate) effect: Option<crate::el::effect::EffectSlot>,
     /// Backdrop blur standard deviation in points (`El::backdrop_blur`); 0 is off.
     pub(crate) backdrop_blur: f32,
     /// The hover track's enter and exit curves (default: snappy spring both ways).
     pub hover_motion: Option<Rc<(Anim, Anim)>>,
+    /// True when `hover_motion` came from a theme/token default (`El::token_hover_motion`), so
+    /// an enclosing `El::hover_motion_within` overrides it.
+    pub(crate) hover_motion_default: bool,
     /// Hover curves for this element and the hover tracks below it without their own.
     pub(crate) hover_within: Option<Rc<(Anim, Anim)>>,
     /// The press tracks' down and up curves (default: instant down, snappy/pop up).
@@ -86,6 +93,13 @@ pub struct VisualCold {
     pub hover_alone: bool,
     /// `El::hover_group_shared`: the key of the elements whose hover this group shares.
     pub(crate) hover_share: Option<Rc<str>>,
+    /// `El::hover_group_pointer`: only the pointer lights this group, not keyboard focus in it.
+    pub(crate) hover_pointer_only: bool,
+    /// `El::group_focus_within`: the key of the ancestor whose keyboard focus shows this
+    /// element's group styles as its group's hover does.
+    pub(crate) group_focus: Option<Rc<str>>,
+    /// `El::group_motion`: this element's own enter and exit curves for its group styles.
+    pub(crate) group_motion: Option<Rc<(Anim, Anim)>>,
     /// `El::icon_rotation`: the icon's turn in radians, clockwise.
     pub(crate) icon_turn: f32,
     /// Optional app-supplied key mixed into the cached subtree's signature (`El::cache_key`).
@@ -177,16 +191,22 @@ impl Empty for VisualCold {
         pixels_fit: None,
         pixels_wrap: None,
         pixels_tint: None,
+        web_image: None,
         image_filter: crate::ImageFilter::Linear,
+        image_menu: None,
         effect: None,
         backdrop_blur: 0.0,
         hover_motion: None,
+        hover_motion_default: false,
         hover_within: None,
         press_motion: None,
         group_opacity: None,
         group_color: None,
         hover_alone: false,
         hover_share: None,
+        hover_pointer_only: false,
+        group_focus: None,
+        group_motion: None,
         icon_turn: 0.0,
         cache_key: None,
         offset_motion: None,

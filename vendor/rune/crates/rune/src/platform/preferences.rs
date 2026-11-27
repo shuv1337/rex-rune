@@ -36,6 +36,12 @@ static CACHED_REDUCED_MOTION: CachedReducedMotion = CachedReducedMotion::new();
 static CACHED_DOUBLE_CLICK: CachedDoubleClick = CachedDoubleClick::new();
 
 #[cfg(all(target_os = "linux", not(feature = "dbus")))]
+static CACHED_INCREASED_CONTRAST: CachedPref<bool> = CachedPref::new(false);
+
+#[cfg(all(target_os = "linux", not(feature = "dbus")))]
+static CACHED_DARK: CachedPref<Option<bool>> = CachedPref::new(None);
+
+#[cfg(all(target_os = "linux", not(feature = "dbus")))]
 static FALLBACK_WINDOWS: std::sync::Mutex<Vec<std::sync::Weak<winit::window::Window>>> =
     std::sync::Mutex::new(Vec::new());
 
@@ -47,13 +53,18 @@ pub(crate) fn follow_fallback(window: &std::sync::Arc<winit::window::Window>) {
     windows.retain(|w| w.strong_count() > 0);
     windows.push(std::sync::Arc::downgrade(window));
     drop(windows);
-    if CACHED_REDUCED_MOTION.late_changed() || CACHED_DOUBLE_CLICK.late_changed() {
+    if CACHED_REDUCED_MOTION.late_changed()
+        || CACHED_DOUBLE_CLICK.late_changed()
+        || CACHED_INCREASED_CONTRAST.late_changed()
+        || CACHED_DARK.late_changed()
+        || crate::platform::text_scale::linux_fallback_late_changed()
+    {
         window.request_redraw();
     }
 }
 
 #[cfg(all(target_os = "linux", not(feature = "dbus")))]
-fn redraw_fallback_windows() {
+pub(super) fn redraw_fallback_windows() {
     let live: Vec<_> = {
         let mut windows = FALLBACK_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
         windows.retain(|w| w.strong_count() > 0);
@@ -73,7 +84,7 @@ pub(crate) fn reduced_motion() -> bool {
 #[cfg(any(test, target_os = "linux"))]
 pub(crate) const DEFAULT_DOUBLE_CLICK_MS: u32 = 500;
 /// Default double-click interval (seconds) when the Linux desktop reports none.
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, all(target_os = "linux", feature = "dbus")))]
 pub(crate) const DEFAULT_DOUBLE_CLICK_SECS: f64 = DEFAULT_DOUBLE_CLICK_MS as f64 / 1000.0;
 /// Bounds for a Linux desktop's reported double-click interval (milliseconds).
 #[cfg(any(test, target_os = "linux"))]
@@ -118,7 +129,7 @@ enum CacheState<T> {
 /// spawns one short-lived worker thread per process, waits at most `FIRST_ANSWER` so launch does
 /// not stall, and notifies open windows if a non-default answer arrives after that wait expires.
 #[cfg(any(test, all(target_os = "linux", not(feature = "dbus"))))]
-struct CachedPref<T: Copy + Eq + Send + Sync + 'static> {
+pub(super) struct CachedPref<T: Copy + Eq + Send + Sync + 'static> {
     default: T,
     state: std::sync::Mutex<CacheState<T>>,
     ready: std::sync::Condvar,
@@ -126,9 +137,9 @@ struct CachedPref<T: Copy + Eq + Send + Sync + 'static> {
 
 #[cfg(any(test, all(target_os = "linux", not(feature = "dbus"))))]
 impl<T: Copy + Eq + Send + Sync + 'static> CachedPref<T> {
-    const FIRST_ANSWER: std::time::Duration = std::time::Duration::from_millis(100);
+    pub(super) const FIRST_ANSWER: std::time::Duration = std::time::Duration::from_millis(100);
 
-    const fn new(default: T) -> Self {
+    pub(super) const fn new(default: T) -> Self {
         Self {
             default,
             state: std::sync::Mutex::new(CacheState::Unstarted),
@@ -136,7 +147,7 @@ impl<T: Copy + Eq + Send + Sync + 'static> CachedPref<T> {
         }
     }
 
-    fn get_or_init_with(
+    pub(super) fn get_or_init_with(
         &'static self,
         name: &'static str,
         wait: std::time::Duration,
@@ -185,7 +196,7 @@ impl<T: Copy + Eq + Send + Sync + 'static> CachedPref<T> {
         }
     }
 
-    fn late_changed(&self) -> bool {
+    pub(super) fn late_changed(&self) -> bool {
         matches!(
             *self.state.lock().unwrap_or_else(|e| e.into_inner()),
             CacheState::Ready { late_changed: true, .. }
@@ -193,7 +204,7 @@ impl<T: Copy + Eq + Send + Sync + 'static> CachedPref<T> {
     }
 
     #[cfg(test)]
-    fn wait_ready(&self) {
+    pub(super) fn wait_ready(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         while !matches!(*state, CacheState::Ready { .. }) {
             state = self.ready.wait(state).unwrap_or_else(|e| e.into_inner());
@@ -337,12 +348,12 @@ fn resolve_double_click_fallback(
 }
 
 #[cfg(target_os = "linux")]
-fn is_kde_desktop() -> bool {
+pub(super) fn is_kde_desktop() -> bool {
     rune_core::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().split(':').any(|d| d.eq_ignore_ascii_case("KDE"))
 }
 
 #[cfg(target_os = "linux")]
-fn read_kdeglobals() -> Option<String> {
+pub(super) fn read_kdeglobals() -> Option<String> {
     let config = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| std::path::PathBuf::from(h).join(".config")))?;
     std::fs::read_to_string(config.join("kdeglobals")).ok()
@@ -381,7 +392,7 @@ pub(crate) fn read_double_click_fallback() -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn with_gsettings<T>(
+pub(super) unsafe fn with_gsettings<T>(
     schema_id: &std::ffi::CStr,
     key: &std::ffi::CStr,
     read: impl FnOnce(&libloading::Library, *mut std::ffi::c_void, *const std::ffi::c_char) -> Option<T>,
@@ -468,22 +479,54 @@ unsafe fn gnome_double_click_ms() -> Option<u32> {
     }
 }
 
+#[cfg(target_os = "linux")]
+unsafe fn gnome_high_contrast() -> Option<bool> {
+    use std::ffi::{c_char, c_void};
+    // SAFETY: `g_settings_get_boolean` matches GIO's C ABI and `settings` is valid for the closure.
+    unsafe {
+        with_gsettings(c"org.gnome.desktop.a11y.interface", c"high-contrast", |gio, settings, key| {
+            let get = gio.get::<unsafe extern "C" fn(*mut c_void, *const c_char) -> i32>(b"g_settings_get_boolean\0").ok()?;
+            Some(get(settings, key) != 0)
+        })
+    }
+}
+
+/// Fallback increased-contrast read for Linux desktops whose Settings portal does not answer
+/// `org.freedesktop.appearance` `contrast`, or builds without the `dbus` feature. Called at
+/// most once per process, on a background worker thread.
+#[cfg(target_os = "linux")]
+pub(crate) fn read_increased_contrast_fallback() -> bool {
+    // Optional GNOME GSettings, with schema lookup before constructing settings (missing
+    // schemas otherwise abort GLib). No subprocess or required GNOME dependency.
+    // SAFETY: `gnome_high_contrast` dynamically resolves GIO symbols, checks every pointer for
+    // null, and releases the schema and settings. The shared bus reference is kept.
+    unsafe { gnome_high_contrast().unwrap_or(false) }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub(crate) fn reduced_motion() -> bool { false }
 
-/// `RUNE_INCREASE_CONTRAST=1`: [`increased_contrast`] on, for captures and checks.
+/// `RUNE_INCREASE_CONTRAST=1`: [`increased_contrast_with`] on, for captures and checks.
 pub(crate) fn increased_contrast_preset() -> bool {
     std::env::var_os("RUNE_INCREASE_CONTRAST").is_some_and(|v| v == "1")
 }
 
 /// Whether the system asks apps for more contrast: macOS's Increase Contrast (Accessibility >
-/// Display), or a Windows contrast theme. `RUNE_INCREASE_CONTRAST=1` reports it on, for captures
-/// and checks, without turning it on for the whole machine. Read as [`reduced_motion`] is, and on
-/// macOS again when the display options change (`a11y/macos.rs`).
-pub(crate) fn increased_contrast() -> bool {
+/// Display), a Windows contrast theme, or Linux's XDG desktop portal `org.freedesktop.appearance`
+/// `contrast` setting (falling back to GNOME's `high-contrast` GSettings key when the portal
+/// does not answer). `RUNE_INCREASE_CONTRAST=1` reports it on, for captures and checks, without
+/// turning it on for the whole machine. Read as [`reduced_motion`] is, on macOS again when the
+/// display options change (`a11y/macos.rs`), and on Linux on redraws requested by the portal.
+///
+/// Reuses an already-sampled `contrast().is_some()` on Windows so callers that read both avoid
+/// querying `SPI_GETHIGHCONTRAST` twice and always see a consistent pair.
+pub(crate) fn increased_contrast_with(has_contrast: bool) -> bool {
+    #[cfg(test)]
+    if let Some(v) = test_overrides::increased_contrast() { return v; }
     if increased_contrast_preset() { return true; }
     #[cfg(target_os = "macos")]
     {
+        let _ = has_contrast;
         use objc2::{class, msg_send};
         // SAFETY: NSWorkspace's shared instance lives for the process; the selector returns an
         // Objective-C BOOL. Native hosts call on the UI thread.
@@ -494,7 +537,78 @@ pub(crate) fn increased_contrast() -> bool {
         }
     }
     #[cfg(target_os = "windows")]
-    { contrast().is_some() }
+    { has_contrast }
+    #[cfg(all(target_os = "linux", feature = "dbus"))]
+    {
+        let _ = has_contrast;
+        crate::platform::portal_appearance::increased_contrast()
+    }
+    #[cfg(all(target_os = "linux", not(feature = "dbus")))]
+    {
+        let _ = has_contrast;
+        CACHED_INCREASED_CONTRAST.get_or_init_with(
+            "rune-increased-contrast",
+            CachedPref::<bool>::FIRST_ANSWER,
+            read_increased_contrast_fallback,
+            redraw_fallback_windows,
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = has_contrast;
+        false
+    }
+}
+
+/// `RUNE_REDUCE_TRANSPARENCY=1`: [`reduced_transparency`] on, for captures and checks.
+pub(crate) fn reduced_transparency_preset() -> bool {
+    std::env::var_os("RUNE_REDUCE_TRANSPARENCY").is_some_and(|v| v == "1")
+}
+
+/// Decodes Windows' `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`
+/// `EnableTransparency` DWORD: `0` means transparency effects are off (reduce transparency);
+/// `1` or a missing value means transparency effects are on.
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn windows_enable_transparency_is_reduced(value: Option<u32>) -> bool {
+    value == Some(0)
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_reduced_transparency() -> bool {
+    #[cfg(feature = "windows-system-material")]
+    if let Some(enabled) = crate::system_material::windows::advanced_effects_if_started() {
+        return !enabled;
+    }
+    let val = windows_registry::CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|key| key.get_u32("EnableTransparency"))
+        .ok();
+    windows_enable_transparency_is_reduced(val)
+}
+
+/// Whether the system asks apps to reduce transparency: macOS's Reduce Transparency
+/// (Accessibility > Display), or Windows' Transparency effects turned off (Personalization >
+/// Colors / Accessibility > Visual effects). `RUNE_REDUCE_TRANSPARENCY=1` reports it on, for
+/// captures and checks, without turning it on for the whole machine. Read at window/overlay
+/// creation, on focus changes, and on live system-setting notifications (`a11y/macos.rs`,
+/// `a11y/windows.rs`, and Windows' material policy watcher).
+pub(crate) fn reduced_transparency() -> bool {
+    #[cfg(test)]
+    if let Some(v) = test_overrides::reduced_transparency() { return v; }
+    if reduced_transparency_preset() { return true; }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{class, msg_send};
+        // SAFETY: NSWorkspace's shared instance lives for the process; the selector returns an
+        // Objective-C BOOL. Native hosts call on the UI thread.
+        unsafe {
+            let workspace: *mut objc2::runtime::AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let reduced: objc2::runtime::Bool = msg_send![workspace, accessibilityDisplayShouldReduceTransparency];
+            reduced.as_bool()
+        }
+    }
+    #[cfg(target_os = "windows")]
+    { read_windows_reduced_transparency() }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     { false }
 }
@@ -521,9 +635,11 @@ pub struct SystemContrast {
 }
 
 /// The system's contrast theme, when one is on (Windows: Settings > Accessibility > Contrast
-/// themes). Read when a window opens and when Windows says its settings or colours changed.
+/// themes). Read when a window or overlay opens and when Windows says its settings or colours changed.
 #[cfg(target_os = "windows")]
 pub(crate) fn contrast() -> Option<SystemContrast> {
+    #[cfg(test)]
+    if let Some(v) = test_overrides::contrast() { return v; }
     if let Some(preset) = contrast_preset() { return Some(preset); }
     use windows_sys::Win32::Graphics::Gdi::GetSysColor;
     use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -544,7 +660,11 @@ pub(crate) fn contrast() -> Option<SystemContrast> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn contrast() -> Option<SystemContrast> { contrast_preset() }
+pub(crate) fn contrast() -> Option<SystemContrast> {
+    #[cfg(test)]
+    if let Some(v) = test_overrides::contrast() { return v; }
+    contrast_preset()
+}
 
 /// `RUNE_CONTRAST=aquatic|desert|dusk|night-sky`: Windows 11's contrast theme of that name, as
 /// its system colours are, without turning it on for the whole machine: for captures and checks
@@ -587,27 +707,73 @@ pub fn last_appearance(last: Option<Appearance>, keep: impl FnMut(Appearance) + 
 }
 
 /// The desktop's light or dark preference where winit reports none (Linux: the XDG desktop
-/// portal's `color-scheme`). None leaves the host's own default.
+/// portal's `color-scheme`, falling back off the UI thread to GSettings, GTK `settings.ini`,
+/// or `kdeglobals`). None leaves the host's own default.
 #[cfg(all(target_os = "linux", feature = "dbus"))]
 pub(crate) fn dark() -> Option<bool> { crate::platform::portal_appearance::dark() }
 
-#[cfg(not(any(all(target_os = "linux", feature = "dbus"), target_arch = "wasm32")))]
-pub(crate) fn dark() -> Option<bool> { None }
-
-/// [`dark`] for a window winit gives no theme; None leaves the window's appearance as it is.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn desktop_dark(window: &winit::window::Window) -> Option<bool> {
-    dark().filter(|_| window.theme().is_none())
+#[cfg(all(target_os = "linux", not(feature = "dbus")))]
+pub(crate) fn dark() -> Option<bool> {
+    CACHED_DARK.get_or_init_with(
+        "rune-color-scheme",
+        CachedPref::<Option<bool>>::FIRST_ANSWER,
+        crate::platform::linux_color_scheme::read_color_scheme_fallback,
+        redraw_fallback_windows,
+    )
 }
 
-/// A new window's appearance: `--theme` when given, else winit's theme, else [`desktop_dark`],
-/// else dark. On Linux a change of the desktop's preference redraws the window, which rereads it.
+#[cfg(not(any(target_os = "linux", target_arch = "wasm32")))]
+pub(crate) fn dark() -> Option<bool> { None }
+
+/// Resolves the Linux desktop's dark preference from an optional `--theme` override and the
+/// sampled portal/fallback preference, defaulting to dark (`true`) when unknown.
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn resolve_linux_dark(theme_arg: Option<&str>, desktop_dark: Option<bool>) -> bool {
+    match theme_arg {
+        Some("light") => false,
+        Some("dark") => true,
+        _ => desktop_dark.unwrap_or(true),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn resolved_linux_dark(theme_arg: Option<&str>) -> bool {
+    resolve_linux_dark(theme_arg, dark())
+}
+
+/// [`dark`] for a window whose platform winit gives no OS theme; None leaves the window's
+/// appearance as it is. On Linux, winit's `Window::theme` on Wayland only echoes the CSD theme
+/// Rune passed to `with_theme` / `set_theme` (and on X11 is always `None`), so `dark()` always
+/// drives `Cx::system_dark()` regardless of `window.theme()`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn desktop_dark(window: &winit::window::Window) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window;
+        dark()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        dark().filter(|_| window.theme().is_none())
+    }
+}
+
+/// A new window's appearance: `--theme` when given, else the platform's OS theme ([`dark`] on
+/// Linux; winit's `Window::theme` on macOS and Windows), else dark. On Linux a change of the
+/// desktop's preference redraws the window, which rereads it.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn window_dark(window: &std::sync::Arc<winit::window::Window>, theme: Option<&str>) -> bool {
     #[cfg(all(target_os = "linux", feature = "dbus"))]
     crate::platform::portal_appearance::follow(window);
     #[cfg(all(target_os = "linux", not(feature = "dbus")))]
     follow_fallback(window);
+    crate::platform::text_scale::follow(window);
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window;
+        resolved_linux_dark(theme)
+    }
+    #[cfg(not(target_os = "linux"))]
     match theme {
         Some("light") => false,
         Some("dark") => true,
@@ -631,6 +797,55 @@ pub(crate) fn full_keyboard_access() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn full_keyboard_access() -> bool { true }
+
+#[cfg(test)]
+pub(crate) mod test_overrides {
+    use std::cell::Cell;
+    use super::SystemContrast;
+
+    thread_local! {
+        static CONTRAST: Cell<Option<Option<SystemContrast>>> = const { Cell::new(None) };
+        static INCREASED_CONTRAST: Cell<Option<bool>> = const { Cell::new(None) };
+        static REDUCED_TRANSPARENCY: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn contrast() -> Option<Option<SystemContrast>> { CONTRAST.with(Cell::get) }
+    pub(super) fn increased_contrast() -> Option<bool> { INCREASED_CONTRAST.with(Cell::get) }
+    pub(super) fn reduced_transparency() -> Option<bool> { REDUCED_TRANSPARENCY.with(Cell::get) }
+
+    pub(crate) struct Guard {
+        prev_contrast: Option<Option<SystemContrast>>,
+        prev_increased: Option<bool>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CONTRAST.with(|c| c.set(self.prev_contrast));
+            INCREASED_CONTRAST.with(|c| c.set(self.prev_increased));
+        }
+    }
+
+    pub(crate) fn set_contrast(contrast: Option<SystemContrast>, increased_contrast: bool) -> Guard {
+        let prev_contrast = CONTRAST.with(|c| c.replace(Some(contrast)));
+        let prev_increased = INCREASED_CONTRAST.with(|c| c.replace(Some(increased_contrast)));
+        Guard { prev_contrast, prev_increased }
+    }
+
+    pub(crate) struct ReducedTransparencyGuard {
+        prev: Option<bool>,
+    }
+
+    impl Drop for ReducedTransparencyGuard {
+        fn drop(&mut self) {
+            REDUCED_TRANSPARENCY.with(|c| c.set(self.prev));
+        }
+    }
+
+    pub(crate) fn set_reduced_transparency(reduced: bool) -> ReducedTransparencyGuard {
+        let prev = REDUCED_TRANSPARENCY.with(|c| c.replace(Some(reduced)));
+        ReducedTransparencyGuard { prev }
+    }
+}
 
 #[cfg(test)]
 #[path = "preferences_tests.rs"]

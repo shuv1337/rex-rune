@@ -54,22 +54,23 @@ pub(crate) mod virtual_rows;
 mod visual;
 mod visuals;
 
-pub use a11y::{AutoComplete, HasPopup, LiveRegion, Orientation};
+pub use a11y::{AutoComplete, Current, HasPopup, LiveRegion, Orientation};
 pub(crate) use a11y::{A11y, Checked};
 pub use anchor::{Anchor, Side, anchor_rect, anchor_rect_in};
-pub(crate) use crate::clipboard::tx::{ClipboardRead, ReadFn};
+pub(crate) use crate::clipboard::tx::{ClipboardRead, CopyImageCallback, CopyImageFn, ReadFn};
 pub use crate::cursor::{Cursor, CursorImage};
 pub use direction::Direction;
 pub(crate) use direction::{DirEffect, DirEvent, Flow, Pin, mirror_anchor, mirror_side, mirror_visual, step as step_direction};
+pub use drop::{DropDescription, DropDescriptionKind, DropFeedback, DropInfo};
 pub(crate) use drop::{DropHoverFn, DropSpec};
 pub(crate) use focus::FocusSpec;
 pub(crate) use focus::ModalSpec;
-pub(crate) use handler_set::Handlers;
+pub(crate) use handler_set::{CustomA11yAction, Handlers};
 pub use grid::{GridRow, grid};
 pub use handlers::{Drag, Phase, PointerEvent, PointerPress, SwipeEdge};
 pub(crate) use handlers::{A11yActionFn, AnyPressFn, DragEndFn, DragFn, DragOutFn, InputKeyFn, PointerFn, PointerMotionFn, PressFn, SetValueFn, StepFn, StepLimitFn, WindowDrag};
 pub(crate) use help::{HELP_KEY, HELP_ROW, help_words};
-pub use input::{InputSpec, auto_grow, edit_access, text_input};
+pub use input::{Autofill, InputMode, InputSpec, auto_grow, edit_access, text_input};
 pub use items::VirtualItems;
 #[doc(hidden)]
 pub use layout::PathBind;
@@ -84,10 +85,10 @@ pub(crate) use scroll::{AtBottomFn, ScrollAxes, ScrollEdges, VisibleRowsFn};
 pub(crate) use selection_scope::{apply_selection_off, selection_off};
 pub use selection_style::SelectionStyle;
 pub(crate) use sticky::{Sticky, StickyEdge};
-pub(crate) use text_spec::{Elide, InlineAnchor, TextDir, TextDirEvent, step_text_dir, wipe_links, wipe_string};
+pub(crate) use text_spec::{Elide, InlineAnchor, TextDir, TextDirEvent, TextFlags, step_text_dir, wipe_links, wipe_string};
 pub use text_spec::LineFill;
 pub use text_spec::TextSpec;
-pub(crate) use tx::{Commit, FocusAsk, FullScreenRequest, MotionSource, SelectRequest, TraceCalls};
+pub(crate) use tx::{Commit, FocusAsk, FullScreenRequest, HoverSnapshot, MotionSource, SelectRequest, TraceCalls, innermost_hover_key};
 pub use tx::{Shell, Tx};
 pub(crate) use visual::VisualFlags;
 pub use visual::{Visual, VisualCold};
@@ -103,6 +104,36 @@ pub fn text(content: impl Into<String>) -> El {
     let mut e = base(FlexDirection::Row);
     e.role = RoleTag::TEXT;
     e.text = Some(crate::cold::SharedBox::new(TextSpec::new(content.into())));
+    e
+}
+
+/// Transparent glyph-less text layer backed by app-placed character boxes
+/// ([`PositionedText`](crate::PositionedText)), for selectable and copyable text over an
+/// externally painted page bitmap (such as a PDF).
+///
+/// Defaults to [`El::selectable`](El::selectable)`(true)` with [`Cursor::Text`]; draws zero
+/// glyphs and paints only selection highlights, [`El::caret_browsing`] carets,
+/// [`El::text_highlight`] / [`El::highlight_texts`], and [`Cx::mark_texts`](crate::Cx::mark_texts).
+/// Participates in [`El::selection_group`], plain and HTML copy, [`Cx::selection_rects`](crate::Cx::selection_rects),
+/// [`Runtime::text_offset_at`](crate::Runtime::text_offset_at), and inline [`Link`](crate::Link) spans.
+///
+/// ```
+/// use rune::{PositionedText, col, el, positioned_text};
+///
+/// let page = PositionedText::new(
+///     "Hi\n",
+///     vec![[10.0, 20.0, 8.0, 12.0], [18.0, 20.0, 4.0, 12.0], [0.0; 4]],
+/// )
+/// .view_box(612.0, 792.0);
+/// let _view = col().selection_group(true).child(
+///     el().size(612.0, 792.0).child(positioned_text(&page).w_full().h_full()),
+/// );
+/// ```
+pub fn positioned_text(text: &crate::text::PositionedText) -> El {
+    let mut e = base(FlexDirection::Row);
+    e.role = RoleTag::TEXT;
+    e.text = Some(crate::cold::SharedBox::new(TextSpec::new_positioned(text.clone())));
+    e.handlers.cursor = Some(Cursor::Text);
     e
 }
 
@@ -165,6 +196,8 @@ pub(crate) struct PasteFn {
 pub(crate) type PillIconFn = Rc<dyn Fn(&str) -> Option<&'static crate::Icon>>;
 /// A pill's leading full-colour image by its id; see [`El::pill_image`].
 pub(crate) type PillImageFn = Rc<dyn Fn(&str) -> Option<crate::Pixels>>;
+/// A pill's replacing inline image by its id; see [`El::pill_inline_image`].
+pub(crate) type PillInlineImageFn = Rc<dyn Fn(&str) -> Option<InlineImage>>;
 /// A pill's look by its id; see [`El::pill_style`].
 pub(crate) type PillStyleFn = Rc<dyn Fn(&str) -> PillStyle>;
 /// A pill's plain-text copy payload by its id; see [`El::pill_copy_text`].
@@ -174,7 +207,7 @@ pub(crate) type PillSecondaryFn = PillPressFn;
 
 /// How one [`Mark::Pill`](crate::Mark::Pill) chip looks: any part left unset falls back to
 /// [`El::pill_colors`] and [`El::pill_icon`], then the field's defaults. Build one with
-/// `PillStyle::new().bg(..).ring(..).radius(..)`.
+/// `PillStyle::new().bg(..).ring(..).radius(..).pad_x(..).margin_x(..)`.
 ///
 /// For a full-colour leading logo ([`Pixels`](crate::Pixels)) without giving up `Copy` or
 /// `const` construction on `PillStyle`, attach [`El::pill_image`] on a `text_input` or
@@ -186,11 +219,13 @@ pub struct PillStyle {
     pub(crate) icon: Option<&'static crate::Icon>,
     pub(crate) ring: Option<(Color, f32)>,
     pub(crate) radius: Option<f32>,
+    pub(crate) pad_x: Option<f32>,
+    pub(crate) margin_x: Option<f32>,
 }
 
 impl PillStyle {
     pub const fn new() -> Self {
-        Self { bg: None, fg: None, icon: None, ring: None, radius: None }
+        Self { bg: None, fg: None, icon: None, ring: None, radius: None, pad_x: None, margin_x: None }
     }
     /// The chip's colour.
     pub const fn bg(mut self, bg: Color) -> Self {
@@ -234,6 +269,32 @@ impl PillStyle {
     /// ```
     pub const fn radius(mut self, points: f32) -> Self {
         self.radius = Some(if points.is_finite() && points > 0.0 { points } else { 0.0 });
+        self
+    }
+    /// Horizontal padding inside the chip in points on each side of its label (and before any
+    /// leading icon or image). Unset, defaults to `(font_size * 0.36).max(3.0)`. Non-finite or
+    /// negative values become `0.0`.
+    ///
+    /// ```
+    /// use rune::PillStyle;
+    ///
+    /// const TIGHT: PillStyle = PillStyle::new().pad_x(2.0).margin_x(0.0);
+    /// ```
+    pub const fn pad_x(mut self, points: f32) -> Self {
+        self.pad_x = Some(if points.is_finite() && points > 0.0 { points } else { 0.0 });
+        self
+    }
+    /// Horizontal outer margin outside the chip in points on each side, separating the chip from
+    /// surrounding text. Unset, defaults to `(font_size * 0.12).max(1.5)`. Non-finite or negative
+    /// values become `0.0`.
+    ///
+    /// ```
+    /// use rune::PillStyle;
+    ///
+    /// const FLUSH: PillStyle = PillStyle::new().margin_x(0.0);
+    /// ```
+    pub const fn margin_x(mut self, points: f32) -> Self {
+        self.margin_x = Some(if points.is_finite() && points > 0.0 { points } else { 0.0 });
         self
     }
 }

@@ -35,9 +35,21 @@ impl RuntimeCore {
         };
         for &(i, a, b) in &ranges {
             let Some(spec) = self.tree.nodes[i].text.as_ref() else { continue };
-            let block = self.block_of(i);
+            let mut block = self.block_of(i);
             // A list's markers are the list's own: `<ol>` and `<ul>` draw them.
-            if self.tree.nodes[i].a11y.hidden && matches!(block, Block::Item { .. }) { continue; }
+            if (self.tree.nodes[i].a11y.hidden || self.tree.nodes[i].role == "list-marker")
+                && matches!(block, Block::Item { .. })
+            {
+                continue;
+            }
+            // A partial slice inside one list item copies as a plain fragment rather than a
+            // list item, keeping HTML in agreement with plain text and `Markdown::copy_source`.
+            if ranges.len() == 1
+                && matches!(block, Block::Item { .. })
+                && !super::copy_join::is_whole_copied(spec, &(a..b))
+            {
+                block = Block::Paragraph(i);
+            }
             let inline = inline_html(spec, a, b);
             if inline.trim().is_empty() { continue; }
             match prev {
@@ -93,8 +105,9 @@ impl RuntimeCore {
                 "heading" => return Block::Heading(j, self.tree.nodes[j].a11y.level.unwrap_or(2).clamp(1, 6) as u8),
                 "listitem" => {
                     let list = std::iter::successors(self.tree.nodes[j].parent, |&p| self.tree.nodes[p].parent).find(|&p| role(p) == "list").unwrap_or(j);
-                    // A list whose first item's marker is a number is ordered.
-                    let ordered = self.tree.nodes.get(j + 1).and_then(|n| n.text.as_ref()).is_some_and(|t| t.content.trim_end_matches('.').chars().all(|c| c.is_ascii_digit()) && !t.content.is_empty());
+                    // Ordered when the list sets `list_start`, or its first item's marker is a number.
+                    let ordered = self.tree.nodes[list].a11y.more.as_deref().is_some_and(|m| m.list_start.is_some())
+                        || self.tree.nodes.get(j + 1).and_then(|n| n.text.as_ref()).is_some_and(|t| { let c = t.content_str(); c.trim_end_matches('.').chars().all(|ch| ch.is_ascii_digit()) && !c.is_empty() });
                     return Block::Item { list, item: j, ordered };
                 }
                 "cell" | "columnheader" | "rowheader" => {
@@ -174,7 +187,8 @@ fn sub_marks(counts: &mut [usize; 4], bits: u8) {
 /// starts or ends, sweeping active intervals in O(N log N) instead of rescanning every span at
 /// every boundary.
 fn inline_html(spec: &crate::el::TextSpec, a: usize, b: usize) -> String {
-    let len = spec.content.len();
+    let content = spec.content_str();
+    let len = content.len();
     let (a, b) = (a.min(len), b.min(len));
     if spec.redacted || a >= b { return String::new(); }
     let links = &spec.cold.links;
@@ -215,7 +229,7 @@ fn inline_html(spec: &crate::el::TextSpec, a: usize, b: usize) -> String {
         cuts.push(end);
     }
 
-    cuts.retain(|&c| c >= a && c <= b && spec.content.is_char_boundary(c));
+    cuts.retain(|&c| c >= a && c <= b && content.is_char_boundary(c));
     cuts.sort_unstable();
     cuts.dedup();
     marks.sort_unstable_by_key(|&(start, _, _)| start);

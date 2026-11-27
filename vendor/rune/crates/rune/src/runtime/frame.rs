@@ -1,10 +1,48 @@
 //! Frame loop, clocks, wake deadlines, request latching and motion/paint-order stepping.
 use super::*;
 
+pub(in crate::runtime) mod drain;
 mod latch;
 mod motion;
 mod mount;
 mod wakes;
+
+/// Side effects collected across a frame (`open_urls`, `open_paths`, `haptics`) and committed
+/// once at the end of [`RuntimeCore::frame`] so they align with the presented frame.
+#[derive(Default)]
+pub(in crate::runtime) struct EndOfFrameRequests {
+    pub open_urls: Vec<crate::open_url::Link>,
+    pub open_paths: Vec<crate::open_path::PathRequest>,
+    pub haptics: Vec<crate::Haptic>,
+}
+
+impl EndOfFrameRequests {
+    pub(in crate::runtime) fn take_from(tx: &mut Tx) -> Self {
+        Self {
+            open_urls: std::mem::take(&mut tx.open_urls),
+            open_paths: std::mem::take(&mut tx.open_paths),
+            haptics: std::mem::take(&mut tx.haptics),
+        }
+    }
+
+    pub(in crate::runtime) fn extend_from(&mut self, tx: &mut Tx) {
+        self.open_urls.extend(std::mem::take(&mut tx.open_urls));
+        self.open_paths.extend(std::mem::take(&mut tx.open_paths));
+        self.haptics.extend(std::mem::take(&mut tx.haptics));
+    }
+
+    pub(in crate::runtime) fn extend(&mut self, other: Self) {
+        self.open_urls.extend(other.open_urls);
+        self.open_paths.extend(other.open_paths);
+        self.haptics.extend(other.haptics);
+    }
+
+    pub(in crate::runtime) fn restore_into(self, tx: &mut Tx) {
+        tx.open_urls.extend(self.open_urls);
+        tx.open_paths.extend(self.open_paths);
+        tx.haptics.extend(self.haptics);
+    }
+}
 
 impl RuntimeCore {
     /// The last committed frame is out of date: state changed (an update, poll or handler), or
@@ -123,25 +161,62 @@ impl RuntimeCore {
     /// is ordered in and its first drawable taken. Lands every track, as showing does.
     /// Returns whether it built; the first frame then has nothing left to build.
     pub(crate) fn build_for_show(&mut self, app: &mut dyn AppDriver) -> bool {
-        if !self.host.fit_height || self.commit.commits == 0 || !self.stale() { return false; }
+        if !self.host.content_sizing.fits_any() || self.commit.commits == 0 || !self.stale() { return false; }
         self.settle_all();
         self.hidden_timer_frame(app);
         true
     }
 
     /// A hidden or covered host's due timer or wake. `poll` and due timers run now; the view
-    /// and layout wait, dirty, for the frame that shows the host. Queued input and drag ends take a frame
-    /// without drawing (`hidden_timer_frame`) so their handlers hear them now. Returns whether
-    /// the last drawn frame went out of date.
+    /// and layout wait, dirty, for the frame that shows the host. Queued input and drag ends -
+    /// whether already waiting at entry or queued by `poll` (such as `Tx::send_key`,
+    /// `Play::press`, or a paste) - take a zero-dt frame without drawing (`hidden_timer_frame`)
+    /// so their handlers hear them in this same wake with the poll's clock, then drain chained
+    /// input through [`drain::drain_turn`]. Returns whether the last drawn frame went out of date.
     pub(crate) fn hidden_wake(&mut self, app: &mut dyn AppDriver) -> bool {
-        if self.has_pending_input() || self.drag_ends_pending() {
-            let commits = self.stats.commits;
+        let commits = self.stats.commits;
+        let mut poll_stale = false;
+        let wake_clock = if self.has_pending_input() || self.drag_ends_pending() {
             self.hidden_timer_frame(app);
-            // File steps held for that frame's build land in another.
-            if self.files_held() { self.hidden_timer_frame(app); }
-            return self.stats.commits != commits;
+            self.polled_at()
+        } else {
+            let (stale, pending) = self.poll_hidden_or_arm_follow_up(app);
+            poll_stale = stale;
+            if !pending {
+                return poll_stale;
+            }
+            let polled = self.clock;
+            self.hidden_timer_frame(app);
+            polled
+        };
+        self.drain_hidden_input(app, wake_clock);
+        poll_stale || self.stats.commits != commits
+    }
+
+    /// Drains chained user input, drag ends, or held file steps left queued after a non-drawable
+    /// frame through [`drain::drain_turn`], preserving `wake_clock` without re-polling. When
+    /// [`drain::MAX_POLL_ROUNDS`] is hit with work still waiting, schedules a continuation wake
+    /// (paced by `TIMER_FRAME` on the host) instead of spinning.
+    pub(crate) fn drain_hidden_input(&mut self, app: &mut dyn AppDriver, wake_clock: f64) {
+        if self.frame.poll_capped() {
+            return;
         }
-        self.poll_hidden(app)
+        let outcome = drain::drain_turn(
+            self,
+            |rt| !rt.frame.poll_capped() && rt.hidden_follow_up_waiting(),
+            |rt, _| {
+                rt.frame.set_follow_up_poll(wake_clock);
+                rt.hidden_timer_frame(app);
+            },
+        );
+        if outcome.capped {
+            self.schedule_wakes_from(wake_clock, [std::time::Duration::ZERO]);
+        }
+    }
+
+    #[inline]
+    fn hidden_follow_up_waiting(&self) -> bool {
+        self.has_input_waiting() || self.drag_ends_pending() || self.files_held()
     }
 
     /// [`Runtime::hidden_wake`] for a shown window that can't draw (covered, minimised, on a
@@ -158,7 +233,10 @@ impl RuntimeCore {
             && (self.a11y_activation_build_pending() || self.has_focus_request())
             && (self.needs_commit() || self.commit.commits == 0)
         {
+            let wake_clock = self.polled_at();
+            self.frame.set_follow_up_poll(wake_clock);
             self.hidden_timer_frame(app);
+            self.drain_hidden_input(app, wake_clock);
         }
         stale
     }
@@ -284,9 +362,12 @@ impl RuntimeCore {
         // the checker brought back show without the view running again.
         let (wake, _marked) = crate::spell::pause::tick(&mut self.edit.spell_watch, self.clock);
         if let Some(at) = wake { self.schedule_wakes([std::time::Duration::from_secs_f64((at - self.clock).max(0.0))]); }
+        self.frame.set_poll_capped(false);
+        let mut frame_had_input = self.frame.queue.has_input();
         if !polled && app.has_poll() {
+            tx.request_poll = false;
             let mut one = self.transaction(app);
-            one.input_waiting = self.frame.queue.has_input();
+            one.input_waiting = frame_had_input;
             // Scheduling does not imply a model change.
             if self.frame.record_poll(crate::tooling::perf_warn::timed("poll", || app.poll(self.clock, &mut one))) {
                 ran = true;
@@ -318,7 +399,8 @@ impl RuntimeCore {
         // it makes isn't the live-only handler's.
         #[cfg(debug_assertions)]
         let mut ran_other = ran;
-        let mut drag_cancelled = self.flush_cancel_pointer(app, &mut tx, &mut ran, &mut why, #[cfg(debug_assertions)] &mut ran_other);
+        let mut handler_ran = false;
+        let mut drag_cancelled = self.flush_cancel_pointer(app, &mut tx, &mut ran, &mut why, &mut handler_ran, #[cfg(debug_assertions)] &mut ran_other);
         // A host settle (an uncover, a restore, a shown window) lands the tree the frame began
         // with, before this frame's input runs. The input's own commit below then animates, so
         // a dialog the first press closes still plays its exit.
@@ -329,130 +411,82 @@ impl RuntimeCore {
             { ran_other = false; }
         }
         let mut pointer_hover = false;
-        for Queued { action, at, input } in queue {
-            if drag_cancelled {
-                match &action {
-                    Action::Drag(_, d, _) | Action::DragRepeat(_, d, _) if d.phase != Phase::Down => continue,
-                    Action::Drag(_, d, _) if d.phase == Phase::Down => drag_cancelled = false,
-                    _ => {}
-                }
-            }
-            if matches!(action, Action::Key { stage: false, .. } | Action::Physical(crate::PhysicalInput::Key { pressed: true, .. }, _)) { crate::marks::input_handled(true); }
-            pointer_hover |= matches!(action, Action::Hover(_));
-            // The user's own key or press takes over from a `Tx::focus_when_shown` still waiting.
-            if matches!(action, Action::Key { stage: false, .. } | Action::Physical(crate::PhysicalInput::Key { pressed: true, .. }, _) | Action::Press(..) | Action::Focus(..)) {
-                self.kbd.focus_owed = None;
-            }
-            // State may have requested focus on a newly mounted field. Resolve the
-            // new tree before routing this frame's text, not after it has gone to
-            // the previous field. The same boundary covers an earlier handler, and lets a
-            // file drag find only what is mounted and reachable now (a covered window builds
-            // nothing until this).
-            let routed = matches!(&action, Action::Key { .. } | Action::KeyUp(_) | Action::Physical(..) | Action::Ime(_) | Action::FinishIme | Action::Paste(..) | Action::Files(_) | Action::SecondaryRepost { .. } | Action::WheelRepost(_));
-            // So is a playground an earlier handler opened or moved, and a focus change.
-            if routed {
-                self.latch_playground(app, &mut tx);
-                self.latch_focus(&mut tx);
-                if let Some(picked) = tx.field_menu_resolution.take() {
-                    self.latch_field_menu_resolution(app, picked, &mut tx);
-                }
-            }
-            // Both callbacks see ordinary &mut S. After the next mutation a single view
-            // cannot tell which one introduced a row. Observe the poll's tree now, without
-            // drawing it or advancing time. A key already needed this same routing boundary.
-            let split = self.motion.motion_needs_cause() && why & CommitWhy::POLL != 0 && (input || routed);
-            if split || (ran || self.commit.dirty || !tx.scroll_to.is_empty()) && routed {
-                if split {
-                    let links = std::mem::take(&mut tx.open_urls);
-                    let paths = std::mem::take(&mut tx.open_paths);
-                    self.latch_requests(app, &mut tx);
-                    tx.open_urls = links;
-                    tx.open_paths = paths;
-                }
-                if ran || self.commit.dirty {
-                    self.motion.capture_flights(&self.tree.nodes, &mut self.paint, &mut self.text, self.env.scale, self.viewport, self.t, &mut tx);
-                    if self.commit.is_settling() { tx.settle(); }
-                    self.settled |= tx.commit.lands();
-                    #[cfg(debug_assertions)]
-                    if ran_other || self.commit.dirty || ran_layout { self.frame.clear_live_check(); }
-                    self.capture_keeps(&mut tx);
-                    tx.unprompted = self.motion.motion_needs_cause() && why & CommitWhy::INPUT == 0 && !tx.asked_motion;
-                    if split && tx.unprompted { tx.commit = tx.commit.without_input(); }
-                    if routed { why |= CommitWhy::ROUTE; }
-                    if self.commit.dirty { why |= CommitWhy::DIRTY; }
-                    self.commit_for(app, &tx, std::mem::take(&mut why));
-                    #[cfg(debug_assertions)]
-                    { let check = self.frame.take_live_check(); self.compare_live_check(check); ran_other = false; }
-                    self.apply_keeps(app);
-                    self.finish_deferred_field_menu(app, &mut tx, None, None);
-                    ran = false;
-                }
-                if split {
-                    self.finish_scroll_requests(app, &mut tx, false);
-                    // The poll's motion policy belongs to the tree just applied, not to
-                    // the handler about to run. Shell requests and timers still go out once.
-                    tx.commit = Commit::Animate;
-                    tx.unprompted = false;
-                    tx.asked_motion = false;
-                    tx.live_growth.clear(); tx.tail_rooms.clear();
-                    tx.motion = None;
-                    tx.color_motion = None;
-                    tx.follow_edge = false;
-                    tx.unclipped_flights = false;
-                    ran_layout = false;
-                } else if !tx.scroll_to.is_empty() {
-                    self.drop_scroll_holds();
-                    for r in tx.scroll_to.drain(..) { self.reveal_row(app, &r, tx.commit.snaps()); }
-                }
-            }
-            let _input = crate::input::time::scope(at);
-            // A selection an earlier handler asked for is what this key copies.
-            if matches!(action, Action::Key { .. } | Action::Physical(..)) && let Some(request) = tx.select.take() {
-                let from_change = std::mem::take(&mut tx.select_from_change);
-                self.apply_select_request(app, request, from_change);
-            }
-            if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false) | Action::VisibleRows(..)) {
-                ran_layout |= self.run_action(app, action, &mut tx);
-            } else {
-                #[cfg(debug_assertions)]
-                let checks = self.frame.live_checks();
-                let r = self.run_action(app, action, &mut tx);
-                #[cfg(debug_assertions)]
-                { ran_other |= r && checks == self.frame.live_checks(); }
-                ran |= r;
-                if r { why |= if input { CommitWhy::INPUT } else { CommitWhy::DIRTY }; }
-            }
-            self.run_pick_reads(app, &mut tx);
-            drag_cancelled |= self.flush_cancel_pointer(app, &mut tx, &mut ran, &mut why, #[cfg(debug_assertions)] &mut ran_other);
-        }
+        self.run_action_queue(
+            app,
+            queue,
+            &mut tx,
+            &mut ran,
+            &mut ran_layout,
+            &mut why,
+            &mut pointer_hover,
+            &mut handler_ran,
+            &mut drag_cancelled,
+            #[cfg(debug_assertions)]
+            &mut ran_other,
+        );
         // Once a frame, however often a drag moved the selection, and in time for this commit.
         for action in self.selection_changes(app) {
             #[cfg(debug_assertions)]
             let checks = self.frame.live_checks();
             let r = self.run_action(app, action, &mut tx);
             #[cfg(debug_assertions)]
-            { ran_other |= r && checks == self.frame.live_checks(); }
+            let non_live = r && checks == self.frame.live_checks();
+            #[cfg(not(debug_assertions))]
+            let non_live = r;
+            #[cfg(debug_assertions)]
+            { ran_other |= non_live; }
+            handler_ran |= non_live;
             if r { ran = true; why |= CommitWhy::DIRTY; }
-            self.flush_cancel_pointer(app, &mut tx, &mut ran, &mut why, #[cfg(debug_assertions)] &mut ran_other);
+            self.flush_cancel_pointer(app, &mut tx, &mut ran, &mut why, &mut handler_ran, #[cfg(debug_assertions)] &mut ran_other);
         }
-        #[cfg(target_os = "linux")]
-        self.note_primary_selection(app);
-        let mut open_urls = std::mem::take(&mut tx.open_urls);
-        let mut open_paths = std::mem::take(&mut tx.open_paths);
+        if app.has_poll() {
+            self.run_poll_follow_ups(
+                app,
+                &mut tx,
+                &mut ran,
+                &mut ran_layout,
+                &mut why,
+                &mut pointer_hover,
+                &mut handler_ran,
+                &mut frame_had_input,
+                #[cfg(debug_assertions)]
+                &mut ran_other,
+            );
+        }
+        let mut end_of_frame = EndOfFrameRequests::take_from(&mut tx);
         self.latch_requests(app, &mut tx);
         // A handler asked for a menu: the hover it takes ends in this commit, not a frame later.
         if self.release_pointer_for_popup() {
+            let mut popup_handler_ran = false;
             for queued in std::mem::take(&mut self.frame.queue) {
                 if !matches!(queued.action, Action::HoverChange(..) | Action::LinkHover(..)) { self.frame.queue.push_queued(queued); continue; }
                 #[cfg(debug_assertions)]
                 let checks = self.frame.live_checks();
                 let r = self.run_action(app, queued.action, &mut tx);
                 #[cfg(debug_assertions)]
-                { ran_other |= r && checks == self.frame.live_checks(); }
+                let non_live = r && checks == self.frame.live_checks();
+                #[cfg(not(debug_assertions))]
+                let non_live = r;
+                #[cfg(debug_assertions)]
+                { ran_other |= non_live; }
+                popup_handler_ran |= non_live;
                 if r { ran = true; why |= if queued.input { CommitWhy::INPUT } else { CommitWhy::DIRTY }; }
             }
-            open_urls.extend(std::mem::take(&mut tx.open_urls));
-            open_paths.extend(std::mem::take(&mut tx.open_paths));
+            if app.has_poll() && !self.frame.poll_capped() && (popup_handler_ran || tx.request_poll) {
+                self.run_poll_follow_ups(
+                    app,
+                    &mut tx,
+                    &mut ran,
+                    &mut ran_layout,
+                    &mut why,
+                    &mut pointer_hover,
+                    &mut popup_handler_ran,
+                    &mut frame_had_input,
+                    #[cfg(debug_assertions)]
+                    &mut ran_other,
+                );
+            }
+            end_of_frame.extend_from(&mut tx);
             self.latch_requests(app, &mut tx);
         }
         self.release_files();
@@ -497,17 +531,20 @@ impl RuntimeCore {
             { let check = self.frame.take_live_check(); self.compare_live_check(check); }
             self.apply_keeps(app);
         }
-        self.finish_deferred_field_menu(app, &mut tx, Some(&mut open_urls), Some(&mut open_paths));
+        self.finish_deferred_field_menu(app, &mut tx, Some(&mut end_of_frame));
+        self.finish_deferred_popup_menu(app, &mut tx, Some(&mut end_of_frame));
         #[cfg(debug_assertions)]
         { self.frame.clear_live_check(); }
         let mount_rounds = self.deliver_mounts(
             app,
             &mut tx,
             commits0,
-            &mut open_urls,
-            &mut open_paths,
+            &mut end_of_frame,
             mount::MAX_MOUNT_ROUNDS,
         );
+        if std::mem::take(&mut tx.request_poll) {
+            self.schedule_wakes([std::time::Duration::ZERO]);
+        }
         tx.keep_on_screen.clear();
         self.queue_reveal_selected(&mut tx, pointer_hover);
         #[cfg(debug_assertions)]
@@ -519,6 +556,8 @@ impl RuntimeCore {
         if self.edit.selectable.pending_move.is_seeking() {
             self.drive_pending_caret(app);
         }
+        #[cfg(target_os = "linux")]
+        self.note_primary_selection(app);
         if defer_shift && self.commit.commits == commits_before_scroll && self.virtual_window_changed() {
             self.commit_virtual_scroll(app, &Tx::default());
         }
@@ -532,8 +571,7 @@ impl RuntimeCore {
                 app,
                 &mut tx,
                 commits0,
-                &mut open_urls,
-                &mut open_paths,
+                &mut end_of_frame,
                 mount::MAX_MOUNT_ROUNDS - mount_rounds,
             );
             if late_rounds > 0 {
@@ -571,7 +609,10 @@ impl RuntimeCore {
         }
         let dt = if self.fit_frame_holds() { 0.0 } else { dt };
         let instant_scroll = tx.commit.snaps() || self.settled;
-        let animating = self.step_motion(app, dt, instant_scroll) || live_animating;
+        let mut animating = self.step_motion(app, dt, instant_scroll) || live_animating;
+        if self.deliver_popup_menu_fallback_after_paint(app, &mut tx, Some(&mut end_of_frame)) {
+            animating |= self.step_motion(app, 0.0, true);
+        }
         self.stats.shaped = self.text.shaped - shaped0;
         let filling = self.virtual_filling();
         if live_animating { self.motion.add_anim_sources(AnimSource::LIVE); }
@@ -586,8 +627,12 @@ impl RuntimeCore {
             self.frame.idle_frame_ends(self.clock, self.animating, clear, self.viewport, self.env.scale, self.paint.srgb_blend(), self.transparent, self.images.copies, &self.instances, opaque, title);
         }
         self.interaction_built();
-        if !open_urls.is_empty() { self.open_urls(open_urls); }
-        if !open_paths.is_empty() { self.open_paths(open_paths); }
+        if !end_of_frame.open_urls.is_empty() { self.open_urls(end_of_frame.open_urls); }
+        if !end_of_frame.open_paths.is_empty() { self.open_paths(end_of_frame.open_paths); }
+        if !end_of_frame.haptics.is_empty() {
+            let now = self.clock;
+            self.host.haptics.push_at(end_of_frame.haptics, now);
+        }
         self.animating
     }
 
@@ -595,12 +640,13 @@ impl RuntimeCore {
     /// returned: ends pointer capture/hover without re-entrancy and delivers the cancelled
     /// `Phase::Up` drag and hover-leave actions in this same frame. Returns whether a held
     /// drag was cancelled.
-    fn flush_cancel_pointer(
+    pub(super) fn flush_cancel_pointer(
         &mut self,
         app: &mut dyn AppDriver,
         tx: &mut Tx,
         ran: &mut bool,
         why: &mut u16,
+        handler_ran: &mut bool,
         #[cfg(debug_assertions)] ran_other: &mut bool,
     ) -> bool {
         if !std::mem::take(&mut tx.cancel_pointer) { return false; }
@@ -614,7 +660,12 @@ impl RuntimeCore {
             let checks = self.frame.live_checks();
             let r = self.run_action(app, q.action, tx);
             #[cfg(debug_assertions)]
-            { *ran_other |= r && checks == self.frame.live_checks(); }
+            let non_live = r && checks == self.frame.live_checks();
+            #[cfg(not(debug_assertions))]
+            let non_live = r;
+            #[cfg(debug_assertions)]
+            { *ran_other |= non_live; }
+            *handler_ran |= non_live;
             if r {
                 *ran = true;
                 *why |= if q.input { CommitWhy::INPUT } else { CommitWhy::DIRTY };
@@ -629,11 +680,9 @@ impl RuntimeCore {
     /// input's own commit animate what it changes. `apply` clears the settle latch as this
     /// commit applies it: the settle is spent here, so nothing is deferred or dropped.
     fn settle_before_input(&mut self, app: &mut dyn AppDriver, tx: &mut Tx, why: &mut u16) {
-        let links = std::mem::take(&mut tx.open_urls);
-        let paths = std::mem::take(&mut tx.open_paths);
+        let deferred = EndOfFrameRequests::take_from(tx);
         self.latch_requests(app, tx);
-        tx.open_urls = links;
-        tx.open_paths = paths;
+        deferred.restore_into(tx);
         self.motion.capture_flights(&self.tree.nodes, &mut self.paint, &mut self.text, self.env.scale, self.viewport, self.t, tx);
         tx.settle();
         self.settled |= tx.commit.lands();
@@ -672,3 +721,5 @@ impl RuntimeCore {
         !self.tree.aspect_snap.is_empty()
     }
 }
+
+

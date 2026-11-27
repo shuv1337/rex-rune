@@ -2,13 +2,13 @@ use crate::{Cx, El, Env, Runtime, TextEdit, TextStyle, col, text_input};
 
 fn field(e: &TextEdit, _: &mut Cx<TextEdit>) -> El {
     col().size(120.0, 200.0).child(
-        text_input(e, TextStyle::new(14.0, 400.0).mono()).key("f").w_full().on_edit(|e: &mut TextEdit| e),
+        text_input(e, TextStyle::new(14.0, 400.0)).key("f").w_full().on_edit(|e: &mut TextEdit| e),
     )
 }
 
 fn nowrap(e: &TextEdit, _: &mut Cx<TextEdit>) -> El {
     col().size(120.0, 200.0).scroll_xy().child(
-        text_input(e, TextStyle::new(14.0, 400.0).mono()).key("f").nowrap().on_edit(|e: &mut TextEdit| e),
+        text_input(e, TextStyle::new(14.0, 400.0)).key("f").nowrap().on_edit(|e: &mut TextEdit| e),
     )
 }
 
@@ -89,13 +89,18 @@ fn a_composition_keeps_lines_in_the_committed_texts_bytes() {
     assert_eq!(rt.text_line("f", 5).unwrap().prev, Some(0));
 }
 
+/// Wraps onto a full line, a short soft-wrapped line (`"bb "`), and more lines in the bundled
+/// default face at 14 pt inside the 120 pt field, with no system font needed.
+const SHORT_MIDDLE: &str = "aaaaaaaaaaaaaaa bb ccccccccccccccc dd";
+
 #[test]
 fn a_byte_mid_line_sees_the_short_soft_wrapped_line_after_it() {
-    let text = "aaaaaaaaaaaa bb cccccccccccc dd";
+    let text = SHORT_MIDDLE;
     let rt = run(text, field);
     let starts: Vec<usize> = lines(&rt).iter().map(|l| l.start).collect();
     assert!(starts.len() >= 3, "{starts:?}");
     let short = starts[1];
+    assert_eq!(&text[short..starts[2]], "bb ", "middle line should be the short one: {starts:?}");
     for b in 0..short {
         assert_eq!(rt.text_line("f", b).unwrap().next, Some(short), "byte {b}, lines {starts:?}");
     }
@@ -104,7 +109,7 @@ fn a_byte_mid_line_sees_the_short_soft_wrapped_line_after_it() {
 #[test]
 fn every_byte_of_a_line_agrees_on_its_start_and_neighbours() {
     for (text, view) in [
-        ("aaaaaaaaaaaa bb cccccccccccc dd", field as fn(&TextEdit, &mut Cx<TextEdit>) -> El),
+        (SHORT_MIDDLE, field as fn(&TextEdit, &mut Cx<TextEdit>) -> El),
         ("alpha beta gamma delta epsilon zeta eta theta\nshort\n\nx y", field),
         ("alpha beta gamma delta epsilon zeta eta theta\nshort\n\nx y", nowrap),
     ] {
@@ -187,4 +192,36 @@ fn a_wrapping_composition_reads_as_one_line_and_walks_end() {
     let rt = composing("one\ntwo", 4);
     assert_eq!(walk_both_ways(&rt), [0, 4]);
     assert_eq!(rt.text_line("f", 4).unwrap().start, 4);
+}
+
+#[test]
+fn tight_line_height_stacks_lines_without_overlap_or_negative_top() {
+    fn tight(e: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+        col().size(120.0, 200.0).child(
+            text_input(e, TextStyle::new(14.0, 400.0).lh(14.0)).key("f").w_full().on_edit(|e: &mut TextEdit| e),
+        )
+    }
+    let rt = run("one\ntwo\n\nfour", tight);
+    let ls = lines(&rt);
+    assert_eq!(ls.iter().map(|l| l.start).collect::<Vec<_>>(), [0, 4, 8, 9]);
+    let field_el = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("f")).unwrap();
+    assert!(
+        ls[0].rect[1] >= field_el.rect[1],
+        "first line must not protrude above field top: line={:?}, field={:?}",
+        ls[0].rect,
+        field_el.rect,
+    );
+    for w in ls.windows(2) {
+        assert!(
+            w[1].rect[1] >= w[0].rect[1] + w[0].rect[3] - 0.5,
+            "adjacent lines must not overlap under negative half-leading: {w:?}",
+        );
+    }
+    for l in &ls {
+        assert!((l.rect[3] - 14.0).abs() <= 0.5, "line height should match 14 pt line box: {l:?}");
+    }
+    // Empty field keeps its line_px fallback height.
+    let empty = run("", tight);
+    let first = empty.text_line("f", 0).unwrap();
+    assert!((first.rect[3] - 14.0).abs() <= 0.5, "empty line height: {first:?}");
 }

@@ -120,32 +120,6 @@ fn read_keymap_fd_ignores_and_preserves_shared_file_offset() -> std::io::Result<
 }
 
 #[test]
-fn wait_for_configure_times_out_on_silent_socket_and_errors_on_hangup() -> std::io::Result<()> {
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
-    use wayland_client::Connection;
-    use crate::platform::layer_shell_machine::configure_wait::Outcome;
-
-    let (client, _server) = UnixStream::pair()?;
-    let Ok(conn) = Connection::from_socket(client) else { return Ok(()); };
-    let mut queue = conn.new_event_queue::<super::State>();
-    let mut state = super::State::default();
-    let started = crate::time::now();
-    let outcome = super::wait_for_configure(&conn, &mut queue, &mut state, Duration::from_millis(40));
-    assert_eq!(outcome, Outcome::TimedOut);
-    assert!(started.elapsed() >= Duration::from_millis(30));
-
-    let (client, server) = UnixStream::pair()?;
-    drop(server);
-    let Ok(conn) = Connection::from_socket(client) else { return Ok(()); };
-    let mut queue = conn.new_event_queue::<super::State>();
-    let mut state = super::State::default();
-    let outcome = super::wait_for_configure(&conn, &mut queue, &mut state, Duration::from_secs(2));
-    assert_eq!(outcome, Outcome::Error);
-    Ok(())
-}
-
-#[test]
 fn xkb_compose_feeds_dead_keys_and_resets_after_composed_or_cancelled() {
     use xkbcommon::xkb;
     use crate::platform::layer_shell_machine::keyboard::ComposeOutcome;
@@ -392,9 +366,13 @@ fn has_pending_events_tracks_foreign_queue_until_dispatched_and_false_when_close
         ));
         let placement = Placement { size: (200.0, 100.0), edge: ScreenEdge::Top, margin: 0.0, align: Align::Start, inset: 0.0 };
         let options = OverlayOptions::default();
-        let mut layer = super::LayerSurface::new(display, "test-pending", placement, false, &options, None)
-            .expect("configured layer surface");
-
+        let mut layer = super::LayerSurface::new(display, "test-pending", placement, false, &options, None, false)
+            .expect("layer surface");
+        while !layer.is_configured() && layer.is_live() {
+            host_read_once(&host);
+            let _ = layer.dispatch();
+        }
+        assert!(layer.is_configured());
         assert!(layer.is_live());
         assert!(!layer.has_pending_events(), "idle layer surface must report no pending events");
 
@@ -409,12 +387,19 @@ fn has_pending_events_tracks_foreign_queue_until_dispatched_and_false_when_close
         assert!(!layer.has_pending_events(), "dispatch must clear pending events");
 
         // Compositor closes the layer surface (zwlr_layer_surface_v1.closed opcode 1).
+        // It waits for a wl_display.sync roundtrip before reporting Closed so an unplug's
+        // wl_registry.global_remove can overtake it.
         let layer_proto_id = layer.layer.id().protocol_id();
         send_msg(&mut server_tx, layer_proto_id, 1, &[])?;
         host_read_once(&host);
         assert!(layer.has_pending_events());
         let changes = layer.dispatch();
-        assert!(changes.closed);
+        assert_eq!(changes.closed, None, "close waits for the sync sent after it");
+        assert!(layer.is_live(), "surface stays live while waiting for the close sync");
+        host_read_once(&host);
+        assert!(layer.has_pending_events(), "sync answer must register as pending");
+        let changes = layer.dispatch();
+        assert_eq!(changes.closed, Some(crate::platform::layer_shell_machine::readiness::CloseKind::Closed));
         assert!(!layer.is_live());
         assert_eq!(layer.close_reason(), None, "compositor close leaves close_reason None so overlay reports compositor closed");
         assert!(!layer.has_pending_events(), "closed surface must never report pending events");
@@ -465,9 +450,11 @@ fn display_error_reports_dead_connection_and_none_when_live() -> std::io::Result
     let (client, server) = UnixStream::pair()?;
     drop(server);
     let Ok(dead) = Connection::from_socket(client) else { return Ok(()); };
-    let mut queue = dead.new_event_queue::<super::State>();
-    let mut state = super::State::default();
-    let _ = super::wait_for_configure(&dead, &mut queue, &mut state, std::time::Duration::from_secs(1));
+    let queue = dead.new_event_queue::<super::State>();
+    let _ = queue.flush();
+    if let Some(guard) = queue.prepare_read() {
+        let _ = guard.read();
+    }
     let dead_ptr = NonNull::new(dead.display().id().as_ptr().cast()).expect("wl_display");
     let err = super::display_error(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(dead_ptr)));
     assert!(err.is_some(), "expected socket error from dead display");
@@ -584,9 +571,19 @@ fn drop_destroys_all_proxies_and_drains_queued_events_so_event_queue_does_not_le
         let display = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
             NonNull::new(host.display().id().as_ptr().cast()).unwrap(),
         ));
-        let mut layer = super::LayerSurface::new(display, "test-queued", placement, false, &options, None)
-            .expect("configured layer surface");
-        let conn_probe = layer.conn.clone();
+        let mut layer = super::LayerSurface::new(display, "test-queued", placement, false, &options, None, false)
+            .expect("layer surface");
+        while !layer.is_configured() && layer.is_live() {
+            let guard = host.prepare_read().or_else(|| {
+                host.backend().dispatch_inner_queue().ok();
+                host.prepare_read()
+            });
+            if let Some(guard) = guard {
+                guard.read().ok();
+            }
+            let _ = layer.dispatch();
+        }
+        let conn_probe = layer.globals.conn().clone();
 
         // Requesting a second frame callback destroys the previous pending one immediately.
         layer.request_frame();
@@ -604,13 +601,13 @@ fn drop_destroys_all_proxies_and_drains_queued_events_so_event_queue_does_not_le
         let surface_id = layer.surface.id();
         let surface_proto_id = surface_id.protocol_id();
         let layer_id = layer.layer.id();
-        let shell_id = layer.shell.id();
-        let compositor_id = layer.compositor.id();
-        let registry_id = layer.globals.as_ref().unwrap().registry().id();
+        let shell_id = layer.globals.shell().id();
+        let compositor_id = layer.globals.compositor().id();
+        let registry_id = layer.globals.registry_id();
         let weaks = [
-            ("registry", Arc::downgrade(layer.globals.as_ref().unwrap().registry().object_data().unwrap())),
-            ("compositor", Arc::downgrade(layer.compositor.object_data().unwrap())),
-            ("shell", Arc::downgrade(layer.shell.object_data().unwrap())),
+            ("registry", layer.globals.registry_object_data().unwrap()),
+            ("compositor", Arc::downgrade(layer.globals.compositor().object_data().unwrap())),
+            ("shell", Arc::downgrade(layer.globals.shell().object_data().unwrap())),
             ("surface", Arc::downgrade(layer.surface.object_data().unwrap())),
             ("layer", Arc::downgrade(layer.layer.object_data().unwrap())),
             ("frame_callback", Arc::downgrade(cb2.object_data().unwrap())),
@@ -658,9 +655,9 @@ fn drop_destroys_all_proxies_and_drains_queued_events_so_event_queue_does_not_le
         let display = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
             NonNull::new(host.display().id().as_ptr().cast()).unwrap(),
         ));
-        let mut layer = super::LayerSurface::new(display, "test-pending-cb", placement, false, &options, None)
+        let mut layer = super::LayerSurface::new(display, "test-pending-cb", placement, false, &options, None, false)
             .expect("configured layer surface");
-        let conn_probe = layer.conn.clone();
+        let conn_probe = layer.globals.conn().clone();
         layer.request_frame();
         let cb = layer.state.frame_callback.as_ref().unwrap().1.clone();
         let cb_id = cb.id();
@@ -689,6 +686,12 @@ fn layer_shell_maps_diagonal_and_bidirectional_resize_cursors() {
     assert_eq!(super::shape(Cursor::ResizeNs), Shape::NsResize);
     assert_eq!(super::shape(Cursor::ResizeNwse), Shape::NwseResize);
     assert_eq!(super::shape(Cursor::ResizeNesw), Shape::NeswResize);
+    assert_eq!(super::shape(Cursor::ResizeN), Shape::NResize);
+    assert_eq!(super::shape(Cursor::ResizeE), Shape::EResize);
+    assert_eq!(super::shape(Cursor::ResizeS), Shape::SResize);
+    assert_eq!(super::shape(Cursor::ResizeW), Shape::WResize);
+    assert_eq!(super::shape(Cursor::Alias), Shape::Alias);
+    assert_eq!(super::shape(Cursor::Copy), Shape::Copy);
 }
 
 #[test]
@@ -708,7 +711,7 @@ fn layer_surface_fail_connection_populates_close_reason_once() -> std::io::Resul
         size: (100.0, 40.0), edge: crate::ScreenEdge::Top, margin: 0.0, align: crate::Align::Center, inset: 0.0,
     };
     let options = crate::OverlayOptions::default();
-    let mut layer = super::LayerSurface::new(display, "test-close-reason", placement, false, &options, None)
+    let mut layer = super::LayerSurface::new(display, "test-close-reason", placement, false, &options, None, false)
         .expect("configured layer surface");
     assert_eq!(layer.close_reason(), None);
     layer.fail_connection(Some("broken pipe".into()));
@@ -719,6 +722,193 @@ fn layer_surface_fail_connection_populates_close_reason_once() -> std::io::Resul
     assert_eq!(layer.close_reason(), Some("the display connection failed: broken pipe"));
     drop(layer);
     drop(host);
+    server_thread.join().unwrap();
+    Ok(())
+}
+
+#[test]
+fn activation_token_names_keyboard_enter_and_touch_down_serials_on_our_surface() -> std::io::Result<()> {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::ptr::NonNull;
+    use std::sync::{Arc, Mutex};
+    use wayland_client::{Connection, Proxy};
+    use winit::raw_window_handle::{RawDisplayHandle, WaylandDisplayHandle};
+    use crate::el::Align;
+    use crate::overlay::{Placement, ScreenEdge};
+    use crate::{KeyPolicy, OverlayOptions};
+
+    fn u32_at(buf: &[u8], offset: usize) -> u32 {
+        u32::from_ne_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+    }
+    fn host_read_once(host: &Connection) {
+        let guard = host.prepare_read().or_else(|| {
+            host.backend().dispatch_inner_queue().ok();
+            host.prepare_read()
+        });
+        if let Some(guard) = guard {
+            guard.read().ok();
+        }
+    }
+
+    let (client, mut server) = UnixStream::pair()?;
+    let mut server_tx = server.try_clone()?;
+    let recorded_serials = Arc::new(Mutex::new(Vec::new()));
+    let serials_out = recorded_serials.clone();
+
+    let server_thread = std::thread::spawn(move || {
+        let mut registry_id = 0u32;
+        let mut shell_id = 0u32;
+        let mut activation_id = 0u32;
+        let mut token_id = 0u32;
+        let mut pending_serial: Option<(u32, u32)> = None;
+        let mut header = [0u8; 8];
+        while server.read_exact(&mut header).is_ok() {
+            let sender_id = u32_at(&header, 0);
+            let word1 = u32_at(&header, 4);
+            let size = (word1 >> 16) as usize;
+            let opcode = (word1 & 0xffff) as u16;
+            if size < 8 { break; }
+            let mut payload = vec![0u8; size - 8];
+            if server.read_exact(&mut payload).is_err() { break; }
+            if sender_id == 1 && opcode == 1 && payload.len() >= 4 {
+                registry_id = u32_at(&payload, 0);
+                for (name, iface, ver) in [
+                    (1u32, "wl_compositor", 6u32),
+                    (2, "zwlr_layer_shell_v1", 4),
+                    (3, "wl_seat", 8),
+                    (4, "xdg_activation_v1", 1),
+                ] {
+                    let mut p = Vec::new();
+                    mock_push_u32(&mut p, name);
+                    mock_push_str(&mut p, iface);
+                    mock_push_u32(&mut p, ver);
+                    if mock_send_msg(&mut server, registry_id, 0, &p).is_err() { return; }
+                }
+            } else if sender_id == 1 && opcode == 0 && payload.len() >= 4 {
+                let cb_id = u32_at(&payload, 0);
+                if mock_send_msg(&mut server, cb_id, 0, &0u32.to_ne_bytes()).is_err() { break; }
+            } else if sender_id == registry_id && registry_id != 0 && opcode == 0 && payload.len() >= 8 {
+                let name = u32_at(&payload, 0);
+                let str_len = u32_at(&payload, 4) as usize;
+                let str_padded = (str_len + 3) & !3;
+                let new_id_off = 8 + str_padded + 4;
+                if payload.len() >= new_id_off + 4 {
+                    let new_id = u32_at(&payload, new_id_off);
+                    if name == 2 {
+                        shell_id = new_id;
+                    } else if name == 3 {
+                        // Pointer (1) | Keyboard (2) | Touch (4)
+                        if mock_send_msg(&mut server, new_id, 0, &7u32.to_ne_bytes()).is_err() { break; }
+                    } else if name == 4 {
+                        activation_id = new_id;
+                    }
+                }
+            } else if sender_id == shell_id && shell_id != 0 && opcode == 0 && payload.len() >= 4 {
+                let layer_id = u32_at(&payload, 0);
+                let mut cfg = Vec::new();
+                mock_push_u32(&mut cfg, 1);
+                mock_push_u32(&mut cfg, 200);
+                mock_push_u32(&mut cfg, 100);
+                if mock_send_msg(&mut server, layer_id, 0, &cfg).is_err() { break; }
+            } else if sender_id == activation_id && activation_id != 0 && opcode == 1 && payload.len() >= 4 {
+                token_id = u32_at(&payload, 0);
+                pending_serial = None;
+            } else if sender_id == token_id && token_id != 0 && opcode == 0 && payload.len() >= 8 {
+                pending_serial = Some((u32_at(&payload, 0), u32_at(&payload, 4)));
+            } else if sender_id == token_id && token_id != 0 && opcode == 3 {
+                serials_out.lock().unwrap().push(pending_serial.take());
+                let mut done = Vec::new();
+                mock_push_str(&mut done, "mock-token");
+                if mock_send_msg(&mut server, token_id, 0, &done).is_err() { break; }
+            }
+        }
+    });
+
+    let Ok(host) = Connection::from_socket(client) else { return Ok(()); };
+    let display = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+        NonNull::new(host.display().id().as_ptr().cast()).unwrap(),
+    ));
+    let placement = Placement { size: (200.0, 100.0), edge: ScreenEdge::Top, margin: 0.0, align: Align::Start, inset: 0.0 };
+    let options = OverlayOptions { keys: KeyPolicy::Exclusive, ..OverlayOptions::default() };
+    let mut layer = super::LayerSurface::new(display, "test-activation", placement, true, &options, None, false)
+        .expect("layer surface");
+    while !layer.is_configured() && layer.is_live() {
+        host_read_once(&host);
+        let _ = layer.dispatch();
+    }
+    assert!(layer.is_configured());
+
+    let seat_id = layer.seat.as_ref().expect("bound wl_seat").id().protocol_id();
+    let keyboard_id = layer.state.keyboard.as_ref().expect("bound wl_keyboard").id().protocol_id();
+    let touch_id = layer.state.touch.as_ref().expect("bound wl_touch").id().protocol_id();
+    let surface_id = layer.surface.id().protocol_id();
+    let other_surface = layer.globals.compositor().create_surface(&layer.queue.handle(), ());
+    let other_surface_id = other_surface.id().protocol_id();
+
+    fn finish_token(host: &Connection, pending: &mut super::PendingActivationToken) -> Option<String> {
+        loop {
+            match pending.dispatch() {
+                crate::platform::layer_shell_machine::activation::TokenPoll::Done(token) => return token,
+                crate::platform::layer_shell_machine::activation::TokenPoll::Pending => host_read_once(host),
+            }
+        }
+    }
+
+    // 1. Before any focus or input event, no set_serial is sent.
+    let mut t1 = layer.start_activation_token().expect("started");
+    assert_eq!(finish_token(&host, &mut t1).as_deref(), Some("mock-token"));
+
+    // 2. wl_keyboard.enter on our surface before any press supplies its serial.
+    let mut enter_ours = Vec::new();
+    mock_push_u32(&mut enter_ours, 41);
+    mock_push_u32(&mut enter_ours, surface_id);
+    mock_push_u32(&mut enter_ours, 0);
+    mock_send_msg(&mut server_tx, keyboard_id, 1, &enter_ours)?;
+    host_read_once(&host);
+    let _ = layer.dispatch();
+    let mut t2 = layer.start_activation_token().expect("started");
+    assert_eq!(finish_token(&host, &mut t2).as_deref(), Some("mock-token"));
+
+    // 3. wl_keyboard.enter on another surface must not overwrite ours.
+    let mut enter_other = Vec::new();
+    mock_push_u32(&mut enter_other, 42);
+    mock_push_u32(&mut enter_other, other_surface_id);
+    mock_push_u32(&mut enter_other, 0);
+    mock_send_msg(&mut server_tx, keyboard_id, 1, &enter_other)?;
+    host_read_once(&host);
+    let _ = layer.dispatch();
+    let mut t3 = layer.start_activation_token().expect("started");
+    assert_eq!(finish_token(&host, &mut t3).as_deref(), Some("mock-token"));
+
+    // 4. wl_touch.down on our surface updates the activation serial.
+    let mut touch_down = Vec::new();
+    mock_push_u32(&mut touch_down, 55);
+    mock_push_u32(&mut touch_down, 100);
+    mock_push_u32(&mut touch_down, surface_id);
+    mock_push_u32(&mut touch_down, 0);
+    mock_push_u32(&mut touch_down, 10 << 8);
+    mock_push_u32(&mut touch_down, 12 << 8);
+    mock_send_msg(&mut server_tx, touch_id, 0, &touch_down)?;
+    host_read_once(&host);
+    let _ = layer.dispatch();
+    let mut t4 = layer.start_activation_token().expect("started");
+    assert_eq!(finish_token(&host, &mut t4).as_deref(), Some("mock-token"));
+
+    assert_eq!(
+        *recorded_serials.lock().unwrap(),
+        vec![
+            None,
+            Some((41, seat_id)),
+            Some((41, seat_id)),
+            Some((55, seat_id)),
+        ],
+    );
+
+    other_surface.destroy();
+    drop(layer);
+    drop(host);
+    drop(server_tx);
     server_thread.join().unwrap();
     Ok(())
 }

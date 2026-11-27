@@ -17,7 +17,7 @@ use crate::frame::surface_stats::SurfaceMeter;
 use crate::render::{Gpu, Renderer};
 use crate::runtime::{Env, Waker};
 use crate::time::Instant;
-use crate::tooling::{Args, Chrome, runtime_for};
+use crate::tooling::{Args, Chrome, runtime_for_configured};
 use crate::windows::{WindowOptions, WindowSpec};
 
 pub(in crate::window) mod any_host;
@@ -25,8 +25,9 @@ pub(in crate::window) mod app;
 pub(in crate::window) mod create;
 pub(in crate::window) mod draw;
 pub(in crate::window) mod events;
+pub(in crate::window) mod gpu_loss;
 pub(in crate::window) mod lifecycle;
-mod render;
+pub(in crate::window) mod render;
 pub(in crate::window) mod shell_requests;
 pub(in crate::window) mod stepping;
 pub(in crate::window) mod window_script;
@@ -56,6 +57,8 @@ pub(in crate::window) struct Host {
     /// `App::titlebar`, unless the window is borderless.
     pub(in crate::window) titlebar: Option<crate::Titlebar>,
     pub(in crate::window) options: WindowOptions,
+    /// Explicit logical outer position (`App::logical_position`, `WindowHandle::set_logical_position`).
+    pub(in crate::window) logical_position: Option<(f64, f64)>,
     pub(in crate::window) placement: Option<crate::windows::PlaceRequest>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(in crate::window) macos_window: crate::MacWindowOptions,
@@ -66,6 +69,11 @@ pub(in crate::window) struct Host {
     /// Per-window native color scheme (`App::color_scheme`, `Tx::set_color_scheme`,
     /// `WindowHandle::set_color_scheme`), retained across native window recreation.
     pub(in crate::window) color_scheme: crate::ColorScheme,
+    /// Requested whole-window system backdrop (`App::window_backdrop`, `Tx::set_window_backdrop`,
+    /// `WindowHandle::set_window_backdrop`), retained across native window recreation.
+    pub(in crate::window) window_backdrop: crate::WindowBackdrop,
+    /// Optional macOS swap-chain frame latency (`App::frame_latency`).
+    pub(in crate::window) frame_latency: Option<u32>,
     /// Last winit theme applied to the live `self.win`, avoiding redundant `set_theme` calls.
     pub(in crate::window) applied_theme: Option<winit::window::Theme>,
     pub(in crate::window) native_handle: WindowHandle,
@@ -73,7 +81,7 @@ pub(in crate::window) struct Host {
     pub(in crate::window) on_window: Option<crate::app::OnWindow>,
     pub(in crate::window) on_ready: Option<crate::app::OnWindow>,
     pub(in crate::window) frame_reports: crate::frame::encoded::FrameReports,
-    #[cfg(target_os = "macos")]
+    pub(in crate::window) observability: crate::frame::stage::HostObservability,
     pub(in crate::window) frame_presented: crate::frame::presented::FramePresentReports,
     #[cfg(target_os = "macos")]
     pub(in crate::window) ambient_period: Option<std::time::Duration>,
@@ -84,6 +92,8 @@ pub(in crate::window) struct Host {
     pub(in crate::window) geometry: SpecGeometry,
     /// The last sample `App::on_window_geometry` heard.
     pub(in crate::window) geometry_watch: super::geometry::GeometryWatch,
+    /// Coalesced dirty watcher for `App::on_placement`.
+    pub(in crate::window) placement_watch: super::placement::PlacementWatch,
     pub(in crate::window) args: Args,
     pub(in crate::window) keep_running: bool,
     /// What the window still owes after its first frame (`post_frame`).
@@ -98,6 +108,11 @@ pub(in crate::window) struct Host {
     pub(in crate::window) release_gpu: bool,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(in crate::window) cpu_first: crate::CpuFirst,
+    pub(in crate::window) keyboard_dispatch: crate::KeyboardDispatch,
+    #[cfg(target_os = "windows")]
+    pub(in crate::window) resize_sync: crate::ResizeSync,
+    /// Per-window terminal GPU-loss state (`App::gpu_loss_policy`).
+    pub(in crate::window) terminal_loss: gpu_loss::TerminalLoss,
     pub(in crate::window) prewarm_effects: crate::PrewarmEffects,
     pub(in crate::window) open_at_start: bool,
     /// `App::float_on_open`: each window maps at a fixed size, then takes its own limits.
@@ -108,6 +123,7 @@ pub(in crate::window) struct Host {
     /// Opening mode (`App::maximized`, `App::full_screen`) and restored frame across recreation.
     pub(in crate::window) reopen: ReopenState,
     pub(in crate::window) shared: Arc<crate::app::SharedCore>,
+    pub(in crate::window) overlay_defaults: crate::overlay::OverlayDefaults,
     pub(in crate::window) shortcuts: crate::shortcuts::Guard,
     pub(in crate::window) menus: crate::native_menu::MenuGuard,
     pub(in crate::window) popup: crate::popup_menu::Presenter,
@@ -135,7 +151,6 @@ pub(in crate::window) struct Host {
     pub(in crate::window) rest: Rest,
     pub(in crate::window) mods: ModifiersState,
     pub(in crate::window) control_click: bool,
-    pub(in crate::window) pending_window_drag: Option<(f32, f32)>,
     pub(in crate::window) files: FileDrop,
     pub(in crate::window) clipboard: crate::clipboard::Client,
     pub(in crate::window) secure_input: crate::input::secure_input::SecureInput,
@@ -209,19 +224,24 @@ impl HostWaker {
 struct HostInit {
     prepared: HostWaker,
     shared: Arc<crate::app::SharedCore>,
+    overlay_defaults: crate::overlay::OverlayDefaults,
     chrome: Chrome,
     titlebar: Option<crate::Titlebar>,
     options: WindowOptions,
+    logical_position: Option<(f64, f64)>,
+    initial_placement: Option<crate::WindowPlacement>,
     macos_window: crate::MacWindowOptions,
     windows_window: crate::WindowsWindowOptions,
     exclude_from_capture: Option<bool>,
     color_scheme: crate::ColorScheme,
+    window_backdrop: crate::WindowBackdrop,
+    frame_latency: Option<u32>,
     native_handle: WindowHandle,
     on_created: Option<Box<dyn FnOnce(WindowHandle)>>,
     on_window: Option<crate::app::OnWindow>,
     on_ready: Option<crate::app::OnWindow>,
     on_frame_encoded: Option<crate::frame::encoded::OnFrameEncoded>,
-    #[cfg(target_os = "macos")]
+    observability: crate::frame::stage::HostObservability,
     on_frame_presented: Option<crate::frame::presented::OnFramePresented>,
     #[cfg(target_os = "macos")]
     ambient_period: Option<std::time::Duration>,
@@ -231,6 +251,11 @@ struct HostInit {
     release_gpu: bool,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     cpu_first: crate::CpuFirst,
+    keyboard_dispatch: crate::KeyboardDispatch,
+    #[cfg(target_os = "windows")]
+    resize_sync: crate::ResizeSync,
+    gpu_loss_policy: crate::GpuLossPolicy,
+    gpu_loss_latch: Option<Arc<crate::render::loss_latch::GpuLossLatch>>,
     prewarm_effects: crate::PrewarmEffects,
     open_at_start: bool,
     fit_height: bool,
@@ -260,6 +285,9 @@ impl Host {
         if let Some(hook) = app.on_display_close.take() {
             cx.on_display_close.push(hook);
         }
+        if let Some(hook) = app.on_displays.take() {
+            cx.on_displays.push(hook);
+        }
         let (prepared, native_handle, slot, gpu_pool, wayland) =
             HostWaker::prepare(&key, handle, &mut app.overlays, cx, app.standard_menus);
         let (on_window, on_ready, on_frame_encoded, on_frame_drawn) = (
@@ -268,7 +296,10 @@ impl Host {
             app.on_frame_encoded.take(),
             app.on_frame_drawn.take(),
         );
-        #[cfg(target_os = "macos")]
+        let observability = crate::frame::stage::HostObservability::new(
+            app.observability.take(),
+            Some(native_handle.key()),
+        );
         let on_frame_presented = app.on_frame_presented.take();
         #[cfg(target_os = "macos")]
         let ambient_period = app.ambient_period;
@@ -276,26 +307,52 @@ impl Host {
         let windows_window = std::mem::take(&mut app.windows_window);
         let exclude_from_capture = app.exclude_from_capture;
         let color_scheme = app.color_scheme;
+        let window_backdrop = app.window_backdrop;
+        let frame_latency = app.frame_latency;
+        let gpu_loss_policy = app.gpu_loss_policy;
+        let gpu_loss_latch = app.gpu_loss_latch.take();
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         let cpu_first = app.cpu_first;
+        let keyboard_dispatch = app.keyboard_dispatch;
+        #[cfg(target_os = "windows")]
+        let resize_sync = app.resize_sync;
         let (open, keep_running, release_gpu, prewarm_effects, fit_height, float_on_open) = (
             app.open, app.keep_running, app.release_gpu, app.prewarm_effects, app.fit_content_height, app.float_on_open,
         );
         let (open_inactive, open_as, chrome, titlebar) = (app.open_inactive, app.open_as, app.chrome, app.titlebar);
-        let (on_close_request, on_close, on_rest, on_reopen, on_quit, turn_scope) = (
-            app.on_close_request, app.on_close, app.on_rest, app.on_reopen, app.on_quit, app.turn_scope,
+        let (on_close_request, on_quit_request, on_close, on_rest, on_reopen, on_quit, turn_scope) = (
+            app.on_close_request, app.on_quit_request, app.on_close, app.on_rest, app.on_reopen, app.on_quit, app.turn_scope,
         );
         let on_geometry = app.on_window_geometry;
+        let crate::window::placement::AppPlacement {
+            on_placement,
+            logical_position,
+            initial_placement,
+        } = std::mem::take(&mut app.placement);
         let comp = app.compositor.take();
         let (layout_seed, keep_layout) = (app.layout_seed.take(), app.keep_layout.take());
         let (playground, attach_playground) = (app.playground.take(), app.attach_playground);
-        let (spec, state, shared, runtime) = app.into_parts(args.scene.as_deref());
-        let size = args.size.unwrap_or(spec.size);
-        // The window reports the system appearance and scale when it opens.
-        let env = Env::new(args.theme.as_deref() != Some("light"), 1.0);
-        let mut rt = runtime_for(&spec, state, size, env, setup_waker(&shared.core));
+        let overlay_defaults = crate::overlay::OverlayDefaults::from_spec(
+            &app.spec,
+            crate::overlay::AppOverlayDefaults {
+                font_smoothing: app.runtime.font_smoothing,
+                wheel_glide: app.runtime.wheel_glide,
+                wheel_line: app.runtime.wheel_line,
+            },
+            app.runtime.emoji_family.clone(),
+            prewarm_effects,
+            gpu_loss_latch.clone(),
+        );
+        let (spec, mut rt, shared) = {
+            let _startup_stages = observability.scope_stages(None);
+            let (spec, state, shared, runtime) = app.into_parts(args.scene.as_deref());
+            let size = args.size.unwrap_or(spec.size);
+            // The window reports the system appearance and scale when it opens.
+            let env = Env::new(args.theme.as_deref() != Some("light"), 1.0);
+            let rt = runtime_for_configured(&spec, state, size, env, setup_waker(&shared.core), Some(runtime));
+            (spec, rt, shared)
+        };
         if let Some(attach) = attach_playground { attach(&mut rt, playground, &spec, args.playground.clone(), args.variant.clone(), true); }
-        rt.configure(runtime);
         if let Some(seed) = layout_seed.clone() { rt.core_mut().offer_layout_seed(seed); }
         shared.core.connect(prepared.waker.clone());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, prepared.waker.clone(), false, wayland);
@@ -303,25 +360,30 @@ impl Host {
         let shared_core = shared.core.clone();
         let geometry = SpecGeometry { title: spec.title, size: spec.size, min_size: spec.min_size };
         let typed = Box::new(TypedWindowApp {
-            rt, shared, comp, on_frame_drawn, on_close_request, on_close, on_rest, on_quit, on_reopen, on_geometry, turn_scope,
+            rt, shared, comp, on_frame_drawn, on_close_request, on_quit_request, on_close, on_rest, on_quit, on_reopen, on_geometry, on_placement, turn_scope,
             keep_layout, kept_layout: layout_seed,
         });
         Self::from_app(typed, HostInit {
             prepared,
             shared: shared_core,
+            overlay_defaults,
             chrome,
             titlebar,
             options,
+            logical_position,
+            initial_placement,
             macos_window,
             windows_window,
             exclude_from_capture,
             color_scheme,
+            window_backdrop,
+            frame_latency,
             native_handle,
             on_created,
             on_window,
             on_ready,
             on_frame_encoded,
-            #[cfg(target_os = "macos")]
+            observability,
             on_frame_presented,
             #[cfg(target_os = "macos")]
             ambient_period,
@@ -331,6 +393,11 @@ impl Host {
             release_gpu,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             cpu_first,
+            keyboard_dispatch,
+            #[cfg(target_os = "windows")]
+            resize_sync,
+            gpu_loss_policy,
+            gpu_loss_latch,
             prewarm_effects,
             open_at_start: open,
             fit_height,
@@ -348,6 +415,7 @@ impl Host {
     }
 
     fn from_app(mut app: Box<dyn WindowApp>, init: HostInit) -> Self {
+        app.rt_mut().enable_native_window_drag();
         let HostInit {
             prepared: HostWaker {
                 app_woken,
@@ -357,19 +425,24 @@ impl Host {
                 frame_proxy,
             },
             shared,
+            overlay_defaults,
             chrome,
             titlebar,
             options,
+            logical_position,
+            initial_placement,
             macos_window,
             windows_window,
             exclude_from_capture,
             color_scheme,
+            window_backdrop,
+            frame_latency,
             native_handle,
             on_created,
             on_window,
             on_ready,
             on_frame_encoded,
-            #[cfg(target_os = "macos")]
+            observability,
             on_frame_presented,
             #[cfg(target_os = "macos")]
             ambient_period,
@@ -379,6 +452,11 @@ impl Host {
             release_gpu,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             cpu_first,
+            keyboard_dispatch,
+            #[cfg(target_os = "windows")]
+            resize_sync,
+            gpu_loss_policy,
+            gpu_loss_latch,
             prewarm_effects,
             open_at_start,
             fit_height,
@@ -397,15 +475,12 @@ impl Host {
         // `RUNE_OPEN_INACTIVE`: a tool's launch (an accessibility probe, a capture) leaves the user's
         // focus and keyboard where they are, as `App::open_inactive` does.
         let open_inactive = open_inactive || std::env::var_os("RUNE_OPEN_INACTIVE").is_some();
-        #[cfg(target_os = "macos")]
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut frame_presented = crate::frame::presented::FramePresentReports::new(on_frame_presented, Some(native_handle.key()));
-        #[cfg(target_os = "macos")]
         let track_presented = frame_presented.wanted();
-        #[cfg(not(target_os = "macos"))]
-        let track_presented = false;
         let frame_reports = crate::frame::encoded::FrameReports::with_presented_seq(
             on_frame_encoded,
-            track_presented,
+            track_presented || observability.wants_stages(),
             Some(native_handle.key()),
         );
         if fit_height {
@@ -413,7 +488,7 @@ impl Host {
             geometry.min_size = options.fit_min_size(geometry.min_size);
             // Opens at the content's height; the first frame corrects any difference its
             // real scale makes.
-            app.rt_mut().host.fit_height = true;
+            app.rt_mut().host.set_fit_height(true);
             let (min, max) = options.size_limits(geometry.min_size);
             let fitted = crate::window::frame::clamp_size((size.0, app.content_height()), min, max);
             app.rt_mut().set_viewport(fitted, 1.0);
@@ -438,17 +513,14 @@ impl Host {
         if replays { println!("rune-script-window {}", native_handle.key()); }
         {
             let rt = app.rt_mut();
-            rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
-            rt.set_system_contrast(crate::platform::preferences::contrast());
-            rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast());
-            rt.set_full_keyboard_access(crate::platform::preferences::full_keyboard_access());
+            crate::input::host_events::refresh_accessibility_preferences(rt);
             crate::platform::accent::watch();
             rt.set_system_accent(crate::system_accent());
             crate::platform::scroll_bars::watch();
             rt.set_system_scroll_bars_state(crate::platform::scroll_bars::current().with_override(args.scroll_bars));
             rt.frame.enable_trace_channels(args.trace.is_some());
             rt.set_live_waker(Arc::new(move || { live_proxy.send_event(WakeEvent::Live(slot)).ok(); }));
-            rt.set_os_drag(crate::drag_out::SUPPORTED);
+            rt.set_os_drag(crate::drag_out::supported(wayland));
             rt.transparent = options.transparent;
             rt.track_marks = has_comp;
             rt.wall_start = Some(crate::time::now());
@@ -459,6 +531,8 @@ impl Host {
             rt.host.document_edited.seed(macos_window.document_edited);
         }
         app.set_live_visible(false);
+        let terminal_loss = gpu_loss::TerminalLoss::new(gpu_loss_policy, gpu_loss_latch);
+        terminal_loss.connect_wake(shared.clone(), waker.clone());
         let mut clipboard = crate::clipboard::Client::default();
         clipboard.connect(waker.clone());
         let popup = crate::popup_menu::Presenter::new(waker.clone());
@@ -468,23 +542,38 @@ impl Host {
             native_handle.native.no_activate.store(windows_window.no_activate, Ordering::Release);
             native_handle.native.tool_window.store(windows_window.tool_window, Ordering::Release);
         }
+        let mut reopen = ReopenState::new(open_as);
+        if let Some(saved) = initial_placement {
+            let (pos, size) = super::placement::placement_to_reopen_state(
+                saved,
+                cfg!(target_os = "macos"),
+                wayland,
+            );
+            reopen.seed_initial(
+                pos.filter(|_| options.position.is_none() && logical_position.is_none()),
+                size.filter(|_| options.physical_size.is_none() && args.size.is_none() && !fit_height),
+            );
+        }
         Host {
             app_woken,
             chrome,
             titlebar,
             options,
+            logical_position,
             placement: None,
             macos_window,
             windows_window,
             exclude_from_capture,
             color_scheme,
+            window_backdrop,
+            frame_latency,
             applied_theme: None,
             native_handle,
             on_created,
             on_window,
             on_ready,
             frame_reports,
-            #[cfg(target_os = "macos")]
+            observability,
             frame_presented,
             #[cfg(target_os = "macos")]
             ambient_period,
@@ -492,6 +581,7 @@ impl Host {
             keeps_loop,
             geometry,
             geometry_watch: Default::default(),
+            placement_watch: Default::default(),
             args,
             keep_running,
             #[cfg(target_os = "windows")]
@@ -502,12 +592,17 @@ impl Host {
             release_gpu,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             cpu_first,
+            keyboard_dispatch,
+            #[cfg(target_os = "windows")]
+            resize_sync,
+            terminal_loss,
             prewarm_effects,
             open_at_start,
             float_on_open,
             open_inactive,
-            reopen: ReopenState::new(open_as),
+            reopen,
             shared,
+            overlay_defaults,
             shortcuts,
             menus,
             popup,
@@ -524,7 +619,6 @@ impl Host {
             rest: Rest::default(),
             mods: ModifiersState::empty(),
             control_click: false,
-            pending_window_drag: None,
             files: FileDrop::default(),
             clipboard,
             secure_input: Default::default(),
@@ -575,7 +669,7 @@ impl Host {
         let Some(w) = self.shown_win() else { return };
         if self.wayland && !w.first_frame.notified() { return; }
         let allow_position = self.placement.is_none() && !self.wayland;
-        let track_size = !self.app.rt().host.fit_height;
+        let track_size = !self.app.rt().host.fit_height();
         self.reopen.record_live(
             w.live_state(self.wayland),
             super::state::reopen::use_physical_size(self.wayland),
@@ -589,6 +683,13 @@ impl Host {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(in crate::window) fn effective_cpu_first(&self) -> crate::CpuFirst {
         self.cpu_first.effective()
+    }
+
+    /// Effective Windows drag-resize sync policy for this window, with `RUNE_RESIZE_SYNC` taking
+    /// precedence over `App::resize_sync` / `WindowSpec::resize_sync`.
+    #[cfg(target_os = "windows")]
+    pub(in crate::window) fn resize_sync_enabled(&self) -> bool {
+        self.resize_sync.effective().is_enabled()
     }
 
     /// Publishes what `AppHandle::is_visible` reports.

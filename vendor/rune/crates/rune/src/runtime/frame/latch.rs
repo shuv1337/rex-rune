@@ -38,6 +38,9 @@ impl RuntimeCore {
         // An update runs at `now_clock()` (`begin_update`); if a resting timer's frame is
         // still pending, cancel it so the upcoming frame polls at the newer clock instead of
         // running handlers at the earlier poll's clock.
+        if std::mem::take(&mut one.request_poll) {
+            one.wakes.push(std::time::Duration::ZERO);
+        }
         self.cancel_timer_frame();
         merge(&mut self.frame.pending, one);
         self.commit.dirty |= changed;
@@ -87,8 +90,12 @@ impl RuntimeCore {
         if let Some(picked) = tx.field_menu_resolution.take() {
             self.latch_field_menu_resolution(app, picked, tx);
         }
+        if let Some(picked) = tx.popup_menu_resolution.take() {
+            self.latch_popup_menu_resolution(app, picked, tx);
+        }
         self.shell_request = self.shell_request.max(tx.shell.take());
         self.host.user_close_request |= std::mem::take(&mut tx.user_close_request);
+        self.host.urgent_frame |= std::mem::take(&mut tx.urgent_frame);
         if tx.minimize_order.take().is_some() { self.minimize_step(crate::window::MinimizeEvent::Asked); }
         self.host.titlebar.toggle_maximized |= std::mem::take(&mut tx.toggle_maximized);
         if let Some(req) = tx.full_screen.take() { self.host.titlebar.full_screen = Some(req); }
@@ -103,7 +110,22 @@ impl RuntimeCore {
             self.edit.clear_secret_request = true;
             self.edit.pill_copy = None;
         }
-        if let Some(copy) = tx.copy.take() {
+        for superseded in tx.superseded_copy_images.drain(..).filter_map(|cb| cb.take()) {
+            self.edit.next_clipboard_read += 1;
+            let id = self.edit.next_clipboard_read;
+            self.edit.copy_image_callbacks.push((id, superseded));
+            self.copy_image_result(id, Err(crate::CopyImageError::Superseded));
+        }
+        if let Some(mut copy) = tx.copy.take() {
+            if let Some(prev_id) = self.copy_request.as_mut().and_then(crate::ClipboardWrite::take_copy_image_id) {
+                self.copy_image_result(prev_id, Err(crate::CopyImageError::Superseded));
+            }
+            if let Some(cb) = tx.copy_image_callback.take().and_then(|cb| cb.take()) {
+                self.edit.next_clipboard_read += 1;
+                let id = self.edit.next_clipboard_read;
+                self.edit.copy_image_callbacks.push((id, cb));
+                copy.set_copy_image_id(id);
+            }
             self.edit.pill_copy = (!copy.is_secret())
                 .then(|| copy.content().html())
                 .flatten()
@@ -124,7 +146,7 @@ impl RuntimeCore {
             self.edit.clipboard_reads.push((self.edit.next_clipboard_read, read));
             self.edit.read_requests.push(self.edit.next_clipboard_read);
         }
-        self.host.popups.extend(tx.popups.drain(..).filter_map(|call| call.take()));
+        self.latch_popups(app, tx);
         for request in tx.file_dialogs.drain(..).filter_map(|call| call.take()) {
             self.request_file_dialog(request);
         }
@@ -138,14 +160,13 @@ impl RuntimeCore {
         if std::mem::take(&mut tx.cancel_pointer) { self.cancel_pointer(); }
         if let Some(title) = tx.title.take() { self.host.window_title.set(title); }
         if let Some(scheme) = tx.color_scheme.take() { self.host.window_color_scheme = Some(scheme); }
+        if let Some(backdrop) = tx.window_backdrop.take() { self.host.window_backdrop_request = Some(backdrop); }
         if let Some(path) = tx.represented_file.take() { self.host.represented_file.set(crate::window::spec::normalize_represented_file(path)); }
         if let Some(edited) = tx.document_edited.take() { self.host.document_edited.set(edited); }
         if let Some((text, how)) = tx.announce.take() { self.host.announcement.say(text, how); }
         if !tx.haptics.is_empty() {
-            // `open_urls_natively` is set for live windows, overlays and the web, which have no
-            // haptics player yet: they drop requests. Headless runs and embedding hosts keep them.
-            let keep = !self.host.open_urls_natively;
-            self.host.haptics.push(std::mem::take(&mut tx.haptics), keep);
+            let now = self.now_clock();
+            self.host.haptics.push_at(tx.haptics.drain(..), now);
         }
         if let Some(mut request) = tx.window_frame.take() {
             request.spring = (request.animate && !tx.commit.snaps() && !self.reduced_motion).then(|| tx.motion.map_or(crate::tok::motion::DEFAULT, MotionSource::spring));
@@ -160,7 +181,7 @@ impl RuntimeCore {
         let focused_link = self.focused_index().and_then(|i| self.edit.focused_link_id(&self.tree.nodes[i]));
         Tx { trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.kbd.held_mods, selection: self.selection_snapshot(app),
             input_time: crate::input::time::current(), clock: self.polled_at(), scale: self.env.scale, focus_visible: self.kbd.focus.keyboard(),
-            focused: self.focused_key(), focused_path: self.kbd.focus.owned(), focused_link,
+            focused: self.focused_key(), focused_path: self.kbd.focus.owned(), focused_link, hover: self.hover_snapshot(),
             assistive: self.host.a11y.is_some() || cfg!(target_arch = "wasm32"), window_hidden: !self.live_visible(), ..Tx::default() }
     }
 

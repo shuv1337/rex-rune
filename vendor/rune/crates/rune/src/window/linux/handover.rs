@@ -253,6 +253,7 @@ impl Host {
     /// The first idle turn after the window's first CPU frame: the GPU starts on its thread
     /// (`CpuFirst::Only` or `RUNE_CPU_FIRST=only`: not until a frame needs it).
     pub(in crate::window) fn cpu_idle(&mut self) {
+        if self.poll_gpu_loss() { return; }
         if self.gpu_owed() { self.start_gpu(self.idle_defers_software()); }
     }
 
@@ -265,6 +266,7 @@ impl Host {
     /// A window left on the CPU by a software GPU starts again; a thread at work keeps the GPU it
     /// finds.
     pub(super) fn start_gpu_for_needs_gpu(&mut self) {
+        if self.poll_gpu_loss() { return; }
         let Some(w) = self.win.as_mut() else { return };
         let SurfaceMode::Cpu { job, .. } = &mut w.native.mode else { return };
         match job {
@@ -289,6 +291,7 @@ impl Host {
     /// Starts making the GPU for this window on a thread. `defer`: a software GPU leaves the
     /// window on the CPU (`defers_software`).
     pub(super) fn start_gpu(&mut self, defer: bool) {
+        if self.poll_gpu_loss() { return; }
         let Some(w) = self.win.as_ref() else { return };
         let SurfaceMode::Cpu { job: GpuJob::Waiting { tries, retry_at }, .. } = &w.native.mode else { return };
         let (tries, retried) = (*tries, retry_at.is_some());
@@ -335,6 +338,7 @@ impl Host {
     /// its surface and swap chain are made with that device, and the next frame is the GPU's.
     /// With none, the window's surface is left alone and the CPU goes on drawing.
     pub(in crate::window) fn gpu_ready(&mut self) {
+        if self.poll_gpu_loss() { return; }
         let Some(w) = self.win.as_mut() else { return };
         let SurfaceMode::Cpu { job, .. } = &mut w.native.mode else { return };
         let GpuJob::Building { tries, pick, .. } = job else { return };
@@ -377,6 +381,7 @@ impl Host {
         if let Err(error) = self.reattach(crate::gpu::fallback::GpuMode::Hardware) { return self.fail_surface(error.message, tries); }
         let on_software = self.gpu.as_ref().is_some_and(|(gpu, _)| gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu);
         if on_software && let Some(w) = self.win.as_mut() { w.surface_retries.note_software(); }
+        self.app.rt_mut().set_renderer_kind(crate::RendererKind::Gpu);
         crate::marks::mark("gpu.window.attached");
         if let Some(w) = self.win.as_ref() { w.request_redraw(); }
     }
@@ -388,6 +393,10 @@ impl Host {
     /// its surface is made again as a lost one is, with that path's tries and its end
     /// (`replace_lost_surface`: the window is given up and the app told why).
     fn fail_surface(&mut self, why: String, tries: u8) {
+        if self.is_terminal_gpu_policy() {
+            self.latch_loss_latch(crate::render::loss_latch::GpuFailureKind::SurfaceFailed, why);
+            return;
+        }
         let Some(w) = self.win.as_mut() else { return };
         if w.native.mode.switch_back(GpuJob::Waiting { tries, retry_at: None }) { return self.fail_gpu(why, tries); }
         eprintln!("rune: the window's GPU surface couldn't be made; it is tried again (the compositor takes no CPU frame once a GPU surface was tried): {why}");
@@ -403,6 +412,14 @@ impl Host {
     /// The GPU couldn't take over (`why`), on its `tries`th try: the window goes on with the CPU
     /// renderer, and tries again after `RETRY_AFTER`, or stays there after `TRIES` tries.
     fn fail_gpu(&mut self, why: String, tries: u8) {
+        let policy = if self.is_terminal_gpu_policy() { crate::GpuLossPolicy::Terminal } else { crate::GpuLossPolicy::Recover };
+        if matches!(crate::window::host::gpu_loss::decide_handover_failure(policy, tries, TRIES), crate::window::host::gpu_loss::HandoverFailureAction::LatchTerminal) {
+            if let Some(w) = self.win.as_mut() && let SurfaceMode::Cpu { job, .. } = &mut w.native.mode {
+                *job = GpuJob::Failed;
+            }
+            self.latch_loss_latch(crate::render::loss_latch::GpuFailureKind::InitFailed, why);
+            return;
+        }
         eprintln!("rune: the window stays on the CPU renderer for now (try {tries} of {TRIES}): {why}");
         crate::marks::mark("gpu.window.failed");
         if !crate::marks::noted("gpu.window.why") { crate::marks::note("gpu.window.why", Box::leak(why.into_boxed_str())); }
@@ -420,12 +437,14 @@ impl Host {
         w.surface = None;
         self.gpu = None;
         self.app.release_compositor_gpu();
+        self.app.rt_mut().set_renderer_kind(crate::RendererKind::Cpu);
         w.request_redraw();
     }
 
     /// At the start of a turn (`Win::handover_deadline` wakes the loop for it): a failed try is
     /// made again when its time comes.
     pub(in crate::window) fn watch_handover(&mut self, now: Instant) {
+        if self.poll_gpu_loss() { return; }
         let Some(w) = self.win.as_ref() else { return };
         if let SurfaceMode::Cpu { job: GpuJob::Waiting { retry_at: Some(at), .. }, .. } = &w.native.mode && now >= *at && w.first_frame.ready() {
             let defer = self.idle_defers_software();

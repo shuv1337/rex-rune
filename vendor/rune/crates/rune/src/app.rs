@@ -32,10 +32,17 @@ use std::sync::Arc;
 use crate::el::Tx;
 use crate::tooling::{AppSpec, Args};
 
+#[path = "app/observability.rs"]
+mod observability;
+#[path = "app/quit_request.rs"]
+mod quit_request;
+pub use quit_request::QuitResponse;
 #[path = "app/web.rs"]
 mod web;
+pub use web::{GpuFallback, GpuFallbackStage};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::with_font;
+pub(crate) use web::OnGpuFallback;
 
 pub(crate) type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) -> bool + Send>;
 /// `App::on_window`'s hook, run after each native window creation.
@@ -43,6 +50,9 @@ pub(crate) type OnWindow = Box<dyn FnMut(&crate::WindowHandle)>;
 /// `App::on_display_close`'s hook, run once on the UI thread before the event loop drops windows
 /// and closes the native display connection.
 pub(crate) type OnDisplayClose = Box<dyn FnOnce()>;
+/// `App::on_displays`'s hook, run on the UI thread whenever connected displays change.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) type OnDisplays = Box<dyn FnMut(&crate::DisplayEvent, &[crate::Display])>;
 
 /// Decision returned by [`App::on_close_request`] and
 /// [`WindowSpec::on_close_request`](crate::WindowSpec::on_close_request) when a native window
@@ -84,27 +94,6 @@ impl<S> Clone for TurnScope<S> {
 #[cfg(not(target_arch = "wasm32"))]
 impl<S> Copy for TurnScope<S> {}
 
-/// Normalizes an opt-in frame-rate cap (Hz): positive finite values clamp to at least `1.0` Hz,
-/// while zero, negative, NaN and infinite values normalize to `0.0` (uncapped display rate).
-#[inline]
-pub(crate) fn normalize_fps_cap(fps: f32) -> f32 {
-    if fps.is_finite() && fps > 0.0 {
-        fps.max(1.0)
-    } else {
-        0.0
-    }
-}
-
-/// Converts an opt-in `ambient_fps` rate (Hz) into its target frame period, or `None` when
-/// uncapped (zero, negative, non-finite, or so large that its period rounds to zero).
-#[inline]
-pub(crate) fn ambient_period_from_fps(fps: f32) -> Option<std::time::Duration> {
-    let hz = normalize_fps_cap(fps);
-    (hz > 0.0)
-        .then(|| std::time::Duration::from_secs_f64(1.0 / f64::from(hz)))
-        .filter(|period| !period.is_zero())
-}
-
 /// An `AppSpec` with its lifetime: by default it opens one window and quits when it closes,
 /// like `rune::run`.
 pub struct App<S: 'static> {
@@ -116,6 +105,11 @@ pub struct App<S: 'static> {
     pub(crate) open: bool,
     pub(crate) release_gpu: bool,
     pub(crate) cpu_first: crate::CpuFirst,
+    pub(crate) keyboard_dispatch: crate::KeyboardDispatch,
+    pub(crate) resize_sync: crate::ResizeSync,
+    pub(crate) gpu_loss_policy: crate::GpuLossPolicy,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) gpu_loss_latch: Option<Arc<crate::render::loss_latch::GpuLossLatch>>,
     pub(crate) prewarm_effects: crate::PrewarmEffects,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) accessory: bool,
@@ -123,6 +117,7 @@ pub struct App<S: 'static> {
     pub(crate) standard_menus: bool,
     pub(crate) keep_running: bool,
     pub(crate) on_close_request: Option<fn(&mut S, &mut Tx) -> CloseResponse>,
+    pub(crate) on_quit_request: Option<fn(&mut S, &mut Tx) -> QuitResponse>,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) on_quit: Option<fn(&mut S, &mut Tx)>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -141,10 +136,14 @@ pub struct App<S: 'static> {
     pub(crate) on_ready: Option<OnWindow>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) on_window_geometry: Option<crate::window::geometry::OnWindowGeometry<S>>,
+    pub(crate) placement: crate::window::placement::AppPlacement<S>,
     pub(crate) on_display_close: Option<OnDisplayClose>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) on_displays: Option<OnDisplays>,
     pub(crate) on_frame_encoded: Option<crate::frame::encoded::OnFrameEncoded>,
     pub(crate) on_frame_presented: Option<crate::frame::presented::OnFramePresented>,
     pub(crate) on_frame_drawn: Option<crate::frame::encoded::OnFrameDrawn<S>>,
+    pub(crate) observability: crate::frame::stage::WindowObservability,
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub(crate) ambient_period: Option<std::time::Duration>,
     /// `App::layout_seed`'s seed and keeper; only desktop windows use them.
@@ -154,10 +153,15 @@ pub struct App<S: 'static> {
     pub(crate) keep_layout: Option<Box<dyn FnMut(crate::LayoutSeed)>>,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) same_tab_router: Option<Box<dyn Fn(&str) -> bool>>,
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(crate) on_gpu_fallback: Option<OnGpuFallback>,
     pub(crate) macos_window: crate::MacWindowOptions,
     pub(crate) windows_window: crate::WindowsWindowOptions,
     pub(crate) exclude_from_capture: Option<bool>,
     pub(crate) color_scheme: crate::ColorScheme,
+    pub(crate) window_backdrop: crate::WindowBackdrop,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) frame_latency: Option<u32>,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
     pub(crate) canvas_id: Option<String>,
@@ -180,6 +184,8 @@ pub struct App<S: 'static> {
     /// `playground::attach`, set by `App::playground`: a window calls it through this, so an app
     /// without a playground doesn't link it.
     pub(crate) attach_playground: Option<crate::playground::Attach<S>>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) settle_ready: Option<settle::SettleReady<S>>,
 }
 
 impl<S: 'static> App<S> {
@@ -195,11 +201,17 @@ impl<S: 'static> App<S> {
             open: true,
             release_gpu: false,
             cpu_first: crate::CpuFirst::Auto,
+            keyboard_dispatch: crate::KeyboardDispatch::Batched,
+            resize_sync: crate::ResizeSync::Auto,
+            gpu_loss_policy: crate::GpuLossPolicy::Recover,
+            #[cfg(not(target_arch = "wasm32"))]
+            gpu_loss_latch: None,
             prewarm_effects: crate::PrewarmEffects::NONE,
             accessory: false,
             standard_menus: false,
             keep_running: false,
             on_close_request: None,
+            on_quit_request: None,
             on_close: None,
             on_quit: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -218,18 +230,24 @@ impl<S: 'static> App<S> {
             on_ready: None,
             #[cfg(not(target_arch = "wasm32"))]
             on_window_geometry: None,
+            placement: Default::default(),
             on_display_close: None,
+            on_displays: None,
             on_frame_encoded: None,
             on_frame_presented: None,
             on_frame_drawn: None,
+            observability: crate::frame::stage::WindowObservability::default(),
             ambient_period: None,
             layout_seed: None,
             keep_layout: None,
             same_tab_router: None,
+            on_gpu_fallback: None,
             macos_window: crate::MacWindowOptions::default(),
             windows_window: crate::WindowsWindowOptions::default(),
             exclude_from_capture: None,
             color_scheme: crate::ColorScheme::System,
+            window_backdrop: crate::WindowBackdrop::None,
+            frame_latency: None,
             compositor: None,
             window_options: crate::WindowOptions::default(),
             canvas_id: None,
@@ -246,6 +264,7 @@ impl<S: 'static> App<S> {
             runtime: RuntimeConfig::default(),
             playground: None,
             attach_playground: None,
+            settle_ready: None,
         }
     }
 
@@ -361,7 +380,7 @@ impl<S: 'static> App<S> {
     /// Native options for this app's window (size limits, resizability, ...). `WindowSpec::from_app`
     /// starts from them, and `WindowSpec::options` replaces them.
     pub fn window_options(mut self, options: crate::WindowOptions) -> Self {
-        self.window_options = options;
+        self.window_options = options; self.placement.override_from_options(&self.window_options);
         self
     }
 
@@ -453,7 +472,7 @@ impl<S: 'static> App<S> {
 
     /// Native and portable options together, including `WindowOptions::launcher_panel()`.
     pub fn configured_options(mut self, options: crate::ConfiguredWindowOptions) -> Self {
-        self.window_options = options.options;
+        self.window_options = options.options; self.placement.override_from_options(&self.window_options);
         self.macos_window = options.native;
         self.windows_window = options.windows;
         self
@@ -520,6 +539,51 @@ impl<S: 'static> App<S> {
     /// ```
     pub fn color_scheme(mut self, scheme: crate::ColorScheme) -> Self {
         self.color_scheme = scheme;
+        self
+    }
+
+    /// Opt-in whole-window system backdrop material ([`WindowBackdrop`](crate::WindowBackdrop)),
+    /// applied on creation and retained across native window recreation. Defaults to
+    /// [`WindowBackdrop::None`](crate::WindowBackdrop::None).
+    ///
+    /// On Windows 11 Build 22621+ transparent DirectComposition GPU windows
+    /// (`WindowOptions { transparent: true, .. }`), this applies the documented
+    /// `DWMWA_SYSTEMBACKDROP_TYPE` attribute. Views read [`Cx::window_backdrop`](crate::Cx::window_backdrop)
+    /// to see whether the OS accepted the backdrop attribute.
+    ///
+    /// By Microsoft design, Windows draws Mica, Mica Alt, and Desktop Acrylic only while the window
+    /// is the foreground window and shows its own solid neutral fallback when unfocused (so a
+    /// non-activating window or overlay that never takes focus never shows the live material, even
+    /// while `cx.window_backdrop().is_active()` is `true`). Pair `cx.window_backdrop()` with
+    /// [`App::on_focus`](Self::on_focus) or [`El::on_window_focus`](crate::El::on_window_focus)
+    /// when a view needs to distinguish "backdrop active and focused" from "backdrop active".
+    /// Update at runtime with [`Tx::set_window_backdrop`](crate::Tx::set_window_backdrop) or
+    /// [`WindowHandle::set_window_backdrop`](crate::WindowHandle::set_window_backdrop).
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, Color, WindowBackdrop, WindowOptions, el};
+    ///
+    /// struct State { focused: bool }
+    ///
+    /// let opts = WindowOptions { transparent: true, ..Default::default() };
+    /// let spec = AppSpec::new("Notes", (800.0, 600.0), || State { focused: true }, |s, cx| {
+    ///     // Check `s.focused` as well if you want a custom fill instead of Windows' flat
+    ///     // unfocused fallback while the window is in the background.
+    ///     let bg = if cx.window_backdrop().is_active() && s.focused {
+    ///         Color::TRANSPARENT
+    ///     } else {
+    ///         rune::tok::theme(cx.system_dark()).bg
+    ///     };
+    ///     el().w_full().h_full().fill(bg)
+    /// });
+    /// App::new(spec)
+    ///     .window_options(opts)
+    ///     .window_backdrop(WindowBackdrop::Mica)
+    ///     .on_focus(|s, focused, _| s.focused = focused)
+    ///     .run();
+    /// ```
+    pub fn window_backdrop(mut self, backdrop: crate::WindowBackdrop) -> Self {
+        self.window_backdrop = backdrop;
         self
     }
 
@@ -622,8 +686,16 @@ impl<S: 'static> App<S> {
             if configured.runtime.emoji_family.is_none() {
                 configured.runtime.emoji_family = self.runtime.emoji_family.clone();
             }
-            let (mut overlay, handle) = crate::overlay::OverlayHost::new(configured, state, &self.spec, self.runtime.font_smoothing);
+            let defaults = crate::overlay::AppOverlayDefaults {
+                font_smoothing: self.runtime.font_smoothing,
+                wheel_glide: self.runtime.wheel_glide,
+                wheel_line: self.runtime.wheel_line,
+            };
+            let (mut overlay, handle) = crate::overlay::OverlayHost::new(configured, state, &self.spec, defaults);
             overlay.set_prewarm_effects(self.prewarm_effects);
+            if let Some(latch) = &self.gpu_loss_latch {
+                overlay.set_gpu_loss_latch(Some(Arc::clone(latch)));
+            }
             self.overlays.push(Box::new(overlay));
             handle
         }
@@ -717,6 +789,8 @@ impl<S: 'static> App<S> {
         self.cpu_first = mode;
         self
     }
+
+
 
     /// Names the optional effect GPU pipelines this app's windows and overlays compile in the
     /// background before their first use ([`PrewarmEffects`](crate::PrewarmEffects)): isolated
@@ -906,8 +980,9 @@ impl<S: 'static> App<S> {
     /// in an accessory app. With several windows, every window's hook runs, in window order,
     /// and any true skips the default. Windows: runs when the app is launched again without a
     /// link while it runs, once `rune::single_instance` made it the app's one process; the
-    /// default then also brings the front window forward, restored. Never called on other
-    /// platforms. Headless scripts deliver it with `{"reopen": true}`.
+    /// default then also brings the front window forward, restored. Linux: the same, and on
+    /// `org.freedesktop.Application.Activate`; the default uses the launch's activation token.
+    /// Never called on other platforms. Headless scripts deliver it with `{"reopen": true}`.
     pub fn on_reopen(mut self, f: fn(&mut S, bool, &mut Tx) -> bool) -> Self {
         self.on_reopen = Some(f);
         self
@@ -928,8 +1003,9 @@ impl<S: 'static> App<S> {
     /// which that launch hands to this process instead of opening a window. The app registers its
     /// scheme itself (`HKEY_CURRENT_USER\Software\Classes\<scheme>`, usually at install), and
     /// names it with `rune::url_schemes` so only arguments on it are links: without that a flag's
-    /// URL value (`--server http://localhost:4096`) is one too. Never called on other platforms
-    /// (Linux passes links to a new process as arguments).
+    /// URL value (`--server http://localhost:4096`) is one too. Linux: the same (never a `file:`
+    /// URI), and `org.freedesktop.Application.Open`'s links; see the README. Never called on
+    /// other platforms.
     pub fn on_open_url(mut self, f: fn(&mut S, &str, &mut Tx)) -> Self {
         self.on_open_url = Some(f);
         self
@@ -946,8 +1022,10 @@ impl<S: 'static> App<S> {
     /// (`CFBundleDocumentTypes`, see the README). With several windows whose apps have the hook,
     /// the first still running receives files.
     ///
-    /// Never called on Windows or Linux, which pass opened files to a new process as launch
-    /// arguments. Headless scripts deliver it with `{"open_files": ["a.torrent"]}`.
+    /// Linux: the `file://` URIs among the launch arguments (`Exec=myapp %U`, not `%F`), with
+    /// `rune::single_instance` a later launch's too, and `org.freedesktop.Application.Open`'s;
+    /// see the README. Never called on Windows, which passes opened files to a new process as
+    /// launch arguments. Headless scripts deliver it with `{"open_files": ["a.torrent"]}`.
     ///
     /// ```no_run
     /// use std::path::PathBuf;
@@ -961,15 +1039,6 @@ impl<S: 'static> App<S> {
     /// ```
     pub fn on_open_files(mut self, f: fn(&mut S, &[std::path::PathBuf], &mut Tx)) -> Self {
         self.on_open_files = Some(f);
-        self
-    }
-
-    /// On web, routes [`Tx::open_url_same_tab`] links inside a single-page app: `route` gets the
-    /// absolute URL of each link on the page's own origin and returns true when it handled it
-    /// (`history.pushState` and a render), or false to let the browser load it with
-    /// `location.assign`. Links to other origins always load. Ignored on native.
-    pub fn same_tab_router(mut self, route: impl Fn(&str) -> bool + 'static) -> Self {
-        self.same_tab_router = Some(Box::new(route));
         self
     }
 
@@ -1020,73 +1089,19 @@ impl<S: 'static> App<S> {
         self
     }
 
-    /// Runs on the UI thread after each frame of the app's window, saying what it came to
-    /// ([`FrameOutcome`](crate::FrameOutcome)): `Drawn` once it was encoded, submitted and
-    /// presented, the first frame during creation and a hidden launcher's frames included;
-    /// `Unchanged` for a frame only a timer asked for that drew what was on screen; `Skipped`
-    /// for one a covered, minimised or occluded window, or a drawable that never came, kept
-    /// from drawing. For logging frame timing: pair [`FrameEncoded::at`](crate::FrameEncoded::at)
-    /// with `Tx::input_time` for input latency. It changes nothing about when or what the window
-    /// draws; without it, each frame checks an `Option`. A single-window headless run reports
-    /// every frame on its virtual clock as `Drawn`, with wall-clock instants and `refresh_hz` at
-    /// its `--fps`, so an app's own meter reads its build and encode costs there too. Overlays,
-    /// multi-window headless runs and the web never call it.
-    pub fn on_frame_encoded(mut self, f: impl FnMut(&crate::FrameEncoded) + 'static) -> Self {
-        self.on_frame_encoded = Some(Box::new(f));
-        self
-    }
-
-    /// Runs on the UI thread in submission order once a `Drawn` frame actually reaches the screen
-    /// (or is skipped by the system, reported as
-    /// [`FramePresented::presented_at`](crate::FramePresented::presented_at) returning `None`).
+    /// Runs on the UI thread whenever a display is added, removed, or changes geometry, scale,
+    /// name, or primary status, with the [`DisplayEvent`](crate::DisplayEvent) and the updated
+    /// list of connected displays.
     ///
-    /// [`FramePresented::seq`](crate::FramePresented::seq) matches
-    /// [`FrameEncoded::seq`](crate::FrameEncoded::seq) for the same `Drawn` frame, and
-    /// `on_frame_encoded` always runs before `on_frame_presented` for a given sequence number.
-    /// Pair them to measure real input-to-photon latency or detect missed vsyncs against
-    /// [`FrameEncoded::presents_at`](crate::FrameEncoded::presents_at).
-    ///
-    /// Only platforms with reliable actual presentation timestamps call it (currently macOS
-    /// Metal, via `MTLDrawable::addPresentedHandler`). Windows, Linux, the web, overlays, and
-    /// headless runs never call it, matching
-    /// [`FrameEncoded::presents_at`](crate::FrameEncoded::presents_at). Without it, no layer
-    /// hook is attached and each frame pays only an `Option` check; once in-flight drawables
-    /// finish presenting, the watch clears automatically so an idle window never wakes or draws.
-    ///
-    /// ```no_run
-    /// use rune::{App, AppSpec, el};
-    ///
-    /// let spec = AppSpec::new("Demo", (320.0, 240.0), || (), |_, _| el());
-    /// App::new(spec)
-    ///     .on_frame_presented(|p| {
-    ///         let _ = (p.seq(), p.window(), p.presented_at());
-    ///     })
-    ///     .run();
-    /// ```
-    pub fn on_frame_presented(mut self, f: impl FnMut(&crate::FramePresented) + 'static) -> Self {
-        self.on_frame_presented = Some(Box::new(f));
-        self
-    }
-
-    /// Runs on the UI thread after each `Drawn` frame of the app's window (desktop windows and
-    /// the web runner, and never on unchanged or skipped frames), with the runtime as that frame
-    /// presented it (`Runtime::elements`, `Runtime::state`), for an app that watches its own
-    /// motion or waits for presented frames. Pair it with [`last_input`](crate::last_input) to
-    /// tell motion the user caused from motion they didn't. Like `on_frame_encoded`, it changes
-    /// nothing about when or what the window draws.
-    ///
-    /// ```no_run
-    /// use rune::{App, AppSpec, el};
-    ///
-    /// let spec = AppSpec::new("Demo", (320.0, 240.0), || 0u32, |_, _| el());
-    /// App::new(spec)
-    ///     .on_frame_drawn(|rt| {
-    ///         let _count = rt.elements().len();
-    ///     })
-    ///     .run();
-    /// ```
-    pub fn on_frame_drawn(mut self, f: impl FnMut(&crate::Runtime<S>) + 'static) -> Self {
-        self.on_frame_drawn = Some(Box::new(f));
+    /// Multiple changes observed together are delivered in order: removals first, then changes,
+    /// then additions. [`crate::displays`] already returns the updated list when `f` runs. Works
+    /// in windowless apps (`.windowless().keep_running()`) as well as apps with windows. Native
+    /// desktop runs only (ignored on headless and web).
+    pub fn on_displays(
+        mut self,
+        f: impl FnMut(&crate::DisplayEvent, &[crate::Display]) + 'static,
+    ) -> Self {
+        self.on_displays = Some(Box::new(f));
         self
     }
 
@@ -1111,8 +1126,7 @@ impl<S: 'static> App<S> {
     /// timeline growth or scroll following a stream) paces at `ambient_fps`.
     ///
     /// Enforced on macOS `DisplayLink` windows today; Windows, Linux, web, overlays, and
-    /// headless runs ignore it (matching [`App::on_frame_presented`] and
-    /// [`App::exclude_from_capture`]).
+    /// headless runs ignore it (matching [`FrameEncoded::presents_at`](crate::FrameEncoded::presents_at)).
     ///
     /// ```no_run
     /// use rune::{App, AppSpec, text};
@@ -1124,6 +1138,27 @@ impl<S: 'static> App<S> {
     /// ```
     pub fn ambient_fps(mut self, fps: f32) -> Self {
         self.ambient_period = ambient_period_from_fps(fps);
+        self
+    }
+
+    /// Cap the swap chain's frame latency on macOS (`1` = 2 drawables, `2` = 3 drawables;
+    /// clamped to `1..=2`, default `2`). Ignored on Windows, Linux, and the web.
+    ///
+    /// With two drawables a frame that runs late waits instead of overlapping the next; at
+    /// 120 Hz that can show as a dropped frame during fast animation, whereas for a rarely
+    /// animating window it is the right trade. Applied when the surface is created (and on
+    /// GPU surface reattach) rather than changed live (changing `CAMetalLayer.maximumDrawableCount`
+    /// while visible forces a synchronous reconfigure and can reallocate drawables or drop a frame).
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, el};
+    ///
+    /// App::new(AppSpec::new("Panel", (488.0, 873.0), || (), |_, _| el()))
+    ///     .frame_latency(1)
+    ///     .run();
+    /// ```
+    pub fn frame_latency(mut self, frames: u32) -> Self {
+        self.frame_latency = Some(frames.clamp(1, 2));
         self
     }
 
@@ -1200,7 +1235,7 @@ impl<S: 'static> App<S> {
     #[cfg(target_arch = "wasm32")]
     pub fn try_run(mut self) -> Result<(), String> {
         if let Some(argv) = self.argv.take() {
-            let _ = Args::parse_from(argv);
+            crate::tooling::set_extra_args(argv);
         }
         crate::platform::web::run(self)
     }
@@ -1398,8 +1433,9 @@ impl<S: 'static> AppHandle<S> {
 }
 
 mod config;
-pub(crate) use config::RuntimeConfig;
+pub(crate) use config::{ambient_period_from_fps, normalize_wheel_line, RuntimeConfig};
 mod requests;
+mod settle;
 pub(crate) use requests::{window_request_order, Activation, Shared, SharedCore, WindowRequest, WindowRequests};
 
 #[cfg(test)]

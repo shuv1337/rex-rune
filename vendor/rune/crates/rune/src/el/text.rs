@@ -426,6 +426,21 @@ impl El {
             .display_pills()
             .into_iter()
             .map(|(start, end, id)| {
+                if let Some(inline) = inp.pill_inline_image.as_ref().and_then(|f| f(id)) {
+                    return crate::text::PillChip {
+                        start,
+                        end,
+                        icon: None,
+                        image: None,
+                        bg: None,
+                        fg: None,
+                        ring: None,
+                        radius: None,
+                        pad_x: None,
+                        margin_x: None,
+                        bare: Some(Box::new(inline.into_bare())),
+                    };
+                }
                 let st = inp.pill_style.as_ref().map(|f| f(id)).unwrap_or_default();
                 let image = inp.pill_image.as_ref().and_then(|f| f(id));
                 let icon = if image.is_some() {
@@ -433,7 +448,7 @@ impl El {
                 } else {
                     st.icon.or_else(|| inp.pill_icon.as_ref().and_then(|f| f(id)))
                 };
-                crate::text::PillChip { start, end, icon, image, bg: st.bg, fg: st.fg, ring: st.ring, radius: st.radius, bare: None }
+                crate::text::PillChip { start, end, icon, image, bg: st.bg, fg: st.fg, ring: st.ring, radius: st.radius, pad_x: st.pad_x, margin_x: st.margin_x, bare: None }
             })
             .collect();
     }
@@ -478,7 +493,7 @@ impl El {
             }
         }
         let pill_fg = t.cold.pill_colors.and_then(|(_, fg)| fg);
-        base_spans.extend(t.cold.pills.iter().filter_map(|p| {
+        base_spans.extend(t.cold.pills.iter().filter(|p| p.bare.is_none()).filter_map(|p| {
             Some(Span { start: p.start, end: p.end, color: Some(p.fg.or(pill_fg)?), ..Span::default() })
         }));
         let mut flat = crate::text::flatten_spans(&base_spans);
@@ -578,14 +593,17 @@ impl El {
     pub fn wraps(&self) -> bool {
         self.text.as_ref().is_some_and(|t| t.wrap)
     }
-    /// One line, cut with "…" when wider than the element; the element may shrink below its
-    /// text's width. A [`text_input`] ignores it and the other truncations.
+    /// One line, cut with "…" when wider than the element. Sets `flex-shrink: 1` and lowers an
+    /// automatic `min-width` to `0` while preserving any explicit [`El::min_w`] and leaving
+    /// `min-height` untouched (override an earlier explicit minimum with `.min_w(0.0)`). A
+    /// [`text_input`] ignores it and the other truncations.
     #[inline]
     pub fn truncate(mut self) -> Self {
         self.set_truncate();
         self
     }
-    /// [`El::truncate`] in place.
+    /// [`El::truncate`] in place. Sets `flex-shrink: 1` and lowers an automatic `min-width` to
+    /// `0` while preserving any explicit [`El::min_w`] and leaving `min-height` untouched.
     #[inline]
     pub fn set_truncate(&mut self) -> &mut Self {
         self.set_elide(Elide::End);
@@ -594,12 +612,13 @@ impl El {
     /// [`El::truncate`] keeping both ends: "…" replaces the middle, as AppKit's
     /// `NSLineBreakByTruncatingMiddle` does for paths and file names. Cuts fall between
     /// graphemes and refit when the element resizes; copying and the accessibility text keep
-    /// the whole string.
+    /// the whole string. Preserves any explicit [`El::min_w`] and leaves `min-height` untouched.
     pub fn truncate_middle(mut self) -> Self {
         self.set_elide(Elide::Middle);
         self
     }
-    /// [`El::truncate`] keeping the end: "…" replaces the start.
+    /// [`El::truncate`] keeping the end: "…" replaces the start. Preserves any explicit
+    /// [`El::min_w`] and leaves `min-height` untouched.
     pub fn truncate_head(mut self) -> Self {
         self.set_elide(Elide::Head);
         self
@@ -626,7 +645,9 @@ impl El {
             cut(t);
         }
         self.style.set_flex_shrink(1.0);
-        self.style.set_min_width(length(0.0));
+        if self.style.min_size().width.is_auto() {
+            self.style.set_min_width(length(0.0));
+        }
     }
     /// Wrapped text that stops after `lines` lines, "…" ending the last when more would follow,
     /// as CSS's `line-clamp`. Combine with [`El::elide_middle`] or [`El::elide_head`] in either
@@ -689,11 +710,14 @@ impl El {
         }
         self
     }
-    /// One line, clipped with a 1.5 em trailing fade only when it overflows. No ellipsis.
+    /// One line, clipped with a 1.5 em trailing fade only when it overflows. No ellipsis. Sets
+    /// `flex-shrink: 1` and lowers an automatic `min-width` to `0` while preserving any explicit
+    /// [`El::min_w`] and leaving `min-height` untouched.
     pub fn truncate_fade(self) -> Self {
         self.truncate_fade_width(TRUNCATE_FADE_EM)
     }
-    /// [`El::truncate_fade`] with a fade `em` ems wide.
+    /// [`El::truncate_fade`] with a fade `em` ems wide. Preserves any explicit [`El::min_w`] and
+    /// leaves `min-height` untouched.
     pub fn truncate_fade_width(self, em: f32) -> Self {
         self.one_line(|t| {
             t.truncate = false;
@@ -820,8 +844,8 @@ impl El {
     }
     /// Mark this text field's misspelled words, as a browser's `spellcheck` does: the platform's
     /// checker (Windows' spell checking API, AppKit's `NSSpellChecker` on macOS, installed system
-    /// Hunspell dictionaries on Linux when the default-on `hunspell` feature is enabled, or fetched
-    /// Hunspell dictionaries on the web) puts a red
+    /// Hunspell dictionaries on Linux or fetched Hunspell dictionaries on the web when the
+    /// default-on `hunspell` feature is enabled) puts a red
     /// marker under each word the caret has left, and the field's menu offers its suggestions and
     /// Learn Spelling. Off by default; a secure field never checks.
     pub fn spellcheck(mut self, on: bool) -> Self {
@@ -888,6 +912,12 @@ impl El {
             if on && self.handlers.cursor.is_none() {
                 self.handlers.cursor = Some(Cursor::Text);
                 t.flags.set(crate::el::text_spec::TextFlags::SELECTABLE_CURSOR, true);
+            } else if !on
+                && t.flags.has(crate::el::text_spec::TextFlags::SELECTABLE_CURSOR)
+                && self.handlers.cursor == Some(Cursor::Text)
+            {
+                self.handlers.cursor = None;
+                t.flags.set(crate::el::text_spec::TextFlags::SELECTABLE_CURSOR, false);
             }
         }
         self
@@ -1015,8 +1045,9 @@ impl El {
         self
     }
     /// Text copying puts before this [`El::selectable`] text when a selection takes it from its
-    /// start along with other texts, without drawing it: a list item's `"- "` or `"1. "`, whose
-    /// drawn marker isn't selectable. A copy of this text alone leaves it out.
+    /// start along with other texts or covers its whole copied text, without drawing it: a list
+    /// item's `"- "` or `"1. "`, whose drawn marker isn't selectable. A partial copy of this text
+    /// alone leaves it out.
     pub fn copy_prefix(mut self, prefix: impl Into<std::rc::Rc<str>>) -> Self {
         if let Some(t) = &mut self.text { t.cold.copy_prefix = Some(prefix.into()); }
         self

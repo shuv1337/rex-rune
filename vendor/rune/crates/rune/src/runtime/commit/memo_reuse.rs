@@ -163,8 +163,8 @@ fn same_visual_cold(a: &crate::el::VisualCold, b: &crate::el::VisualCold) -> boo
     let crate::el::VisualCold {
         surface, surface_place, border_bottom, border_sides, border_layout, border_dash, border_dash_phase, shadows, blur_motion,
         clip, clip_radius, clip_corners, cutouts, icon, icon_inked, icon_one_color, gradient, radial, outline, shape,
-        grid, pixels, pixels_fit, pixels_wrap, pixels_tint, image_filter, effect, backdrop_blur, hover_motion, hover_within, press_motion,
-        group_opacity, group_color, hover_alone, hover_share, icon_turn, cache_key, offset_motion, scale_motion,
+        grid, pixels, pixels_fit, pixels_wrap, pixels_tint, web_image, image_filter, image_menu, effect, backdrop_blur, hover_motion, hover_motion_default, hover_within, press_motion,
+        group_opacity, group_color, hover_alone, hover_share, hover_pointer_only, group_focus, group_motion, icon_turn, cache_key, offset_motion, scale_motion,
         origin, rotate_motion, child_exit, enter_delay, motion_intent, instant_motion, clip_to_content, flight_crop, flight_in_place,
         hold_landing, row_face, press_color, hover_fill, press_fill, hover_border, press_border, paint_contain, motion_snaps, hairline, offset, paint_alpha, layer_opacity, blur, rotate, mark, mirror_rtl, paint_order,
     } = b;
@@ -195,14 +195,20 @@ fn same_visual_cold(a: &crate::el::VisualCold, b: &crate::el::VisualCold) -> boo
             (Some(pa), Some(pb)) => Arc::ptr_eq(&pa.source, &pb.source),
             _ => false,
         }
-        && a.pixels_fit == *pixels_fit && a.pixels_wrap == *pixels_wrap && a.pixels_tint == *pixels_tint && a.image_filter == *image_filter && a.effect == *effect && a.backdrop_blur == *backdrop_blur
-        && opt_rc_eq(&a.hover_motion, hover_motion) && opt_rc_eq(&a.hover_within, hover_within)
+        && a.pixels_fit == *pixels_fit && a.pixels_wrap == *pixels_wrap && a.pixels_tint == *pixels_tint && opt_rc_eq(&a.web_image, web_image) && a.image_filter == *image_filter && opt_rc_eq(&a.image_menu, image_menu) && a.effect == *effect && a.backdrop_blur == *backdrop_blur
+        && opt_rc_eq(&a.hover_motion, hover_motion) && a.hover_motion_default == *hover_motion_default && opt_rc_eq(&a.hover_within, hover_within)
         && match (&a.press_motion, press_motion) {
             (None, None) => true,
             (Some(x), Some(y)) => Rc::ptr_eq(x, y) || **x == **y,
             _ => false,
         }
         && a.group_opacity == *group_opacity && a.group_color == *group_color && a.hover_alone == *hover_alone && a.hover_share == *hover_share
+        && a.hover_pointer_only == *hover_pointer_only && a.group_focus == *group_focus
+        && match (&a.group_motion, group_motion) {
+            (None, None) => true,
+            (Some(x), Some(y)) => Rc::ptr_eq(x, y) || **x == **y,
+            _ => false,
+        }
         && a.icon_turn == *icon_turn && a.cache_key == *cache_key
         && opt_box_eq(&a.offset_motion, offset_motion) && opt_box_eq(&a.scale_motion, scale_motion)
         && a.origin == *origin && opt_box_eq(&a.rotate_motion, rotate_motion)
@@ -317,10 +323,14 @@ fn same_drop(
         (Some(x), Some(y)) => {
             opt_rc_eq(&x.on_drop, &y.on_drop)
                 && opt_rc_eq(&x.accepts, &y.accepts)
+                && opt_rc_eq(&x.accepts_drag, &y.accepts_drag)
+                && opt_rc_eq(&x.feedback, &y.feedback)
                 && opt_rc_eq(&x.on_hover, &y.on_hover)
                 && opt_rc_eq(&x.on_reject, &y.on_reject)
                 && opt_rc_eq(&x.on_reject_hover, &y.on_reject_hover)
                 && opt_rc_eq(&x.on_move, &y.on_move)
+                && opt_rc_eq(&x.on_hover_within, &y.on_hover_within)
+                && opt_rc_eq(&x.on_move_within, &y.on_move_within)
         }
         _ => false,
     }
@@ -335,6 +345,7 @@ fn same_handlers(
     }
     let crate::el::Handlers {
         on_a11y_action,
+        custom_a11y_actions,
         on_paste,
         on_window_focus,
         on_spellcheck,
@@ -358,7 +369,7 @@ fn same_handlers(
         drag_out,
         drag_threshold,
         touch_at_once,
-        edge_drag,
+        edge_drags,
         press_on_down,
         on_drag_start,
         on_drag_end,
@@ -384,6 +395,12 @@ fn same_handlers(
     a.modal.is_none()
         && modal.is_none()
         && opt_rc_eq(&a.on_a11y_action, on_a11y_action)
+        && match (&a.custom_a11y_actions, custom_a11y_actions) {
+            (None, None) => true,
+            (Some(xa), Some(xb)) => xa.len() == xb.len()
+                && xa.iter().zip(xb.iter()).all(|(x, y)| x.id == y.id && x.label == y.label && Rc::ptr_eq(&x.handler, &y.handler)),
+            _ => false,
+        }
         && match (&a.on_paste, on_paste) {
             (None, None) => true,
             (Some(pa), Some(pb)) => pa.rich == pb.rich && Rc::ptr_eq(&pa.call, &pb.call),
@@ -414,9 +431,9 @@ fn same_handlers(
         && opt_rc_eq(&a.drag_out, drag_out)
         && a.drag_threshold == *drag_threshold
         && a.touch_at_once == *touch_at_once
-        && match (&a.edge_drag, edge_drag) {
+        && match (&a.edge_drags, edge_drags) {
             (None, None) => true,
-            (Some((ea, wa, fa)), Some((eb, wb, fb))) => ea == eb && wa == wb && Rc::ptr_eq(fa, fb),
+            (Some(ea), Some(eb)) => ea.same(eb),
             _ => false,
         }
         && a.press_on_down == *press_on_down

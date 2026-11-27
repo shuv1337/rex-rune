@@ -248,3 +248,194 @@ fn overlay_panel_color_space_options_drive_panel_seam_and_metal_layer() {
     assert_eq!(layer_colorspace_name(&layer), None, "Unmanaged overlay clears CAMetalLayer.colorspace to nil");
     drop(surface);
 }
+/// Verifies on a standalone off-screen `CAMetalLayer` (never attached to any `NSWindow` or
+/// `NSView`) that `frame_latency` and `LaunchDrawables` drive `maximumDrawableCount` as
+/// specified on both Rune's native Metal backend and wgpu's Metal backend: default (`None`)
+/// starts capped at 2 drawables and raises to 3 once settled, whereas `Some(1)` stays steady
+/// at 2 drawables before and after settle.
+#[test]
+fn metal_layer_maximum_drawable_count_follows_frame_latency_and_launch_drawables() {
+    use std::time::Duration;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use crate::window::{LaunchDrawables, frame_latency};
+
+    let check_instance = |instance: wgpu::Instance, label: &str| {
+        // SAFETY: new off-screen layer, never added to a window or view, used on this thread only.
+        let layer: Retained<AnyObject> = unsafe { msg_send![AnyClass::get(c"CAMetalLayer").expect("QuartzCore"), new] };
+        // SAFETY: `layer` is a live `CAMetalLayer`; `superlayer` returns a borrowed `CALayer*` or null.
+        let superlayer: *const AnyObject = unsafe { msg_send![&*layer, superlayer] };
+        assert!(superlayer.is_null(), "{label}: off-screen layer must stay detached");
+        let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
+        // SAFETY: `layer` outlives `surface`.
+        let surface = unsafe { instance.create_surface_unsafe(target) }.expect("Metal surface");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .expect("Metal adapter");
+        let (device, _queue) = pollster::block_on(adapter.request_device(&Default::default())).expect("Metal device");
+        let mut config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            width: 64,
+            height: 32,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: frame_latency(None),
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let max_drawables = || -> usize {
+            // SAFETY: `layer` is a live `CAMetalLayer`; `maximumDrawableCount` returns `NSUInteger`.
+            unsafe { msg_send![&*layer, maximumDrawableCount] }
+        };
+
+        // Default (`None` -> latency 2): capped at 2 drawables at launch, 3 after settle.
+        let t0 = crate::time::now();
+        let mut launch = LaunchDrawables::cap(&mut config);
+        surface.configure(&device, &config);
+        assert_eq!(max_drawables(), 2, "{label}: launch cap holds 2 drawables");
+        let steady = launch.settle(true, t0).expect("default launch raises to steady latency 2");
+        assert_eq!(steady, 2);
+        config.desired_maximum_frame_latency = steady;
+        surface.configure(&device, &config);
+        assert_eq!(max_drawables(), 3, "{label}: settled default holds 3 drawables");
+
+        // Opt-in `frame_latency(1)`: `LaunchDrawables::cap` returns Steady and stays at 2.
+        config.desired_maximum_frame_latency = frame_latency(Some(1));
+        let mut launch = LaunchDrawables::cap(&mut config);
+        surface.configure(&device, &config);
+        assert_eq!(max_drawables(), 2, "{label}: frame_latency(1) keeps 2 drawables");
+        assert_eq!(launch.settle(true, t0), None);
+        assert_eq!(launch.settle(false, t0 + Duration::from_secs(2)), None);
+        assert_eq!(max_drawables(), 2, "{label}: frame_latency(1) stays at 2 after settle");
+
+        // Clamping: 0 -> 1 (2 drawables), 3 -> 2 (3 drawables).
+        config.desired_maximum_frame_latency = frame_latency(Some(0));
+        surface.configure(&device, &config);
+        assert_eq!(max_drawables(), 2, "{label}: 0 clamps to 2 drawables");
+        config.desired_maximum_frame_latency = frame_latency(Some(3));
+        surface.configure(&device, &config);
+        assert_eq!(max_drawables(), 3, "{label}: 3 clamps to 3 drawables");
+        drop(surface);
+    };
+
+    #[cfg(feature = "metal-backend")]
+    check_instance(crate::gpu::metal::instance(), "native-metal");
+
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::METAL;
+    check_instance(wgpu::Instance::new(desc), "wgpu-metal");
+}
+/// Driving a standalone detached `CAMetalLayer` (never attached to any `NSWindow` or `NSView`)
+/// and `Renderer` through 24 live-resize (`presentsWithTransaction`) size changes followed by
+/// macOS idle rest (`poll(Poll)` + `give_back(false)`) empties the Metal retire queue (releasing
+/// held `CAMetalDrawable` and command-buffer references) and returns live HAL texture, buffer,
+/// and bind-group counts to the single-size baseline.
+#[cfg(feature = "metal-backend")]
+#[test]
+fn detached_metal_layer_retires_presented_drawables_on_idle_poll_and_bounds_resize_textures() {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use std::time::Duration;
+
+    autoreleasepool(|_| {
+        let instance = crate::gpu::metal::instance();
+        // SAFETY: detached off-screen CAMetalLayer, never added to any view or window.
+        let layer: Retained<AnyObject> = unsafe { msg_send![AnyClass::get(c"CAMetalLayer").expect("QuartzCore"), new] };
+        // SAFETY: `layer` is a live `CAMetalLayer`; `superlayer` returns a borrowed pointer or null.
+        let superlayer: *const AnyObject = unsafe { msg_send![&*layer, superlayer] };
+        assert!(superlayer.is_null(), "off-screen layer must never attach to a window");
+        let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
+        // SAFETY: `layer` outlives `surface`.
+        let surface = unsafe { instance.create_surface_unsafe(target) }.expect("Metal surface");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .expect("Metal adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).expect("Metal device");
+        let mut config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            width: 800,
+            height: 600,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        surface.configure(&device, &config);
+        let mut renderer = crate::render::Renderer::new(&device, wgpu::TextureFormat::Bgra8Unorm);
+        renderer.set_srgb_blend(true);
+        let view_fn = |_s: &(), _cx: &mut crate::Cx<()>| {
+            crate::col().w_full().h_full().fill(crate::Color::BLACK)
+                .child(crate::el().key("card").w_full().h(100.0).radius(8.0).opacity(0.95).fill(crate::Color::WHITE.alpha(0.2)).child(crate::text("Resize")))
+                .child(crate::el().key("blur").size(96.0, 32.0).radius(8.0).backdrop_blur(8.0).fill(crate::Color::WHITE.alpha(0.12)))
+                .child(crate::el().key("cached").w_full().h(64.0).cache().fill(crate::Color::WHITE.alpha(0.15)).child(crate::text("Cached")))
+        };
+        let mut rt = crate::Runtime::new((), view_fn, (400.0, 300.0), crate::Env::new(true, 2.0));
+        rt.set_srgb_blend(true);
+
+        let draw_one = |rt: &mut crate::Runtime<()>, renderer: &mut crate::render::Renderer, config: &wgpu::SurfaceConfiguration, surface: &wgpu::Surface<'_>| {
+            autoreleasepool(|_| {
+                rt.set_viewport((config.width as f32 / 2.0, config.height as f32 / 2.0), 2.0);
+                rt.frame(1.0 / 60.0);
+                let frame = match surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                    other => panic!("drawable: {other:?}"),
+                };
+                let view = frame.texture.create_view(&Default::default());
+                let mut enc = device.create_command_encoder(&Default::default());
+                renderer.upload_images(&device, &queue, &mut rt.images);
+                renderer.prepare(&device, &queue, &mut rt.text.atlas, &rt.instances, (config.width, config.height));
+                renderer.draw(&mut enc, &view, rt.clear_color());
+                renderer.before_submit(&mut enc);
+                queue.submit([enc.finish()]);
+                queue.present(frame);
+            });
+        };
+
+        draw_one(&mut rt, &mut renderer, &config, &surface);
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("baseline poll");
+        #[cfg(feature = "test-gpu-counters")]
+        let base = {
+            let c = device.get_internal_counters().hal;
+            (c.textures.read(), c.buffers.read(), c.bind_groups.read())
+        };
+
+        // 24 rapid live-resize steps ending back at the initial size.
+        // SAFETY: detached layer on this thread.
+        unsafe { let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::YES]; }
+        for i in 1..=23u32 {
+            config.width = 640 + (i * 53) % 480;
+            config.height = 420 + (i * 41) % 360;
+            surface.configure(&device, &config);
+            draw_one(&mut rt, &mut renderer, &config, &surface);
+        }
+        config.width = 800;
+        config.height = 600;
+        surface.configure(&device, &config);
+        draw_one(&mut rt, &mut renderer, &config, &surface);
+        // SAFETY: detached layer on this thread.
+        unsafe { let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::NO]; }
+
+        // Wait for the final GPU pass to finish without polling, then run the idle-rest path.
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(crate::window::rest::should_poll_on_idle_rest(true, false));
+        let status = device.poll(wgpu::PollType::Poll).expect("non-blocking Metal poll");
+        assert_eq!(status, wgpu::PollStatus::QueueEmpty, "idle poll retires all completed Metal command buffers and drawables");
+        rt.text.rest();
+        rt.images.rest();
+        renderer.give_back(false, &mut rt.text.atlas.resident_caches, &rt.images);
+        assert_eq!(renderer.spare_layers(), 0);
+        #[cfg(feature = "test-gpu-counters")]
+        {
+            let c = device.get_internal_counters().hal;
+            assert_eq!((c.textures.read(), c.buffers.read(), c.bind_groups.read()), base, "HAL counters return to single-size baseline after 24 resizes + idle rest");
+        }
+        drop(renderer);
+        drop(surface);
+    });
+}

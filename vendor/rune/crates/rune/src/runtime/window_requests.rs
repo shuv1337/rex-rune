@@ -12,12 +12,26 @@ pub(crate) struct HostState {
     pub(in crate::runtime) titlebar_inset: f32,
     pub(in crate::runtime) maximized: bool,
     pub(in crate::runtime) full_screen: bool,
+    /// Confirmed OS-active whole-window backdrop reported by [`Cx::window_backdrop`].
+    pub(in crate::runtime) window_backdrop: crate::WindowBackdrop,
+    /// Bitmask of non-`None` `WindowBackdrop` variants currently supported by the active host
+    /// surface and OS/compositor, reported by [`Cx::window_backdrop_supported`].
+    pub(in crate::runtime) window_backdrop_supported: u8,
+    /// Active renderer backing this window or overlay, reported by [`Cx::renderer_kind`].
+    pub(in crate::runtime) renderer_kind: crate::RendererKind,
+    /// When `true` on a transparent window, `clear_color()` clears to an opaque theme-matched
+    /// fallback so a requested backdrop that could not activate never opens a transparent hole.
+    pub(in crate::runtime) backdrop_opaque_fallback: bool,
     pub(in crate::runtime) system_reduced_motion: bool,
     pub(in crate::runtime) system_accent: crate::SystemAccent,
     /// What [`Cx::system_contrast`] reports.
     pub(in crate::runtime) system_contrast: Option<crate::SystemContrast>,
     /// What [`Cx::system_increased_contrast`] reports.
     pub(in crate::runtime) system_increased_contrast: bool,
+    /// What [`Cx::system_text_scale`] reports (`1.0` by default).
+    pub(in crate::runtime) system_text_scale: f32,
+    /// What [`Cx::system_reduced_transparency`] reports.
+    pub(in crate::runtime) system_reduced_transparency: bool,
     pub(in crate::runtime) scroll_bars: system_settings::ScrollBarHost,
     /// Preferred languages set via `Runtime::set_languages` or browser `languagechange` (`None`: lazy OS query).
     pub(in crate::runtime) system_languages: Option<Rc<[String]>>,
@@ -41,18 +55,29 @@ pub(crate) struct HostState {
     pub(crate) window_title: Title,
     /// Per-window native color scheme requested via `Tx::set_color_scheme`, taken by the host.
     pub(crate) window_color_scheme: Option<crate::ColorScheme>,
+    /// Per-window system backdrop requested via `Tx::set_window_backdrop`, taken by the host.
+    pub(crate) window_backdrop_request: Option<crate::WindowBackdrop>,
     /// macOS document path (`MacWindowOptions::represented_file`, `Tx::set_represented_file`).
     pub(crate) represented_file: Latched<Option<std::path::PathBuf>>,
     /// macOS document edited dot (`MacWindowOptions::document_edited`, `Tx::set_document_edited`).
     pub(crate) document_edited: Latched<bool>,
-    /// The window's height follows the root's natural height (`App::fit_content_height`).
-    pub(crate) fit_height: bool,
+    /// How the root fits its content (`App::fit_content_height` sets `ContentSizing::FitHeight`;
+    /// `ConfiguredOverlay::sizing` / `fit_content_height` sets any `ContentSizing` mode).
+    pub(crate) content_sizing: crate::ContentSizing,
+    /// Optional root `(min_size, max_size)` bounds in window points for content-sized overlays.
+    pub(crate) content_limits: crate::overlay::sizing::SizeLimits,
     /// The height a window that fits its content last asked for, and the frame its move
     /// starts with. The host takes the hold as it starts the move.
     pub(crate) fit: FitWindow,
+    /// The content's `(width, height)` a content-sized native overlay asked for, apart from
+    /// `window_frame` (`Tx::resize_window`, which overlays ignore). Its host takes it.
+    pub(crate) overlay_fit: Option<(f32, f32)>,
     /// A user-initiated close request (`Tx::request_user_close`) waiting for the host's
     /// `close_requested` gate.
     pub(crate) user_close_request: bool,
+    /// `Tx::request_urgent_frame` waiting for the host to arm one-shot macOS display-link
+    /// admission on the next drawn frame.
+    pub(crate) urgent_frame: bool,
     /// A handler or `update` asked to minimize the window (`Tx::minimize`); the shell takes it,
     /// after a show the same turn asked for (`window::Minimize`).
     pub(crate) minimize: crate::window::Minimize,
@@ -66,6 +91,13 @@ pub(crate) struct HostState {
     pub(crate) open_urls_natively: bool,
     /// Pop-up menus asked for (`Tx::popup_menu`) and not yet answered, oldest first.
     pub(in crate::runtime) popups: popup_dispatch::Popups,
+    /// Lifecycle state of the in-window fallback pop-up menu delivered to `App::on_popup_menu`.
+    pub(in crate::runtime) popup_fallback: popup_fallback::PopupFallbackState,
+    /// Monotonic token tagging each opened fallback pop-up menu.
+    pub(in crate::runtime) popup_fallback_seq: u64,
+    /// Test-only seam forcing `App::on_popup_menu` even where `popup_menu_supported()` is true.
+    #[cfg(test)]
+    pub(crate) force_popup_menu_fallback: bool,
     /// Pending text-field menu delivered to `App::on_field_menu`, awaiting `Tx::resolve_field_menu`.
     pub(in crate::runtime) field_menu_fallback: Option<Box<crate::runtime::field_menu::PendingFieldMenu>>,
     /// Monotonic token tagging each opened fallback field menu so a deferred pick never matches a newer menu.
@@ -75,7 +107,10 @@ pub(crate) struct HostState {
     /// Test-only seam forcing `App::on_field_menu` even where `popup_menu_supported()` is true.
     #[cfg(test)]
     pub(crate) force_field_menu_fallback: bool,
-    /// The file dialog asked for (`Tx::open_file`, `Tx::save_file`) and not yet answered.
+    /// True when the embedding host presents file dialogs itself rather than refusing them.
+    #[cfg_attr(not(any(test, target_vendor = "apple")), allow(dead_code))]
+    pub(crate) file_dialogs: bool,
+    /// The file dialog asked for (`Tx::open_file`, `Tx::pick_file`, `Tx::save_file`) and not yet answered.
     pub(in crate::runtime) file_dialog: crate::file_dialog::DialogState,
     /// File dialog callbacks, by id, until their answer runs.
     pub(in crate::runtime) file_dialog_answers: Vec<(u64, crate::file_dialog::AnswerFn)>,
@@ -88,6 +123,26 @@ pub(crate) struct HostState {
     pub(in crate::runtime) a11y: Option<Box<crate::a11y::tree::A11yTree>>,
     /// The band of a taller document the window draws (`App::web_document`).
     pub(in crate::runtime) page: Option<web_page::Page>,
+    pub(in crate::runtime) wm_state: crate::WindowManagerState,
+    /// Whether the last committed view read `Cx::decoration_mode`, `Cx::tiled_edges`, or `Cx::window_actions`.
+    pub(in crate::runtime) wm_state_read: bool,
+    /// Per-window native primary pointer mode (`Cx::touch_controls`, `Cx::hover_none`).
+    pub(in crate::runtime) primary_pointer: cx::PrimaryPointer,
+    /// Whether the last committed view read `Cx::touch_controls` or `Cx::hover_none`.
+    pub(in crate::runtime) primary_pointer_read: bool,
+    /// Last sampled OS tablet/slate-mode posture, so focus changes on hybrid touchscreen laptops
+    /// preserve live touch vs. mouse mode unless the system posture itself transitioned.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub(in crate::runtime) system_tablet_mode: Option<bool>,
+    #[cfg(target_os = "windows")]
+    pub(in crate::runtime) tablet_setting_gen: u64,
+    /// Host-supplied safe-area insets `[top, right, bottom, left]` in logical points
+    /// (`Runtime::set_safe_area`); `None` falls back to browser insets on wasm32 or `[0.0; 4]`.
+    pub(in crate::runtime) safe_area: Option<[f32; 4]>,
+    /// Visible vertical band `(top, bottom)` of the host's visual viewport in window points when
+    /// smaller than the layout viewport (e.g. an on-screen keyboard under `resizes-visual`), or
+    /// `None` when the full layout viewport is visible.
+    pub(in crate::runtime) visual_viewport_y: Option<(f32, f32)>,
 }
 
 impl HostState {
@@ -101,10 +156,16 @@ impl HostState {
             titlebar_inset: 0.0,
             maximized: false,
             full_screen: false,
+            window_backdrop: crate::WindowBackdrop::None,
+            window_backdrop_supported: 0,
+            renderer_kind: crate::RendererKind::Gpu,
+            backdrop_opaque_fallback: false,
             system_reduced_motion: false,
             system_accent: crate::SystemAccent::DEFAULT,
             system_contrast: None,
             system_increased_contrast: false,
+            system_text_scale: crate::platform::text_scale::DEFAULT,
+            system_reduced_transparency: false,
             scroll_bars: Default::default(),
             system_languages: None,
             languages_gen: 0,
@@ -118,22 +179,31 @@ impl HostState {
             window_frame: None,
             window_title: Default::default(),
             window_color_scheme: None,
+            window_backdrop_request: None,
             represented_file: Default::default(),
             document_edited: Default::default(),
-            fit_height: false,
+            content_sizing: crate::ContentSizing::Fixed,
+            content_limits: (None, None),
             fit: Default::default(),
+            overlay_fit: None,
             user_close_request: false,
+            urgent_frame: false,
             minimize: Default::default(),
             url_requests: Vec::new(),
             path_requests: Vec::new(),
             url_scheme_requests: Vec::new(),
             open_urls_natively: false,
             popups: Default::default(),
+            popup_fallback: Default::default(),
+            popup_fallback_seq: 0,
+            #[cfg(test)]
+            force_popup_menu_fallback: false,
             field_menu_fallback: None,
             field_menu_seq: 0,
             deferred_field_menu_pick: None,
             #[cfg(test)]
             force_field_menu_fallback: false,
+            file_dialogs: false,
             file_dialog: Default::default(),
             file_dialog_answers: Vec::new(),
             next_file_dialog: 0,
@@ -141,6 +211,15 @@ impl HostState {
             haptics: Default::default(),
             a11y: None,
             page: None,
+            wm_state: crate::WindowManagerState::default(),
+            wm_state_read: false,
+            primary_pointer: cx::PrimaryPointer::Hover,
+            primary_pointer_read: false,
+            system_tablet_mode: None,
+            #[cfg(target_os = "windows")]
+            tablet_setting_gen: 0,
+            safe_area: None,
+            visual_viewport_y: None,
         }
     }
 
@@ -234,7 +313,7 @@ impl HostState {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn fit_window(
         &mut self,
-        height: f32,
+        size: (f32, f32),
         viewport: (f32, f32),
         scale: f32,
         reduced_motion: bool,
@@ -242,7 +321,18 @@ impl HostState {
         tx: &Tx,
         first: bool,
     ) {
-        let height = height.ceil_to(scale).max(1.0);
+        // An overlay resizes through its host in window points at `window_scale`, matching
+        // `measure_content` and `OverlayCore::canvas_size` under `Cx::zoom`.
+        if self.native_overlay {
+            let w = if self.content_sizing.fits_width() { self.content_height_from(size.0) } else { self.zoom.window.0 };
+            let h = if self.content_sizing.fits_height() { self.content_height_from(size.1) } else { self.zoom.window.1 };
+            let next = (w, h);
+            if next == self.zoom.window { return; }
+            self.overlay_fit = Some(next);
+            return;
+        }
+        if !self.content_sizing.fits_height() { return; }
+        let height = size.1.ceil_to(scale).max(1.0);
         if !self.fit.ask(height, viewport.1) { return; }
         let jump = first || tx.commit.snaps() || tx.relayout || reduced_motion;
         // Only a macOS window and headless runs move the frame on a spring.
@@ -260,11 +350,22 @@ impl HostState {
         (view_height * self.zoom.k).ceil_to(self.zoom.window_scale).max(1.0)
     }
 
+    #[inline]
+    pub(crate) fn set_fit_height(&mut self, on: bool) {
+        self.content_sizing = if on { crate::ContentSizing::FitHeight } else { crate::ContentSizing::Fixed };
+    }
+
+    #[inline]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) const fn fit_height(&self) -> bool {
+        matches!(self.content_sizing, crate::ContentSizing::FitHeight)
+    }
+
     /// Someone resized a window that fits its content (not a page's band) to `height`: it
     /// goes back to the content's height.
     #[inline]
     pub(super) fn fit_resized(&mut self, height: f32, current_height: f32) -> bool {
-        self.fit_height && self.page.is_none() && self.window_resting && self.fit.resized(height, current_height)
+        self.content_sizing.fits_height() && !self.native_overlay && self.page.is_none() && self.window_resting && self.fit.resized(height, current_height)
     }
 
     /// Whether this frame holds its motion for the window (see [`FitHold`]).
@@ -469,8 +570,8 @@ impl RuntimeCore {
     /// Asks the window for the content's new height, on this commit's spring. The first
     /// commit, a viewport change and `Tx::instant` jump.
     #[inline]
-    pub(super) fn fit_window(&mut self, height: f32, tx: &Tx, first: bool) {
-        self.host.fit_window(height, self.viewport, self.env.scale, self.reduced_motion, self.wall_start.is_none(), tx, first);
+    pub(super) fn fit_window(&mut self, size: (f32, f32), tx: &Tx, first: bool) {
+        self.host.fit_window(size, self.viewport, self.env.scale, self.reduced_motion, self.wall_start.is_none(), tx, first);
     }
 
     /// The root's natural height at the current width, in window points (the view's times its
@@ -481,6 +582,25 @@ impl RuntimeCore {
         let height = measured.nodes.first().map_or(self.viewport.1, |root| root.local.h);
         self.discard_measured(measured);
         self.host.content_height_from(height)
+    }
+
+    /// The root's natural `(width, height)` in window points (view points times `Cx::zoom`),
+    /// measured without committing or firing `apply`, `on_layout`, `on_ready`, `poll`, or timers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn measure_content(&mut self, app: &dyn ViewDriver) -> (f32, f32) {
+        let measured = self.measure_pass(app, &Tx::default(), false);
+        let zoom = measured.zoom;
+        let size = measured.nodes.first().map_or(self.viewport, |root| (root.local.w, root.local.h));
+        self.discard_measured(measured);
+        (size.0 * zoom, size.1 * zoom)
+    }
+
+    /// The last committed root element's target `(width, height)` in window points from Taffy
+    /// layout (not interpolated spring rects).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn committed_content_size(&self) -> Option<(f32, f32)> {
+        let root = self.tree.nodes.first()?;
+        Some((root.local.w * self.host.zoom.k, root.local.h * self.host.zoom.k))
     }
 
     /// Someone resized a window that fits its content (not a page's band) to `height`: it
@@ -500,6 +620,12 @@ impl RuntimeCore {
     #[inline]
     pub(crate) fn take_user_close_request(&mut self) -> bool {
         std::mem::take(&mut self.host.user_close_request)
+    }
+
+    /// Takes a latched `Tx::request_urgent_frame` request for the host.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn take_urgent_frame(&mut self) -> bool {
+        std::mem::take(&mut self.host.urgent_frame)
     }
 
     /// Whether a user-initiated close request is pending for the host.

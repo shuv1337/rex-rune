@@ -185,6 +185,7 @@ impl Host {
             let rt = self.app.rt_mut();
             rt.set_system_dark(crate::platform::preferences::window_dark(&window, self.args.theme.as_deref()));
             rt.set_viewport((size.0 as f32 / scale, size.1 as f32 / scale), scale);
+            rt.set_renderer_kind(crate::RendererKind::Cpu);
             // Reopening paints the settled state in the first frame (guarantee 8).
             if self.shown && !built { rt.settle_all(); }
         }
@@ -196,7 +197,13 @@ impl Host {
         self.native_handle.native.number.store(native_window_number(&window).unwrap_or(0), Ordering::Release);
         self.win = Some(Win {
             a11y,
-            native: Native { mode: SurfaceMode::Cpu { cpu, job }, ..Default::default() },
+            native: Native {
+                mode: SurfaceMode::Cpu { cpu, job },
+                wayland_present: (self.wayland && self.frame_presented.wanted())
+                    .then(|| crate::platform::wayland::presentation::SurfacePresentation::for_window(&window))
+                    .flatten(),
+                ..Default::default()
+            },
             first_frame: FirstFrame::opened(crate::time::now()),
             surface: None,
             config,
@@ -210,13 +217,14 @@ impl Host {
             corners: None,
             timer_frame: TimerFrame::default(),
             loop_frame: LoopFrame::default(),
+            damage: Default::default(),
             presented: None,
             redraw: std::cell::Cell::new(Redraw::Idle),
         });
+        self.apply_window_color_scheme();
+        self.sync_window_backdrop(false);
         self.apply_placement(event_loop);
-        crate::marks::mark("window.created");
-        if let Some(created) = self.on_created.take() { created(self.native_handle.clone()); }
-        if let Some(on_window) = self.on_window.as_mut() { on_window(&self.native_handle); }
+        if !self.announce_created(false) { return Ok(()); }
         if let Some(w) = self.win.as_mut() {
             let size = w.window.inner_size();
             let scale = w.window.scale_factor() as f32;
@@ -241,7 +249,17 @@ impl Host {
     /// A frame drawn by the CPU renderer: the runtime steps, the painter repaints the tiles that
     /// changed, and only those rectangles go to the display.
     pub(in crate::window) fn draw_cpu(&mut self, resizing: bool) {
-        let mut frame = CpuWindowFrame { host: self, resizing, owed: false, now: None, encoded: None, sent: false };
+        let seq = self.frame_reports.next_seq();
+        let _stage_scope = self.observability.scope_stages(seq);
+        let mut frame = CpuWindowFrame {
+            host: self,
+            resizing,
+            owed: false,
+            now: None,
+            encoded: None,
+            sent: false,
+            redraw_stage: crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Redraw),
+        };
         host_step::run(&mut frame);
     }
 }
@@ -255,6 +273,7 @@ struct CpuWindowFrame<'a> {
     encoded: Option<Instant>,
     /// This frame sent pixels to the display.
     sent: bool,
+    redraw_stage: crate::frame::stage::StageGuard,
 }
 
 impl FrameHost for CpuWindowFrame<'_> {
@@ -269,6 +288,7 @@ impl FrameHost for CpuWindowFrame<'_> {
         let owed = cpu.frames.exposed(false);
         let covered = !owed && (!self.host.life.uncovered() || l.minimized());
         if covered {
+            self.redraw_stage.end();
             self.host.covered_frame();
             return Gate::Skip;
         }
@@ -296,6 +316,7 @@ impl FrameHost for CpuWindowFrame<'_> {
     fn acquire(&mut self) -> Acquire<()> { Acquire::Ready(()) }
 
     fn step_runtime(&mut self) -> StepInfo {
+        let _runtime = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Runtime);
         let now = crate::time::now();
         self.now = Some(now);
         let (animating, dt) = self.host.app.clock_advance(&mut self.host.clock, now, false);
@@ -323,7 +344,12 @@ impl FrameHost for CpuWindowFrame<'_> {
         }
         let gpu_failed = matches!(l.native.mode, SurfaceMode::Cpu { job: GpuJob::Failed, .. });
         let Some(cpu) = l.native.mode.cpu() else { return RenderPrep::Abort };
-        cpu.painter.fill_masks(&mut rt.text.atlas);
+        if rt.text.atlas.has_pending_fills() {
+            let _atlas = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::GlyphAtlas);
+            cpu.painter.fill_masks(&mut rt.text.atlas);
+        } else {
+            cpu.painter.fill_masks(&mut rt.text.atlas);
+        }
         crate::marks::mark_once(&FIRST_MASKS, "frame.first.masks");
         let scene = Scene::new(&rt.instances, &rt.text.atlas, &rt.images, (width, height), rt.clear_color())
             .srgb_blend(rt.srgb_blend())
@@ -346,7 +372,10 @@ impl FrameHost for CpuWindowFrame<'_> {
         };
         if !canvas.kept { painter.forget(); }
         let (kept, stride) = (canvas.kept, canvas.stride);
-        let painted = painter.paint(&scene, &mut Target::with_stride(&mut *canvas.bytes, width, height, stride));
+        let painted = {
+            let _encode = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Encode);
+            painter.paint(&scene, &mut Target::with_stride(&mut *canvas.bytes, width, height, stride))
+        };
         match painted {
             Ok(painted) => {
                 clear_corners(canvas.bytes, stride, (width, height), radius, &painted.rects);
@@ -386,6 +415,7 @@ impl FrameHost for CpuWindowFrame<'_> {
         // wants the window's pixels: the request that asked for this frame may be why.
         let owed = self.owed || (rects.is_empty() && cpu.frames.exposed(true));
         let put = if owed { Put::All } else { Put::Rects(rects) };
+        let _present = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Present);
         // winit asks the compositor for the next frame's time with what is committed now.
         if owed || !rects.is_empty() { l.window.pre_present_notify(); }
         self.sent = cpu.frames.present(put);
@@ -409,7 +439,9 @@ impl FrameHost for CpuWindowFrame<'_> {
     fn settle(&mut self, submitted: Instant, info: &StepInfo) {
         let now = self.now.unwrap_or(submitted);
         self.host.meter.presented();
-        self.host.frame_reports.drawn(self.encoded, None, now, info.update_ms);
+        crate::haptics::flush_live(self.host.app.rt_mut(), false);
+        self.redraw_stage.end();
+        self.host.frame_reports.drawn_with_present(self.encoded, self.encoded, None, now, info.update_ms, false);
         self.host.app.inspect_frame();
         let Some(l) = self.host.win.as_mut() else { return };
         let next_tick = l.next_tick(now);

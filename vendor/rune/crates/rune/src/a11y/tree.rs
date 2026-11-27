@@ -19,9 +19,11 @@ pub(super) const ROOT: AkId = AkId(1);
 const TOOLTIP: AkId = AkId(2);
 /// `Tx::announce`'s live region.
 const ANNOUNCER: AkId = AkId(3);
-/// Bits under an element's id for the nodes it owns: its text's lines and links.
+/// Bits under an element's id for the nodes it owns: its text's lines, links and named inline
+/// icons.
 const SUB: u32 = 16;
 pub(super) const LINK_BASE: u64 = 0x8000;
+pub(super) const ICON_BASE: u64 = 0xF000;
 pub(super) const LINES_BOX_CLASS: &str = "\x1frune-lines";
 pub(super) const LINE_CLASS: &str = "\x1frune-line";
 
@@ -29,11 +31,13 @@ pub(super) fn element_id(id: NodeId) -> AkId { AkId(id.0 << SUB) }
 pub(super) fn line_id(id: NodeId, line: usize) -> AkId { AkId((id.0 << SUB) | (1 + line as u64).min(LINK_BASE - 2)) }
 pub(super) fn lines_box_id(id: NodeId) -> AkId { AkId((id.0 << SUB) | (LINK_BASE - 1)) }
 pub(super) fn drawn_line_id(id: NodeId, line: usize) -> AkId { AkId((id.0 << SUB) | (1 + line as u64).min(LINK_BASE - 2)) }
-pub(super) fn link_id(id: NodeId, k: usize) -> AkId { AkId((id.0 << SUB) | (LINK_BASE + k as u64).min((1 << SUB) - 1)) }
+pub(super) fn link_id(id: NodeId, k: usize) -> AkId { AkId((id.0 << SUB) | (LINK_BASE + k as u64).min(ICON_BASE - 1)) }
+/// A named inline icon (`InlineIcon::label`), by its pill's index.
+pub(super) fn icon_id(id: NodeId, k: usize) -> AkId { AkId((id.0 << SUB) | (ICON_BASE + k as u64).min((1 << SUB) - 1)) }
 /// The runtime node an AccessKit id names, and which of its own nodes: 0 the element, a line
-/// `1..LINK_BASE`, a link from `LINK_BASE`.
+/// `1..LINK_BASE`, a link `LINK_BASE..ICON_BASE`, a named inline icon from `ICON_BASE`.
 pub(super) fn split_id(id: AkId) -> (NodeId, u64) { (NodeId(id.0 >> SUB), id.0 & ((1 << SUB) - 1)) }
-pub(super) fn sub_link(sub: u64) -> Option<usize> { (sub >= LINK_BASE).then(|| (sub - LINK_BASE) as usize) }
+pub(super) fn sub_link(sub: u64) -> Option<usize> { (LINK_BASE..ICON_BASE).contains(&sub).then(|| (sub - LINK_BASE) as usize) }
 
 /// What a tree update read last time: when none of it moved, nothing it builds can have.
 #[derive(Clone, PartialEq, Default)]
@@ -94,6 +98,17 @@ enum ModalLive {
 }
 
 impl A11yTree {
+    pub(crate) fn rest(&mut self) {
+        let cap = (self.sent.len().saturating_mul(2)).max(64);
+        if self.sent.capacity() > cap { self.sent.shrink_to(cap); }
+        let sc = (self.scrollers.len().saturating_mul(2)).max(16);
+        if self.scrollers.capacity() > sc { self.scrollers.shrink_to(sc); }
+        let lf = (self.long_fields.len().saturating_mul(2)).max(16);
+        if self.long_fields.capacity() > lf { self.long_fields.shrink_to(lf); }
+        let lm = (self.live_modal.len().saturating_mul(2)).max(16);
+        if self.live_modal.capacity() > lm { self.live_modal.shrink_to(lm); }
+    }
+
     pub(super) fn is_live_muted(&self, id: AkId) -> bool {
         matches!(self.live_modal.get(&id.0), Some(ModalLive::Muted(_)))
     }
@@ -396,6 +411,7 @@ impl RuntimeCore {
             let Some(old) = tree.sent.get_mut(&id.0) else { continue };
             node.set_children(old.node.children().to_vec());
             if let Some(size) = old.node.size_of_set() { node.set_size_of_set(size); }
+            if let Some(ls) = old.node.list_style() { node.set_list_style(ls); }
             if let Some(rows) = old.node.row_count() { node.set_row_count(rows); }
             if let Some(row) = old.node.row_index() { node.set_row_index(row); }
             if old.node != node {
@@ -564,7 +580,8 @@ impl RuntimeCore {
             Some(t) => {
                 let words = t.source_text();
                 let words = words.trim();
-                !words.is_empty() && t.cold.links.is_empty() && name.contains(words)
+                let named_icon = t.cold.pills.iter().any(|p| p.bare.as_deref().is_some_and(|b| b.label.is_some()));
+                !words.is_empty() && t.cold.links.is_empty() && !named_icon && name.contains(words)
             }
             None => n.label.as_deref().is_none_or(|l| l.trim().is_empty() || name.contains(l.trim())) && n.vis.grid.is_none(),
         }
@@ -637,20 +654,26 @@ impl RuntimeCore {
                 let id = element_id(n.id);
                 let live_sig = self.a11y_live_sig(i, content_print);
                 let mut print = mix(self.a11y_print(i, role, &w), content_print);
-                let parent_role = slots[w.slot].role;
+                let parent_slot = &slots[w.slot];
+                let parent_role = parent_slot.role;
+                let parent_element = parent_slot.element;
                 let is_set_item = crate::a11y::roles::ordered_set_item_in(role, parent_role);
                 if let Some(list) = self.commit.virtuals.get(&n.path) {
                     print = mix(print, list.keys.len() as u64 + 1);
                 }
-                if let Some(index) = self.a11y_index_in_list(i)
+                let virtual_pos = self.a11y_virtual_list_pos(i);
+                if let Some((index, _)) = virtual_pos
                     && (is_set_item || (role == Role::Row && crate::a11y::roles::table_container(parent_role)))
                 {
                     print = mix(print, index as u64 + 1);
                 }
-                if n.a11y.level.is_some()
-                    && is_set_item
-                    && let Some((_, size)) = n.a11y.more.as_ref().and_then(|m| m.set)
-                {
+                if let Some(size) = self.a11y_item_set_size(
+                    i,
+                    is_set_item,
+                    parent_role,
+                    parent_element,
+                    virtual_pos.map(|(_, len)| len),
+                ) {
                     print = mix(print, size as u64 + 1);
                 }
                 if n.scroll.is_some() && self.scroll.scrolls.contains_key(&n.id) { scrollers.push((i, w)); }
@@ -728,8 +751,17 @@ impl RuntimeCore {
             };
             let mut node = self.a11y_node(i, s.role, &s.walk);
             let n = &self.tree.nodes[i];
-            let parent_role = found.slots[s.walk.slot].role;
+            let parent_slot = &found.slots[s.walk.slot];
+            let parent_role = parent_slot.role;
             let is_set_item = crate::a11y::roles::ordered_set_item_in(s.role, parent_role);
+            if s.role == Role::ListItem
+                && parent_role == Role::List
+                && parent_slot.element.is_some_and(|p| {
+                    self.tree.nodes[p].a11y.more.as_deref().is_some_and(|m| m.list_start.is_some())
+                })
+            {
+                node.set_list_style(accesskit::ListStyle::Numeric);
+            }
             if let Some(list) = self.commit.virtuals.get(&n.path) {
                 if crate::a11y::roles::ordered_set(s.role) { node.set_size_of_set(list.keys.len()); }
                 if crate::a11y::roles::table_container(s.role) && node.row_count().is_none() {
@@ -737,7 +769,8 @@ impl RuntimeCore {
                 }
             }
             // An app's own place in the set or table wins over the virtual list's index.
-            if let Some(index) = self.a11y_index_in_list(i) {
+            let virtual_pos = self.a11y_virtual_list_pos(i);
+            if let Some((index, _)) = virtual_pos {
                 if node.position_in_set().is_none() && is_set_item {
                     node.set_position_in_set(index);
                 }
@@ -745,12 +778,15 @@ impl RuntimeCore {
                     node.set_row_index(index);
                 }
             }
-            // A levelled ordered-set item (a flat tree's treeitem or treegrid row) carries its own
-            // level's set size so adapters report per-level counts without synthetic groups.
-            if n.a11y.level.is_some()
-                && is_set_item
-                && let Some((_, size)) = n.a11y.more.as_ref().and_then(|m| m.set)
-            {
+            // Set items carry their own size_of_set when levelled (flat trees/treegrids) or when
+            // their container is not an ordered set (e.g. articles in a virtual log or region).
+            if let Some(size) = self.a11y_item_set_size(
+                i,
+                is_set_item,
+                parent_role,
+                parent_slot.element,
+                virtual_pos.map(|(_, len)| len),
+            ) {
                 node.set_size_of_set(size);
             }
             if let Some((size, _)) = s.set_size { node.set_size_of_set(size); }
@@ -768,10 +804,35 @@ impl RuntimeCore {
         out
     }
 
-    /// Row `i`'s index in the virtual list it is a row of.
-    fn a11y_index_in_list(&self, i: usize) -> Option<usize> {
+    /// Row `i`'s 0-based index and total row count in the virtual list it is a direct row of.
+    pub(crate) fn a11y_virtual_list_pos(&self, i: usize) -> Option<(usize, usize)> {
         let n = &self.tree.nodes[i];
         let list = self.commit.virtuals.get(&self.tree.nodes[n.parent?].path)?;
-        list.index_of(n.key.as_deref()?)
+        Some((list.index_of(n.key.as_deref()?)?, list.keys.len()))
+    }
+
+    /// Per-item `size_of_set` for an ordered-set item: levelled items carry their level's explicit
+    /// size, and items whose container does not own the set size (such as `article` rows in a
+    /// `log`, `region`, or omitted virtual wrapper) carry their explicit or virtual list count.
+    fn a11y_item_set_size(
+        &self,
+        i: usize,
+        is_set_item: bool,
+        parent_role: Role,
+        parent_element: Option<usize>,
+        virtual_len: Option<usize>,
+    ) -> Option<usize> {
+        if !is_set_item {
+            return None;
+        }
+        let n = &self.tree.nodes[i];
+        let explicit = n.a11y.more.as_ref().and_then(|m| m.set).map(|(_, size)| size);
+        if n.a11y.level.is_some() {
+            return explicit;
+        }
+        if crate::a11y::roles::ordered_set(parent_role) {
+            return if explicit.is_some() || parent_element == n.parent { None } else { virtual_len };
+        }
+        explicit.or(virtual_len)
     }
 }

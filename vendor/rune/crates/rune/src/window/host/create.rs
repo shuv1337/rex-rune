@@ -37,17 +37,16 @@ use crate::window::{WakeEvent, sync_screen_origin_core};
 impl Host {
     #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
     pub(in crate::window) fn try_create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>, focus: bool) -> Result<(), String> {
+        if self.poll_gpu_loss() {
+            return Err(self.terminal_loss.reason().unwrap_or_else(|| "the GPU device was lost".into()));
+        }
         // A released window reopens at the height its content reached while it was gone.
         crate::marks::mark("window.create");
         let built = self.shown && self.build_for_show();
         let size = self.args.size.unwrap_or(self.geometry.size);
         let launcher = self.launcher();
         let visible = !launcher && (self.started || self.options.visible);
-        let effective_theme = crate::window::window_theme_for_platform(
-            self.color_scheme,
-            crate::window::app_color_scheme(),
-            cfg!(target_os = "macos"),
-        );
+        let effective_theme = self.window_theme();
         #[allow(unused_mut)]
         let mut attrs = self.options.attributes_with_theme(
             self.app.rt().host.window_title.current().unwrap_or(self.geometry.title),
@@ -58,6 +57,19 @@ impl Host {
         ).with_active(focus);
         #[cfg(target_os = "macos")]
         if self.macos_window.nonactivating_panel { attrs = attrs.with_visible(false).with_active(false); }
+        #[cfg(target_os = "macos")]
+        let mac_screens = (self.logical_position.is_none() && self.options.position.is_some())
+            .then(crate::platform::macos::screen_bounds);
+        #[cfg(target_os = "macos")]
+        let mac_screens_ref = mac_screens.as_ref().map(|(s, f)| (s.as_slice(), *f));
+        #[cfg(not(target_os = "macos"))]
+        let mac_screens_ref = None;
+        attrs = crate::window::placement::apply_initial_position_attrs(
+            attrs,
+            self.logical_position,
+            &self.options,
+            mac_screens_ref,
+        );
         let panel = cfg!(target_os = "macos") && self.macos_window.nonactivating_panel;
         let plan = self.reopen.create_plan(self.options.resizable, panel);
         #[cfg(target_os = "windows")]
@@ -76,6 +88,11 @@ impl Host {
                 attrs = winit::platform::startup_notify::WindowAttributesExtStartupNotify::with_activation_token(attrs, token);
             }
         }
+        // Where the Wayland compositor draws no frame, a titlebar's window opens without winit's
+        // own, so its grey bar never shows above the app's: Rune draws the caption buttons and
+        // the resize edges (`titlebar::linux`).
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.titlebar.is_some() && crate::titlebar::linux::choose(event_loop) { attrs = attrs.with_decorations(false); }
         let chrome = frame_chrome(self.chrome, self.titlebar, self.app.rt().titlebar_set());
         #[cfg(target_os = "macos")]
         let attrs = self.macos_window.apply_attributes(attrs, self.options.borderless, chrome.full_size_content);
@@ -99,6 +116,10 @@ impl Host {
         self.register_resize_sync(&window);
         #[cfg(target_os = "windows")]
         crate::platform::win32::press_point::install(&window);
+        #[cfg(target_os = "windows")]
+        crate::platform::win32::touch_input::install(&window);
+        #[cfg(target_os = "windows")]
+        crate::platform::win32::dark_mode::install_theme_refresh(&window);
         // Before it shows, so the title bar never appears.
         #[cfg(target_os = "windows")]
         let frame = self.titlebar.map(|t| self.app.rt().titlebar_set().over(t))
@@ -108,11 +129,12 @@ impl Host {
         let cloak = crate::platform::win32::Cloak::default();
         // Its first frame on the CPU renderer, painted before it shows (`cpu_frame`).
         #[cfg(target_os = "windows")]
-        let cpu_first = visible && !launcher && cpu_frame::opens_on_cpu(self);
+        let cpu_first = visible && !launcher && !self.is_terminal_gpu_policy() && cpu_frame::opens_on_cpu(self);
         #[cfg(target_os = "windows")]
         if visible && !cpu_first {
             // Unfocused (`App::open_inactive` or `WindowsWindowOptions::no_activate`), it never activates.
-            cloak.hold(&window, crate::time::now() + win::READY_FALLBACK, focus);
+            let until = crate::time::now() + win::READY_FALLBACK;
+            if open_as.full_screens() { cloak.hold_without_transitions(&window, until, focus); } else { cloak.hold(&window, until, focus); }
             window.set_visible(true);
             chrome::open_as(&window, open_as);
             if open_as != crate::windows::OpenAs::Normal {
@@ -204,7 +226,7 @@ impl Host {
         // Linux: its first frame on the CPU renderer too, sent before any GPU is made
         // (`linux::cpu_frame`); a display that takes no CPU frames gives the window back.
         #[cfg(target_os = "linux")]
-        let (window, a11y) = if visible && crate::window::linux::cpu_frame::opens_on_cpu(self) {
+        let (window, a11y) = if visible && !self.is_terminal_gpu_policy() && crate::window::linux::cpu_frame::opens_on_cpu(self) {
             match self.open_on_cpu(event_loop, window, a11y, built) {
                 Ok(()) => return Ok(()),
                 Err(back) => back,
@@ -214,15 +236,15 @@ impl Host {
         let phys = window.inner_size();
         let srgb_blend = self.app.rt().srgb_blend();
         let prewarm_effects = self.prewarm_effects;
+        let frame_latency = crate::window::frame_latency(self.frame_latency);
         let features = self.app.compositor_features();
         let transparent = self.options.transparent;
         // A window with a client-side frame keeps its pixels' alpha for the frame's corner arcs;
         // one under a compositor that draws the decorations itself keeps the surface it always had.
         let client_frame = self.client_frame(&window);
         #[cfg(target_os = "windows")]
-        let dcomp_handover = if crate::window::win32::resize_sync::enabled()
-            && !transparent
-            && !launcher
+        let dcomp_handover = if ((self.resize_sync_enabled() && !transparent && !launcher)
+            || (cfg!(feature = "windows-system-material") && transparent))
             && matches!(Gpu::dx12_swapchain_kind(), wgpu::Dx12SwapchainKind::DxgiFromVisual)
         {
             crate::platform::win32::hwnd(&window)
@@ -248,6 +270,7 @@ impl Host {
             let initial = drawable_size(None, (phys.width, phys.height), max_surface_dim(Some(gpu)));
             let (mut config, translucent) = surface_config(surface, &gpu.adapter, initial, srgb_blend)
                 .ok_or_else(|| SurfaceSetupError::unsupported("the GPU adapter can't present to this window"))?;
+            config.desired_maximum_frame_latency = frame_latency;
             crate::window::present::apply(&mut config, surface, &gpu.adapter, self.wayland);
             #[cfg(target_os = "macos")]
             let launch_drawables = LaunchDrawables::cap(&mut config);
@@ -310,6 +333,12 @@ impl Host {
                                 return Err(format_window_setup_error(err));
                             }
                             Decision::MoveOn => {
+                                if self.is_terminal_gpu_policy() {
+                                    drop((surface, gpu));
+                                    self.app.release_compositor_gpu();
+                                    *self.gpu_pool.borrow_mut() = Weak::default();
+                                    return Err(format_window_setup_error(err));
+                                }
                                 let instance = gpu.instance.clone();
                                 let first_info = gpu.adapter.get_info();
                                 let excluded = Gpu::candidate_info(0, &gpu.adapter, Some(&surface));
@@ -348,6 +377,11 @@ impl Host {
                                     return Err(format_window_setup_error(err));
                                 }
                                 Decision::MoveOn => {
+                                    if self.is_terminal_gpu_policy() {
+                                        drop((surface, gpu));
+                                        *self.gpu_pool.borrow_mut() = Weak::default();
+                                        return Err(format_window_setup_error(err));
+                                    }
                                     let instance = gpu.instance.clone();
                                     let first_info = gpu.adapter.get_info();
                                     let excluded = Gpu::candidate_info(0, &gpu.adapter, Some(&surface));
@@ -367,12 +401,12 @@ impl Host {
                     }
                 } else {
                     #[cfg(target_os = "linux")]
-                    let (gpu, surface, configured) = match Gpu::for_surface_setup(
-                        features, transparent, make_surface, setup_surface,
+                    let (gpu, surface, configured) = match Gpu::for_surface_setup_with_latch(
+                        self.terminal_loss.latch(), features, transparent, make_surface, setup_surface,
                     ) {
                         Ok(ok) => ok,
                         Err(err) => {
-                            if self.effective_cpu_first().transparent_gpu_fallback(
+                            if !self.is_terminal_gpu_policy() && self.effective_cpu_first().transparent_gpu_fallback(
                                 visible,
                                 transparent,
                                 crate::gpu::pick::env_policy(),
@@ -387,8 +421,8 @@ impl Host {
                         }
                     };
                     #[cfg(not(target_os = "linux"))]
-                    let (gpu, surface, configured) = Gpu::for_surface_setup(
-                        features, transparent, make_surface, setup_surface,
+                    let (gpu, surface, configured) = Gpu::for_surface_setup_with_latch(
+                        self.terminal_loss.latch(), features, transparent, make_surface, setup_surface,
                     ).map_err(format_window_setup_error)?;
                     let gpu = Arc::new(gpu);
                     *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
@@ -408,6 +442,7 @@ impl Host {
             self.app.rt_mut().transparent = config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
         }
         let target_format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
+        self.terminal_loss.attach_gpu(&gpu);
         self.gpu = Some((gpu, renderer));
         let (gpu, renderer) = self.gpu.as_mut().unwrap();
         rebuild_renderer_core(&gpu.device, renderer, target_format, self.app.rt_mut());
@@ -487,9 +522,17 @@ impl Host {
                 Some(handover) => handover::SurfaceMode::Rebinding { handover },
                 None => handover::SurfaceMode::Gpu,
             };
-            Native { cloak, frame, mode, a11y_start, ..Default::default() }
+            let last_maximized = window.is_maximized();
+            Native { cloak, frame, mode, a11y_start, last_maximized, ..Default::default() }
         };
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        let native = Native {
+            wayland_present: (self.wayland && self.frame_presented.wanted())
+                .then(|| crate::platform::wayland::presentation::SurfacePresentation::for_window(&window))
+                .flatten(),
+            ..Default::default()
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(target_os = "ios"), not(target_os = "android")))))]
         let native = Native::default();
         let initial_mode = if self.gpu.as_ref().is_some_and(|(gpu, _)| gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu) {
             crate::gpu::fallback::GpuMode::Software
@@ -512,20 +555,21 @@ impl Host {
             corners: None,
             timer_frame: TimerFrame::default(),
             loop_frame: LoopFrame::default(),
+            damage: Default::default(),
             presented: None,
             #[cfg(target_os = "windows")]
             covered_draw: CoveredDraw::Current,
             redraw: std::cell::Cell::new(Redraw::Idle),
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(crate::time::now()); }
+        self.app.rt_mut().set_renderer_kind(crate::RendererKind::Gpu);
+        #[cfg(target_os = "linux")]
+        self.apply_window_color_scheme();
+        self.sync_window_backdrop(false);
         self.apply_placement(event_loop);
         #[cfg(target_os = "macos")]
         if visible && let Some(w) = &mut self.win && w.native.panel.is_some() { w.show(focus); }
-        crate::marks::mark("window.created");
-        if let Some(created) = self.on_created.take() { created(self.native_handle.clone()); }
-        if let Some(on_window) = self.on_window.as_mut() { on_window(&self.native_handle); }
-        // After `on_window`, which may resize it, and before its first focus and frame.
-        self.creation_geometry();
+        if !self.announce_created(true) { return Ok(()); }
         if let (Some(w), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) {
             #[cfg(target_os = "macos")]
             if let Some(pacing) = &mut w.native.pacing { pacing.update_display(&w.window); }
@@ -541,13 +585,17 @@ impl Host {
                 self.app.window_focus(true);
             }
         }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.wayland && self.options.transparent {
+            self.sync_window_backdrop(false);
+        }
         // The first frame, now, so the window comes on screen with it instead of empty for a
         // frame or two. AppKit has ordered the window in, but it reaches the screen with this
         // turn's Core Animation commit, so nothing reports it visible yet.
         #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut drew = false;
         #[cfg(target_os = "macos")]
-        if visible && !self.app.rt().host.minimize.field() && !self.life.finished() && !event_loop.exiting()
+        if visible && !self.closing_at_creation() && !self.life.finished() && !event_loop.exiting()
             && self.win.as_ref().is_some_and(|w| w.native.panel.is_none() && w.window.is_minimized() != Some(true))
         {
             let presents = self.meter.totals().presents;
@@ -637,6 +685,10 @@ impl Host {
     /// this keeps failing.
     #[allow(unsafe_code)]
     pub(in crate::window) fn reattach(&mut self, mode: crate::gpu::fallback::GpuMode) -> Result<(), ReattachError> {
+        self.assert_no_live_frame_texture();
+        if self.is_terminal_gpu_policy() {
+            return Err(ReattachError::other("terminal GPU loss policy refuses device replacement"));
+        }
         let Some(w) = self.win.as_mut() else { return Err(ReattachError::other("there is no window to draw into")) };
         let window = w.window.clone();
         // The old surface goes before the device that made it and before the new surface is
@@ -647,16 +699,28 @@ impl Host {
         // A pass made on the device that went with it draws nothing: it goes too.
         w.corners = None;
         w.presented = None;
+        w.damage.reset();
         // Unregister any swap-chain wait before dropping the surface, even if replacement fails.
         #[cfg(target_os = "windows")]
         {
+            #[cfg(feature = "windows-system-material")]
+            {
+                let native = &mut w.native;
+                native.materials.on_device_loss(native.mode.handover_mut());
+            }
             w.native.slot.reset();
-            w.native.damage.reset();
             self.on_resize_sync_event(crate::window::win32::resize_sync::Event::DeviceLost);
         }
+        #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+        self.app.rt_mut().paint.set_windows_acrylic_materials(false);
         let Some(w) = self.win.as_mut() else { return Err(ReattachError::other("there is no window to draw into")) };
+        #[cfg(target_os = "windows")]
+        w.native.dxgi_present.reset();
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if let Some(wp) = w.native.wayland_present.as_mut() {
+            wp.reset();
+        }
         drop(w.surface.take());
-        #[cfg(target_os = "macos")]
         self.frame_presented.reset();
         self.gpu = None;
         self.app.release_compositor_gpu();
@@ -676,6 +740,7 @@ impl Host {
         let prev = self.win.as_ref().map(|w| (w.config.width, w.config.height));
         let srgb_blend = self.app.rt().srgb_blend();
         let prewarm_effects = self.prewarm_effects;
+        let frame_latency = crate::window::frame_latency(self.frame_latency);
         let client_frame = self.client_frame(&window);
         let make_surface = |instance: &wgpu::Instance| {
             #[cfg(target_os = "windows")]
@@ -689,6 +754,7 @@ impl Host {
             let size = drawable_size(prev, (raw_size.width, raw_size.height), max_surface_dim(Some(gpu)));
             let (mut config, translucent) = surface_config(surface, &gpu.adapter, size, srgb_blend)
                 .ok_or_else(|| SurfaceSetupError::unsupported("the GPU adapter can't present to this window"))?;
+            config.desired_maximum_frame_latency = frame_latency;
             crate::window::present::apply(&mut config, surface, &gpu.adapter, self.wayland);
             if transparent || client_frame {
                 config.alpha_mode = alpha_mode(transparent, client_frame, translucent);
@@ -745,8 +811,9 @@ impl Host {
         w.config = config;
         w.surface_ok = true;
         w.alpha = alpha;
+        w.damage.reset();
         #[cfg(target_os = "windows")]
-        { w.native.slot.reset(); w.native.damage.reset(); }
+        { w.native.slot.reset(); w.native.dxgi_present.reset(); }
         #[cfg(target_os = "windows")]
         w.native.mode.rebind();
         #[cfg(target_os = "macos")]
@@ -757,6 +824,7 @@ impl Host {
         *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
         crate::render::surface_gpu(&gpu);
         self.gpu = Some((gpu, renderer));
+        self.sync_window_backdrop(true);
         Ok(())
     }
 
@@ -784,8 +852,10 @@ impl Host {
         // The old surface goes first: a DX12 surface takes the visual's content, and the
         // committed tree keeps showing its last frame until the new one commits.
         w.native.slot.reset();
-        w.native.damage.reset();
+        w.native.dxgi_present.reset();
+        w.damage.reset();
         drop(w.surface.take());
+        self.frame_presented.reset();
         // SAFETY: the window keeps the visual's `Handover` as long as it keeps this surface.
         let surface = unsafe { gpu.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual)) }.map_err(|e| e.to_string())?;
         let mut config = w.config.clone();
@@ -795,8 +865,8 @@ impl Host {
         w.config = config;
         w.surface_ok = true;
         w.presented = None;
+        w.damage.reset();
         w.native.slot.reset();
-        w.native.damage.reset();
         w.native.mode.rebind();
         Ok(true)
     }
@@ -815,7 +885,24 @@ impl Host {
     pub(in crate::window) fn replace_lost_surface(&mut self) -> bool {
         let lost = self.gpu.as_ref().is_none_or(|(gpu, _)| gpu.is_lost());
         let surface_missing = self.win.as_ref().is_some_and(|w| !w.surface_ok || w.surface.is_none());
-        if !lost && !surface_missing { return true; }
+        match super::gpu_loss::decide_lost_surface(
+            if self.is_terminal_gpu_policy() { crate::GpuLossPolicy::Terminal } else { crate::GpuLossPolicy::Recover },
+            self.gpu_loss_failed(),
+            lost,
+            surface_missing,
+        ) {
+            super::gpu_loss::LostSurfaceAction::Healthy => return true,
+            super::gpu_loss::LostSurfaceAction::LatchTerminal => {
+                if !self.poll_gpu_loss() {
+                    self.latch_loss_latch(crate::render::loss_latch::GpuFailureKind::DeviceLost, "the GPU device was lost");
+                }
+                return false;
+            }
+            super::gpu_loss::LostSurfaceAction::RecreateSurfaceSameDevice => {
+                return self.recreate_surface_same_device();
+            }
+            super::gpu_loss::LostSurfaceAction::Recover => {}
+        }
         let now = crate::time::now();
         let policy = Gpu::env_fallback_policy();
         let software_available = crate::gpu::fallback::software_fallback_available();
@@ -872,6 +959,7 @@ impl Host {
     /// and hides the native window (`stop_showing`, `wind_down`), then the window, device and
     /// surface go. An app sees `window_error` and can `open` the window again.
     pub(in crate::window) fn give_up_surface(&mut self, reason: String) -> bool {
+        self.assert_no_live_frame_texture();
         eprintln!("rune: {reason}");
         self.record_live_window_state();
         self.stop_showing();
@@ -922,7 +1010,7 @@ impl ReattachError {
 
 /// The pass that turns premultiplied pixels into straight alpha for a `PostMultiplied` surface on
 /// a backend that composites premultiplied pixels (all but Metal).
-fn alpha_pass(gpu: &Gpu, transparent: bool, config: &wgpu::SurfaceConfiguration, format: wgpu::TextureFormat)
+pub(super) fn alpha_pass(gpu: &Gpu, transparent: bool, config: &wgpu::SurfaceConfiguration, format: wgpu::TextureFormat)
     -> Option<crate::render::surface_alpha::AlphaSurface> {
     (transparent && config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied
         && gpu.adapter.get_info().backend != wgpu::Backend::Metal)

@@ -21,6 +21,8 @@ pub(crate) mod languages;
 pub(crate) mod layer_shell;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 pub(crate) mod layer_shell_machine;
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) mod linux_color_scheme;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(target_os = "macos")]
@@ -34,15 +36,20 @@ pub(crate) mod preferences;
 pub(crate) mod ready_signal;
 pub(crate) mod reopen;
 pub(crate) mod scroll_bars;
+pub(crate) mod text_scale;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
-pub(crate) mod wayland_drop;
-#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
-pub(crate) mod wayland_output;
+pub(crate) mod wayland;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod web_math;
 #[cfg(target_os = "windows")]
 pub(crate) mod win32;
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "platform/win32/backdrop.rs"]
+pub(crate) mod win32_backdrop;
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "platform/win32/layered.rs"]
+pub(crate) mod win32_layered;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 pub(crate) mod x11;

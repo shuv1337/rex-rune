@@ -50,6 +50,11 @@ pub struct EmbedFrame {
     pub cpu_us: u64,
 }
 
+const _: fn() = || {
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<EmbedFrame>();
+};
+
 impl From<FrameSummary> for EmbedFrame {
     fn from(s: FrameSummary) -> Self {
         Self {
@@ -228,7 +233,15 @@ impl<S: 'static> LayerHost<S> {
     ) -> Result<Self, String> {
         // SAFETY: caller upholds `from_core_animation_layer`'s safety contract (`layer` is a valid `CAMetalLayer` outliving `LayerHost`, on the UI thread).
         let (mut core, size, scale, now) = unsafe { LayerHostCore::new(layer, viewport, scale) }?;
+        #[cfg(target_os = "ios")]
+        let text_scale_wake = wake.clone();
         let mut rt = runtime_for(spec, state, size, Env::new(dark, scale), wake);
+        #[cfg(target_os = "ios")]
+        {
+            rt.set_touch_controls(true);
+            rt.set_system_text_scale(crate::platform::text_scale::current());
+            crate::platform::text_scale::follow_waker(text_scale_wake);
+        }
         core.configure_runtime(rt.core_mut(), now);
         Ok(Self { core, compositor: None, rt })
     }
@@ -250,9 +263,11 @@ impl<S: 'static> LayerHost<S> {
     }
 
     /// Takes the haptics handlers asked for (`Tx::haptic`), oldest first, for the host to play:
-    /// Rune doesn't call the platform's feedback generators itself here. Take them after each
-    /// [`Self::frame`], and at any other time (say after `Runtime::update`), since a request
-    /// alone doesn't ask for a frame.
+    /// Rune does not link UIKit or call platform feedback generators from `LayerHost` because
+    /// iOS 17.5+ `UIFeedbackGenerator(view:)` and Android `View.performHapticFeedback` require
+    /// the host's native view on the main thread. Drain after each [`Self::frame`] (and after
+    /// out-of-frame `Runtime::update` calls if desired). Identical haptics within 30 ms on the
+    /// runtime clock are coalesced and at most 32 are retained (oldest dropped first).
     pub fn take_haptics(&mut self) -> Vec<crate::Haptic> {
         self.rt.take_haptics()
     }
@@ -266,6 +281,8 @@ impl<S: 'static> LayerHost<S> {
     /// Steps animations and layout to `Instant::now()` and presents one Metal frame, following
     /// the shared [`crate::frame::host_step`] order.
     pub fn frame(&mut self) -> EmbedFrame {
+        #[cfg(target_os = "ios")]
+        self.rt.set_system_text_scale(crate::platform::text_scale::cached());
         embed_frame::run_embed_frame(self).into()
     }
 }

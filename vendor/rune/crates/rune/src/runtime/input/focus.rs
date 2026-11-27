@@ -131,9 +131,10 @@ impl ModalScope {
     fn build(nodes: &[Node], is_exiting: impl Fn(usize) -> bool, is_unmounted: impl Fn(usize) -> bool) -> Option<Self> {
         let index = nodes.iter().enumerate().rev()
             .find(|(i, n)| n.handlers.get().is_some_and(|h| h.modal.is_some()) && !is_exiting(*i) && !is_unmounted(*i)).map(|(i, _)| i)?;
-        // The Windows caption buttons are the window's, not the view's: a modal in the view
-        // leaves them to the pointer and assistive technology, as the native ones are.
-        let caption = |n: &Node| n.key.as_deref() == Some(crate::titlebar::BUTTONS_KEY)
+        // The caption buttons are the window's, not the view's: a modal in the view leaves them
+        // to the pointer and assistive technology, as the native ones are. So are a Linux
+        // frame's resize edges (`titlebar::linux`).
+        let caption = |n: &Node| matches!(n.key.as_deref(), Some(crate::titlebar::BUTTONS_KEY | crate::titlebar::EDGES_KEY))
             && n.parent.is_some_and(|p| nodes[p].key.as_deref() == Some(crate::titlebar::FRAME_KEY));
         let mut members: Vec<bool> = nodes.iter().enumerate().map(|(i, n)| i == index || caption(n)).collect();
         // Portals are root siblings. Follow their anchor ownership, including chained
@@ -673,7 +674,8 @@ impl RuntimeCore {
             .map(|(p, _)| p.to_owned())
             .or_else(|| asked.as_ref().map(|(p, ..)| p.clone()))
             .or_else(|| restore.as_ref().map(|(p, _)| p.clone()))
-            .or_else(|| (!blurred).then(|| self.kbd.focus.owned().filter(|p| (0..nodes.len()).any(|j| &nodes[j].path == p && shown(j)
+            .or_else(|| (!blurred).then(|| self.kbd.focus.owned().filter(|p| (0..nodes.len()).any(|j| &nodes[j].path == p
+                && (shown(j) || (node_visible(nodes, j) && nodes[j].input.is_some()))
                 && !ancestor_disabled(nodes, j)
                 && (self.takes_focus(&nodes[j]) || (!nodes[j].focus.opt_out && nodes[j].input.as_ref().is_some_and(|i| i.edit.focused))))
                 || self.commit.virtual_inputs.get(p).is_some_and(|i| i.edit.focused))).flatten())
@@ -691,6 +693,7 @@ impl RuntimeCore {
         if asked.is_none() && let Some(owed) = waits { self.kbd.focus_owed = Some(owed); }
         let old_path = self.kbd.focus.owned();
         let moved = old_path.as_deref() != next.as_deref();
+        let was_built = std::mem::replace(&mut self.tree.built, false);
         std::mem::swap(&mut self.tree.nodes, nodes);
         self.nodes_replaced();
         let mut changed = self.set_focus_entry(app, next, keyboard, keep_entry, true);
@@ -707,6 +710,7 @@ impl RuntimeCore {
         }
         let cb = if moved { self.notify_focus_change(app, old_path.as_deref(), Some(nodes)) } else { None };
         std::mem::swap(&mut self.tree.nodes, nodes);
+        self.tree.built = was_built;
         self.nodes_replaced();
         if let Some((dirty, mut cb_tx)) = cb {
             changed |= dirty;

@@ -218,7 +218,9 @@ pub(crate) fn web_touch_end_activate(rt: &RuntimeCore, document: bool, ended_in_
     if !document || rt.has_focus() {
         WebActivate::Always
     } else {
-        WebActivate::Never
+        // Focus now lands on tap-up rather than touch-down, so in document mode check after the
+        // tap's frame commits whether it focused an editable field.
+        WebActivate::IfFieldFocused
     }
 }
 
@@ -231,20 +233,22 @@ pub(crate) fn gesture_phase(phase: TouchPhase) -> crate::GesturePhase {
     }
 }
 
-/// Whether the mouse message being handled is one Windows synthesized from a touch or pen
-/// (`GetMessageExtraInfo` carries `MI_WP_SIGNATURE`).
-#[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
-pub(crate) fn touch_promoted() -> bool {
-    const MI_WP_SIGNATURE: u32 = 0xFF51_5700;
-    // SAFETY: reads the calling thread's current message info; no pointers involved.
-    let info = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetMessageExtraInfo() } as u32;
-    info & 0xFFFF_FF00 == MI_WP_SIGNATURE
-}
-
-#[cfg(not(target_os = "windows"))]
+/// Returns `(drop, dirty)` for a legacy mouse event: drops it while a finger is active or when
+/// Windows promoted it from touch/pen (`MI_WP_SIGNATURE`). Pen promotion leaves touch mode when
+/// `switch_on_pen` is true without double-firing the mouse event.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn touch_promoted() -> bool { false }
+pub(crate) fn drop_touch_promoted_mouse(rt: &mut RuntimeCore, switch_on_pen: bool) -> (bool, bool) {
+    if rt.touching() { return (true, false); }
+    #[cfg(target_os = "windows")]
+    match crate::platform::win32::touch_input::current_promoted_source() {
+        crate::platform::win32::touch_input::PromotedSource::Mouse => (false, false),
+        crate::platform::win32::touch_input::PromotedSource::Touch => (true, false),
+        crate::platform::win32::touch_input::PromotedSource::Pen => {
+            (true, switch_on_pen && rt.sync_primary_pointer(crate::runtime::PrimaryPointer::Hover))
+        }
+    }
+    #[cfg(not(target_os = "windows"))] { let _ = switch_on_pen; (false, false) }
+}
 
 /// Builds a `ModifiersState` from individual shift/ctrl/alt/meta flags.
 #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
@@ -411,6 +415,20 @@ pub(crate) fn wheel_page_delta(rt: &RuntimeCore, dx_pages: f32, dy_pages: f32, s
     }
 }
 
+/// Whether a browser `gesturestart` (Safari/WebKit pinch or rotation) at view point `point`
+/// (falling back to the current pointer when absent) is claimed by a Rune gesture handler.
+/// Document mode and `fit_height` canvases always leave browser pinch-zoom alone.
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+pub(crate) fn web_gesture_start(
+    rt: &RuntimeCore,
+    point: Option<(f32, f32)>,
+    document: bool,
+    fit_height: bool,
+) -> bool {
+    if document || fit_height { return false; }
+    point.or_else(|| rt.pointer()).is_some_and(|(x, y)| rt.has_magnify_or_rotate(x, y))
+}
+
 /// Translates a browser wheel delta in window points through [`wheel_core`], applying browser
 /// policies: Ctrl+wheel only pinches outside document mode (unclaimed Ctrl+wheel stays with
 /// browser zoom), and `fit_height` canvases leave vertical wheel to the page.
@@ -418,35 +436,28 @@ pub(crate) fn wheel_page_delta(rt: &RuntimeCore, dx_pages: f32, dy_pages: f32, s
 #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 pub(crate) fn web_wheel(
     rt: &mut RuntimeCore,
-    dx: f32,
-    dy: f32,
-    mods: crate::Mods,
-    phase: crate::GesturePhase,
-    precise: bool,
+    input: WheelInput,
     document: bool,
     fit_height: bool,
 ) -> (bool, Option<bool>) {
     let Some((x, y)) = rt.pointer() else { return (false, None) };
     // A page's pinch is the browser's zoom; elsewhere unclaimed Ctrl+wheel stays with browser
     // zoom instead of falling through to scroll.
-    if mods.ctrl {
-        let used = !document && rt.pinch_wheel(x, y, dy, None);
+    if input.mods.ctrl {
+        let used = !document && rt.pinch_wheel(x, y, input.dy, input.ticks);
         return (used, Some(used));
     }
     // On a content-sized embedded canvas, vertical wheel belongs to the page unless a
     // horizontal strip is being scrolled.
-    if fit_height && dx.abs() <= dy.abs() {
+    if fit_height && input.dx.abs() <= input.dy.abs() {
         return (false, None);
     }
-    let outcome = wheel_core(
-        rt,
-        WheelInput { dx, dy, ticks: None, mods, phase, precise, notch: false, pinch: false },
-    );
+    let outcome = wheel_core(rt, WheelInput { pinch: false, ..input });
     (outcome != WheelOutcome::Ignored, None)
 }
 
 /// Returns whether a winit wheel delta comes from a discrete mouse-wheel notch on a platform
-/// whose browsers ease notched wheels.
+/// whose browsers ease notched wheels (including Firefox's `DOM_DELTA_LINE` on web).
 ///
 /// On macOS, AppKit's `hasPreciseScrollingDeltas == false` (mapped by winit to `LineDelta`)
 /// already isolates discrete physical mouse wheels from trackpads, Magic Mouse, Mighty Mouse,
@@ -455,13 +466,58 @@ pub(crate) fn web_wheel(
 /// and `cc/input/input_handler.cc::ShouldAnimateScroll`), every macOS `LineDelta` is a notch.
 /// On Windows and Linux, whole lines are a notched wheel while a free-spinning wheel or a
 /// precision touchpad sends fractions (the run decides, `WheelLock::notched`).
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn line_delta_is_notch(delta: MouseScrollDelta, is_macos: bool, is_win_or_linux: bool) -> bool {
+pub(crate) fn line_delta_is_notch(delta: MouseScrollDelta, is_macos: bool, is_win_or_linux: bool) -> bool {
     match delta {
         MouseScrollDelta::LineDelta(_, _) if is_macos => true,
         MouseScrollDelta::LineDelta(x, y) if is_win_or_linux => x.fract() == 0.0 && y.fract() == 0.0,
         _ => false,
     }
+}
+
+/// Translates a `MouseScrollDelta` with host-neutral `Mods` into runtime pinch-wheel,
+/// `WheelEvent`, or pointer-less phase begin/end notifications, scaled into view points.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn wheel_from_delta(
+    rt: &mut RuntimeCore,
+    delta: MouseScrollDelta,
+    phase: crate::GesturePhase,
+    scale: f32,
+    mods: crate::Mods,
+) -> WheelOutcome {
+    let shift = crate::runtime::SHIFT_TURNS_WHEEL && mods.shift && !mods.ctrl;
+    // In window points: a wheel turns as far on screen at any zoom, as Chromium's does,
+    // and a pinch is the same gesture whatever the zoom.
+    #[cfg(target_os = "windows")]
+    let points = rt.wheel_line().unwrap_or_else(|| rt.windows_wheel_points(delta, shift));
+    #[cfg(not(target_os = "windows"))]
+    let points = rt.wheel_line().unwrap_or(crate::runtime::LINE_POINTS);
+    let (dx, dy) = crate::runtime::wheel_delta(delta, scale, shift, points);
+    let precise = matches!(delta, MouseScrollDelta::PixelDelta(_));
+    let ticks = match delta {
+        MouseScrollDelta::LineDelta(_, y) if !shift => Some(y),
+        _ => None,
+    };
+    let notch = line_delta_is_notch(
+        delta,
+        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "windows", target_os = "linux")),
+    );
+    wheel_core(
+        rt,
+        WheelInput {
+            dx,
+            dy,
+            ticks,
+            mods,
+            phase,
+            precise,
+            notch,
+            // On macOS too: Chromium hands a page Ctrl + wheel and a trackpad pinch alike, as a
+            // wheel with `ctrlKey`, so a zoom handler hears both (`MagnifyEvent::wheel` tells them
+            // apart); a real pinch still arrives as its own gesture.
+            pinch: true,
+        },
+    )
 }
 
 /// Translates a winit `MouseWheel` event into runtime pinch-wheel, `WheelEvent`, or
@@ -474,40 +530,7 @@ pub(crate) fn wheel(
     scale: f32,
     mods: ModifiersState,
 ) {
-    let shift = crate::runtime::SHIFT_TURNS_WHEEL && mods.shift_key() && !mods.control_key();
-    // In window points: a wheel turns as far on screen at any zoom, as Chromium's does,
-    // and a pinch is the same gesture whatever the zoom.
-    #[cfg(target_os = "windows")]
-    let points = rt.windows_wheel_points(delta, shift);
-    #[cfg(not(target_os = "windows"))]
-    let points = crate::runtime::LINE_POINTS;
-    let (dx, dy) = crate::runtime::wheel_delta(delta, scale, shift, points);
-    let precise = matches!(delta, MouseScrollDelta::PixelDelta(_));
-    let ticks = match delta {
-        MouseScrollDelta::LineDelta(_, y) if !shift => Some(y),
-        _ => None,
-    };
-    let notch = line_delta_is_notch(
-        delta,
-        cfg!(target_os = "macos"),
-        cfg!(any(target_os = "windows", target_os = "linux")),
-    );
-    let _ = wheel_core(
-        rt,
-        WheelInput {
-            dx,
-            dy,
-            ticks,
-            mods: map_mods(mods),
-            phase,
-            precise,
-            notch,
-            // On macOS too: Chromium hands a page Ctrl + wheel and a trackpad pinch alike, as a
-            // wheel with `ctrlKey`, so a zoom handler hears both (`MagnifyEvent::wheel` tells them
-            // apart); a real pinch still arrives as its own gesture.
-            pinch: true,
-        },
-    );
+    let _ = wheel_from_delta(rt, delta, phase, scale, map_mods(mods));
 }
 
 /// Translates a winit `PinchGesture` at the current pointer; returns true when delivered.
@@ -732,18 +755,34 @@ pub(crate) fn sync_ime(window: &Window, rt: &mut RuntimeCore, ime_state: &mut Im
     }
 }
 
+/// Samples OS accessibility preferences (reduced motion, contrast theme, increased contrast,
+/// full keyboard access, and Linux double-click interval) onto `rt`.
+///
+/// Called on window and overlay construction and before reveal so non-activating hosts - which never
+/// receive `WindowEvent::Focused` and have no native handle to hear `WM_SETTINGCHANGE` before
+/// creation or while parked - reflect current preferences on their first draw.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn refresh_accessibility_preferences(rt: &mut RuntimeCore) {
+    rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
+    #[cfg(target_os = "linux")]
+    { rt.double_click_interval = crate::platform::preferences::double_click_interval(); }
+    let contrast = crate::platform::preferences::contrast();
+    rt.set_system_contrast(contrast);
+    rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_with(contrast.is_some()));
+    rt.set_system_text_scale(crate::platform::text_scale::current());
+    rt.set_system_reduced_transparency(crate::platform::preferences::reduced_transparency());
+    rt.set_full_keyboard_access(crate::platform::preferences::full_keyboard_access());
+    #[cfg(target_os = "windows")]
+    rt.sync_windows_tablet_mode();
+}
+
 /// Refreshes OS accessibility and appearance preferences sampled on window/overlay focus changes.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn refresh_focus_preferences(
     rt: &mut RuntimeCore,
     scroll_bars_override: Option<crate::platform::scroll_bars::ScrollBars>,
 ) {
-    rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
-    #[cfg(target_os = "linux")]
-    { rt.double_click_interval = crate::platform::preferences::double_click_interval(); }
-    rt.set_system_contrast(crate::platform::preferences::contrast());
-    rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast());
-    rt.set_full_keyboard_access(crate::platform::preferences::full_keyboard_access());
+    refresh_accessibility_preferences(rt);
     rt.set_system_scroll_bars_state(crate::platform::scroll_bars::reread().with_override(scroll_bars_override));
 }
 

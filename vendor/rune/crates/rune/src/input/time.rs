@@ -35,8 +35,8 @@ pub(crate) fn arrived_now() -> Scope {
 pub(crate) fn is_web_dom_input(kind: &str) -> bool {
     matches!(
         kind,
-        "edit" | "preedit" | "selection" | "secure" | "secure_replace"
-            | "key" | "paste" | "a11y_press" | "a11y_link" | "leave" | "wheel_page" | "hover" | "pointer_motion"
+        "edit" | "preedit" | "selection" | "secure" | "secure_replace" | "autofill"
+            | "key" | "paste" | "a11y_press" | "a11y_link" | "a11y_custom" | "leave" | "wheel_page" | "hover" | "pointer_motion"
     )
 }
 

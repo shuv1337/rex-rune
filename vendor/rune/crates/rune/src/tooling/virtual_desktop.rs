@@ -449,12 +449,19 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             };
             let (x, y) = at();
             match &e.kind {
-                Kind::Mark(_) => {}
+                Kind::Mark(_) | Kind::AwaitKey { .. } => {}
                 Kind::Focus(focused) => desk.set_active(*focused),
                 Kind::Reopen => desk.reopen(accessory, &desktop, real_t),
                 Kind::CloseRequest => {
                     let i = desk.focus.key().unwrap_or(selected);
                     desk.members[i].close_requested();
+                }
+                Kind::QuitRequest => {
+                    for member in &mut desk.members {
+                        if member.quit_requested() == Some(crate::QuitResponse::Defer) {
+                            break;
+                        }
+                    }
                 }
                 Kind::Shortcut(shortcut) => fire(&desk, |m| m.shortcut(shortcut)).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => fire(&desk, |m| m.menu(item)).unwrap_or_else(|e| die(&format!("script menu: {e}"))),

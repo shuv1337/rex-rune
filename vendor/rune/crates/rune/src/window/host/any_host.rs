@@ -20,7 +20,40 @@ impl AnyHost for Host {
     fn owns(&self, id: WindowId) -> bool {
         self.win.as_ref().is_some_and(|w| w.window.id() == id)
     }
+    fn has_live_wayland_layer(&self) -> bool {
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        return self.wayland
+            && self.win.as_ref().is_some_and(|w| {
+                w.native.wayland_backdrop.as_ref().is_some_and(|b| b.needs_wake_on_read())
+                    || w.native.wayland_present.as_ref().is_some_and(|p| p.needs_wake_on_read())
+            });
+        #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+        false
+    }
+    fn has_pending_platform_events(&self) -> bool {
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        return self.wayland
+            && self.win.as_ref().is_some_and(|w| {
+                w.native.wayland_backdrop.as_ref().is_some_and(|b| b.has_pending_events())
+                    || w.native.wayland_present.as_ref().is_some_and(|p| p.has_pending_events())
+            });
+        #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+        false
+    }
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    fn primary_selection_lost(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.app.rt_mut().primary_selection_lost();
+    }
     fn finished(&self) -> bool { self.life.finished() }
+    fn has_pending_overlays(&self) -> bool { self.shared.has_overlays() }
+    fn take_pending_overlays(&mut self) -> Vec<Box<dyn crate::overlay::PendingOverlay>> {
+        self.shared
+            .take_overlays()
+            .into_iter()
+            .filter_map(|build| build(&self.overlay_defaults))
+            .collect()
+    }
     fn has_shown(&self) -> bool { self.shown }
     fn take_startup_error(&mut self) -> Option<String> { self.startup_error.take() }
     fn keeps_loop(&self) -> bool { self.keeps_loop }
@@ -39,6 +72,7 @@ impl AnyHost for Host {
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
+        if self.gpu_loss_failed() { return None; }
         // The next display tick consumes due timers too. Leaving an overdue timer
         // armed while its redraw waits for that tick would spin the event loop. Without a
         // running link, a timer due sooner than a frame waits a frame (`timer_deadline`).
@@ -78,6 +112,7 @@ impl AnyHost for Host {
             .chain(shown.and_then(|w| w.cursor.reassert_at(now)))
             .chain(self.rest.deadline())
             .chain(wayland_drop_deadline(win))
+            .chain(dxgi_present_deadline(win, self.frame_presented.has_pending()))
             .chain(self.window_script.as_ref().and_then(|s| s.next_at()))
             .min()
     }
@@ -86,6 +121,10 @@ impl AnyHost for Host {
 
     // What reaches the app's state runs in its turn scope (`App::turn_scope`).
     fn terminate(&mut self) { self.in_turn(Self::terminate_in_turn) }
+    fn has_quit_request(&self) -> bool { !self.life.finished() && self.app.has_quit_request() }
+    fn quit_request_hook(&mut self, event_loop: &ActiveEventLoop) -> Option<crate::QuitResponse> {
+        self.in_turn(|h| h.quit_request_in_turn(event_loop))
+    }
     fn quit_hook(&mut self) { self.in_turn(Self::quit_hook_in_turn) }
     fn vanish(&mut self) {
         if let Some(w) = self.shown_win() { w.hide(); }
@@ -101,6 +140,8 @@ impl AnyHost for Host {
     fn apply_pending(&mut self, event_loop: &ActiveEventLoop) { self.in_turn(|h| h.apply_pending_in_turn(event_loop)) }
     fn reopen(&mut self, event_loop: &ActiveEventLoop) { self.in_turn(|h| h.reopen_in_turn(event_loop)) }
     fn apply_app_color_scheme(&mut self) { self.apply_window_color_scheme(); }
+    #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+    fn on_material_policy_changed(&mut self) { self.in_turn(Self::on_material_policy_changed_in_turn) }
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) { self.in_turn(|h| h.new_events_in_turn(event_loop, cause)) }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> bool { self.in_turn(|h| h.about_to_wait_in_turn(event_loop)) }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) { self.in_turn(|h| h.resumed_in_turn(event_loop)) }
@@ -122,8 +163,37 @@ pub(in crate::window) enum Turn {
 }
 
 impl Host {
+    /// Windows: reconciles `El::system_material` native vs fallback state after a system effects
+    /// policy notification (Transparency effects, Energy/Battery Saver, High Contrast, RDP, or
+    /// `CompositionCapabilities`).
+    #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+    fn on_material_policy_changed_in_turn(&mut self) {
+        let contrast = crate::platform::preferences::contrast();
+        let mut effects = crate::system_material::windows::current_policy();
+        effects.high_contrast |= contrast.is_some();
+        {
+            let rt = self.app.rt_mut();
+            rt.set_system_contrast(contrast);
+            rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_with(contrast.is_some()));
+            rt.set_system_text_scale(crate::platform::text_scale::current());
+            rt.set_system_reduced_transparency(crate::platform::preferences::reduced_transparency());
+        }
+        if let Some(l) = self.win.as_mut() {
+            let native = &mut l.native;
+            let redraw = native.materials.on_policy_changed(effects, native.mode.handover_mut());
+            let now_native = native.materials.native();
+            self.app.rt_mut().paint.set_windows_acrylic_materials(now_native);
+            if redraw || self.app.rt().stale() {
+                l.timer_frame.no_longer_quiet();
+                l.loop_frame.touched();
+                l.request_redraw();
+            }
+        }
+    }
+
     /// Raw relative mouse motion while pointer lock is active and this window has focus.
     fn pointer_motion_in_turn(&mut self, dx: f64, dy: f64) {
+        if self.poll_gpu_loss() { return; }
         let Some(w) = self.shown_win() else { return };
         if !self.app.rt().pointer_locked() || !w.window.has_focus() {
             return;
@@ -149,6 +219,7 @@ impl Host {
     /// The loop's turn ends: the frame the window wants next is asked for, and on Windows a
     /// window whose paint the system keeps putting off behind another's paints now (`Redraw`).
     fn turn_ends_in_turn(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        if self.poll_gpu_loss() { return; }
         let Some(w) = &self.win else { return };
         let paints = cfg!(target_os = "windows") && self.life.uncovered() && !w.minimized();
         let (next, effect) = w.redraw.get().step(RedrawEvent::TurnEnds { now, paints });
@@ -221,12 +292,15 @@ impl Host {
     }
 
     fn terminate_in_turn(&mut self) {
+        self.shared.close_overlays();
         // Once: a window that already closed ran its hook then.
         if !self.closes() { return; }
         self.life.finish();
         self.close_hook();
         self.app.popup_cancel(&mut self.popup);
         self.app.file_dialog_cancel(&mut self.file_dialog);
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        self.wayland_drop_closed();
     }
 
     fn quit_hook_in_turn(&mut self) {
@@ -241,7 +315,7 @@ impl Host {
     }
 
     fn reopen_hook_in_turn(&mut self, event_loop: &ActiveEventLoop, has_visible_windows: bool) -> bool {
-        if !self.started || self.life.finished() { return false; }
+        if !self.started || self.life.finished() || self.poll_gpu_loss() { return false; }
         // As an update, so its frame, wakes, window requests and quit go as an update's do.
         let Some(handled) = self.app.queue_on_reopen(has_visible_windows) else { return false };
         self.drain(event_loop, false);
@@ -256,7 +330,7 @@ impl Host {
     }
 
     fn reopen_in_turn(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.started || self.life.finished() { return; }
+        if !self.started || self.life.finished() || self.poll_gpu_loss() { return; }
         self.open(event_loop, None);
         self.shell(event_loop);
         // winit's focus does nothing while the window is still deminiaturizing.
@@ -266,11 +340,10 @@ impl Host {
     }
 
     fn new_events_in_turn(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if self.poll_gpu_loss() { return; }
         #[cfg(target_os = "macos")]
-        {
-            if let Some(shadow) = self.win.as_ref().and_then(|w| w.native.shadow.as_ref()) { shadow.turn(); }
-            self.frame_presented.drain();
-        }
+        if let Some(shadow) = self.win.as_ref().and_then(|w| w.native.shadow.as_ref()) { shadow.turn(); }
+        self.drain_frame_presented();
         self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::frame::surface_stats::slept(cause));
         if matches!(cause, StartCause::ResumeTimeReached { .. }) && let Some(w) = &self.win { w.cursor.reassert(); }
         if self.window_script.is_some() { self.replay_window_script(crate::time::now()); }
@@ -284,7 +357,7 @@ impl Host {
         if let Some(attempt) = self.win.as_ref().and_then(|w| w.native.drop_binding.grace_attempt())
             && self.win.as_ref().and_then(|w| w.native.drop_binding.deadline()).is_some_and(|due| due <= crate::time::now())
         {
-            self.step_wayland_drop_binding(crate::platform::wayland_drop::binding::Event::GraceDue {
+            self.step_wayland_drop_binding(crate::platform::wayland::drop::binding::Event::GraceDue {
                 attempt,
                 now: crate::time::now(),
             });
@@ -384,13 +457,18 @@ impl Host {
     }
 
     fn about_to_wait_in_turn(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if self.poll_gpu_loss() { return false; }
         if self.idle_geometry(event_loop) { return false; }
+        if self.idle_placement(event_loop) { return false; }
         #[cfg(target_os = "macos")]
         {
-            self.fn_key();
-            self.media_keys();
+            self.fn_key(Some(event_loop));
+            self.media_keys(Some(event_loop));
         }
         self.flush_files(event_loop);
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        self.poll_wayland_backdrop();
+        self.drain_frame_presented();
         // Another window switched the font families (`Tx::set_font_families`).
         if self.app.rt_mut().follow_font_families() && let Some(w) = &mut self.win {
             w.loop_frame.touched();
@@ -412,7 +490,14 @@ impl Host {
         #[cfg(target_os = "linux")]
         self.cpu_idle();
         #[cfg(not(target_os = "windows"))]
-        { !crate::marks::counting() && self.app.text_idle_owed() && self.app.text_idle_turn() }
+        {
+            if !crate::marks::counting() && self.app.text_idle_owed() {
+                let _stages = self.observability.scope_stages(None);
+                self.app.text_idle_turn()
+            } else {
+                false
+            }
+        }
     }
 
     fn resumed_in_turn(&mut self, event_loop: &ActiveEventLoop) {
@@ -423,6 +508,7 @@ impl Host {
     fn user_event_in_turn(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         #[cfg(feature = "frame-profile")]
         let logged = Some(crate::frame::live_log::now());
+        let _stages = self.observability.scope_stages(None);
         self.meter.waited();
         self.handle_user_event(event_loop, event);
         self.publish();
@@ -433,7 +519,9 @@ impl Host {
     fn window_event_in_turn(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         #[cfg(feature = "frame-profile")]
         let logged = (!matches!(event, WindowEvent::RedrawRequested)).then(crate::frame::live_log::now);
-        if !matches!(event, WindowEvent::RedrawRequested) { self.meter.waited(); }
+        let is_redraw = matches!(event, WindowEvent::RedrawRequested);
+        let _stages = (!is_redraw).then(|| self.observability.scope_stages(None));
+        if !is_redraw { self.meter.waited(); }
         self.handle_window_event(event_loop, id, event);
         self.publish();
         #[cfg(feature = "frame-profile")]
@@ -477,4 +565,68 @@ fn wayland_drop_deadline(win: Option<&Win>) -> Option<Instant> {
     return win.and_then(|w| w.native.drop_binding.deadline());
     #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
     { let _ = win; None }
+}
+
+/// When a Windows window polls DXGI `GetFrameStatistics` for an in-flight `on_frame_presented` frame.
+fn dxgi_present_deadline(win: Option<&Win>, has_pending: bool) -> Option<Instant> {
+    #[cfg(target_os = "windows")]
+    return has_pending.then(|| win.and_then(|w| w.native.dxgi_present.next_deadline())).flatten();
+    #[cfg(not(target_os = "windows"))]
+    { let _ = (win, has_pending); None }
+}
+
+impl Host {
+    /// Drains any landed presentation timestamps on the active platform without blocking.
+    pub(in crate::window) fn drain_frame_presented(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.frame_presented.drain();
+        #[cfg(target_os = "windows")]
+        self.poll_dxgi_present();
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        self.poll_wayland_present();
+    }
+
+    /// Drains landed completions, then drops orphaned in-flight presentation tracking after a
+    /// surface replacement, hide, release, or device loss.
+    pub(in crate::window) fn reset_frame_presented(&mut self) {
+        self.drain_frame_presented();
+        self.frame_presented.reset();
+        #[cfg(target_os = "windows")]
+        if let Some(w) = self.win.as_mut() {
+            w.native.dxgi_present.reset();
+        }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if let Some(wp) = self.win.as_mut().and_then(|w| w.native.wayland_present.as_mut()) {
+            wp.reset();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(in crate::window) fn poll_dxgi_present(&mut self) {
+        if !self.frame_presented.has_pending() {
+            if let Some(w) = self.win.as_mut() {
+                w.native.dxgi_present.clear_waiting();
+            }
+            return;
+        }
+        let Some(w) = self.win.as_mut() else { return };
+        let Some(surface) = w.surface.as_ref() else { return };
+        let hz = super::draw::display_hz(w);
+        w.native.dxgi_present.poll_surface(surface, &mut self.frame_presented, crate::time::now(), hz);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    pub(in crate::window) fn poll_wayland_present(&mut self) {
+        if !self.wayland || !self.frame_presented.wanted() {
+            return;
+        }
+        let Some(wp) = self.win.as_mut().and_then(|w| w.native.wayland_present.as_mut()) else {
+            return;
+        };
+        let mut completions = Vec::new();
+        wp.poll(&mut completions);
+        if !completions.is_empty() {
+            self.frame_presented.apply_completions(completions);
+        }
+    }
 }

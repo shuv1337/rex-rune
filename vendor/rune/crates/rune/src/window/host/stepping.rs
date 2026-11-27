@@ -153,60 +153,176 @@ impl Host {
             crate::tooling::perf_warn::timed("on_ready", || ready(&self.native_handle));
         }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-        self.wayland_drop_ready();
+        {
+            self.wayland_drop_ready();
+            self.wayland_backdrop_ready();
+            self.wayland_primary_selection_ready();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         crate::platform::ready_signal::ready();
+    }
+
+    /// Wayland: lazily binds the shared per-display backdrop controller after the first frame for
+    /// transparent windows opened with `WindowBackdrop::None`, populating
+    /// `Cx::window_backdrop_supported(WindowBackdrop::Blur)` without adding a startup round-trip
+    /// or creating any per-surface blur object.
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    fn wayland_backdrop_ready(&mut self) {
+        if !self.wayland || !self.options.transparent {
+            return;
+        }
+        let needs_attach = self.win.as_ref().is_some_and(|w| {
+            #[cfg(target_os = "linux")]
+            let cpu = matches!(w.native.mode, crate::window::linux::handover::SurfaceMode::Cpu { .. });
+            #[cfg(not(target_os = "linux"))]
+            let cpu = false;
+            w.native.wayland_backdrop.is_none()
+                && !cpu
+                && w.surface.is_some()
+                && w.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque
+        });
+        if needs_attach && let Some(w) = self.win.as_mut() {
+            w.native.wayland_backdrop =
+                crate::platform::wayland::backdrop::SurfaceBlur::for_window(&w.window);
+            if w.native.wayland_backdrop.is_some() {
+                self.sync_window_backdrop(false);
+            }
+        }
+    }
+
+    /// Wayland: if `El::system_material` elements mounted on a transparent window with
+    /// `WindowBackdrop::None` before the shared blur controller bound (Frame 1), bind now so
+    /// `Cx::window_backdrop_supported(WindowBackdrop::Blur)` and `wayland_blur_materials` take
+    /// effect on Frame 1 before encoding/presenting. Returns `true` when the runtime became
+    /// stale and must rebuild before encoding.
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    pub(in crate::window) fn prepare_wayland_material_blur(&mut self) -> bool {
+        if !self.wayland
+            || !self.options.transparent
+            || self.window_backdrop != crate::WindowBackdrop::None
+            || self.app.rt().paint.materials().is_empty()
+        {
+            return false;
+        }
+        let needs_attach = self.win.as_ref().is_some_and(|w| {
+            #[cfg(target_os = "linux")]
+            let cpu = matches!(w.native.mode, crate::window::linux::handover::SurfaceMode::Cpu { .. });
+            #[cfg(not(target_os = "linux"))]
+            let cpu = false;
+            w.native.wayland_backdrop.is_none()
+                && !cpu
+                && w.surface.is_some()
+                && w.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque
+        });
+        if !needs_attach {
+            return false;
+        }
+        if let Some(w) = self.win.as_mut() {
+            w.native.wayland_backdrop =
+                crate::platform::wayland::backdrop::SurfaceBlur::for_window(&w.window);
+        }
+        if self.win.as_ref().is_some_and(|w| w.native.wayland_backdrop.is_some()) {
+            self.sync_window_backdrop(false);
+            return self.app.rt().stale();
+        }
+        false
+    }
+
+    /// Wayland: dispatches queued runtime capability events on the shared display controller and
+    /// re-syncs this window if `Capability::Blur` was revoked or re-granted.
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    pub(in crate::window) fn poll_wayland_backdrop(&mut self) {
+        if !self.wayland {
+            return;
+        }
+        let changed = self
+            .win
+            .as_mut()
+            .and_then(|w| w.native.wayland_backdrop.as_mut())
+            .is_some_and(|b| b.poll_capability_change());
+        if changed {
+            self.sync_window_backdrop(false);
+        }
+    }
+
+    /// Wayland: lazily binds `zwp_primary_selection_device_manager_v1` on winit's `wl_display`
+    /// once after frame 1 (zero work before frame 1).
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    fn wayland_primary_selection_ready(&mut self) {
+        if !self.wayland { return; }
+        if let Some(w) = &self.win {
+            crate::platform::wayland::primary_selection::wire::ensure_for_window(&w.window);
+        }
     }
 
     /// Wayland: marks the window ready for lazy `wl_data_device` binding and syncs drop targets.
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     fn wayland_drop_ready(&mut self) {
         if !self.wayland { return; }
-        self.step_wayland_drop_binding(crate::platform::wayland_drop::binding::Event::WindowReady);
+        self.step_wayland_drop_binding(crate::platform::wayland::drop::binding::Event::WindowReady);
         self.sync_wayland_drop();
     }
 
-    /// Wayland: lazily binds or schedules teardown of `wl_data_device` when `(commit_generation,
-    /// active_modal)` changes. Zero work before frame 1 or on steady/animation frames.
+    /// Wayland: lazily binds or schedules teardown of `wl_data_device` (and the unwatched
+    /// press/touch serial listener for `drag_out`) when `(commit_generation, active_modal)` or
+    /// active-drag state changes. Zero work before frame 1 or on steady/animation frames.
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     pub(in crate::window) fn sync_wayland_drop(&mut self) {
         if !self.wayland { return; }
         let key = {
             let rt = self.app.rt();
-            crate::platform::wayland_drop::binding::SyncKey {
+            let active_drag = rt.has_active_drag_out()
+                || self.win.as_ref().is_some_and(|w| crate::platform::wayland::drop::has_active_drag(&w.window));
+            crate::platform::wayland::drop::binding::SyncKey {
                 commit: rt.commit_generation(),
                 modal: rt.active_modal(),
+                active_drag,
             }
         };
         if !self.win.as_ref().is_some_and(|w| w.native.drop_binding.needs_sync(key)) {
             return;
         }
-        let has_targets = self.app.rt().has_drop_targets();
-        self.step_wayland_drop_binding(crate::platform::wayland_drop::binding::Event::TreeSynced {
+        let (has_drop, has_drag_out) = {
+            let rt = self.app.rt();
+            (rt.has_drop_targets(), rt.has_drag_out())
+        };
+        let active_drag = key.active_drag;
+        let has_targets = has_drop || has_drag_out || active_drag;
+        self.step_wayland_drop_binding(crate::platform::wayland::drop::binding::Event::TreeSynced {
             key,
             has_targets,
             now: crate::time::now(),
         });
+        // Keep the unwatched press/touch serial listener bound only while `drag_out` is mounted
+        // (or an outgoing drag is in flight) and the window's `wl_data_device` is bound.
+        if let Some(w) = &mut self.win {
+            let wants_serial = w.native.drop_target.is_some() && (has_drag_out || active_drag);
+            if wants_serial && w.native.drag_serial.is_none() {
+                w.native.drag_serial = crate::platform::wayland::serial::wire::attach_window(&w.window);
+            } else if !wants_serial && w.native.drag_serial.is_some() {
+                w.native.drag_serial = None;
+            }
+        }
     }
 
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     pub(in crate::window) fn wayland_drop_closed(&mut self) {
         if !self.wayland { return; }
-        self.step_wayland_drop_binding(crate::platform::wayland_drop::binding::Event::WindowClosed);
+        self.step_wayland_drop_binding(crate::platform::wayland::drop::binding::Event::WindowClosed);
     }
 
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     pub(in crate::window) fn wayland_drop_display_lost(&mut self) {
         if !self.wayland { return; }
-        self.step_wayland_drop_binding(crate::platform::wayland_drop::binding::Event::DisplayLost);
+        self.step_wayland_drop_binding(crate::platform::wayland::drop::binding::Event::DisplayLost);
     }
 
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     pub(in crate::window) fn step_wayland_drop_binding(
         &mut self,
-        event: crate::platform::wayland_drop::binding::Event,
+        event: crate::platform::wayland::drop::binding::Event,
     ) {
-        use crate::platform::wayland_drop::binding::{self, Effect};
+        use crate::platform::wayland::drop::binding::{self, Effect};
         let Some(w) = &mut self.win else { return };
         let effects = binding::step(&mut w.native.drop_seq, &mut w.native.drop_binding, event);
         for effect in effects {
@@ -215,12 +331,17 @@ impl Host {
                     let Some(w) = &mut self.win else { return };
                     if w.native.drop_target.is_none() {
                         let handle = self.native_handle.clone();
-                        let target = crate::platform::wayland_drop::install(
+                        let target = crate::platform::wayland::drop::install(
                             &w.window,
                             std::sync::Arc::new(move || handle.send(|_| crate::window::WakeEvent::FileDrop)),
                         );
                         if target.is_some() {
                             w.native.drop_target = target;
+                            if w.native.drag_serial.is_none()
+                                && (self.app.rt().has_drag_out() || self.app.rt().has_active_drag_out())
+                            {
+                                w.native.drag_serial = crate::platform::wayland::serial::wire::attach_window(&w.window);
+                            }
                         } else {
                             let _ = binding::step(
                                 &mut w.native.drop_seq,
@@ -239,6 +360,7 @@ impl Host {
                 Effect::WakeAt(_) => {}
                 Effect::Unbind => {
                     if let Some(w) = &mut self.win {
+                        w.native.drag_serial = None;
                         w.native.drop_target = None;
                     }
                 }
@@ -261,6 +383,7 @@ impl Host {
 
     pub(in crate::window) fn place(&mut self, event_loop: &ActiveEventLoop, request: crate::windows::PlaceRequest) {
         self.options.position = None;
+        self.logical_position = None;
         self.placement = Some(request);
         self.reopen.clear_position();
         self.apply_placement(event_loop);
@@ -287,6 +410,7 @@ impl Host {
             if let Some(size) = applied { self.apply_immediate_resize(size, true); }
         }
         self.sync_origin();
+        self.placement_watch.mark_dirty();
     }
 
     /// Applies a size that `Window::request_inner_size` committed immediately (Wayland):
@@ -305,6 +429,10 @@ impl Host {
             (resized, (w.config.width, w.config.height))
         });
         if redraw && self.life.shown() && (changed || origin_moved) { w.request_redraw(); }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.wayland && self.options.transparent {
+            self.sync_window_backdrop(false);
+        }
     }
 
     /// Seconds on the host's frame clock, which frame animations sample.
@@ -366,6 +494,7 @@ impl Host {
                 self.frame_move = None;
                 crate::platform::macos::set_window_frame(&w.window, to);
                 self.sync_origin();
+                self.placement_watch.mark_dirty();
                 self.sync_surface_size()
             }
         }
@@ -399,6 +528,7 @@ impl Host {
             if [x, y] != [current[0], current[1]] {
                 window.set_outer_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
                 self.sync_origin();
+                self.placement_watch.mark_dirty();
             }
             false
         }

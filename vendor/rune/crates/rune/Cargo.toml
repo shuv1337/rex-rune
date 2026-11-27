@@ -7,7 +7,7 @@ description = "GPU-rendered Rust UI framework (wgpu, winit) with keyed element t
 autotests = false
 
 [features]
-default = ["accessibility", "dbus", "embedded-fonts", "hunspell", "metal-backend", "ogg-audio", "svg", "rune-gpu/default", "rune-image/default", "rune-media/default", "rune-text/default"]
+default = ["accessibility", "dbus", "embedded-fonts", "hunspell", "metal-backend", "ogg-audio", "png", "svg", "wayland-csd-title", "rune-gpu/default", "rune-image/default", "rune-media/default", "rune-text/default"]
 # Bundle Inter (Regular, Medium, SemiBold; on web also IBM Plex Mono) as the fonts text falls back
 # to when the app registers none. Disable when AppSpec::fonts supplies the app's own fonts to omit
 # the bytes (about 1.25 MB native).
@@ -46,30 +46,65 @@ hot = ["dep:subsecond", "dep:dioxus-devtools"]
 # reject an app built with it. Off, the lookup isn't compiled in, and a non-key overlay's
 # cursor shows only while its app is frontmost.
 macos-background-cursor = []
+# Windows 11 Build 22000+: opt-in per-element behind-window blur for `El::system_material` on
+# transparent DirectComposition windows and overlays using documented `DWMWA_USE_HOSTBACKDROPBRUSH`
+# and `Windows.UI.Composition` (`Compositor::CreateHostBackdropBrush`). Off by default while live
+# Windows 11 hardware checks confirm unfocused overlay blur and spring tracking; off, no
+# `Windows.UI.Composition` types or WinRT composition features are compiled in.
+windows-system-material = [
+    "windows/Foundation",
+    "windows/Foundation_Numerics",
+    "windows/Graphics_Effects",
+    "windows/System",
+    "windows/UI_Composition",
+    "windows/UI_Composition_Desktop",
+    "windows/UI_ViewManagement",
+    "windows/Win32_Graphics_Direct2D",
+    "windows/Win32_Graphics_Direct2D_Common",
+    "windows/Win32_System_WinRT_Composition",
+    "windows/Win32_System_WinRT_Graphics_Direct2D",
+]
 # macOS: play Ogg (Vorbis, Opus) and WebM/Matroska audio, which AVFoundation can't read, by
 # decoding it in Rust (symphonia, opuscule) and handing AVPlayer the PCM. Off, those clips
 # fail at once with a clear message.
 ogg-audio = ["rune-media/ogg-audio"]
+# Web (`wasm32`): decode PNG, APNG and ICNS bytes and convert embedded ICC profiles in Rust
+# (`image/png`, `png`, `moxcms`). Off (for example with `default-features = false`), `wasm32`
+# decodes PNG and ICNS through the browser's `createImageBitmap` (with native ICC conversion),
+# encodes `ClipboardImage::from_rgba` / `DragImage::from_rgba` with a tiny stored-block PNG
+# writer, and omits `image`, `png`, `fdeflate`/`flate2`/`miniz_oxide` and `moxcms`. No effect
+# on native targets, which always link the Rust raster codecs.
+png = ["rune-image/png", "dep:image", "dep:png"]
 # SVG and SVGZ images (`ImageCache::svg`, `file`, `load_mime`, and `load` on sniffed SVG bytes), and
 # scalable Linux app icons, rasterized by resvg. Off, those images resolve to `Image::error`.
 svg = ["rune-image/svg", "rune-text/svg"]
-# AVIF images (`ImageCache::load` on AVIF bytes), decoded natively by rav1d, a Rust port of
-# dav1d; an animated AVIF shows its first frame. Building it for x86 needs NASM on the PATH for
-# rav1d's assembly. Off, AVIF bytes resolve to `Image::error`. No effect on web, where the
-# browser decodes AVIF.
+# AVIF stills (`ImageCache::load` on AVIF bytes), decoded natively by rav1d, a pure-Rust port of
+# dav1d; animated AVIF (`avis`) is rejected natively. Off, AVIF bytes resolve to `Image::error`.
+# No effect on web, where the browser decodes AVIF.
 avif = ["rune-image/avif"]
-# Linux: spell check text fields (`El::spellcheck`) against installed system Hunspell
-# dictionaries via `spellbook` (MPL-2.0) and `unicode-segmentation`. Off (for example with
-# `default-features = false` or a permissive-only licence policy), `spellbook` is not compiled on
-# Linux and `El::spellcheck` falls back to a no-op there. No effect on Windows (`ISpellChecker`),
-# macOS (`NSSpellChecker`), or web (which always enables `rune-spell/hunspell`).
+# Linux and web (`wasm32`): spell check text fields (`El::spellcheck`) against Hunspell
+# dictionaries via `spellbook` (MPL-2.0) and `unicode-segmentation` (installed system dictionaries
+# on Linux, fetched `spell/<tag>.aff`/`.dic` files on web). Off (for example with
+# `default-features = false` or a permissive-only licence policy), `spellbook` and the web
+# dictionary loader are not compiled and `El::spellcheck` falls back to a no-op on Linux and web.
+# No effect on Windows (`ISpellChecker`) or macOS (`NSSpellChecker`).
 hunspell = ["rune-spell/hunspell"]
+# Linux/Wayland: render window titles in `sctk-adwaita`'s client-side headerbar on compositors
+# without server-side decorations (such as GNOME), via `winit/wayland-csd-adwaita` (`ab_glyph`,
+# `ttf-parser`, and a 31 KB fallback Cantarell font). On by default so plain system-decorated
+# windows show their `AppSpec` / `Window::set_title` title out of the box. Disable with
+# `default-features = false` (keeping `wayland-csd-adwaita-notitle` frames and buttons without
+# `ab_glyph` or the fallback font) for custom-titlebar or size-minimal Linux builds. No effect on
+# other platforms or compositors that draw server-side decorations.
+wayland-csd-title = ["winit/wayland-csd-adwaita"]
 # Linux desktop services over D-Bus (zbus over async-io): the desktop's light or dark preference
 # (the Settings portal), the system tray (`Tray`), global shortcuts on Wayland (the
-# GlobalShortcuts portal) and, with `native-file-dialog`, the FileChooser portal. Off, those
-# D-Bus crates are not compiled for Rune's own services: a window winit gives no theme draws dark,
-# `Tray::new` returns `TrayError::Unsupported` on Linux and a Wayland session's global shortcuts
-# return `ShortcutError::Unsupported`; X11 shortcuts keep working. No effect on other platforms.
+# GlobalShortcuts portal), the Secret Service (`rune::credentials`) and, with `native-file-dialog`,
+# the FileChooser portal. Off, those D-Bus crates are not compiled for Rune's own services: a
+# window winit gives no theme draws dark, `Tray::new` returns `TrayError::Unsupported` on Linux, a
+# Wayland session's global shortcuts return `ShortcutError::Unsupported` (X11 shortcuts keep
+# working) and `Credentials::system` returns `CredentialError::Unsupported`. No effect on other
+# platforms.
 dbus = ["dep:async-channel", "dep:async-executor", "dep:async-io", "dep:futures-lite", "dep:serde", "dep:zbus"]
 # macOS and iOS: Rune's native Metal backend (research/34). Mac apps draw with it by default; an
 # app opts out with `App::gpu_backend(GpuBackend::Wgpu)`, or a launch with `RUNE_GPU_BACKEND=wgpu`,
@@ -93,29 +128,28 @@ test-gpu-noop = ["wgpu/noop"]
 [dependencies]
 # The accessibility tree's types; the platform adapters below come with `accessibility`.
 accesskit = "0.25.2"
-procwatch = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", optional = true }
+procwatch = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", optional = true }
 subsecond = { version = "=0.7.10", optional = true }
 dioxus-devtools = { version = "=0.7.10", optional = true }
-rune-core = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-rune-edit = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-rune-gpu = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false }
-rune-image = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false }
-rune-media = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false }
-rune-motion = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-rune-spell = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false }
-rune-staging = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-rune-taffy = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3" }
-rune-text = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false }
+rune-core = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-edit = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-gpu = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-image = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-media = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-motion = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-spell = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-staging = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-taffy = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-text = { git = "https://github.com/anomalyco/rune.git", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
 # Allow backend patch fixes; headless pixel equivalence guards the precompiled Metal path.
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl"] }
-# Keep Wayland client-side frames/buttons without the title font's ab_glyph/ttf-parser.
+# Keep Wayland client-side frames/buttons even with `default-features = false`; the default
+# `wayland-csd-title` feature adds `winit/wayland-csd-adwaita` for headerbar title rendering.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
 parley = { version = "0.12", default-features = false, features = ["std"] }
 bytemuck = { version = "1.25", features = ["derive"] }
-png = "0.18"
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
 blake3 = "1"
 rustc-hash = "2"
 zeroize = "1.8"
@@ -127,6 +161,8 @@ unicode-segmentation = "1.13"
 libc = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.18"
 pollster = "1"
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
@@ -137,7 +173,8 @@ arboard = { version = "3.6", default-features = false, features = ["wayland-data
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rune-spell = { git = "https://github.com/anomalyco/rune.git", rev = "983e33b916b0da5719442d94ae04a00867c952a3", default-features = false, features = ["hunspell"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+png = { version = "0.18", optional = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -164,7 +201,7 @@ accesskit_macos = { version = "0.27.2", optional = true }
 # Names for the interaction watchdog's stack samples (`tooling::interaction::stack`).
 rustc-demangle = "0.1"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObject", "NSRange", "NSValue", "NSProcessInfo", "NSString", "NSThread", "NSURL", "NSUserDefaults", "objc2-core-foundation"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "bitflags", "objc2-core-foundation", "NSApplication", "NSButton", "NSCell", "NSColorSpace", "NSControl", "NSEvent", "NSFont", "NSFontDescriptor", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSGraphicsContext", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAttributedString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "bitflags", "objc2-core-foundation", "NSApplication", "NSButton", "NSCell", "NSColorSpace", "NSControl", "NSEvent", "NSFont", "NSFontDescriptor", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSGraphicsContext", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAttributedString"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVDisplayLink", "CVHostTime", "CVReturn", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGColorSpace"] }
 
@@ -173,6 +210,7 @@ raw-window-handle = "0.6"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 x11rb = { version = "0.13", features = ["shape", "xinput", "randr", "allow-unsafe-code", "dl-libxcb"] }
 xkbcommon = "0.9"
@@ -181,7 +219,7 @@ xkbcommon = "0.9"
 # DirectComposition handover (`platform::win32::dcomp_handover`), OLE drag and drop
 # (`drag_out::windows`, `platform::win32::drop_target`), jump lists and the taskbar button's
 # progress and badge (`platform::win32::{jump_list,taskbar}`).
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Foundation", "UI_ViewManagement", "Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
 # `#[windows::core::implement]` (the OLE drop target, `platform::win32::drop_target`) names this crate.
 windows-core = "0.62"
 # D3D12 alone: a machine without a hardware D3D12 adapter draws on WARP, D3D12's own software
@@ -191,7 +229,7 @@ wgpu = { version = "~30.0.1", default-features = false, features = ["dx12"] }
 accesskit_windows = { version = "0.35.2", optional = true }
 # `AppHandle::register_url_scheme` writes the per-user `Software\Classes\<scheme>` entry.
 windows-registry = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_System_DataExchange", "Win32_System_Memory"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_System_DataExchange", "Win32_System_Memory"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # AT-SPI over D-Bus on its own async-io thread, started only when the desktop's accessibility bus is on.
@@ -273,10 +311,19 @@ name = "add_font"
 name = "emoji_family"
 
 [[test]]
+name = "heap_trim_custom_alloc"
+
+[[test]]
+name = "heap_trim_guards"
+
+[[test]]
 name = "installed_families"
 
 [[test]]
 name = "measure_scope"
+
+[[test]]
+name = "setup_measure"
 
 [[test]]
 name = "pixels_streaming"
@@ -338,6 +385,14 @@ name = "macos_drag_out"
 harness = false
 
 [[test]]
+name = "wayland_display_queue"
+harness = false
+
+[[test]]
+name = "wayland_window_geometry"
+harness = false
+
+[[test]]
 name = "macos_overlay_drag_out"
 harness = false
 
@@ -360,6 +415,10 @@ harness = false
 
 [[test]]
 name = "macos_callback_panic"
+harness = false
+
+[[test]]
+name = "macos_quit_request"
 harness = false
 
 [[test]]

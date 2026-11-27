@@ -62,6 +62,39 @@ impl HeadlessPrep {
     }
 }
 
+#[derive(Clone, Default)]
+pub(super) struct HeadlessWake(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl HeadlessWake {
+    fn waker(&self) -> crate::runtime::Waker {
+        let inner = self.0.clone();
+        Arc::new(move || {
+            let (lock, cvar) = &*inner;
+            if let Ok(mut notified) = lock.lock() {
+                *notified = true;
+                cvar.notify_one();
+            }
+        })
+    }
+
+    /// Waits up to `dur` for a wake notification, returning `true` when woken by a
+    /// notification (including one already pending) and `false` on timeout or a zero wait
+    /// with no pending notification.
+    pub(super) fn wait_timeout(&self, dur: std::time::Duration) -> bool {
+        let (lock, cvar) = &*self.0;
+        let Ok(mut notified) = lock.lock() else { return false };
+        if *notified {
+            *notified = false;
+            return true;
+        }
+        if dur.is_zero() {
+            return false;
+        }
+        let Ok((mut guard, _)) = cvar.wait_timeout(notified, dur) else { return false };
+        std::mem::replace(&mut *guard, false)
+    }
+}
+
 struct HeadlessConfig {
     launched: Instant,
     state_ms: f64,
@@ -74,10 +107,12 @@ struct HeadlessConfig {
     min_size: Option<(f32, f32)>,
     on_ready: Option<crate::app::OnWindow>,
     on_frame_encoded: Option<crate::frame::encoded::OnFrameEncoded>,
+    observability: crate::frame::stage::HostObservability,
     shared_core: Arc<SharedCore>,
     shortcuts_core: Arc<crate::shortcuts::HubCore>,
     shortcuts: crate::shortcuts::Guard,
     menus: crate::native_menu::MenuGuard,
+    wake: HeadlessWake,
 }
 
 fn wait_for_profiler() -> Instant {
@@ -165,27 +200,35 @@ fn try_headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, 
     let (chrome, titlebar, fit_height) = (app.chrome, app.titlebar, app.fit_content_height);
     let app_options = app.window_options.clone();
     let comp = app.compositor.take();
-    let (on_close_request, on_close, on_reopen, on_open_url, on_open_files) = (
-        app.on_close_request, app.on_close, app.on_reopen, app.on_open_url, app.on_open_files,
+    let (on_close_request, on_quit_request, on_close, on_quit, on_reopen, on_open_url, on_open_files) = (
+        app.on_close_request, app.on_quit_request, app.on_close, app.on_quit, app.on_reopen, app.on_open_url, app.on_open_files,
     );
     let on_ready = app.on_ready.take();
     let on_frame_encoded = app.on_frame_encoded.take();
+    let observability = crate::frame::stage::HostObservability::new(app.observability.take(), Some("main"));
+    let settle_ready = app.settle_ready.take();
     let (playground, attach_playground) = (app.playground.take(), app.attach_playground);
-    let (spec, state, shared, runtime) = app.into_parts(args.scene.as_deref());
-    let shortcuts = crate::shortcuts::Guard::attach(&shared, Arc::new(|| {}), true, false);
-    let menus = crate::native_menu::MenuGuard::attach(&shared, true);
-    let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
-    let mut rt = runtime_for(&spec, state, prep.size, Env::new(prep.dark, prep.scale), Arc::new(|| {}));
+    crate::credentials::note_headless_runtime();
+    let wake = HeadlessWake::default();
+    let (spec, mut rt, shared, shortcuts, menus, state_ms) = {
+        let _startup = observability.scope_stages(None);
+        let (spec, state, shared, runtime) = app.into_parts(args.scene.as_deref());
+        shared.core.connect(wake.waker());
+        let shortcuts = crate::shortcuts::Guard::attach(&shared, wake.waker(), true, false);
+        let menus = crate::native_menu::MenuGuard::attach(&shared, true);
+        let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
+        let rt = runtime_for_configured(&spec, state, prep.size, Env::new(prep.dark, prep.scale), wake.waker(), Some(runtime));
+        (spec, rt, shared, shortcuts, menus, state_ms)
+    };
     if let Some(attach) = attach_playground {
         attach(&mut rt, playground, &spec, args.playground.clone(), args.variant.clone(), false);
     }
-    rt.configure(runtime);
     let config = HeadlessConfig {
         launched, state_ms, args, transparent, chrome, titlebar, fit_height, app_options,
-        min_size: spec.min_size, on_ready, on_frame_encoded,
-        shared_core: shared.core.clone(), shortcuts_core: shared.shortcuts.core.clone(), shortcuts, menus,
+        min_size: spec.min_size, on_ready, on_frame_encoded, observability,
+        shared_core: shared.core.clone(), shortcuts_core: shared.shortcuts.core.clone(), shortcuts, menus, wake,
     };
-    let mut typed = TypedHeadlessApp { rt, shared, comp, on_close_request, on_close, on_reopen, on_open_url, on_open_files };
+    let mut typed = TypedHeadlessApp { rt, shared, comp, on_close_request, on_quit_request, on_close, on_quit, on_reopen, on_open_url, on_open_files, settle_ready };
     run_headless(prep, config, &mut typed)
 }
 
@@ -193,14 +236,18 @@ fn run_headless(prep: HeadlessPrep, config: HeadlessConfig, app: &mut dyn Headle
     let HeadlessPrep { source, script, timeline, scale, size, dark, mut writer } = prep;
     let HeadlessConfig {
         launched, state_ms, args, transparent, chrome, titlebar, fit_height, app_options,
-        min_size, on_ready, on_frame_encoded, shared_core, shortcuts_core, shortcuts, mut menus,
+        min_size, on_ready, on_frame_encoded, observability, shared_core, shortcuts_core, shortcuts, mut menus, wake,
     } = config;
     // A `--realtime` run stands in for a window, so it starts the app's live work as one does.
     let mut on_ready = on_ready.filter(|_| args.realtime);
-    let mut reports = crate::frame::encoded::FrameReports::new(on_frame_encoded, Some("main"));
+    let mut reports = crate::frame::encoded::FrameReports::with_presented_seq(
+        on_frame_encoded,
+        observability.wants_stages(),
+        Some("main"),
+    );
     app.rt_mut().headless_chrome(chrome, titlebar, app_options.borderless);
     app.rt_mut().transparent = transparent;
-    app.rt_mut().host.fit_height = fit_height;
+    app.rt_mut().host.set_fit_height(fit_height);
     if let Some(bars) = args.scroll_bars { app.rt_mut().set_system_scroll_bars(bars); }
     // Only limits the app set: the canvas opens at any size, below the default minimum too.
     let limits = (app_options.min_size.or(min_size).unwrap_or((0.0, 0.0)), app_options.max_size);
@@ -338,6 +385,8 @@ fn run_headless(prep: HeadlessPrep, config: HeadlessConfig, app: &mut dyn Headle
         idle: true,
         early_place: None,
         placed: None,
+        wake,
+        settle_outcome: None,
         snap_crop: &snap_crop,
         cpu_boot: &cpu_boot,
         loop_check: super::loop_check::Tally::default(),
@@ -363,17 +412,41 @@ fn run_headless(prep: HeadlessPrep, config: HeadlessConfig, app: &mut dyn Headle
         let real_t = k as f64 * dt;
         #[cfg(not(target_arch = "wasm32"))]
         if args.realtime {
-            let ahead = real_t - wall.elapsed().as_secs_f64();
-            if ahead > 0.0 { std::thread::sleep(std::time::Duration::from_secs_f64(ahead)); }
+            let deadline = wall + std::time::Duration::from_secs_f64(real_t);
+            wait_realtime_tick(&state.wake, deadline, || {
+                if let Some(place) = take_requests(app, &mut menus) {
+                    state.early_place = Some(place);
+                }
+            });
         }
-        let frame_start = crate::time::now();
+        let mut frame_start = crate::time::now();
         let script_before = next_ev;
         #[cfg(feature = "frame-profile")]
         let events0 = next_ev;
         while next_ev < script.len() && script[next_ev].t <= real_t + 1e-9 {
             let e = &script[next_ev];
             next_ev += 1;
-            if let Some(g) = state.gate.as_mut() && !matches!(e.kind, Kind::Mark(_)) { g.input("script"); }
+            if let Some(g) = state.gate.as_mut() && !matches!(e.kind, Kind::Mark(_) | Kind::AwaitKey { .. }) { g.input("script"); }
+            if let Kind::AwaitKey { key, wait_s } = &e.kind {
+                let waited = await_key(
+                    app,
+                    &state.wake,
+                    |app| {
+                        if let Some(place) = take_requests(app, &mut menus) {
+                            state.early_place = Some(place);
+                        }
+                        app.frame(0.0);
+                        app.open_popup_headless();
+                    },
+                    key,
+                    *wait_s,
+                )
+                .map_err(|msg| format!("script: {msg}"))?;
+                if waited {
+                    frame_start = crate::time::now();
+                }
+                continue;
+            }
             let (x, y) = crate::tooling::script_point(app.rt(), e, last_down).unwrap_or_else(|msg| die(&format!("script: {msg}")));
             match &e.kind {
                 Kind::Mark(name) if args.realtime => {
@@ -385,6 +458,7 @@ fn run_headless(prep: HeadlessPrep, config: HeadlessConfig, app: &mut dyn Headle
                 // The one window always shows here.
                 Kind::Reopen => app.run_reopen(),
                 Kind::CloseRequest => { let _ = app.run_close_request(); }
+                Kind::QuitRequest => { let _ = app.run_quit_request(); }
                 Kind::OpenUrl(url) => app.run_open_url(url),
                 Kind::OpenFiles(paths) => app.run_open_files(paths),
                 Kind::Shortcut(shortcut) => shortcuts_core.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
@@ -413,9 +487,13 @@ fn run_headless(prep: HeadlessPrep, config: HeadlessConfig, app: &mut dyn Headle
         // Frame 0 has drawn: a window runs `on_ready` after its first frame.
         if k == 1 && let Some(mut ready) = on_ready.take() { ready(&crate::WindowHandle::new("main")); }
         let requested_place = take_requests(app, &mut menus);
+        let seq = state.reports.next_seq();
+        let _stage_scope = observability.scope_stages(seq);
         let mut host = HeadlessFrame {
             state: &mut state,
             app,
+            shortcuts: &shortcuts,
+            menus: &mut menus,
             deliver: &mut deliver,
             k,
             real_t,
@@ -425,6 +503,7 @@ fn run_headless(prep: HeadlessPrep, config: HeadlessConfig, app: &mut dyn Headle
             want_pixels: false,
             first_pixels: false,
             encoded_stamp: None,
+            redraw_stage: crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Redraw),
             #[cfg(feature = "frame-profile")]
             fp_alloc0: alloc0,
             #[cfg(feature = "frame-profile")]
@@ -641,6 +720,38 @@ pub(super) fn traffic_light_overlaps(rt: &RuntimeCore, lights: &[[f32; 4]; 3]) -
     }).collect()
 }
 
+/// Maximum sleep interval between element checks while a keyed script event waits (`wait_s`).
+const AWAIT_KEY_POLL_STEP: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Waits up to `wait_s` wall seconds for an element with `key` to exist, pumping zero-dt frames
+/// with the clock stopped so queued updates and `poll` land deterministically. Checks `find`
+/// rather than `find_shown` so an element that exists but is clipped or scrolled out of view
+/// still reports its own visibility error in `script_point`. Returns `Ok(true)` if it waited,
+/// `Ok(false)` if the element was already present.
+fn await_key(
+    app: &mut dyn HeadlessApp,
+    wake: &HeadlessWake,
+    mut pump: impl FnMut(&mut dyn HeadlessApp),
+    key: &str,
+    wait_s: f64,
+) -> Result<bool, String> {
+    if app.rt().find(key).is_some() {
+        return Ok(false);
+    }
+    let deadline = crate::time::now() + std::time::Duration::from_secs_f64(wait_s.max(0.0));
+    loop {
+        pump(app);
+        if app.rt().find(key).is_some() {
+            return Ok(true);
+        }
+        let remaining = deadline.saturating_duration_since(crate::time::now());
+        if remaining.is_zero() {
+            return Err(format!("no element with key {key:?} after {wait_s} s"));
+        }
+        wake.wait_timeout(remaining.min(AWAIT_KEY_POLL_STEP));
+    }
+}
+
 /// Lists visible text, icons and controls whose drawn rect comes within 4 pt of a traffic light.
 fn report_traffic_light_overlaps(rt: &RuntimeCore, lights: &[[f32; 4]; 3]) {
     let overlaps = traffic_light_overlaps(rt, lights);
@@ -649,3 +760,30 @@ fn report_traffic_light_overlaps(rt: &RuntimeCore, lights: &[[f32; 4]; 3]) {
     }
     eprintln!("rune: chrome: traffic lights at {:?}, {} overlapping elements", lights[0].map(r2), overlaps.len());
 }
+
+/// Waits until `deadline` on the wall clock for a `--realtime` frame tick, waking early on
+/// `wake` notifications to run `on_wake` (draining queued updates and requests) before waiting
+/// out whatever time remains until `deadline`.
+#[cfg(not(target_arch = "wasm32"))]
+fn wait_realtime_tick(
+    wake: &HeadlessWake,
+    deadline: Instant,
+    mut on_wake: impl FnMut(),
+) {
+    loop {
+        let remaining = deadline.saturating_duration_since(crate::time::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if wake.wait_timeout(remaining) {
+            on_wake();
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "headless/await_key_tests.rs"]
+mod await_key_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "headless/realtime_tests.rs"]
+mod realtime_tests;

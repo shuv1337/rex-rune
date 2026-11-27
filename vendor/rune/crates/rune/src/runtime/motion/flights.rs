@@ -366,12 +366,20 @@ impl tracks::MotionState {
             if self.flying.iter().any(|f| f.0 == from) && !self.launches.launched(from) {
                 // Mid-flight toggle: `from` drew along its blended flight frame rather than its
                 // parent's full zoom, so continue from that exact drawn rect and speed.
-                let held = from_parent_inh.map_or((1.0, [0.0; 2], [0.0; 2]), |h| h.held);
-                let dxy = from_parent_inh.map_or([0.0, row], |h| [h.dx - h.cover[0], h.dy - h.cover[1] + row]);
+                let held = from_parent_inh.map_or((1.0, [0.0; 2], [0.0; 2]), |h| paint.inh_cold_of(&h).held);
+                let dxy = from_parent_inh.map_or([0.0, row], |h| {
+                    let cover = paint.inh_cold_of(&h).cover;
+                    [h.dx - cover[0], h.dy - cover[1] + row]
+                });
                 let anc_off = super::super::paint::build::pose::ancestor_scene_offset(&tree.nodes, scene, tree.nodes[from_i].parent);
                 let row_h = built.get(&from).and_then(|&k| paint.row_h.get(k)).copied().unwrap_or(-1.0);
-                let p_rect = scene.presented(from).map_or(tree.nodes[from_i].local, |p| p.rect);
-                let delta = super::super::paint::build::pose::flight_rest_delta(scene, &tree.nodes[from_i], p_rect, 1.0, row_h, held, dxy, anc_off);
+                let from_node = &tree.nodes[from_i];
+                let from_p = scene.presented(from);
+                let p_rect = from_p.map_or(from_node.local, |p| p.rect);
+                let from_own_sc = from_p.map_or(1.0, |p| p.transform.scale.x)
+                    * if from_node.scale_track { scene.get(from, P_SCALE).unwrap_or(from_node.static_scale) } else { from_node.static_scale }
+                    * if from_node.handlers.get().is_some_and(|h| h.press_scale.is_some()) { scene.get(from, P_PRESS_SCALE).unwrap_or(1.0) } else { 1.0 };
+                let delta = super::super::paint::build::pose::flight_rest_delta(scene, from_node, p_rect, from_own_sc, row_h, held, dxy, anc_off);
                 let travel = scene.get(from, prop::TRAVEL).unwrap_or(rune_motion::Vec2::new(1.0, 1.0));
                 let travel_vel = scene.store().sample_velocity(from, prop::TRAVEL).unwrap_or(rune_motion::Vec2::ZERO);
                 let k_t = (0.5 * (travel.x + travel.y)).clamp(0.0, 1.0);
@@ -379,14 +387,22 @@ impl tracks::MotionState {
                 scene.match_geometry_from_flight(from, to, delta, travel, travel_vel, radius_scale, anim);
             } else {
                 let (scale, anchor, anchor_to) = if self.launches.launched(from) {
-                    from_parent_inh.map_or((1.0, [0.0; 2], [0.0; 2]), |h| h.still)
+                    from_parent_inh.map_or((1.0, [0.0; 2], [0.0; 2]), |h| paint.inh_cold_of(&h).still)
                 } else {
                     built.get(&from)
                         .and_then(|&k| paint.inh_scratch.get(k))
-                        .map_or((1.0, [0.0; 2], [0.0; 2]), |h| (h.scale, h.anchor, h.anchor_to))
+                        .map_or((1.0, [0.0; 2], [0.0; 2]), |h| {
+                            let c = paint.inh_cold_of(h);
+                            (h.scale, c.anchor, c.anchor_to)
+                        })
                 };
                 let source = from_parent_inh.map_or([0.0; 2], |h| {
-                    if self.launches.launched(from) { [h.dx - h.cover[0], h.dy - h.cover[1]] } else { [h.dx, h.dy] }
+                    if self.launches.launched(from) {
+                        let cover = paint.inh_cold_of(&h).cover;
+                        [h.dx - cover[0], h.dy - cover[1]]
+                    } else {
+                        [h.dx, h.dy]
+                    }
                 });
                 let offset = rune_motion::Vec2::new(source[0], source[1] + row);
                 scene.match_geometry_scaled(
@@ -534,8 +550,9 @@ impl tracks::MotionState {
                 .find_map(|p| built.get(&nodes[p].id).copied())
                 .and_then(|k| paint.inh_scratch.get(k))
             {
-                shift = [h.dx - h.cover[0], h.dy - h.cover[1]];
-                zoom = h.still;
+                let c = paint.inh_cold_of(h);
+                shift = [h.dx - c.cover[0], h.dy - c.cover[1]];
+                zoom = c.still;
             }
             let (k, anchor, anchor_to) = zoom;
             let at = |axis: usize| anchor[axis] + (from[axis] - anchor_to[axis]) / k - rel[axis] - shift[axis];

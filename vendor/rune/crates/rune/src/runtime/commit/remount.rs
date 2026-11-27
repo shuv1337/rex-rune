@@ -58,8 +58,17 @@ impl CommitState {
         if hot || checking_live_only || (self.virtuals.is_empty() && self.virtual_items.is_empty()) || tree.nodes.is_empty() {
             return false;
         }
+        if !tree.aspect_snap.is_empty() {
+            return false;
+        }
+        let check_aspect = tree.has_pixel_aspect;
         if !tree.nodes.iter().all(|n| {
-            relayout::reusable(n) && n.text.as_ref().is_none_or(|t| !t.redacted)
+            relayout::reusable(n)
+                && n.text.as_ref().is_none_or(|t| !t.redacted)
+                && (!check_aspect
+                    || n.cold.get().and_then(|c| c.pixel_aspect).is_none_or(|r| {
+                        n.vis.pixels.as_ref().is_some_and(|p| flatten::pixel_ratio(p) == r)
+                    }))
         }) {
             return false;
         }
@@ -319,9 +328,10 @@ impl Measurement<'_> {
             self.env,
             self.system_accent,
             self.system_reduced_motion,
+            self.system_reduced_transparency,
             self.languages_gen,
             crate::theme::blends_srgb(),
-            self.chrome_bits(),
+            self.memo_chrome_bits(),
             self.caret.clone(),
             self.layout_seen.clone(),
         );
@@ -726,7 +736,7 @@ impl Measurement<'_> {
         self.memo.path_scratch = path_buf;
         taffy.finish_flatten();
         let root_id = nodes[0].taffy;
-        let (layout, mut nodes) = self.solve(text, taffy, root_id, nodes, &reused);
+        let (layout, mut nodes, above_fit_styles) = self.solve(text, taffy, root_id, nodes, &reused);
         if self.measure_virtuals(&nodes, false) {
             memo_reuse::restore_moved_nodes(self.nodes, &mut nodes, &reused, &[]);
             nodes.clear();
@@ -748,11 +758,14 @@ impl Measurement<'_> {
             defaults: self.defaults.clone(),
             titlebar: self.titlebar,
             caret_read: self.caret_read,
+            wm_state_read: None,
+            primary_pointer_read: None,
             layout_reads: self.layout_reads,
             memo_flattened: Some(pending),
             memo_reused: reused,
             taken_paths: Vec::new(),
             selection: Vec::new(),
+            above_fit_styles,
         })
     }
 }

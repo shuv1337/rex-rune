@@ -8,7 +8,7 @@ use super::*;
 #[cfg(test)]
 #[cfg(test)]
 use crate::file_dialog::DialogOutcome;
-use crate::file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions};
+use crate::file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileHandle};
 #[cfg(any(test, target_arch = "wasm32"))]
 use crate::popup_menu::Show;
 use crate::popup_menu::{PopupMenu, PopupMenuError};
@@ -136,8 +136,23 @@ impl<S: 'static> Runtime<S> {
     pub fn cursor(&self) -> crate::el::Cursor { self.core().cursor() }
     #[inline(always)]
     pub fn wheel(&mut self, x: f32, y: f32, dy: f32) { self.core_mut().wheel(x, y, dy); }
+    /// Whether whole mouse-wheel notches ease smoothly rather than jumping immediately
+    /// (default `true`, configured by [`App::wheel_glide`](crate::App::wheel_glide) or
+    /// [`ConfiguredOverlay::wheel_glide`](crate::ConfiguredOverlay::wheel_glide)).
     #[inline(always)]
-    pub fn set_wheel_glide(&mut self, on: bool) { self.core_mut().scroll.set_wheel_glide(on); }
+    pub fn wheel_glide(&self) -> bool { self.core().wheel_glide() }
+    /// Turns mouse-wheel notch easing on or off for this runtime (default `true`).
+    #[inline(always)]
+    pub fn set_wheel_glide(&mut self, on: bool) { self.core_mut().set_wheel_glide(on); }
+    /// Configured window points per mouse-wheel line/notch, or `None` when using the platform
+    /// default (Windows `SPI_GETWHEELSCROLLLINES`, 120 pt on Linux, 40 pt on macOS and web).
+    #[inline(always)]
+    pub fn wheel_line(&self) -> Option<f32> { self.core().wheel_line() }
+    /// Overrides how many window points one mouse-wheel line/notch scrolls for this runtime.
+    /// Positive finite values override the platform default; `None`, zero, negative, or
+    /// non-finite values restore the platform default.
+    #[inline(always)]
+    pub fn set_wheel_line(&mut self, points: Option<f32>) { self.core_mut().set_wheel_line(points); }
     #[inline(always)]
     pub fn fling(&mut self, x: f32, y: f32, velocity: f32) { self.core_mut().fling(x, y, velocity); }
     #[inline(always)]
@@ -365,17 +380,31 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn drag_files(&mut self, paths: Vec<PathBuf>, at: Option<(f32, f32)>) { self.core_mut().drag_files(paths, at); }
     #[inline(always)]
+    pub fn drag_files_with(&mut self, paths: Vec<PathBuf>, at: Option<(f32, f32)>, mods: crate::Mods, allowed: crate::DragOperations) {
+        self.core_mut().drag_files_with(paths, at, mods, allowed);
+    }
+    #[inline(always)]
     pub fn drag_files_to(&mut self, at: Option<(f32, f32)>) -> bool { self.core_mut().drag_files_to(at) }
+    #[inline(always)]
+    pub fn drag_files_to_with(&mut self, at: Option<(f32, f32)>, mods: crate::Mods, allowed: crate::DragOperations) -> bool {
+        self.core_mut().drag_files_to_with(at, mods, allowed)
+    }
     #[inline(always)]
     pub fn drag_files_leave(&mut self) { self.core_mut().drag_files_leave(); }
     #[inline(always)]
     pub fn drop_files(&mut self, paths: Vec<PathBuf>, at: Option<(f32, f32)>) { self.core_mut().drop_files(paths, at); }
+    #[inline(always)]
+    pub fn drop_files_with(&mut self, paths: Vec<PathBuf>, at: Option<(f32, f32)>, mods: crate::Mods, allowed: crate::DragOperations, operation: Option<crate::DragOperation>) {
+        self.core_mut().drop_files_with(paths, at, mods, allowed, operation);
+    }
     #[inline(always)]
     pub fn dragging_files(&self) -> bool { self.core().dragging_files() }
     #[inline(always)]
     pub fn drop_hovered(&self) -> Option<String> { self.core().drop_hovered() }
     #[inline(always)]
     pub fn drop_rejected_hovered(&self) -> Option<String> { self.core().drop_rejected_hovered() }
+    #[inline(always)]
+    pub fn drop_feedback(&self) -> Option<&crate::DropFeedback> { self.core().drop_feedback() }
 
     #[inline(always)]
     pub(crate) fn take_drag_out(&mut self) -> Option<crate::drag_out::DragOutStart> { self.core_mut().take_drag_out() }
@@ -415,9 +444,26 @@ impl<S: 'static> Runtime<S> {
     pub fn set_chrome_insets(&mut self, insets: crate::ChromeInsets) { self.core_mut().set_chrome_insets(insets); }
     #[inline(always)]
     pub fn chrome_insets(&self) -> crate::ChromeInsets { self.core().chrome_insets() }
+    /// Sets the safe-area insets `[top, right, bottom, left]` in logical points reported by
+    /// [`Cx::safe_area`](crate::Cx::safe_area) and added to [`El::on_edge_drag`](crate::El::on_edge_drag)
+    /// bands (for example, forwarding `UIView.safeAreaInsets` from an embedded iOS `LayerHost`
+    /// or `WindowInsets` on Android). Negative and non-finite values clamp to `0.0`.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, Runtime, el};
+    /// # fn view(_: &[f32; 4], cx: &mut Cx<[f32; 4]>) -> El { let _ = cx.safe_area(); el() }
+    /// let mut rt = Runtime::new([0.0; 4], view, (390.0, 844.0), Env::new(true, 1.0));
+    /// rt.set_safe_area([47.0, 0.0, 34.0, 0.0]);
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn set_safe_area(&mut self, insets: [f32; 4]) { self.core_mut().set_safe_area(insets); }
     #[cfg(test)]
     #[inline(always)]
     pub(crate) fn set_caption(&mut self, caption: Option<crate::titlebar::Caption>) { self.core_mut().set_caption(caption); }
+    #[cfg(test)]
+    #[inline(always)]
+    pub(crate) fn set_window_menu_trigger(&mut self, trigger: WindowMenuTrigger) { self.core_mut().set_window_menu_trigger(trigger); }
     #[inline(always)]
     pub(crate) fn headless_chrome(&mut self, chrome: crate::Chrome, titlebar: Option<crate::Titlebar>, borderless: bool) -> crate::Chrome {
         self.core_mut().headless_chrome(chrome, titlebar, borderless)
@@ -472,6 +518,10 @@ impl<S: 'static> Runtime<S> {
     /// ```
     #[inline(always)]
     pub fn file_dialog_multiple(&self) -> bool { self.core().file_dialog_multiple() }
+    /// True when the pending file dialog accepts platform-neutral [`FileHandle`]s
+    /// ([`Tx::pick_file`], [`Tx::pick_files`], [`Tx::pick_save_file`]).
+    #[inline(always)]
+    pub fn file_dialog_handles(&self) -> bool { self.core().file_dialog_handles() }
     #[inline(always)]
     pub fn resolve_file_dialog(&mut self, path: Option<PathBuf>) -> Result<(), FileDialogError> {
         self.core_mut().resolve_file_dialog(path)
@@ -489,6 +539,16 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn resolve_file_dialog_files(&mut self, paths: Option<Vec<PathBuf>>) -> Result<(), FileDialogError> {
         self.core_mut().resolve_file_dialog_files(paths)
+    }
+    /// Answers the pending file dialog with a single [`FileHandle`], or cancels with `None`.
+    #[inline(always)]
+    pub fn resolve_file_dialog_handle(&mut self, handle: Option<FileHandle>) -> Result<(), FileDialogError> {
+        self.core_mut().resolve_file_dialog_handle(handle)
+    }
+    /// Answers the pending file dialog with one or more [`FileHandle`]s, or cancels with `None`.
+    #[inline(always)]
+    pub fn resolve_file_dialog_handles(&mut self, handles: Option<Vec<FileHandle>>) -> Result<(), FileDialogError> {
+        self.core_mut().resolve_file_dialog_handles(handles)
     }
     #[cfg(test)]
     #[inline(always)]

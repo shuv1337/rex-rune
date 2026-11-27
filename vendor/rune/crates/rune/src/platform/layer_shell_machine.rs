@@ -65,8 +65,23 @@ pub(crate) mod touch {
 
 /// How far the compositor has got with the surface. Nothing can be drawn before its first
 /// configure; the size it asks for and the buffer scale it prefers are each read once, by
-/// `dispatch`, in whatever order they arrive; and once it closes the surface it is final.
+/// `dispatch`, in whatever order they arrive. When `zwlr_layer_surface_v1.closed` arrives, the
+/// surface sends a `wl_display.sync` roundtrip to distinguish an unplugged output (whose
+/// `wl_registry.global_remove` arrives before the sync's `done`) from a compositor close on a
+/// live output.
 pub(crate) mod readiness {
+    use crate::machine::Effects;
+
+    /// Why a layer surface ended.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum CloseKind {
+        /// The compositor closed the surface while its output stayed, or the display connection
+        /// failed.
+        Closed,
+        /// The `wl_output` the surface belonged to was removed (`wl_registry.global_remove`).
+        OutputGone,
+    }
+
     /// What the compositor said about the surface.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Event {
@@ -74,8 +89,22 @@ pub(crate) mod readiness {
         Configure { width: u32, height: u32 },
         /// The buffer scale it prefers.
         Scale(i32),
-        /// It destroyed the surface.
+        /// `zwlr_layer_surface_v1.closed` arrived; wait for `wl_display.sync` or
+        /// `OutputRemoved` before deciding whether the output went.
         Closed,
+        /// The `wl_display.sync` sent after `Closed` was answered (`wl_callback.done`).
+        CloseSyncDone,
+        /// `wl_registry.global_remove` removed the `wl_output` this surface belongs to.
+        OutputRemoved,
+        /// A fatal display connection error ended the surface immediately.
+        ConnectionFailed,
+    }
+
+    /// Action the caller must perform on the Wayland connection.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Effect {
+        /// Send a `wl_display.sync` callback to tell whether `global_remove` precedes its `done`.
+        SendCloseSync,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,38 +115,102 @@ pub(crate) mod readiness {
         /// Configured. `size` and `scale` are what the compositor said that `dispatch` hasn't
         /// read yet.
         Ready { size: Option<(u32, u32)>, scale: Option<i32> },
-        /// Destroyed by the compositor: it says nothing more that counts.
-        Closed,
+        /// `zwlr_layer_surface_v1.closed` arrived; waiting for `CloseSyncDone` or
+        /// `OutputRemoved`.
+        Closing,
+        /// Final: either the compositor closed the surface (or the display died), or its output
+        /// went away.
+        Ended(CloseKind),
     }
 
     impl Default for State {
         fn default() -> Self { State::Configuring { scale: None } }
     }
 
-    /// The surface after `event`. No effect: what it said is read with the accessors below.
-    pub(crate) fn step(state: &mut State, event: Event) {
-        match (&*state, event) {
-            (State::Closed, _) => {}
-            (_, Event::Closed) => *state = State::Closed,
-            (State::Configuring { scale }, Event::Configure { width, height }) => *state = State::Ready { size: Some((width, height)), scale: *scale },
-            (State::Ready { scale, .. }, Event::Configure { width, height }) => *state = State::Ready { size: Some((width, height)), scale: *scale },
-            (State::Configuring { .. }, Event::Scale(scale)) => *state = State::Configuring { scale: Some(scale) },
-            (State::Ready { size, .. }, Event::Scale(scale)) => *state = State::Ready { size: *size, scale: Some(scale) },
+    /// Steps the surface readiness state machine on `event`.
+    pub(crate) fn step(state: &mut State, event: Event) -> Effects<Effect> {
+        match (*state, event) {
+            (State::Ended(_), _) => Effects::none(),
+            (_, Event::OutputRemoved) => {
+                *state = State::Ended(CloseKind::OutputGone);
+                Effects::none()
+            }
+            (_, Event::ConnectionFailed) => {
+                *state = State::Ended(CloseKind::Closed);
+                Effects::none()
+            }
+            (State::Configuring { .. } | State::Ready { .. }, Event::Closed) => {
+                *state = State::Closing;
+                Effects::one(Effect::SendCloseSync)
+            }
+            (State::Closing, Event::CloseSyncDone) => {
+                *state = State::Ended(CloseKind::Closed);
+                Effects::none()
+            }
+            (State::Closing, Event::Closed | Event::Configure { .. } | Event::Scale(_))
+            | (State::Configuring { .. } | State::Ready { .. }, Event::CloseSyncDone) => {
+                Effects::none()
+            }
+            (State::Configuring { scale }, Event::Configure { width, height }) => {
+                *state = State::Ready { size: Some((width, height)), scale };
+                Effects::none()
+            }
+            (State::Ready { scale, .. }, Event::Configure { width, height }) => {
+                *state = State::Ready { size: Some((width, height)), scale };
+                Effects::none()
+            }
+            (State::Configuring { .. }, Event::Scale(scale)) => {
+                *state = State::Configuring { scale: Some(scale) };
+                Effects::none()
+            }
+            (State::Ready { size, .. }, Event::Scale(scale)) => {
+                *state = State::Ready { size, scale: Some(scale) };
+                Effects::none()
+            }
         }
     }
 
     impl State {
-        /// The compositor configured a size, so the surface can be drawn on.
-        pub(crate) fn configured(&self) -> bool { !matches!(self, State::Configuring { .. }) }
+        /// The compositor configured a size, or the surface has finished ending (not waiting on
+        /// initial configure or a post-close sync).
+        #[cfg(test)]
+        pub(crate) fn configured(&self) -> bool {
+            matches!(self, State::Ready { .. } | State::Ended(_))
+        }
 
-        /// The compositor destroyed the surface.
-        pub(crate) fn closed(&self) -> bool { matches!(self, State::Closed) }
+        /// The compositor has sent at least one `configure` and the surface is still open.
+        #[cfg_attr(not(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))), allow(dead_code))]
+        pub(crate) fn is_ready(&self) -> bool {
+            matches!(self, State::Ready { .. })
+        }
+
+        /// `zwlr_layer_surface_v1.closed` arrived and the surface is waiting for its sync answer
+        /// or output removal.
+        #[cfg_attr(not(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))), allow(dead_code))]
+        pub(crate) fn closing(&self) -> bool {
+            matches!(self, State::Closing)
+        }
+
+        /// The surface has ended (closed by the compositor, display failure, or removed output).
+        pub(crate) fn closed(&self) -> bool {
+            matches!(self, State::Ended(_))
+        }
+
+        /// Why the surface ended, once it has reached `State::Ended`.
+        #[cfg_attr(not(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))), allow(dead_code))]
+        pub(crate) fn close_kind(&self) -> Option<CloseKind> {
+            match *self {
+                State::Ended(kind) => Some(kind),
+                State::Configuring { .. } | State::Ready { .. } | State::Closing => None,
+            }
+        }
 
         /// The size the compositor asked for that `dispatch` hasn't read yet.
+        #[cfg(test)]
         pub(crate) fn size(&self) -> Option<(u32, u32)> {
             match self {
                 State::Ready { size, .. } => *size,
-                State::Configuring { .. } | State::Closed => None,
+                State::Configuring { .. } | State::Closing | State::Ended(_) => None,
             }
         }
 
@@ -125,7 +218,7 @@ pub(crate) mod readiness {
         pub(crate) fn take_size(&mut self) -> Option<(u32, u32)> {
             match self {
                 State::Ready { size, .. } => size.take(),
-                State::Configuring { .. } | State::Closed => None,
+                State::Configuring { .. } | State::Closing | State::Ended(_) => None,
             }
         }
 
@@ -133,7 +226,7 @@ pub(crate) mod readiness {
         pub(crate) fn take_scale(&mut self) -> Option<i32> {
             match self {
                 State::Configuring { scale } | State::Ready { scale, .. } => scale.take(),
-                State::Closed => None,
+                State::Closing | State::Ended(_) => None,
             }
         }
     }
@@ -334,6 +427,45 @@ pub(crate) mod keyboard {
         }
     }
 
+    /// Computes `PhysicalInput::Key::text` for an XKB key event, matching the window host
+    /// (`winit`'s Wayland XKB path and `window/keys.rs::platform_text`):
+    /// - Releases, open compose sequences, and cancelled compose sequences produce `None`.
+    /// - A completed compose sequence produces its non-empty composed string.
+    /// - Otherwise prefers `state_utf8` (`xkb_state_key_get_utf8`) when non-empty and free of
+    ///   control characters, falling back to `sym_utf8` (`xkb_keysym_to_utf8`) so `Ctrl+c` /
+    ///   `Ctrl+Shift+c` keep `"c"` / `"C"` and `Enter` / `Escape` / `Tab` / `Backspace` / `Delete`
+    ///   keep their control text while `Shift+Tab` (`ISO_Left_Tab`) stays `None`.
+    pub(crate) fn physical_text(
+        pressed: bool,
+        compose: &ComposeOutcome,
+        state_utf8: &str,
+        sym_utf8: &str,
+    ) -> Option<String> {
+        if !pressed {
+            return None;
+        }
+        match compose {
+            ComposeOutcome::Composing | ComposeOutcome::Cancelled => None,
+            ComposeOutcome::Composed(composed) => {
+                composed.as_deref().filter(|t| !t.is_empty()).map(str::to_owned)
+            }
+            ComposeOutcome::Nothing => {
+                let with_all_mods = (!state_utf8.is_empty()).then_some(state_utf8);
+                let sym = (!sym_utf8.is_empty()).then_some(sym_utf8);
+                crate::window::pick_typed_text(with_all_mods, sym).map(str::to_owned)
+            }
+        }
+    }
+
+    /// The `zwlr_layer_surface_v1` keyboard interactivity mode to request from the compositor.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) enum Interactivity {
+        #[default]
+        None,
+        Exclusive,
+        OnDemand,
+    }
+
     /// Whether a layer-shell overlay with `policy` may request keyboard interactivity on
     /// `zwlr_layer_surface_v1` `layer_version`. On-demand needs version 4; exclusive is in
     /// every version.
@@ -342,6 +474,20 @@ pub(crate) mod keyboard {
             crate::KeyPolicy::None => false,
             crate::KeyPolicy::OnDemand => layer_version >= 4,
             crate::KeyPolicy::Exclusive => true,
+        }
+    }
+
+    /// The `zwlr_layer_surface_v1` keyboard interactivity mode a layer surface asks for when
+    /// `hold_keys` is true, or `Interactivity::None` when false or unsupported by `policy` /
+    /// `layer_version`. On-demand requires version 4; exclusive works on every version.
+    pub(crate) fn interactivity(policy: crate::KeyPolicy, layer_version: u32, hold_keys: bool) -> Interactivity {
+        if !hold_keys || !can_request_keys(policy, layer_version) {
+            return Interactivity::None;
+        }
+        match policy {
+            crate::KeyPolicy::None => Interactivity::None,
+            crate::KeyPolicy::Exclusive => Interactivity::Exclusive,
+            crate::KeyPolicy::OnDemand => Interactivity::OnDemand,
         }
     }
 
@@ -372,148 +518,6 @@ pub(crate) mod keyboard {
             return None;
         }
         String::from_utf8(buf).ok()
-    }
-}
-
-/// Bounded wait for a Wayland layer surface's initial `configure` (or `closed`) event.
-/// Kept here so the deadline, flush-retry, interrupt-retry and timeout logic runs tests on
-/// every host without needing a live Wayland compositor.
-pub(crate) mod configure_wait {
-    use std::time::Duration;
-    use crate::time::Instant;
-
-    /// How long `LayerSurface::new` waits for the compositor's initial `configure` (or `closed`)
-    /// event before giving up so a silent or broken compositor cannot freeze the app.
-    pub(crate) const TIMEOUT: Duration = Duration::from_secs(2);
-
-    /// Result of flushing outgoing Wayland requests.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum Flush {
-        Ok,
-        /// The socket send buffer is full; poll for writability and retry before reading.
-        WouldBlock,
-        Error,
-    }
-
-    /// Result of polling the Wayland socket up to the remaining deadline.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum Poll {
-        /// The socket is readable or reported hangup/error; read events now.
-        Readable,
-        /// Only writability fired while retrying a blocked flush; cancel the read and flush again.
-        WritableOnly,
-        /// The poll timed out without socket activity.
-        TimedOut,
-        /// Interrupted by a signal (`EINTR`); retry with the remaining time.
-        Interrupted,
-        Error,
-    }
-
-    /// Result of reading events from the Wayland socket into the queue.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum Read {
-        Ok,
-        /// Another reader drained the socket or the read would block; retry until the deadline.
-        WouldBlock,
-        Error,
-    }
-
-    /// Outcome of [`wait`].
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum Outcome {
-        /// The surface reached `configure` or `closed` before the deadline.
-        Done,
-        /// The deadline elapsed before `configure` or `closed` arrived.
-        TimedOut,
-        /// Dispatching, flushing, polling or reading failed fatally.
-        Error,
-    }
-
-    /// Platform operations needed by [`wait`]: dispatching pending events, flushing outgoing
-    /// requests, and preparing, polling and reading the Wayland socket.
-    pub(crate) trait Driver {
-        /// Guard representing a prepared Wayland socket read. Dropping it without calling
-        /// [`Self::read`] cancels the prepared read.
-        type Guard;
-        /// Whether `configure` or `closed` has already been dispatched.
-        fn done(&self) -> bool;
-        /// Current monotonic time.
-        fn now(&mut self) -> Instant;
-        /// Dispatches already-queued events; `false` on a fatal dispatch error.
-        fn dispatch_pending(&mut self) -> bool;
-        /// Flushes outgoing requests to the compositor.
-        fn flush(&mut self) -> Flush;
-        /// Prepares a synchronized read, or returns `None` when events are already pending in
-        /// the queue and must be dispatched first.
-        fn prepare_read(&mut self) -> Option<Self::Guard>;
-        /// Polls the socket up to `timeout_ms` milliseconds (also watching for writability when
-        /// `want_write` is true).
-        fn poll(&mut self, guard: &Self::Guard, timeout_ms: i32, want_write: bool) -> Poll;
-        /// Reads socket events into the queue, consuming the prepared-read guard.
-        fn read(&mut self, guard: Self::Guard) -> Read;
-    }
-
-    /// Converts a non-zero remaining duration into a positive millisecond timeout for `poll(2)`,
-    /// rounding sub-millisecond remainders up to 1 ms and clamping to `i32::MAX`.
-    pub(crate) fn timeout_ms(remaining: Duration) -> i32 {
-        let millis = remaining.as_millis();
-        let rounded = if remaining.subsec_nanos() % 1_000_000 != 0 {
-            millis.saturating_add(1)
-        } else {
-            millis
-        };
-        rounded.clamp(1, i32::MAX as u128) as i32
-    }
-
-    /// Waits for [`Driver::done`] up to `timeout`, keeping a single overall deadline across
-    /// unrelated Wayland events, `EINTR` interruptions, and `WouldBlock` retries.
-    pub(crate) fn wait<D: Driver>(driver: &mut D, timeout: Duration) -> Outcome {
-        let deadline = driver.now() + timeout;
-        loop {
-            if !driver.dispatch_pending() {
-                return Outcome::Error;
-            }
-            if driver.done() {
-                return Outcome::Done;
-            }
-            let remaining = deadline.saturating_duration_since(driver.now());
-            if remaining.is_zero() {
-                return Outcome::TimedOut;
-            }
-            let want_write = match driver.flush() {
-                Flush::Ok => false,
-                Flush::WouldBlock => true,
-                Flush::Error => return Outcome::Error,
-            };
-            let Some(guard) = driver.prepare_read() else {
-                continue;
-            };
-            match driver.poll(&guard, timeout_ms(remaining), want_write) {
-                Poll::Readable => match driver.read(guard) {
-                    Read::Ok | Read::WouldBlock => {}
-                    Read::Error => return Outcome::Error,
-                },
-                Poll::WritableOnly | Poll::Interrupted => {
-                    drop(guard);
-                }
-                Poll::TimedOut => {
-                    drop(guard);
-                    if !driver.dispatch_pending() {
-                        return Outcome::Error;
-                    }
-                    if driver.done() {
-                        return Outcome::Done;
-                    }
-                    if driver.now() >= deadline {
-                        return Outcome::TimedOut;
-                    }
-                }
-                Poll::Error => {
-                    drop(guard);
-                    return Outcome::Error;
-                }
-            }
-        }
     }
 }
 
@@ -687,7 +691,7 @@ pub(crate) mod repeat {
     }
 }
 
-/// Wayland reader watch loop (used by `wayland_drop`), kept cross-platform so its
+/// Wayland reader watch loop (used by `wayland::drop`), kept cross-platform so its
 /// queue-draining, read-guard cancellation, wake gating and hangup/stop paths run tests on every
 /// host without a compositor.
 pub(crate) mod watch_loop {
@@ -763,8 +767,11 @@ pub(crate) mod watch_loop {
     }
 }
 
+pub(crate) mod activation;
 pub(crate) mod compose_cache;
 pub(crate) mod frame_callback;
+pub(crate) mod globals_pool;
+pub(crate) mod output;
 pub(crate) mod pointer;
 pub(crate) mod text_input;
 
@@ -866,8 +873,6 @@ pub(crate) mod connection {
 #[cfg(test)]
 #[path = "layer_shell_machine_tests.rs"]
 mod tests;
-#[cfg(test)]
-mod configure_wait_tests;
 #[cfg(test)]
 mod connection_tests;
 #[cfg(test)]

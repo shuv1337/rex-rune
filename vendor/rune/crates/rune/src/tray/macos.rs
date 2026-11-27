@@ -1,8 +1,8 @@
 //! `NSStatusBar` / `NSStatusItem` on macOS. Primary clicks send `TrayEvent::Activate`;
 //! secondary clicks and Control-clicks open the flat `NSMenu`, whose picks send
 //! `TrayEvent::Menu`. `Tray::new` must run on the main thread; `set_menu`, `set_tooltip`,
-//! `set_icon`, `set_icon_name`, `set_title`, `rect` and `Drop` may be called from any thread
-//! (AppKit calls dispatch to the main queue when off the main thread).
+//! `set_icon`, `set_icon_name`, `set_title`, `set_highlighted`, `rect` and `Drop` may be
+//! called from any thread (AppKit calls dispatch to the main queue when off the main thread).
 
 #![allow(unsafe_code)]
 
@@ -45,6 +45,7 @@ struct Model {
     thickness: f64,
     menu: Vec<TrayItem>,
     rect: Option<[i32; 4]>,
+    highlighted: bool,
 }
 
 /// Thin platform seam around `NSStatusBar` / `NSStatusItem` / `NSStatusBarButton`, so headless
@@ -54,8 +55,12 @@ trait StatusItemHost: 'static {
     fn set_image(&self, image: &NSImage);
     fn set_title(&self, title: &str);
     fn set_tooltip(&self, tooltip: Option<&str>);
+    fn set_highlighted(&self, highlighted: bool);
     fn screen_rect(&self, mtm: MainThreadMarker) -> Option<[i32; 4]>;
     fn pop_up_menu(&self, menu: &NSMenu);
+    fn on_main(&self, work: Box<dyn FnOnce() + Send>) {
+        crate::platform::main_queue::on_main(work);
+    }
     fn remove(&self);
 }
 
@@ -112,6 +117,12 @@ impl StatusItemHost for SystemStatusItem {
     fn set_tooltip(&self, tooltip: Option<&str>) {
         let tip = tooltip.filter(|s| !s.is_empty()).map(NSString::from_str);
         self.button.setToolTip(tip.as_deref());
+    }
+
+    fn set_highlighted(&self, highlighted: bool) {
+        if !self.removed.get() {
+            self.button.highlight(highlighted);
+        }
     }
 
     fn screen_rect(&self, mtm: MainThreadMarker) -> Option<[i32; 4]> {
@@ -248,20 +259,26 @@ impl ButtonTarget {
             }
             MacClickAction::ShowMenu => {
                 let items = ivars.model.lock().unwrap_or_else(|e| e.into_inner()).menu.clone();
-                if items.is_empty() {
-                    return;
+                if !items.is_empty()
+                    && let Some((host, _)) = live_entry(ivars.id)
+                {
+                    let (menu, menu_target) = build_menu(mtm, &items, ivars.on_event.clone());
+                    let previous = ivars.last_menu.borrow_mut().replace((menu.clone(), menu_target));
+                    if let Some((old_menu, _)) = previous {
+                        clear_menu_targets(&old_menu);
+                    }
+                    ivars.showing_menu.set(true);
+                    let _guard = ShowingMenuGuard(&ivars.showing_menu);
+                    host.pop_up_menu(&menu);
                 }
-                let (menu, menu_target) = build_menu(mtm, &items, ivars.on_event.clone());
-                let previous = ivars.last_menu.borrow_mut().replace((menu.clone(), menu_target));
-                if let Some((old_menu, _)) = previous {
-                    clear_menu_targets(&old_menu);
-                }
-                let host = ITEMS.with(|map| map.borrow().get(&ivars.id).map(|live| live.host.clone()));
-                let Some(host) = host else { return };
-                ivars.showing_menu.set(true);
-                let _guard = ShowingMenuGuard(&ivars.showing_menu);
-                host.pop_up_menu(&menu);
             }
+        }
+        // Button click and menu tracking clear the button's highlight when tracking ends, so
+        // restore an app-held highlight on the next main-queue turn for every click action.
+        let highlighted = ivars.model.lock().unwrap_or_else(|e| e.into_inner()).highlighted;
+        if highlighted && let Some((host, _)) = live_entry(ivars.id) {
+            let id = ivars.id;
+            host.on_main(Box::new(move || reapply_highlight(id)));
         }
     }
 }
@@ -491,10 +508,26 @@ fn apply_tooltip(id: u64) {
     host.set_tooltip(non_empty(&tip));
 }
 
+fn apply_highlighted(id: u64) {
+    let Some((host, model)) = live_entry(id) else { return };
+    let highlighted = model.lock().unwrap_or_else(|e| e.into_inner()).highlighted;
+    host.set_highlighted(highlighted);
+}
+
+/// Image, title and click tracking can clear the button's highlight, so a highlight the app
+/// still holds is set again after them.
+fn reapply_highlight(id: u64) {
+    let Some((host, model)) = live_entry(id) else { return };
+    if model.lock().unwrap_or_else(|e| e.into_inner()).highlighted {
+        host.set_highlighted(true);
+    }
+}
+
 fn apply_title(id: u64, mtm: MainThreadMarker) {
     let Some((host, model)) = live_entry(id) else { return };
     let title = model.lock().unwrap_or_else(|e| e.into_inner()).title.clone();
     host.set_title(&title);
+    reapply_highlight(id);
     model.lock().unwrap_or_else(|e| e.into_inner()).rect = host.screen_rect(mtm);
 }
 
@@ -506,6 +539,7 @@ fn apply_icon(id: u64, mtm: MainThreadMarker) -> Result<(), TrayError> {
     };
     let image = make_image(&icon, thickness, &label)?;
     host.set_image(&image);
+    reapply_highlight(id);
     model.lock().unwrap_or_else(|e| e.into_inner()).rect = host.screen_rect(mtm);
     Ok(())
 }
@@ -518,7 +552,7 @@ fn refresh_rect(id: u64, mtm: MainThreadMarker) -> Option<[i32; 4]> {
 }
 
 fn remove_item(id: u64) {
-    let Some(live) = ITEMS.with(|map| map.borrow_mut().remove(&id)) else { return };
+    let Some(live) = ITEMS.try_with(|map| map.borrow_mut().remove(&id)).ok().flatten() else { return };
     if let Some((menu, _)) = live.target.ivars().last_menu.borrow_mut().take() {
         clear_menu_targets(&menu);
     }
@@ -563,6 +597,7 @@ impl Native {
             thickness,
             menu: spec.menu,
             rect: None,
+            highlighted: false,
         }));
         let target = alloc_button_target(mtm, id, model.clone(), on_event);
         let host = Rc::new(SystemStatusItem::new(mtm, bar, &target)?);
@@ -613,6 +648,22 @@ impl Native {
                     apply_title(id, mtm);
                 }
             });
+        }
+    }
+
+    pub(super) fn set_highlighted(&self, highlighted: bool) {
+        self.model.lock().unwrap_or_else(|e| e.into_inner()).highlighted = highlighted;
+        let id = self.id;
+        // From a tray callback this runs inside the button's click tracking, which unhighlights
+        // the button when it ends; applying the model's latest value on the next main-queue turn
+        // lands after that.
+        if MainThreadMarker::new().is_some() {
+            apply_highlighted(id);
+            if let Some((host, _)) = live_entry(id) {
+                host.on_main(Box::new(move || apply_highlighted(id)));
+            }
+        } else {
+            crate::platform::main_queue::on_main(move || apply_highlighted(id));
         }
     }
 

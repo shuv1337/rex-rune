@@ -2,7 +2,10 @@
 
 use std::fmt::Write;
 
-use taffy::style::{CompactLength, Display, FlexDirection, FlexWrap, Overflow, Position, Style};
+use taffy::style::{
+    CompactLength, Display, FlexDirection, FlexWrap, GridTemplateComponent, Overflow, Position, RepetitionCount, Style,
+    TrackSizingFunction,
+};
 
 use super::escape;
 use crate::color::Color;
@@ -28,6 +31,50 @@ fn len(raw: CompactLength) -> Option<String> {
         CompactLength::FIT_CONTENT_KEYWORD_TAG => Some("fit-content".into()),
         _ => None,
     }
+}
+
+fn track_len(raw: CompactLength) -> Option<String> {
+    match raw.tag() {
+        CompactLength::FR_TAG => Some(format!("{}fr", num(raw.value()))),
+        CompactLength::MIN_CONTENT_TAG => Some("min-content".into()),
+        CompactLength::MAX_CONTENT_TAG => Some("max-content".into()),
+        CompactLength::FIT_CONTENT_PX_TAG => Some(format!("fit-content({})", px(raw.value()))),
+        CompactLength::FIT_CONTENT_PERCENT_TAG => Some(format!("fit-content({}%)", num(raw.value() * 100.0))),
+        _ => len(raw),
+    }
+}
+
+fn track(t: TrackSizingFunction) -> Option<String> {
+    let (min, max) = (t.min.into_raw(), t.max.into_raw());
+    if min == max {
+        track_len(min)
+    } else if min.tag() == CompactLength::AUTO_TAG && max.tag() == CompactLength::FR_TAG {
+        track_len(max)
+    } else {
+        Some(format!("minmax({},{})", track_len(min)?, track_len(max)?))
+    }
+}
+
+fn grid_tracks<S: taffy::CheapCloneStr>(list: &[GridTemplateComponent<S>]) -> Option<String> {
+    if list.is_empty() { return None; }
+    let mut parts = Vec::with_capacity(list.len());
+    for c in list {
+        match c {
+            GridTemplateComponent::Single(t) => parts.push(track(*t)?),
+            GridTemplateComponent::Repeat(r) => {
+                let count = match r.count {
+                    RepetitionCount::Count(n) => n.to_string(),
+                    RepetitionCount::AutoFill => "auto-fill".into(),
+                    RepetitionCount::AutoFit => "auto-fit".into(),
+                };
+                let mut tracks = Vec::with_capacity(r.tracks.len());
+                for t in &r.tracks { tracks.push(track(*t)?); }
+                if tracks.is_empty() { return None; }
+                parts.push(format!("repeat({count},{})", tracks.join(" ")));
+            }
+        }
+    }
+    Some(parts.join(" "))
 }
 
 /// A Rust variant name in CSS's spelling: `SpaceBetween` to `space-between`.
@@ -64,6 +111,9 @@ pub(super) fn layout(s: &Style, root: bool) -> Decls {
         Display::Grid => d.push(("display", "grid".into())),
         Display::None => d.push(("display", "none".into())),
         _ => d.push(("display", "block".into())),
+    }
+    if let Some(cols) = grid_tracks(&s.grid_template_columns) {
+        d.push(("grid-template-columns", cols));
     }
     if s.flex_direction != FlexDirection::Row { d.push(("flex-direction", kebab(format!("{:?}", s.flex_direction)))); }
     if s.flex_wrap != FlexWrap::NoWrap { d.push(("flex-wrap", kebab(format!("{:?}", s.flex_wrap)))); }
@@ -139,7 +189,7 @@ pub(super) fn layout(s: &Style, root: bool) -> Decls {
 
 /// Fill, gradients, border, corners, shadows, opacity, blurs and soft clips, for an element
 /// `size` points big.
-pub(super) fn paint(v: &Visual, size: (f32, f32), d: &mut Decls) {
+pub(super) fn paint(v: &Visual, size: (f32, f32), reduced_transparency: bool, d: &mut Decls) {
     // Rune paints the fill, then gradients, then a wrapped/tiled image on top: CSS lists
     // background layers top first, with the colour last.
     let mut layers: Vec<String> = Vec::new();
@@ -201,7 +251,7 @@ pub(super) fn paint(v: &Visual, size: (f32, f32), d: &mut Decls) {
     if v.cold.clip.is_some() || v.cold.clip_radius.is_some() {
         if !d.iter().any(|(p, _)| p.starts_with("overflow")) { d.push(("overflow", "hidden".into())); }
     }
-    if v.cold.backdrop_blur > 0.0 { d.push(("backdrop-filter", format!("blur({})", px(v.cold.backdrop_blur)))); }
+    if v.cold.backdrop_blur > 0.0 && !reduced_transparency { d.push(("backdrop-filter", format!("blur({})", px(v.cold.backdrop_blur)))); }
     if v.blur > 0.0 { d.push(("filter", format!("blur({})", px(v.blur)))); }
 }
 
@@ -295,7 +345,7 @@ pub(super) fn text(spec: &TextSpec, d: &mut Decls) {
 pub(super) fn text_html(spec: &TextSpec) -> String {
     let content = &spec.content;
     let hrefs: Vec<Option<String>> = spec.cold.links.iter()
-        .map(|l| crate::open_url::check_href(&l.id).ok())
+        .map(|l| crate::open_url::check_href(l.href.as_deref().unwrap_or(&l.id)).ok())
         .collect();
     let mut cuts: Vec<usize> = vec![0, content.len()];
     for s in &spec.spans { cuts.extend([s.start as usize, s.end as usize]); }

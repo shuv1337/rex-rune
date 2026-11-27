@@ -142,39 +142,43 @@ fn several_tabs_show_their_pills_and_split_panes_keep_their_headers() {
 #[test]
 fn empty_title_space_moves_and_zooms_the_window_and_controls_do_not() {
     let (mut rt, _rx) = unified(&["single"]);
-    let press = |rt: &mut Runtime<Workspace>, key: &str| {
+    let press = |rt: &mut Runtime<Workspace>, key: &str, travel: f32| {
         let r = rect(rt, key);
         let (x, y) = (r[0] + r[2] / 2., r[1] + r[3] / 2.);
         rt.pointer_down(x, y);
+        // A native titlebar move can be immediate or wait for pointer travel.
+        if travel > 0. {
+            rt.pointer_move(x + travel, y);
+        }
         let action = rt.take_titlebar_action();
-        rt.pointer_up(x, y);
+        rt.pointer_up(x + travel, y);
         action
     };
-    assert_eq!(press(&mut rt, "title-drag"), Some(TitlebarAction::Drag));
+    assert_eq!(press(&mut rt, "title-drag", 9.), Some(TitlebarAction::Drag));
     assert_eq!(
-        press(&mut rt, "title-drag"),
+        press(&mut rt, "title-drag", 0.),
         Some(TitlebarAction::DoubleClick),
         "the system's double-click action, zoom by default"
     );
     rt.frame(1.);
     assert_eq!(
-        press(&mut rt, "title-name"),
+        press(&mut rt, "title-name", 9.),
         Some(TitlebarAction::Drag),
         "the title moves the window too"
     );
     rt.frame(1.);
-    assert_eq!(press(&mut rt, "settings"), None);
+    assert_eq!(press(&mut rt, "settings", 0.), None);
     rt.frame(1. / 60.);
     assert!(rt.state.panel.is_some(), "the control did its own thing");
     std::fs::remove_file(&rt.state.settings_path).ok();
 
     for key in ["identity", "pane-split-right:block:a"] {
         let (mut rt, _rx) = unified(&["single"]);
-        assert_eq!(press(&mut rt, key), None, "{key}");
+        assert_eq!(press(&mut rt, key, 0.), None, "{key}");
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
     let (mut rt, _rx) = unified(&["single", "split"]);
-    assert_eq!(press(&mut rt, "tab:split"), None, "a tab pill");
+    assert_eq!(press(&mut rt, "tab:split", 0.), None, "a tab pill");
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 

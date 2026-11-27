@@ -132,20 +132,24 @@ pub(crate) fn extend(origin: (usize, usize), at: (usize, usize)) -> (usize, usiz
 /// their highlights match.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runtime) fn push_selection(out: &mut Vec<Instance>, flow: TextFlow<'_>, a: usize, b: usize, origin: [f32; 2], k: f32,
-    fill: [f32; 4], s: f32, clip: [f32; 4], fade: [f32; 4]) {
+    fill: [f32; 4], s: f32, clip: [f32; 4], fade: [f32; 4], join_from: usize) {
     for (bb, _) in flow.range_boxes(a, b, true) {
         let rect = super::text_marks::pixel_rect(origin, bb, k);
+        if !super::visibility::rect_in_clip(rect, clip) { continue; }
         let radius = 2.0 * s * k;
-        extend_run(out, rect, fill, radius, clip, fade, 40.0 * s * k);
+        extend_run(out, rect, fill, radius, clip, fade, 40.0 * s * k, join_from);
     }
 }
 
 /// A text field's selection: one layout, so no runs to join, and a field's own fill behind it
 /// is the field, not a chip the highlight should stretch to.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::runtime) fn push_field_selection(out: &mut Vec<Instance>, layout: TextFlow<'_>, a: usize, b: usize, origin: [f32; 2], k: f32,
     fill: [f32; 4], s: f32, clip: [f32; 4], fade: [f32; 4]) {
     for (bb, _) in layout.range_boxes(a, b, true) {
-        out.push(rect_inst(super::text_marks::pixel_rect(origin, bb, k), fill, 2.0 * s * k, clip, fade));
+        let rect = super::text_marks::pixel_rect(origin, bb, k);
+        if !super::visibility::rect_in_clip(rect, clip) { continue; }
+        out.push(rect_inst(rect, fill, 2.0 * s * k, clip, fade));
     }
 }
 
@@ -154,8 +158,9 @@ pub(in crate::runtime) fn push_field_selection(out: &mut Vec<Instance>, layout: 
 /// it, so a run reads as one rect with no seams, as tall as the line's tallest text. When
 /// something filled was drawn in between (a chip's background), a rect of its own is drawn on
 /// top, reaching back to where the last one ended.
-fn extend_run(out: &mut Vec<Instance>, mut rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: [f32; 4], reach: f32) {
-    let from = out.len().saturating_sub(256);
+#[allow(clippy::too_many_arguments)]
+fn extend_run(out: &mut Vec<Instance>, mut rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: [f32; 4], reach: f32, join_from: usize) {
+    let from = out.len().saturating_sub(256).max(join_from);
     let found = out[from..].iter().rposition(|i| {
         let gap = rect[0] - (i.rect[0] + i.rect[2]);
         let overlap = (i.rect[1] + i.rect[3]).min(rect[1] + rect[3]) - i.rect[1].max(rect[1]);
@@ -266,7 +271,9 @@ impl caret::TextInputState {
 impl RuntimeCore {
     pub(in crate::runtime) fn is_selectable(&self, i: usize) -> bool {
         let n = &self.tree.nodes[i];
-        n.input.is_none() && n.text.as_ref().is_some_and(|t| t.selectable && !t.redacted)
+        n.input.is_none()
+            && n.text.as_ref().is_some_and(|t| t.selectable && !t.redacted)
+            && !self.is_text_hidden(i)
     }
 
     pub(in crate::runtime) fn live(&self, path: &str) -> Option<usize> {
@@ -274,7 +281,7 @@ impl RuntimeCore {
     }
 
     pub(in crate::runtime) fn content_of(&self, i: usize) -> &str {
-        self.tree.nodes[i].text.as_ref().map_or("", |t| t.content.as_str())
+        self.tree.nodes[i].text.as_ref().map_or("", |t| t.content_str())
     }
 
     /// The selection group node `i` is in: its nearest `El::selection_group` ancestor.
@@ -586,10 +593,16 @@ impl RuntimeCore {
     /// Byte offset of node `i`'s text under window point (x, y), where it was drawn this frame.
     pub(in crate::runtime) fn text_index_at(&self, i: usize, x: f32, y: f32) -> Option<usize> {
         let n = &self.tree.nodes[i];
-        let (spec, flow) = (n.text.as_ref()?, n.text_layout.as_ref()?.view());
-        let s = self.env.scale;
+        let spec = n.text.as_ref()?;
         let z = self.paint.drawn_scale.get(i).copied().unwrap_or(1.0).max(1e-4);
         let (rect, x, y) = self.unturned_box_and_point(i, x, y);
+        if let Some(pt) = spec.positioned() {
+            let tf = super::positioned::PositionedTransform::from_window_box(n, pt, rect, z);
+            let [sx, sy] = tf.to_source(x, y)?;
+            return Some(pt.hit(sx, sy).0);
+        }
+        let flow = n.text_layout.as_ref()?.view();
+        let s = self.env.scale;
         let [ox, oy] = links::origin(n, spec, flow, rect, s, z);
         let px = s / z;
         let at = flow.hit((x - ox) * px, (y - oy) * px).index;
@@ -634,45 +647,17 @@ impl RuntimeCore {
     /// above them, or the hidden lines of a long folded prompt), and a drag that reached it
     /// selected everything between it and the press.
     fn shown_box(&self, j: usize) -> Option<[f32; 4]> {
+        if self.is_text_hidden(j) { return None; }
         let r = self.drawn_box(j);
-        if self.paint.inh_scratch.len() != self.tree.nodes.len() || self.paint.drawn.get(j).is_none_or(|d| d[2] <= 0.0 && d[3] <= 0.0) {
+        if !self.tree.built || self.paint.inh_scratch.len() != self.tree.nodes.len() {
             return Some(r);
+        }
+        if self.paint.drawn.get(j).is_none_or(|d| d[2] <= 0.0 || d[3] <= 0.0) {
+            return None;
         }
         let c = self.screen_clip_of_parent(Some(j)).map(|v| v / self.env.scale);
         let v = [r[0].max(c[0]), r[1].max(c[1]), r[2].min(c[2]), r[3].min(c[3])];
         (v[0] < v[2] && v[1] < v[3]).then_some(v)
-    }
-
-    /// A primary press on `target` (None: on nothing). On selectable text away from its links it
-    /// starts a selection: one click places it, two select a word, three a paragraph, and Shift
-    /// extends the current one, into another text of its selection group too. Anywhere else it
-    /// clears the selection.
-    pub(in crate::runtime) fn selection_down(&mut self, target: Option<usize>, x: f32, y: f32) {
-        use virtual_selection::EndRef;
-        let Some(i) = target.filter(|&i| self.is_selectable(i) && self.link_at(i, x, y).is_none()) else {
-            self.clear_text_selection();
-            self.edit.selectable.presses.clear();
-            return;
-        };
-        let Some(at) = self.text_index_at(i, x, y) else { return };
-        let path = self.tree.nodes[i].path.clone();
-        let content = self.content_of(i).to_owned();
-        let now = self.now_clock();
-        let clicks = self.edit.selectable.presses.press(&path, now, (x, y), self.double_click_interval).min(3);
-        let i_end = EndRef::Mounted(i);
-        let holder = self.selection_holder_end().filter(|&h| h == i_end || self.end_same_group(h, i_end));
-        match holder {
-            // Keep the anchor; the focus follows the pointer from here.
-            Some(h) if clicks == 1 && self.edit.selectable.shift => {
-                self.select_step(phase::Event::Extend { focus: at, far: (h != i_end).then(|| phase::Far::new(path, content)) });
-            }
-            _ => {
-                let unit = match clicks { 1 => Unit::Char, 2 => Unit::Word, _ => Unit::Paragraph };
-                let origin = self.unit_in(i, at, unit);
-                let origin = if unit == Unit::Word { with_trailing_space(&content, origin) } else { origin };
-                self.select_step(phase::Event::Press { path, content, unit, origin });
-            }
-        }
     }
 
     /// Snapshot of an in-progress text selection drag's endpoints, used to detect whether a
@@ -687,9 +672,18 @@ impl RuntimeCore {
     /// clickable row), so this follows the selection's own text.
     pub(in crate::runtime) fn selection_drag(&mut self, x: f32, y: f32) {
         use virtual_selection::EndRef;
-        let phase::Phase::Dragging { unit, selection } = &self.edit.selectable.phase else { return };
-        let (unit, origin) = (*unit, selection.origin);
-        let Some(h) = self.selection_holder_end() else { self.clear_text_selection(); return };
+        let Some((selection, unit, armed)) = self.edit.selectable.phase.drag_selection() else { return };
+        if armed == Some(true)
+            && !self.pointer.press_held().is_some_and(|h| h.moved && h.hit != crate::runtime::capture::Hit::Cancelled)
+        {
+            return;
+        }
+        let (origin, armed_path) = (selection.origin, armed.is_some().then(|| selection.path.clone()));
+        let h = match armed_path {
+            Some(path) => self.live(&path).filter(|&i| self.is_selectable(i)).map(EndRef::Mounted),
+            None => self.selection_holder_end(),
+        };
+        let Some(h) = h else { self.clear_text_selection(); return };
         let g = self.end_group_path(h).and_then(|gp| self.live(gp));
         let Some((j, at)) = (match (g, h) {
             (Some(g), _) => self.group_point(g, h, x, y),
@@ -709,7 +703,7 @@ impl RuntimeCore {
             phase::Reach::Anchor
         } else {
             let n = &self.tree.nodes[j];
-            phase::Reach::Far { path: &n.path, content: n.text.as_ref().map_or("", |t| t.content.as_str()) }
+            phase::Reach::Far { path: &n.path, content: n.text.as_ref().map_or("", |t| t.content_str()) }
         };
         let effects = phase::step(&mut self.edit.selectable.phase, phase::Event::Drag { anchor, focus, reach });
         self.carry_select(effects);
@@ -757,12 +751,16 @@ impl RuntimeCore {
         }
         let text = self.copy_text(app);
         let html = text.as_ref().and_then(|_| self.copy_html());
-        let mut copy = crate::PopupItem::new("copy", crate::labels::label(crate::Label::Copy)).enabled(text.is_some());
-        // The primary modifier, as the copy key handler takes it: ⌘C on macOS, Ctrl+C elsewhere.
-        if let Ok(shortcut) = "mod+c".parse::<crate::Shortcut>() { copy = copy.key_equivalent(shortcut); }
+        let Some(menu) = link_menu::build_context_menu(link_menu::ContextMenuTarget {
+            has_link: false,
+            has_on_link: false,
+            image: None,
+            selectable: true,
+            copy_enabled: text.is_some(),
+        }) else { return false };
         log_event!(self, "selection menu {path}");
         self.host.popups.push_back(crate::popup_menu::Request {
-            menu: crate::PopupMenu::new().item(copy),
+            menu,
             anchor: crate::PopupAnchor::Point(x, y),
             on_pick: Box::new(move |_, picked, tx| {
                 if picked == Some("copy") && let Some(text) = text {

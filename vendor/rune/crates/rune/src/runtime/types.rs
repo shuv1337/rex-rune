@@ -12,6 +12,21 @@ pub(super) enum RowLayout {
     Horizontal,
 }
 
+/// Authored placeholder preserved once `LiveText` overwrites `TextSpec::content`, so layout
+/// re-measures (window resize, memo reuse, virtual remount) keep the reserved placeholder box
+/// instead of measuring the current live string.
+#[derive(Clone)]
+pub(in crate::runtime) struct LivePlaceholder {
+    /// Cased authored placeholder string (matching `TextSpec::content` before latching).
+    pub(in crate::runtime) content: String,
+    /// Placeholder `TextSpec::shape` key at the flattened scale.
+    pub(in crate::runtime) shape: Option<(u32, u64)>,
+    /// Authored placeholder `inline_boxes` (empty when the text has no `El::inline` children).
+    pub(in crate::runtime) inline_boxes: Vec<crate::text::InlineBoxRun>,
+    /// Cached unwrapped `(scale_bits, width, height)` in logical points for `!spec.wrap`.
+    pub(in crate::runtime) single_line_size: Option<(u32, f32, f32)>,
+}
+
 /// Rarely set per-node metadata, motion overrides, accessibility, live bindings and container
 /// specs, kept behind `Cold<NodeCold>` so common nodes stay under four hundred bytes.
 #[derive(Clone)]
@@ -25,6 +40,9 @@ pub(crate) struct NodeCold {
     /// Verified tabular-digit glyph substitution for a single-line `LiveText` node.
     pub(super) tabular_layout: Option<Rc<crate::text::TabularGlyphs>>,
     pub(super) live_text_seen: Option<u128>,
+    /// Authored placeholder preserved once `LiveText` overwrites `TextSpec::content`, so layout
+    /// re-measures keep the reserved placeholder size.
+    pub(super) live_placeholder: Option<Box<LivePlaceholder>>,
     pub(super) looping: Option<Box<rune_motion::LoopSpec>>,
     pub(super) loop_times: Option<u32>,
     pub(super) frame_motion: Option<Box<rune_motion::Anim>>,
@@ -54,7 +72,7 @@ pub(crate) struct NodeCold {
     pub(super) pixel_aspect: Option<f32>,
     /// `El::aspect_fit`: the ratio and the element's own style, which the fitted size replaces.
     pub(super) aspect_fit: Option<Box<(f32, CompactStyle)>>,
-    pub(super) material: Option<crate::SystemMaterial>,
+    pub(super) material: Option<(crate::SystemMaterial, crate::MaterialParams)>,
     /// `El::help`.
     pub(crate) help: Option<String>,
     /// `El::help_when_truncated`.
@@ -78,6 +96,7 @@ impl crate::cold::Empty for NodeCold {
         run_layout: None,
         tabular_layout: None,
         live_text_seen: None,
+        live_placeholder: None,
         looping: None,
         loop_times: None,
         frame_motion: None,
@@ -270,11 +289,15 @@ impl Node {
         }
     }
 
-    /// Its hover track's curves: its own `El::hover_motion`, else the inherited
-    /// `El::hover_motion_within` pair.
+    /// Its hover track's curves: its own explicit `El::hover_motion`, else the inherited
+    /// `El::hover_motion_within` pair, else a theme/token default (`El::token_hover_motion`).
     #[inline]
     pub(super) fn hover_motion(&self) -> Option<(Anim, Anim)> {
-        self.vis.hover_motion.as_deref().or(self.hover_within.as_deref()).copied()
+        if self.vis.hover_motion_default {
+            self.hover_within.as_deref().or(self.vis.hover_motion.as_deref()).copied()
+        } else {
+            self.vis.hover_motion.as_deref().or(self.hover_within.as_deref()).copied()
+        }
     }
 
     #[inline]
@@ -320,115 +343,6 @@ impl AnimSource {
 
     pub fn names(bits: u16) -> Vec<&'static str> {
         Self::NAMES.iter().enumerate().filter(|(i, _)| bits & (1 << i) != 0).map(|(_, n)| *n).collect()
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct Inh {
-    pub(super) opacity: f32,
-    pub(super) paint_opacity: f32,
-    /// `El::stuck_fade`: how much of a stuck header's first child (its title) shows.
-    pub(super) first_fade: f32,
-    pub(super) clip: [f32; 4],
-    pub(super) fade: [f32; 4],
-    pub(super) fade_origin: [f32; 4],
-    /// Paint clips are consumed by isolation; logical clips remain for hit tests/inspection.
-    pub(super) paint_clip: [f32; 4],
-    pub(super) paint_fade: [f32; 4],
-    pub(super) paint_fade_origin: [f32; 4],
-    pub(super) rounded: Option<([f32; 4], [f32; 4])>,
-    /// Ancestors' scales, composed: a point `x` (points, with `dx`/`dy` applied) draws at
-    /// `anchor_to + (x - anchor) * scale`. The anchors differ when scales nest.
-    pub(super) scale: f32,
-    pub(super) anchor: [f32; 2],
-    pub(super) anchor_to: [f32; 2],
-    pub(super) blur: f32,
-    /// Vertical offset in points from scroll viewports and growth rows above.
-    pub(super) dy: f32,
-    /// Horizontal offset in points: a matched flight centring its scaled children.
-    pub(super) dx: f32,
-    /// The part of `dx`/`dy` from flights' covers above. A flight nested in another travels its
-    /// own root-space path, so it drops this.
-    pub(super) cover: [f32; 2],
-    /// The clip, fade and fade origin outside the nearest flight above, for a flight nested in it.
-    pub(super) outer: Option<[[f32; 4]; 3]>,
-    pub(super) mark: u32,
-    /// The nearest hover group's hover amount (0-1), for `group_*` styles.
-    pub(super) group: f32,
-    /// The nearest `El::press_color` above or here, and how far a press on it is held (0-1).
-    pub(super) pressed: f32,
-    pub(super) press_to: Option<Color>,
-    /// `opacity` with each `El::group_opacity` at its hovered level: a press where the pointer
-    /// hovers the group finds what the hover shows, before a frame has drawn it.
-    pub(super) hit_opacity: f32,
-    /// The nearest hover group's rect in points (x0, y0, x1, y1): where a pointer hovers it.
-    pub(super) group_rect: [f32; 4],
-    /// How `scale` is changing, which decides how text rasterizes under it.
-    pub(super) scale_motion: ScaleMotion,
-    /// `(scale, anchor, anchor_to)` of the ancestors whose scales hold still from the root down,
-    /// as an app-wide zoom does, stopping at the first that moves. Launches and text rasterizing
-    /// keep this part.
-    pub(super) still: (f32, [f32; 2], [f32; 2]),
-    /// `(scale, anchor, anchor_to)` of the ancestors whose scales the app holds or drives (still
-    /// or live), stopping at the first whose scale animates on its own (an entrance, press,
-    /// static scale spring or cover). Matched flights land at this scale.
-    pub(super) held: (f32, [f32; 2], [f32; 2]),
-    /// True once an ancestor above had its own animating scale so descendants stop updating `held`.
-    pub(super) held_moving: bool,
-    /// Composed resting target scale when a `P_SCALE` track drives this subtree (no live scale).
-    pub(super) scale_target: f32,
-    /// True while an ancestor's own `P_SCALE` track is animating without a live scale.
-    pub(super) scale_tracked: bool,
-    /// Inside an active `El::cache` scope: do not cull children against the window viewport.
-    pub(super) in_cache: bool,
-    /// Inside an elided or off-screen `El::cache` scope: skip primitive emission.
-    pub(super) skip_paint: bool,
-    /// Inside an `El::anchored` overlay whose anchor could not be resolved: suppress paint and hits.
-    pub(super) anchor_hidden: bool,
-    /// Ancestors' `El::rotate` layers, composed, as an index into `turn_scratch` plus one
-    /// (0: none): where this subtree's device pixels land. An index keeps `Inh` small.
-    pub(super) turn: u32,
-    /// Accumulated `(current - target)` residual of any animating `El::press_offset` here or above (points).
-    pub(super) press_off_by: [f32; 2],
-    pub(super) snap: pixel_snap::Inherit,
-}
-
-/// How a subtree's scale is changing. Text under a still scale rasterizes at its scaled size.
-/// Under a live zoom gesture it steps through logarithmic $2^{1/4}$ buckets and lands on the
-/// exact resting scale once still; under a short spring it samples its rest-size glyphs.
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum ScaleMotion {
-    #[default]
-    Still,
-    /// Bound to a live scale that is actively changing: rasterize at $2^{1/4}$ octave buckets.
-    Live,
-    Moving,
-}
-
-impl ScaleMotion {
-    /// The scale text under `sc` rasterizes at. It draws at `sc`, filtered, when they differ.
-    /// Moving text rasterizes at `rest`, the scale of its nearest still ancestor (an app's zoom,
-    /// say), so text that moves inside a zoomed window stays as crisp as at rest and doesn't
-    /// sharpen when the motion ends.
-    pub(super) fn raster(self, sc: f32, rest: f32) -> f32 {
-        let k = match self {
-            ScaleMotion::Still => sc,
-            ScaleMotion::Live => 2.0f32.powf((sc.max(1e-4).log2() * 4.0).round() * 0.25),
-            ScaleMotion::Moving => rest,
-        };
-        // A tiny or huge raster isn't worth its atlas space; sample the rest size instead.
-        if (1.0 / 16.0..=4.0).contains(&k) { k } else { 1.0 }
-    }
-}
-
-impl Default for Inh {
-    fn default() -> Self {
-        Inh { opacity: 1.0, paint_opacity: 1.0, first_fade: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
-            paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
-            scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0, pressed: 0.0, press_to: None,
-            hit_opacity: 1.0, group_rect: [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY],
-            scale_motion: ScaleMotion::Still, still: (1.0, [0.0; 2], [0.0; 2]), held: (1.0, [0.0; 2], [0.0; 2]), held_moving: false, scale_target: 1.0, scale_tracked: false, in_cache: false, skip_paint: false, anchor_hidden: false, turn: 0,
-            press_off_by: [0.0; 2], snap: Default::default() }
     }
 }
 
@@ -617,6 +531,11 @@ pub enum TitlebarAction {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
+    /// View commits run since the runtime started. In debug builds, one self-check commit runs a
+    /// quarter second after the last commit on the next event whose handler called
+    /// [`Tx::live_only`](crate::Tx::live_only) unless
+    /// [`Runtime::check_live_only`](crate::Runtime::check_live_only)`(false)` was called (release
+    /// builds never check), so a test counting commits turns the check off.
     pub commits: u64,
     pub layout_nodes: usize,
     pub glyphs: usize,
@@ -664,9 +583,11 @@ pub(crate) struct TreeState {
     /// Whether this runtime has an attached playground (`hooks.playground.is_some()`).
     pub(crate) has_playground: bool,
     pub(in crate::runtime) exit_mask: exit_mask::Mask,
-    key_index: key_index::KeyIndex,
+    pub(in crate::runtime) key_index: key_index::KeyIndex,
     /// Packed explicit piecewise-linear scroll-fade stops (`ScrollFade::stops`) for `Globals::flags[2..4]`.
     pub(in crate::runtime) fade_stops: [f32; 2],
+    /// Incremented on each `build()`, for invalidating cached hover snapshots.
+    pub(in crate::runtime) build_gen: u64,
 }
 
 impl TreeState {
@@ -701,6 +622,7 @@ impl TreeState {
             exit_mask: Default::default(),
             key_index: Default::default(),
             fade_stops: [0.0; 2],
+            build_gen: 0,
         }
     }
 

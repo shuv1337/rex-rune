@@ -102,32 +102,11 @@ impl WindowHandle {
     /// positions. Call it on the UI thread.
     pub fn placement(&self) -> Option<crate::windows::WindowPlacement> {
         let window = self.window().ok()?;
-        let (outer, inner) = (window.outer_position().ok()?, window.inner_position().ok()?);
-        let size = window.inner_size();
         #[cfg(target_os = "macos")]
         let panel = crate::platform::macos::is_panel(&window);
         #[cfg(not(target_os = "macos"))]
         let panel = false;
-        let (maximized, minimized, full_screen) = if panel {
-            (false, false, false)
-        } else {
-            (window.is_maximized(), window.is_minimized().unwrap_or(false), window.fullscreen().is_some())
-        };
-        #[cfg(target_os = "windows")]
-        let restore = ((maximized || minimized) && !full_screen).then(|| crate::platform::win32::restore_frame(&window)).flatten();
-        #[cfg(not(target_os = "windows"))]
-        let restore = None;
-        Some(crate::windows::WindowPlacement {
-            position: (outer.x, outer.y),
-            content_position: (inner.x, inner.y),
-            content_size: (size.width, size.height),
-            scale: window.scale_factor(),
-            maximized,
-            minimized,
-            full_screen,
-            restore,
-            display: window.current_monitor().map(|m| ((m.position().x, m.position().y), (m.size().width, m.size().height))),
-        })
+        crate::window::placement::sample_native_placement(&window, panel, None)
     }
     /// Shows `state` on the window's taskbar button: a progress bar and a count badge (see
     /// [`crate::Taskbar`]). macOS shows the count on the Dock icon, summed over the app's windows
@@ -221,9 +200,40 @@ impl WindowHandle {
         #[cfg(target_arch = "wasm32")]
         let _ = scheme;
     }
-    /// Physical desktop pixels; retained across recreation. Unsupported on Wayland.
+    /// Requests a whole-window system backdrop material ([`WindowBackdrop`](crate::WindowBackdrop))
+    /// at runtime, retained across native window recreation.
+    ///
+    /// On Windows 11 Build 22621+ transparent DirectComposition GPU windows, this updates
+    /// `DWMWA_SYSTEMBACKDROP_TYPE` and reports whether the OS accepted the attribute through
+    /// [`Cx::window_backdrop`](crate::Cx::window_backdrop) (Windows draws the live material only
+    /// while the window is the foreground window and shows a flat fallback while unfocused). Safe
+    /// to call from any thread; requests made before the window starts apply once it does. Ignored
+    /// on web and headless.
+    ///
+    /// ```no_run
+    /// use rune::{AppSpec, WindowBackdrop, WindowSpec, el};
+    ///
+    /// let spec = WindowSpec::new("notes", AppSpec::new("Notes", (480.0, 360.0), || (), |_, _| el()))
+    ///     .on_created(|handle| handle.set_window_backdrop(WindowBackdrop::Mica));
+    /// let _ = spec;
+    /// ```
+    pub fn set_window_backdrop(&self, backdrop: crate::WindowBackdrop) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.send(move |slot| WakeEvent::WindowBackdrop(slot, backdrop));
+        #[cfg(target_arch = "wasm32")]
+        let _ = backdrop;
+    }
+    /// Physical desktop pixels; retained across recreation. On macOS, resolved against connected
+    /// displays' backing scales; for unambiguous mixed-scale moves when physical display rects
+    /// overlap, use [`Self::set_logical_position`]. Unsupported on Wayland.
     pub fn set_position(&self, position: (i32, i32)) {
         self.send(move |slot| WakeEvent::Position(slot, position));
+    }
+    /// Outer position in logical desktop points (top-left origin; negative coordinates are valid).
+    /// On macOS this moves the window directly in AppKit global points, unaffected by the
+    /// window's current display scale. Retained across recreation. Unsupported on Wayland.
+    pub fn set_logical_position(&self, position: (f64, f64)) {
+        self.send(move |slot| WakeEvent::LogicalPosition(slot, position));
     }
     pub fn place(&self, display: crate::DisplayTarget, placement: crate::OverlayPlacement) {
         let place = crate::windows::PlaceRequest::new(display, placement);
@@ -265,13 +275,22 @@ impl WindowHandle {
         if let Ok(window) = self.window() { crate::platform::win32::hide_now(&window); }
         self.hide();
     }
-    /// Focus/activate an already-visible window, restoring it if minimized. Wayland requests attention.
+    /// Focus/activate an already-visible window, restoring it if minimized.
+    /// On Wayland this requests attention; use [`activate`](Self::activate) for compositor-authorized focus.
     pub fn focus(&self) { self.send(WakeEvent::Focus); }
     /// Show, restore and activate, creating the window if needed (see `AppHandle::open`).
     /// A default close destroys its host; use App::keep_running to reopen.
     /// Windows added with `App::window` always reopen. Requests made before the loop runs
     /// apply once the window's host starts.
     pub fn open(&self) { self.send(|slot| WakeEvent::Window(slot, WindowRequest::Open(None))); }
+    /// Show, restore and focus the window with an activation token another process forwarded
+    /// (`XDG_ACTIVATION_TOKEN` on Wayland, `DESKTOP_STARTUP_ID` on X11), so the compositor
+    /// lets it take focus (see [`AppHandle::activate`](crate::AppHandle::activate)).
+    /// An empty token or a platform without activation tokens behaves like [`open`](Self::open).
+    pub fn activate(&self, token: impl Into<String>) {
+        let token = Some(token.into()).filter(|t| !t.is_empty());
+        self.send(move |slot| WakeEvent::Window(slot, WindowRequest::Open(token)));
+    }
     pub fn close(&self) { self.send(|slot| WakeEvent::Window(slot, WindowRequest::Close)); }
     /// Borrow a raw native handle while alive. Platform thread restrictions still apply;
     /// do not retain an extracted pointer beyond the callback.

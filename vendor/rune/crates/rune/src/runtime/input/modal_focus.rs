@@ -215,15 +215,21 @@ impl RuntimeCore {
                     if !self.cancel_drag() { self.drop_press(); }
                     self.pointer.clear_secondary();
                     self.pointer.hovered = None;
+                    self.pointer.hover_hit = None;
+                    self.pointer.clear_hover_cache();
                 }
                 ModalEffect::FocusInitial => {
                     if let Some(target) = self.modal_initial_focus() {
-                        cb_dirty |= self.set_focus_notifying(app, Some(target), self.kbd.focus.keyboard()).1;
+                        self.kbd.focus_lost_dirty = false;
+                        let cb = self.set_focus_notifying(app, Some(target), self.kbd.focus.keyboard()).1;
+                        cb_dirty |= cb || std::mem::take(&mut self.kbd.focus_lost_dirty);
                     }
                 }
                 ModalEffect::Return { restore, ring } => {
                     let restore = restore.filter(|p| self.node_index(p).is_some_and(|i| self.can_focus(i)));
-                    cb_dirty |= self.set_focus_notifying(app, restore, ring && self.kbd.focus.keyboard()).1;
+                    self.kbd.focus_lost_dirty = false;
+                    let cb = self.set_focus_notifying(app, restore, ring && self.kbd.focus.keyboard()).1;
+                    cb_dirty |= cb || std::mem::take(&mut self.kbd.focus_lost_dirty);
                 }
             }
         }

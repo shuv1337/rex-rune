@@ -515,6 +515,9 @@ impl El {
         self.style.set_justify_content(JustifyContent::SPACE_EVENLY);
         self
     }
+    /// Minimum width in points. Preserved by [`El::shrink`] and the single-line truncation
+    /// builders in either call order; pass `.min_w(0.0)` after an earlier explicit minimum to
+    /// override it down to zero.
     #[inline]
     pub fn min_w(mut self, w: f32) -> Self {
         self.set_min_w(w);
@@ -644,17 +647,39 @@ impl El {
         self.style.set_pad_right(p);
         self
     }
-    /// Allow shrinking below content size along the parent's main axis.
+    /// Sets `flex-shrink: 1` and lowers an automatic `min-width` to `0`, preserving any explicit
+    /// [`El::min_w`] regardless of call order and leaving `min-height` untouched (nested vertical
+    /// flex columns still need explicit [`El::min_h`]`(0.0)`). To override an earlier explicit
+    /// minimum down to zero, call `.min_w(0.0)` after.
+    ///
+    /// ```
+    /// use rune::{Env, Runtime, el, row};
+    ///
+    /// let mut rt = Runtime::new(
+    ///     (),
+    ///     |_: &(), _| row().w(100.0)
+    ///         .child(el().key("a").w(300.0).min_w(160.0).shrink())
+    ///         .child(el().key("b").w(300.0).shrink().min_w(160.0)),
+    ///     (100.0, 100.0),
+    ///     Env::new(true, 1.0),
+    /// );
+    /// rt.frame(0.0);
+    /// assert_eq!(rt.presented("a").unwrap().0[2], 160.0);
+    /// assert_eq!(rt.presented("b").unwrap().0[2], 160.0);
+    /// ```
     #[inline]
     pub fn shrink(mut self) -> Self {
         self.set_shrink();
         self
     }
-    /// [`El::shrink`] in place.
+    /// [`El::shrink`] in place: sets `flex-shrink: 1` and lowers an automatic `min-width` to `0`
+    /// while preserving any explicit [`El::min_w`] and leaving `min-height` untouched.
     #[inline]
     pub fn set_shrink(&mut self) -> &mut Self {
         self.style.set_flex_shrink(1.0);
-        self.style.set_min_width(length(0.0));
+        if self.style.min_size().width.is_auto() {
+            self.style.set_min_width(length(0.0));
+        }
         self
     }
     /// Lay children out in `n` equal columns, each as wide as the widest child needs (CSS
@@ -662,6 +687,71 @@ impl El {
     /// Children fill the cells in order unless placed with `grid_cell`.
     pub fn equal_columns(mut self, n: usize) -> Self {
         self.style.set_equal_columns(n);
+        self
+    }
+    /// Lay children out in as many equal columns of at least `min_width` points as fit the
+    /// element's width (CSS `grid-template-columns: repeat(auto-fit, minmax(min_width, 1fr))`).
+    ///
+    /// Empty trailing tracks collapse when fewer children exist than columns that fit, so a
+    /// single row of items stretches across the full width; a non-positive or non-finite
+    /// `min_width` falls back to one full-width column (`1fr`).
+    ///
+    /// ```
+    /// # use rune::{col, el};
+    /// # let _ =
+    /// el().w_full().auto_fit_columns(240.0).gap(12.0)
+    ///     .child(col().h(60.0))
+    ///     .child(col().h(60.0))
+    /// # ;
+    /// ```
+    #[inline]
+    pub fn auto_fit_columns(mut self, min_width: f32) -> Self {
+        self.set_auto_fit_columns(min_width);
+        self
+    }
+    /// [`El::auto_fit_columns`] in place.
+    ///
+    /// ```
+    /// # use rune::el;
+    /// let mut e = el().w_full();
+    /// e.set_auto_fit_columns(240.0);
+    /// ```
+    #[inline]
+    pub fn set_auto_fit_columns(&mut self, min_width: f32) -> &mut Self {
+        self.style.set_auto_fit_columns(min_width);
+        self
+    }
+    /// Lay children out in as many equal columns of at least `min_width` points as fit the
+    /// element's width, keeping empty trailing tracks (CSS
+    /// `grid-template-columns: repeat(auto-fill, minmax(min_width, 1fr))`).
+    ///
+    /// Unlike [`El::auto_fit_columns`], when fewer children exist than columns that fit, each
+    /// child keeps one column's share instead of expanding into the unused trailing tracks. A
+    /// non-positive or non-finite `min_width` falls back to one full-width column (`1fr`).
+    ///
+    /// ```
+    /// # use rune::{col, el};
+    /// # let _ =
+    /// el().w_full().auto_fill_columns(240.0).gap(12.0)
+    ///     .child(col().h(60.0))
+    ///     .child(col().h(60.0))
+    /// # ;
+    /// ```
+    #[inline]
+    pub fn auto_fill_columns(mut self, min_width: f32) -> Self {
+        self.set_auto_fill_columns(min_width);
+        self
+    }
+    /// [`El::auto_fill_columns`] in place.
+    ///
+    /// ```
+    /// # use rune::el;
+    /// let mut e = el().w_full();
+    /// e.set_auto_fill_columns(240.0);
+    /// ```
+    #[inline]
+    pub fn set_auto_fill_columns(&mut self, min_width: f32) -> &mut Self {
+        self.style.set_auto_fill_columns(min_width);
         self
     }
     /// Place this child of an `equal_columns` element in `column` (0-based) of the first row.

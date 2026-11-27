@@ -307,39 +307,106 @@ pub(super) fn render_frame(app: &mut dyn OverlayApp, f: OverlayRenderArgs<'_>) -
 /// submission) is finished, submitted and presented on the overlay's present thread, so the
 /// event loop's thread spends none of wgpu's encode, submit and present on it. Prewarm frames
 /// present here, before the window is revealed.
-pub(super) fn submit_and_present(live: &mut Live, renderer: &Renderer, gpu: &Gpu, rt: &RuntimeCore,
-    encoder: wgpu::CommandEncoder, frame: wgpu::SurfaceTexture, prewarm: bool) {
+/// On macOS, hands a plain non-terminal frame off to the overlay's present worker thread.
+/// Returns `Ok(())` when the worker took ownership of `encoder` and `frame`, or `Err((encoder, frame))`
+/// when the caller should submit synchronously on this thread (all non-macOS platforms, prewarm,
+/// native materials, or `GpuLossPolicy::Terminal`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_submit_on_macos_worker(
+    live: &mut Live,
+    renderer: &Renderer,
+    gpu: &Gpu,
+    rt: &RuntimeCore,
+    encoder: wgpu::CommandEncoder,
+    frame: wgpu::SurfaceTexture,
+    prewarm: bool,
+    terminal: bool,
+    on_materials: &mut Option<crate::system_material::OnMaterials>,
+) -> Result<(), (wgpu::CommandEncoder, wgpu::SurfaceTexture)> {
+    #[cfg(target_os = "macos")]
+    if !terminal && !prewarm && live.materials.presents_plainly() && renderer.submits_plainly() && !crate::gpu::native(&gpu.queue) {
+        crate::system_material::announce(on_materials, rt);
+        #[allow(irrefutable_let_patterns)]
+        if let Backing::Window(w) = &live.backing {
+            w.pre_present_notify();
+        }
+        if live.present.is_none() { live.present = crate::frame::present_worker::PresentWorker::spawn(); }
+        if let Some(worker) = &mut live.present {
+            let mut encoder = encoder;
+            renderer.before_submit(&mut encoder);
+            renderer.note_plain_submit();
+            let queue = gpu.queue.clone();
+            worker.run(move || {
+                queue.submit([encoder.finish()]);
+                queue.present(frame);
+            });
+            return Ok(());
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (live, renderer, gpu, rt, prewarm, terminal, on_materials);
+    Err((encoder, frame))
+}
+
+/// Presents a frame whose command buffer has already been submitted on a healthy device.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn present_submitted(
+    live: &mut Live,
+    gpu: &Gpu,
+    rt: &RuntimeCore,
+    window_backdrop: crate::WindowBackdrop,
+    frame: wgpu::SurfaceTexture,
+    prewarm: bool,
+    on_materials: &mut Option<crate::system_material::OnMaterials>,
+) -> bool {
+    crate::system_material::announce(on_materials, rt);
     #[allow(irrefutable_let_patterns)]
     if let Backing::Window(w) = &live.backing {
         w.pre_present_notify();
     }
     #[cfg(target_os = "macos")]
     {
-        if !prewarm && live.materials.presents_plainly() && renderer.submits_plainly() && !crate::gpu::native(&gpu.queue) {
-            if live.present.is_none() { live.present = crate::frame::present_worker::PresentWorker::spawn(); }
-            if let Some(worker) = &mut live.present {
-                let mut encoder = encoder;
-                renderer.before_submit(&mut encoder);
-                let queue = gpu.queue.clone();
-                return worker.run(move || {
-                    queue.submit([encoder.finish()]);
-                    queue.present(frame);
-                });
-            }
-        }
-        renderer.submit(&gpu.queue, encoder);
+        let _ = (prewarm, window_backdrop);
         let (draws, scale) = crate::system_material::present_draws(rt);
         live.materials.present(draws, scale, || gpu.queue.present(frame));
+        true
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (rt, prewarm);
-        renderer.submit(&gpu.queue, encoder);
+        let _ = (prewarm, window_backdrop);
+        #[cfg(not(any(all(target_os = "windows", feature = "windows-system-material"), all(unix, not(target_os = "ios"), not(target_os = "android")))))]
+        let _ = rt;
         #[cfg(all(unix, not(target_os = "ios"), not(target_os = "android")))]
-        if !gpu.is_lost() && let Backing::Layer(layer) = &mut live.backing {
-            layer.request_frame();
+        if !gpu.is_lost() {
+            if let Some(blur) = live.wayland_backdrop.as_mut() {
+                blur.sync_frame_materials(
+                    window_backdrop,
+                    true,
+                    Some(live.config.alpha_mode),
+                    false,
+                    (live.config.width, live.config.height),
+                    if live.scale > 0.0 { live.scale } else { rt.window_scale() },
+                    rt.paint.wayland_material_blurs(),
+                    true,
+                );
+            }
+            if let Backing::Layer(layer) = &mut live.backing {
+                layer.request_frame();
+            }
         }
+        #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+        let materials_ok = {
+            let draws = crate::system_material::windows_present_draws(rt);
+            live.materials.present(draws, rt.env.system_dark, live.handover.as_mut(), || {
+                gpu.queue.present(frame);
+            })
+        };
+        #[cfg(not(all(target_os = "windows", feature = "windows-system-material")))]
         gpu.queue.present(frame);
+        #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+        { materials_ok }
+        #[cfg(not(all(target_os = "windows", feature = "windows-system-material")))]
+        { true }
     }
 }
 

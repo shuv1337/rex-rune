@@ -1,6 +1,7 @@
 //! `El::pill` and `El::pills`: rounded chips around byte ranges of static text, drawn and
 //! wrapped like a [`text_input`](crate::text_input)'s [`Mark::Pill`](crate::Mark::Pill) chips.
 use std::ops::Range;
+use std::rc::Rc;
 
 use crate::Color;
 use crate::el::{El, PillStyle};
@@ -49,6 +50,8 @@ impl El {
                 fg: st.fg,
                 ring: st.ring,
                 radius: st.radius,
+                pad_x: st.pad_x,
+                margin_x: st.margin_x,
                 bare: None,
             });
         }
@@ -97,6 +100,8 @@ impl El {
             fg: style.fg,
             ring: style.ring,
             radius: style.radius,
+            pad_x: style.pad_x,
+            margin_x: style.margin_x,
             bare: None,
         });
         t.spans = with_pill_colors(&t.spans, &t.cold.pills);
@@ -110,7 +115,8 @@ impl El {
     /// stays on the line of the word that follows it, as an icon before a link does on a web
     /// page, and sits centred on that word's letters. Its glyph takes `icon`'s colour or the
     /// element's; an image (a site's favicon) draws as it is. Selection and copy skip it. With no
-    /// word after `at`, or over a pill, it draws nothing.
+    /// word after `at`, or over a pill, it draws nothing. It is decoration unless it has a name
+    /// ([`InlineIcon::label`]) or a tooltip ([`InlineIcon::help`]).
     ///
     /// ```
     /// # use rune::{Icon, InlineIcon, Span, rich};
@@ -134,9 +140,9 @@ impl El {
             return self;
         }
         let at = t.cold.pills.partition_point(|p| p.start < start);
-        let InlineIcon { icon, image, size, gap, radius, color } = icon;
-        let bare = Some(Box::new(BareIcon { size, gap, radius, image, replace: None }));
-        t.cold.pills.insert(at, PillChip { start, end, icon, image: None, bg: None, fg: color, ring: None, radius: None, bare });
+        let InlineIcon { icon, image, size, gap, radius, color, label, help } = icon;
+        let bare = Some(Box::new(BareIcon { size, gap, radius, image, replace: None, label, help }));
+        t.cold.pills.insert(at, PillChip { start, end, icon, image: None, bg: None, fg: color, ring: None, radius: None, pad_x: None, margin_x: None, bare });
         self
     }
 
@@ -146,7 +152,7 @@ impl El {
     /// still see them. A line grows to fit a taller or deeper image, and one too wide for the
     /// rest of a line moves whole to the next. Ranges are UTF-8 bytes on char boundaries with
     /// no newline; empty, out-of-range or overlapping ones are skipped. On a field this does
-    /// nothing.
+    /// nothing: attach [`El::pill_inline_image`] instead.
     ///
     /// ```
     /// # use rune::{InlineImage, Pixels, text};
@@ -171,10 +177,41 @@ impl El {
             return self;
         }
         let at = t.cold.pills.partition_point(|p| p.start < start);
-        let InlineImage { pixels, width, ascent, descent, bleed } = image;
-        let replace = Some(Replace { width, ascent, descent, bleed });
-        let bare = Some(Box::new(BareIcon { size: 0.0, gap: 0.0, radius: 0.0, image: Some(pixels), replace }));
-        t.cold.pills.insert(at, PillChip { start, end, icon: None, image: None, bg: None, fg: None, ring: None, radius: None, bare });
+        let bare = Some(Box::new(image.into_bare()));
+        t.cold.pills.insert(at, PillChip { start, end, icon: None, image: None, bg: None, fg: None, ring: None, radius: None, pad_x: None, margin_x: None, bare });
+        self
+    }
+
+    /// Draws an [`InlineImage`](crate::InlineImage) in place of a [`Mark::Pill`](crate::Mark::Pill)'s
+    /// label inside a [`text_input`](crate::text_input), by the pill's id (`None`: draw the pill
+    /// as a regular chip).
+    ///
+    /// Like [`El::inline_image`] on static text, the image stands on the baseline at its own
+    /// width, ascent and descent, growing the line when taller and moving whole to the next line
+    /// when too wide. The pill stays atomic (the caret steps over it and delete removes it whole),
+    /// and its label stays in the field's text for copy, paste and accessibility. When `Some`,
+    /// this replaces the pill's chip, label, [`El::pill_style`], [`El::pill_image`] and
+    /// [`El::pill_icon`].
+    ///
+    /// ```
+    /// # use std::collections::HashMap;
+    /// # use rune::{InlineImage, Pixels, TextEdit, TextStyle, text_input};
+    /// # struct App { draft: TextEdit, emoji: HashMap<String, Pixels> }
+    /// # let s = App { draft: TextEdit::default(), emoji: HashMap::new() };
+    /// # let body = TextStyle::new(14.0, 400.0);
+    /// # let _ =
+    /// text_input(&s.draft, body).pill_inline_image({
+    ///     let emoji = s.emoji.clone();
+    ///     move |id| emoji.get(id).cloned().map(|px| InlineImage::new(px, 18.0, 14.0, 4.0))
+    /// })
+    /// # ;
+    /// ```
+    pub fn pill_inline_image(mut self, image: impl Fn(&str) -> Option<InlineImage> + 'static) -> Self {
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            inp.pill_inline_image = Some(Rc::new(image));
+            self.sync_input_pills();
+            self.sync_input_rich();
+        }
         self
     }
 
@@ -242,8 +279,9 @@ impl El {
     }
 }
 
-/// An image set in text by [`El::inline_image`]: `width` points wide, `ascent` points above
-/// the baseline and `descent` below it, the image scaled to fit that box.
+/// An image set in text by [`El::inline_image`] or in a field pill by [`El::pill_inline_image`]:
+/// `width` points wide, `ascent` points above the baseline and `descent` below it, the image
+/// scaled to fit that box.
 #[derive(Clone, Debug)]
 pub struct InlineImage {
     pixels: crate::Pixels,
@@ -267,6 +305,18 @@ impl InlineImage {
         self.bleed = self::points(points);
         self
     }
+    pub(crate) fn into_bare(self) -> BareIcon {
+        let Self { pixels, width, ascent, descent, bleed } = self;
+        BareIcon {
+            size: 0.0,
+            gap: 0.0,
+            radius: 0.0,
+            image: Some(pixels),
+            replace: Some(Replace { width, ascent, descent, bleed }),
+            label: None,
+            help: None,
+        }
+    }
 }
 
 /// An icon set inline in text by [`El::inline_icon`]: a glyph or an image, `size` points square
@@ -279,16 +329,18 @@ pub struct InlineIcon {
     gap: f32,
     radius: f32,
     color: Option<Color>,
+    label: Option<String>,
+    help: Option<String>,
 }
 
 impl InlineIcon {
     /// `icon`, drawn in [`Self::color`] or the element's text colour.
     pub fn glyph(icon: &'static crate::Icon) -> Self {
-        Self { icon: Some(icon), image: None, size: 14.0, gap: 4.0, radius: 0.0, color: None }
+        Self { icon: Some(icon), image: None, size: 14.0, gap: 4.0, radius: 0.0, color: None, label: None, help: None }
     }
     /// An image (decoded pixels, such as a site's favicon), scaled to fit the square.
     pub fn image(pixels: crate::Pixels) -> Self {
-        Self { icon: None, image: Some(pixels), size: 14.0, gap: 4.0, radius: 0.0, color: None }
+        Self { icon: None, image: Some(pixels), size: 14.0, gap: 4.0, radius: 0.0, color: None, label: None, help: None }
     }
     /// Its side in points.
     pub fn size(mut self, points: f32) -> Self {
@@ -308,6 +360,23 @@ impl InlineIcon {
     /// A glyph's colour.
     pub fn color(mut self, c: Color) -> Self {
         self.color = Some(c);
+        self
+    }
+    /// Its name for assistive technology, as an `<img>`'s `aria-label`: the text's element
+    /// gains an image named `label` in the accessibility tree, where the icon draws. Without
+    /// one the icon is decoration and a reader skips it. An empty name is none.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        let label = label.into();
+        self.label = (!label.is_empty()).then_some(label);
+        self
+    }
+    /// A tooltip shown while the pointer rests on the icon, as [`El::help`] shows an element's
+    /// (an HTML `title`): after the same delay, in the same look, under the icon. It is the
+    /// icon's own, over any help its element has. A named icon also reads it as its description
+    /// when it says something its name doesn't. An empty text is none.
+    pub fn help(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        self.help = (!text.is_empty()).then_some(text);
         self
     }
 }

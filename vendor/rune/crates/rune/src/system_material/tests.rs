@@ -7,7 +7,7 @@ use bytemuck::Zeroable;
 
 #[test]
 fn native_frames_are_points_from_the_top_left() {
-    let draw = MaterialDraw { id: NodeId(1), material: SystemMaterial::Glass, rect: [20.0, 40.0, 200.0, 100.0], radius: 24.0, continuous: false, opacity: 1.0 };
+    let draw = MaterialDraw { id: NodeId(1), material: SystemMaterial::Glass, rect: [20.0, 40.0, 200.0, 100.0], radius: 24.0, continuous: false, opacity: 1.0, params: MaterialParams::new() };
     assert_eq!(draw.points(2.0), ([10.0, 20.0, 100.0, 50.0], 12.0));
     assert_eq!(draw.points(1.0), ([20.0, 40.0, 200.0, 100.0], 24.0));
 }
@@ -435,6 +435,37 @@ fn macos_make_view_configures_sidebar_and_popover_effect_views() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_material_host_is_hidden_from_accessibility_and_hit_tests() {
+    use objc2::{msg_send, rc::Retained, runtime::{AnyObject, Bool}};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    let class = macos::host_class().expect("RuneMaterialHost class");
+    // SAFETY: creates an off-window RuneMaterialHost in memory without any NSWindow.
+    let host: Retained<AnyObject> = unsafe {
+        let alloc: *mut AnyObject = msg_send![class, alloc];
+        let view: *mut AnyObject = msg_send![alloc, initWithFrame: CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: 200.0, height: 120.0 } }];
+        Retained::from_raw(view).expect("RuneMaterialHost init")
+    };
+    let slot = macos::make_view(SystemMaterial::Sidebar, &host).expect("sidebar slot");
+    // SAFETY: queries standard NSAccessibility getters on a live NSView owned by this test.
+    unsafe {
+        let is_el: Bool = msg_send![&*host, isAccessibilityElement];
+        let is_ignored: Bool = msg_send![&*host, accessibilityIsIgnored];
+        let children: *mut AnyObject = msg_send![&*host, accessibilityChildren];
+        let nav_children: *mut AnyObject = msg_send![&*host, accessibilityChildrenInNavigationOrder];
+        let hit: *mut AnyObject = msg_send![&*host, accessibilityHitTest: CGPoint { x: 10.0, y: 10.0 }];
+        assert!(!is_el.as_bool(), "RuneMaterialHost must not be an accessibility element");
+        assert!(is_ignored.as_bool(), "RuneMaterialHost must be ignored by accessibility");
+        let count: usize = msg_send![children.as_ref().expect("accessibilityChildren must return an empty NSArray"), count];
+        assert_eq!(count, 0, "RuneMaterialHost must hide backdrop effect subviews from accessibilityChildren");
+        let nav_count: usize = msg_send![nav_children.as_ref().expect("accessibilityChildrenInNavigationOrder must return an empty NSArray"), count];
+        assert_eq!(nav_count, 0, "RuneMaterialHost must hide backdrop effect subviews from navigation order");
+        assert!(hit.is_null(), "RuneMaterialHost must never capture accessibilityHitTest:");
+        let _: () = msg_send![&*slot.view, removeFromSuperview];
+    }
+}
+
 #[test]
 fn default_cap_reports_fallback_on_fifth_visible_material_and_warns_only_when_native() {
     fn five(_: &u8, _: &mut Cx<u8>) -> El {
@@ -551,4 +582,185 @@ fn fallback_notice_formats_single_and_multiple_overflows() {
     assert!(one.contains("5 of 5") && one.contains("limit 4") && one.contains("App::max_native_materials"), "{one}");
     let many = fallback_notice(2, 6, 4);
     assert!(many.contains("2 of 6") && many.contains("5..=6") && many.contains("limit 4"), "{many}");
+}
+
+#[test]
+fn apps_read_the_frames_material_rects_without_native_views() {
+    let rt = runtime(one_card, false);
+    assert_eq!(rt.system_materials(), rt.paint.materials());
+    let (draws, scale) = present_draws(rt.core());
+    let frame = MaterialFrame::new(draws, scale);
+    assert_eq!(frame.scale(), 2.0);
+    assert_eq!(frame.draws().len(), 1);
+    assert_eq!(frame.draws()[0].points(frame.scale()), ([30.0, 20.0, 120.0, 60.0], 18.0));
+}
+
+/// Contract for an overlay driving an external backdrop from `ConfiguredOverlay::on_materials`:
+/// - called on every animating frame (both plain and under `El::cache()`);
+/// - never called once the overlay rests (no frames drawn at rest);
+/// - always lists exactly one entry while the pill is visible;
+/// - rect matches the element's exact box (including spring overshoot);
+/// - remains listed every frame under `El::cache()` even while elided as a resident cache;
+/// - `announce` is a zero-work no-op when no hook is set.
+#[test]
+fn on_materials_contract_animating_rest_exact_box_and_under_cache() {
+    use std::{cell::RefCell, rc::Rc};
+
+    fn pill_view(s: &(bool, bool, f32), _: &mut Cx<(bool, bool, f32)>) -> El {
+        let (expanded, cached, dot_x) = *s;
+        let (w, h) = if expanded { (388.0, 120.0) } else { (270.0, 40.0) };
+        let pill = el()
+            .key("pill")
+            .absolute(16.0, 12.0)
+            .size(w, h)
+            .radius(20.0)
+            .system_material(SystemMaterial::Glass)
+            .motion(crate::Spring::new(0.30, 0.28));
+        let host = if cached {
+            el().key("cache-wrap").size(440.0, 160.0).cache().child(pill)
+        } else {
+            el().key("plain-wrap").size(440.0, 160.0).child(pill)
+        };
+        el().size(480.0, 200.0)
+            .child(host)
+            .child(el().key("dot").absolute(dot_x, 170.0).size(8.0, 8.0).fill(Color::WHITE))
+    }
+
+    // No hook set: announce does nothing.
+    let mut no_hook: Option<OnMaterials> = None;
+    let plain = runtime(one_card, false);
+    announce(&mut no_hook, plain.core());
+
+    for cached in [false, true] {
+        let mut rt = Runtime::new((false, cached, 0.0_f32), pill_view, (480.0, 200.0), Env { scale: 1.0, system_dark: true });
+        let calls: Rc<RefCell<Vec<Vec<[f32; 4]>>>> = Rc::new(RefCell::new(Vec::new()));
+        let log = calls.clone();
+        let mut hook: Option<OnMaterials> = Some(Box::new(move |frame: MaterialFrame<'_>| {
+            log.borrow_mut().push(frame.draws().iter().map(|d| d.rect).collect());
+        }));
+
+        // Initial settled frame: exact compact box 270x40.
+        rt.frame(0.0);
+        announce(&mut hook, rt.core());
+        assert_eq!(calls.borrow().last().unwrap().as_slice(), &[[16.0, 12.0, 270.0, 40.0]]);
+
+        // Expand pill on Spring(0.30, 0.28): called on every animating frame, always 1 entry,
+        // matches element box exactly (with visible overshoot past 388x120), settles at 388x120.
+        rt.update(|s, _| s.0 = true);
+        let mut anim_frames = 0usize;
+        let mut saw_overshoot = false;
+        for _ in 0..240 {
+            rt.frame(1.0 / 120.0);
+            announce(&mut hook, rt.core());
+            let last = calls.borrow().last().unwrap().clone();
+            assert_eq!(last.len(), 1, "cached={cached}: always exactly 1 entry while visible");
+            let pill_info = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("pill")).unwrap();
+            let painted_pill = rt.instances.iter().find(|q| q.params[1] == KIND_RECT && q.rect[0] == 16.0 && q.rect[1] == 12.0).unwrap();
+            assert_eq!(last[0], painted_pill.rect, "cached={cached}: material rect must match painted pill quad exactly");
+            for k in 0..4 {
+                assert!((last[0][k] - pill_info.rect[k]).abs() <= 1.0, "cached={cached}: rect[{k}] {:?} vs {:?}", last[0], pill_info.rect);
+            }
+            if last[0][2] > 388.0 {
+                saw_overshoot = true;
+            }
+            if rt.animating {
+                anim_frames += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(anim_frames >= 10, "cached={cached}: spring ran across multiple frames ({anim_frames})");
+        assert!(saw_overshoot, "cached={cached}: underdamped Spring(0.30, 0.28) shows overshoot");
+        assert_eq!(calls.borrow().last().unwrap().as_slice(), &[[16.0, 12.0, 388.0, 120.0]]);
+
+        // At rest: runtime asks for no more frames, so overlay loop does not present or invoke hook.
+        let calls_at_rest = calls.borrow().len();
+        assert!(!rt.animating && !rt.stale() && !rt.live_pending());
+        assert_eq!(calls.borrow().len(), calls_at_rest);
+
+        // Under El::cache(): once settled and resident, animating an unrelated sibling outside the
+        // cache reuses the cached raster AND still delivers the exact 388x120 pill rect every frame.
+        if cached {
+            if let Some(gpu) = Gpu::test_headless() {
+                let mut renderer = Renderer::new(&gpu.device, crate::render::OFFSCREEN_FORMAT);
+                renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (480, 200));
+            }
+            rt.update(|s, tx| { s.2 = 200.0; tx.motion(crate::Spring::new(0.2, 0.0)); });
+            for _ in 0..3 {
+                rt.frame(1.0 / 60.0);
+                assert!(rt.animating);
+                announce(&mut hook, rt.core());
+                assert_eq!(calls.borrow().last().unwrap().as_slice(), &[[16.0, 12.0, 388.0, 120.0]]);
+            }
+        }
+    }
+}
+
+#[test]
+fn material_params_clamp_sanitize_and_flow_through_draws_and_cache() {
+    // Default MaterialParams leaves every override unset.
+    let empty = MaterialParams::default();
+    assert_eq!(empty, MaterialParams::new());
+    assert_eq!(empty.get_tint(), None);
+    assert_eq!(empty.get_tint_opacity(), None);
+    assert_eq!(empty.get_luminosity_opacity(), None);
+    assert_eq!(empty.get_saturation(), None);
+
+    // Clamping and non-finite sanitization.
+    let clamped = MaterialParams::new()
+        .tint_opacity(1.5)
+        .luminosity_opacity(-0.2)
+        .saturation(9.0);
+    assert_eq!(clamped.get_tint_opacity(), Some(1.0));
+    assert_eq!(clamped.get_luminosity_opacity(), Some(0.0));
+    assert_eq!(clamped.get_saturation(), Some(MAX_MATERIAL_SATURATION));
+
+    let sanitized = clamped
+        .tint_opacity(f32::NAN)
+        .luminosity_opacity(f32::INFINITY)
+        .saturation(f32::NEG_INFINITY);
+    assert_eq!(sanitized.get_tint_opacity(), None);
+    assert_eq!(sanitized.get_luminosity_opacity(), None);
+    assert_eq!(sanitized.get_saturation(), None);
+
+    // El::system_material_with propagates params into Runtime::system_materials() and El::cache() replays.
+    let tint = Color { r: 0.1, g: 0.2, b: 0.5, a: 1.0 };
+    let initial = MaterialParams::new()
+        .tint(tint)
+        .tint_opacity(0.12)
+        .luminosity_opacity(0.65)
+        .saturation(1.75);
+    let updated = MaterialParams::new()
+        .tint_opacity(0.30)
+        .luminosity_opacity(0.80)
+        .saturation(0.5);
+
+    fn view(params: &MaterialParams, _: &mut Cx<MaterialParams>) -> El {
+        el().key("root").size(240.0, 120.0).cache().child(
+            el().key("card")
+                .absolute(10.0, 10.0)
+                .size(180.0, 60.0)
+                .radius(16.0)
+                .system_material_with(SystemMaterial::Glass, *params),
+        )
+    }
+
+    let mut rt = Runtime::new(initial, view, (240.0, 120.0), Env { scale: 1.0, system_dark: true });
+    rt.frame(0.0);
+    assert_eq!(rt.system_materials().len(), 1);
+    let d0 = rt.system_materials()[0];
+    assert_eq!(d0.material, SystemMaterial::Glass);
+    assert!(d0.continuous, "Glass with MaterialParams still enables continuous corners");
+    assert_eq!(d0.params(), initial);
+
+    // Second frame reuses cached layer (elided) and replays the exact MaterialParams.
+    rt.frame(0.0);
+    assert_eq!(rt.system_materials().len(), 1);
+    assert_eq!(rt.system_materials()[0].params(), initial);
+
+    // Updating MaterialParams invalidates commit/cache and reflects the new params immediately.
+    rt.update(|p, _| *p = updated);
+    rt.frame(0.0);
+    assert_eq!(rt.system_materials().len(), 1);
+    assert_eq!(rt.system_materials()[0].params(), updated);
 }

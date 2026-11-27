@@ -1,6 +1,6 @@
-//! The window's controls over the app's titlebar: the macOS traffic lights and the Windows
-//! custom frame (`App::titlebar`), and what they take of it (`Cx::titlebar_inset`,
-//! `Cx::chrome_insets`, the caption buttons drawn over the view).
+//! The window's controls over the app's titlebar: the macOS traffic lights, the Windows custom
+//! frame and Rune's own frame on Linux (`App::titlebar`), and what they take of it
+//! (`Cx::titlebar_inset`, `Cx::chrome_insets`, the caption buttons drawn over the view).
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 #[cfg(not(target_os = "macos"))]
@@ -14,6 +14,8 @@ use crate::window::surface::Win;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 pub(in crate::window) mod float_on_open;
 pub(in crate::window) mod full_screen;
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+pub(in crate::window) mod linux_wm_state;
 #[cfg(target_os = "macos")]
 pub(in crate::window) mod mac;
 pub(in crate::window) mod platform_sync;
@@ -91,6 +93,33 @@ pub(in crate::window) fn sync_chrome_core(rt: &mut RuntimeCore, w: &Win, chrome:
     rt.set_caption(caption);
     rt.set_maximized(w.is_maximized());
     rt.set_full_screen(full_screen);
+    let _ = sync_wm_state_core(rt, w);
+    #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    rt.set_window_menu_trigger(resolve_window_menu_trigger(false, None, cfg!(target_os = "windows") && caption.is_some()));
+}
+
+/// Reads platform window-manager state (decoration mode, tiled edges, allowed actions) and updates
+/// `rt`, returning whether the view was dirtied. Wayland reads `xdg_toplevel` / `xdg-decoration`
+/// configure state; X11 queries EWMH / `_GTK_EDGE_CONSTRAINTS` properties; macOS and Windows
+/// honestly leave the state at its default unknown values. On Linux this also updates the titlebar
+/// secondary-click window-menu trigger from the same state read.
+pub(in crate::window) fn sync_wm_state_core(rt: &mut RuntimeCore, w: &Win) -> bool {
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    {
+        let wayland = is_wayland_window(&w.window);
+        let state = if wayland {
+            linux_wm_state::read_wayland(&w.window)
+        } else {
+            crate::platform::x11::wm_state::read(&w.window, rt.window_manager_state().decoration_mode)
+        };
+        rt.set_window_menu_trigger(resolve_window_menu_trigger(wayland, state.actions.window_menu, false));
+        rt.sync_window_manager_state(state)
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    {
+        let _ = (rt, w);
+        false
+    }
 }
 
 /// The traffic lights sit at the window's right: a right-to-left app on macOS.
@@ -102,13 +131,16 @@ fn lights_right(w: &Win) -> bool {
 }
 
 /// Whether Rune replaced the native title bar: macOS draws the app's titlebar under its
-/// transparent one; Windows has the custom frame.
+/// transparent one; Windows has the custom frame, and Linux Rune's own where the Wayland
+/// compositor draws none (`titlebar::linux`).
 fn custom_frame(w: &Win) -> bool {
     #[cfg(target_os = "windows")]
     return w.native.frame.is_some();
     #[cfg(target_os = "macos")]
     { let _ = w; true }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    { let _ = w; crate::titlebar::linux::chosen() }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(target_os = "ios"), not(target_os = "android")))))]
     { let _ = w; false }
 }
 
@@ -123,7 +155,25 @@ fn caption(w: &Win, titlebar: Option<crate::Titlebar>) -> Option<crate::titlebar
         }
         f.caption(&w.window)
     });
-    #[cfg(not(target_os = "windows"))]
+    // Rune's own frame: the desktop's buttons, and resize edges while the window floats.
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    return titlebar.filter(|_| crate::titlebar::linux::chosen()).map(|t| {
+        // What the compositor allows and which sides it tiled, as `Cx::window_actions` and
+        // `Cx::tiled_edges` report them.
+        let wm = linux_wm_state::read_wayland(&w.window);
+        let tiled = wm.tiled_edges.unwrap_or_default();
+        let window = crate::titlebar::linux::WindowState {
+            maximized: w.is_maximized(),
+            full_screen: w.is_full_screen(),
+            resizable: w.window.is_resizable(),
+            minimizable: wm.actions.minimize != Some(false),
+            maximizable: wm.actions.maximize != Some(false),
+            tiled: crate::titlebar::linux::Sides { top: tiled.top, right: tiled.right, bottom: tiled.bottom, left: tiled.left },
+        };
+        let caption = crate::titlebar::Caption::own_frame(t.height(), crate::titlebar::linux::desktop_layout(), window);
+        crate::titlebar::Caption { hidden: caption.hidden || !t.has_controls(), ..caption }
+    });
+    #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
     { let _ = (w, titlebar); None }
 }
 
@@ -216,6 +266,29 @@ pub(in crate::window) fn window_menu(window: &Window, menu: crate::runtime::Wind
     }
     #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
     let _ = (window, menu, at);
+}
+
+/// Resolves the titlebar secondary-click window-menu trigger from platform capabilities:
+/// Wayland opens on press (for `xdg_toplevel.show_window_menu`'s press serial) unless the
+/// compositor explicitly reported `window_menu == Some(false)`; X11 opens on release when
+/// `WindowActions::window_menu` is `Some(true)` (`_GTK_SHOW_WINDOW_MENU` in `_NET_SUPPORTED`,
+/// after X11's implicit pointer grab ends); Windows custom frames open on release (`WM_NCRBUTTONUP`).
+pub(in crate::window) const fn resolve_window_menu_trigger(
+    wayland: bool,
+    wm_window_menu: Option<bool>,
+    windows_caption: bool,
+) -> crate::runtime::WindowMenuTrigger {
+    if wayland {
+        if matches!(wm_window_menu, Some(false)) {
+            crate::runtime::WindowMenuTrigger::None
+        } else {
+            crate::runtime::WindowMenuTrigger::OnPress
+        }
+    } else if matches!(wm_window_menu, Some(true)) || windows_caption {
+        crate::runtime::WindowMenuTrigger::OnRelease
+    } else {
+        crate::runtime::WindowMenuTrigger::None
+    }
 }
 
 /// Whether Alt+Space opens this window's window menu when no handler takes it: on Wayland every

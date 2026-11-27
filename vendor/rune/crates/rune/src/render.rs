@@ -5,13 +5,13 @@ use crate::text::{ATLAS_SIZE, Atlas};
 
 mod backdrop_blur;
 mod breaker;
-#[cfg(any(target_os = "windows", target_arch = "wasm32"))]
 mod damaged;
 mod device;
 mod dxbc;
 mod effect_warm;
 mod fill;
 mod first_use;
+pub(crate) mod loss_latch;
 mod gpu_loss;
 mod instance;
 mod layers;
@@ -20,8 +20,9 @@ mod offscreen;
 mod outlines;
 mod pass;
 mod pipelines;
+mod renderer_kind;
 // The kept frame it checks exists only where partial frames do (`damaged`).
-#[cfg(any(target_os = "windows", target_arch = "wasm32"))]
+#[cfg(target_os = "windows")]
 mod pixel_check;
 #[cfg(target_os = "macos")]
 mod prewarm;
@@ -31,7 +32,6 @@ mod prewarm;
 #[cfg(target_arch = "wasm32")]
 mod prewarm {
     pub(super) fn start() {}
-    pub(super) fn take() -> Option<(super::Gpu, super::Renderer)> { None }
     pub(super) fn discard() {}
 }
 mod shader_check;
@@ -43,17 +43,22 @@ mod variant;
 mod vulkan_icd;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod warm_machine;
-mod warmup;
+pub(crate) mod warmup;
+#[cfg(test)]
+mod wgsl_minify;
 #[cfg(target_os = "macos")]
 mod windfoil_metallib;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod csd_corners;
 pub(crate) mod gpu_events;
 pub(crate) mod layer_blur;
 pub(crate) mod surface_alpha;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod translucency;
 
 pub mod cpu_boot;
+pub use loss_latch::GpuLossPolicy;
 
 #[cfg(test)]
 mod abi_tests;
@@ -76,10 +81,13 @@ mod webgl_shader_tests;
 
 use pass::{ActivePass, Backdrop};
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use damaged::KeptDraw;
 pub(crate) use damaged::MAX_RECTS;
 pub(crate) use shader_check::ShaderError;
-pub(crate) use surface_setup::{SurfaceSetupError, format_window_setup_error};
+pub(crate) use surface_setup::SurfaceSetupError;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use surface_setup::format_window_setup_error;
 #[cfg(target_os = "windows")]
 pub(crate) use surface_setup::with_wine_hwnd_hint;
 #[cfg(not(target_arch = "wasm32"))]
@@ -101,7 +109,9 @@ pub(crate) use instance::shader_consts;
 pub(crate) use instance::turned_bounds;
 pub(crate) use instance::unpack_u64_f32;
 pub(crate) use instance::word;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use warmup::park_gpu;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use warmup::surface_gpu;
 #[cfg(target_os = "linux")]
 pub(crate) use warmup::{warm_gpu_made, warm_gpu_then};
@@ -112,8 +122,10 @@ pub use device::prewarm_gpu;
 pub use device::prewarm_gpu_on;
 pub use device::set_gpu_memory_policy;
 pub use effect_warm::PrewarmEffects;
+pub use renderer_kind::RendererKind;
 #[doc(hidden)]
 pub use fill::FillDrift;
+pub use first_use::builtin_wgsl_hash;
 pub use first_use::make_layer_blur;
 pub use first_use::make_straight_alpha;
 pub use first_use::precompiled_misses;
@@ -155,10 +167,11 @@ pub(crate) const ATLAS_START_ROWS: u32 = 256;
 
 /// `RUNE_LOOP_CHECK=2` found a picture that differed from the whole frame's (`pixel_check`), so the
 /// process's exit code is 3. Never on macOS and Linux, which have no loop-only frames.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn loop_pixel_check_failed() -> bool {
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
+    #[cfg(target_os = "windows")]
     return pixel_check::failed();
-    #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
+    #[cfg(not(target_os = "windows"))]
     false
 }
 
@@ -207,7 +220,7 @@ impl Default for LayerSpec {
 /// soft edges and rounded-clip radius, so a compositor shader cuts its effect with the same
 /// rectangle, feathers and circular or continuous corners as the primitives around it. Prepend it
 /// to the shader source.
-pub const CLIP_WGSL: &str = include_str!("shaders/clip.wgsl");
+pub const CLIP_WGSL: &str = uber_wgsl::CLIP;
 
 /// The WGSL the precompiled DX12 bytecode is compiled from (Windfoil's, CRLF read as LF), its
 /// BLAKE3 and the hash of its pipeline layout, as the bytecode records them;
@@ -298,6 +311,9 @@ pub struct Renderer {
     effect_warm: effect_warm::EffectWarm,
     first_frame_submitted: std::sync::atomic::AtomicBool,
     surfaces: Option<crate::native_surface::SurfaceRenderer>,
+    /// Per-device native surface texture importer for compositors (`surface_texture`), adopted
+    /// into `surfaces` if a view also draws `El::native_surface`.
+    surface_importer: Option<crate::native_surface::SurfaceImporter>,
     /// The native surface renderer while its pipeline compiles (`build_surfaces`).
     surfaces_building: Option<crate::native_surface::Building>,
     pipeline: wgpu::RenderPipeline,
@@ -371,10 +387,8 @@ pub struct Renderer {
     /// limit from JavaScript (about 35 µs), which a frame's layers used to pay.
     max_texture_dim: u32,
     /// The one instance per rectangle that clears a damaged one (`arm_damage`), made on first use.
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     clear_quad: std::sync::OnceLock<wgpu::Buffer>,
     /// The kept frame and the rectangles the next `draw` may redraw alone (`damaged`).
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     damage: std::sync::Mutex<damaged::DamageState>,
 }
 
@@ -551,7 +565,7 @@ impl Renderer {
         if range.is_empty() && range.end != self.count { return; }
         self.validate_layer_range(&range);
         self.flush_uploads(encoder);
-        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("frame"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
@@ -564,6 +578,7 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         }).forget_lifetime();
+        pass::apply_subrect_viewport(&mut pass, view, self.target_frame(None).1);
         let mut active = ActivePass::owned(pass, encoder, view);
         self.draw_layer_range(&mut active, format, range, None, hook);
     }
@@ -673,7 +688,13 @@ impl Renderer {
 
     pub fn submit(&self, queue: &wgpu::Queue, mut encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         self.before_submit(&mut encoder);
-        let index = if let Some(s) = &self.surfaces { s.submit(queue, encoder) } else { queue.submit([encoder.finish()]) };
+        let index = if let Some(s) = &self.surfaces {
+            s.submit(queue, encoder)
+        } else if let Some(importer) = &self.surface_importer {
+            importer.submit(queue, encoder)
+        } else {
+            queue.submit([encoder.finish()])
+        };
         self.first_frame_submitted.store(true, std::sync::atomic::Ordering::Release);
         index
     }
@@ -683,11 +704,22 @@ impl Renderer {
     #[cfg(target_os = "macos")]
     pub(crate) fn submits_plainly(&self) -> bool {
         self.surfaces.as_ref().is_none_or(|s| s.draws_nothing())
+            && self.surface_importer.as_ref().is_none_or(|i| !i.has_pending_submit())
+    }
+
+    /// Advances native-surface importer frame generation when a plain macOS overlay submission
+    /// bypasses [`Self::submit`].
+    #[cfg(target_os = "macos")]
+    pub(crate) fn note_plain_submit(&self) {
+        if let Some(s) = &self.surfaces {
+            s.note_frame_submitted();
+        } else if let Some(importer) = &self.surface_importer {
+            importer.note_frame_submitted();
+        }
     }
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: [f32; 4]) {
-        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
-        if self.armed() && self.draw_armed(encoder, &view.texture()) { return; }
+        if self.armed() && self.draw_armed(encoder, view) { return; }
         self.draw_timed(encoder, view, clear, None);
     }
 
@@ -728,6 +760,7 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        pass::apply_subrect_viewport(&mut pass, view, self.target_frame(None).1);
         if !blurs {
             self.draw_range(&mut pass, self.format, 0..self.count);
             return;
@@ -737,6 +770,7 @@ impl Renderer {
         let mut active = ActivePass::owned_timed(pass, encoder, view, timestamps);
         self.draw_layer_range(&mut active, self.format, 0..self.count, None, &mut |_, _| {});
     }
+
 }
 
 /// How far a corner of radius `radius` reaches along each edge. Radii are signed: a negative

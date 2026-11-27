@@ -1,7 +1,6 @@
 // Browser text services and semantic DOM accessibility mirror.
-const MAC = /Mac|iP/.test(navigator.platform);
 const coarse = () => matchMedia('(pointer: coarse)').matches;
-export function isMac() { return MAC; }
+export function isMac() { return /Mac|iP/.test(globalThis.navigator?.platform ?? ''); }
 
 // Detects platforms whose browser dispatches touch `contextmenu` while the finger is still down
 // (Android, ChromeOS, Linux). Excludes Windows (Chrome defers touch contextmenu until finger lift
@@ -84,20 +83,44 @@ function domToRaw(offset, crlfs) {
     return offset + lo;
 }
 
-function browserShortcut(event) {
+function isPlainCopyChord(event) {
+    const chord = (event.metaKey || event.ctrlKey) && !event.getModifierState?.('AltGraph');
+    return chord && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'c';
+}
+
+function browserShortcut(event, inField = false) {
     const chord = (event.metaKey || event.ctrlKey) && !event.getModifierState?.('AltGraph');
     if (event.key === 'F5' || event.key === 'F12') return true;
     if (!chord) return false;
     const k = event.key.toLowerCase();
     // With Alt only the developer tools' chords are the browser's: Ctrl+Alt+W and the like are
-    // the app's (its Close tab, where the browser keeps Ctrl+W).
-    if (event.altKey) return ['i', 'j', 'u'].includes(k);
+    // the app's (its Close tab, where the browser keeps Ctrl+W). On macOS Option+I/J/U/C can
+    // produce Dead or accented glyphs in `event.key`, so fall back to `event.code`.
+    if (event.altKey) {
+        if (['i', 'j', 'u'].includes(k)) return true;
+        if (isMac()) {
+            if (k === 'c') return true;
+            if (!/^[a-z]$/i.test(event.key) && ['KeyI', 'KeyJ', 'KeyU', 'KeyC'].includes(event.code)) return true;
+        }
+        return false;
+    }
+    // DevTools chords with Shift: Ctrl+Shift+I/J/C off macOS, Cmd+Shift+C on macOS.
+    if (event.shiftKey && (k === 'c' || (!isMac() && ['i', 'j'].includes(k)))) return true;
     // An installed app's window gives the page every key first (Chromium: "In Apps mode, no keys
     // are reserved"), and closes itself on a Ctrl+W the page lets through: there the tab, window
     // and new-session keys are the app's, as in its desktop build.
     if (['t', 'w', 'n'].includes(k) && appWindow()) return false;
-    // Leave copy ('c') un-prevented too so the browser fires its synchronous `copy` event.
-    return ['c', 'r', 'l', 't', 'w', 'n', 'f', 'g', '=', '+', '-', '0'].includes(k);
+    // Outside focused text fields, leave copy ('c') un-prevented so the browser fires its
+    // synchronous `copy` event for read-only `El::selectable` selections. Inside a focused text
+    // field, plain Cmd/Ctrl+C is a text-editing command handled by Rune.
+    if (k === 'c') return !inField;
+    return ['r', 'l', 't', 'w', 'n', 'f', 'g', '=', '+', '-', '0'].includes(k);
+}
+
+function shouldPreventKeydown(event, inField, used, copyText) {
+    if (!browserShortcut(event, inField)) return true;
+    if (!inField && copyText && isPlainCopyChord(event)) return false;
+    return Boolean(used);
 }
 
 function appWindow() {
@@ -163,27 +186,110 @@ const PAGE_CSS = `[data-rune-a11y] :focus-visible{outline:2px solid var(--rune-f
 [data-rune-a11y] a,[data-rune-a11y] button{color:transparent;-webkit-tap-highlight-color:transparent}
 [data-rune-a11y] [data-rune-scroll-x]::-webkit-scrollbar{display:none}`;
 
+const MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
+const NO_AUTOCORRECT_MODES = new Set(['email', 'url', 'numeric', 'decimal', 'tel', 'none']);
+const NO_AUTOCORRECT_AUTOFILL = new Set(['username', 'email', 'one-time-code', 'url', 'tel']);
+const WORDS_AUTOCAP_AUTOFILL = new Set(['name', 'given-name', 'family-name', 'organization']);
+
+function isRasterImageType(type) {
+    if (typeof type !== 'string') return false;
+    const t = type.toLowerCase();
+    return t.startsWith('image/') && t !== 'image/svg+xml';
+}
+
+function findClipboardImageFile(items, files) {
+    const list = [...(items ?? [])];
+    const pngItem = list.find(i => i.kind === 'file' && String(i.type ?? '').toLowerCase() === 'image/png');
+    if (pngItem) return pngItem.getAsFile?.() ?? undefined;
+    const otherItem = list.find(i => i.kind === 'file' && isRasterImageType(i.type));
+    if (otherItem) return otherItem.getAsFile?.() ?? undefined;
+    if (!list.length && files?.length) {
+        const fl = [...files];
+        return fl.find(f => String(f.type ?? '').toLowerCase() === 'image/png') ?? fl.find(f => isRasterImageType(f.type));
+    }
+    return undefined;
+}
+
+// Configures HTML input semantics (`type`, `inputMode`, `autocapitalize`, `autocorrect`,
+// `spellcheck`, `enterKeyHint`, `autocomplete`, `name`) on the active hidden field.
+// Note: active single-line email/numeric inputs stay `type="text"` (with `inputMode="email|numeric|decimal"`
+// and `autocomplete`) because WHATWG HTML disallows `selectionStart`/`setSelectionRange` on
+// `type="email"` and `type="number"`, while `search`, `url`, `tel`, and `password` support them.
+function applyInputSemantics(field, inputMode, autofill, secure) {
+    const mode = inputMode || 'text';
+    const af = autofill || '';
+    field.inputMode = mode;
+    if (secure) {
+        field.autocomplete = af || 'current-password';
+        field.setAttribute('autocomplete', field.autocomplete);
+        field.name = af === 'new-password' ? 'new-password' : 'password';
+        field.setAttribute('autocorrect', 'off');
+        field.setAttribute('autocapitalize', 'off');
+        field.spellcheck = false;
+        field.removeAttribute('enterkeyhint');
+        return;
+    }
+    if (field.tagName === 'INPUT') {
+        const nextType = mode === 'search' ? 'search'
+            : (mode === 'url' || af === 'url') ? 'url'
+            : (mode === 'tel' || af === 'tel') ? 'tel'
+            : 'text';
+        if (field.type !== nextType) field.type = nextType;
+        const name = af && af !== 'off' ? af : (mode !== 'text' && mode !== 'none' ? mode : '');
+        if (name) { field.name = name; field.setAttribute('name', name); }
+        else { field.name = ''; field.removeAttribute('name'); }
+    }
+    const noCorrect = NO_AUTOCORRECT_MODES.has(mode) || NO_AUTOCORRECT_AUTOFILL.has(af);
+    const autoCap = noCorrect || mode === 'search'
+        ? 'none'
+        : WORDS_AUTOCAP_AUTOFILL.has(af)
+        ? 'words'
+        : 'sentences';
+    field.setAttribute('autocapitalize', autoCap);
+    field.setAttribute('autocorrect', noCorrect ? 'off' : 'on');
+    field.spellcheck = !noCorrect;
+    if (mode === 'search') field.setAttribute('enterkeyhint', 'search');
+    else field.removeAttribute('enterkeyhint');
+    if (af) {
+        field.autocomplete = af;
+        field.setAttribute('autocomplete', af);
+    } else {
+        field.autocomplete = '';
+        field.removeAttribute('autocomplete');
+    }
+}
+
 export function mount(canvas, callback, embedded, fitHeight, page) {
+    const form = document.createElement('form');
+    form.setAttribute('novalidate', '');
+    form.setAttribute('autocomplete', 'on');
+    form.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;margin:0;padding:0;border:0;overflow:visible;pointer-events:none;';
     const textarea = document.createElement('textarea');
     textarea.setAttribute('aria-label', 'Text input');
     textarea.setAttribute('autocapitalize', 'sentences');
     // It is 1 px wide: wrapped, its every character would be a line to a screen reader reading by
     // line. Unwrapped, a line is what a line break ends.
     textarea.wrap = 'off';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.setAttribute('aria-label', 'Text input');
+    input.setAttribute('autocapitalize', 'sentences');
     const password = document.createElement('input');
     password.type = 'password';
     password.setAttribute('aria-label', 'Password input');
     password.autocomplete = 'current-password';
+    password.setAttribute('autocomplete', 'current-password');
     password.setAttribute('autocorrect', 'off');
     password.setAttribute('autocapitalize', 'off');
     password.spellcheck = false;
-    for (const field of [textarea, password]) {
+    for (const field of [textarea, input, password]) {
         field.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;resize:none;pointer-events:none;';
         field.tabIndex = -1;
         field.inputMode = coarse() ? 'none' : 'text';
         field.inert = true;
-        document.body.append(field);
     }
+    form.append(input, password);
+    document.body.append(textarea, form);
     // The mirror's text is transparent over the canvas. `forced-color-adjust:none` keeps it so in
     // Windows' contrast themes, which would otherwise paint it, on backplates, over what Rune drew.
     const a11y = document.createElement('div');
@@ -212,13 +318,16 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         a11y.style.cssText = 'position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:1;color:transparent;forced-color-adjust:none;';
         document.body.append(a11y);
     }
-    const h = { canvas, textarea, password, a11y, a11yNodes: new Map(), a11yByPath: new Map(), mirrorSel: false, field: textarea, key: '', base: 0, value: '', domValue: '', crlfs: null,
+    const h = { canvas, form, textarea, input, password, a11y, a11yNodes: new Map(), a11yByPath: new Map(), webImages: null, webImageNodes: new Map(), pageHeight: 0, mirrorSel: false, field: textarea, key: '', base: 0, value: '', domValue: '', crlfs: null,
+        inputMode: 'text', autofill: '', peerKey: '', peerSecure: false,
         selection: null, copyText: '', composing: false, composition: '', shift: false, modBits: 0, listeners: [], syncing: false, disposed: false,
         embedded, fitHeight, page, focused: false, presented: false, swapped: false, touchDown: false,
         touchTimestamps: [], touchHoldConfirm: null, activeTouchId: null, a11yTouchId: null,
-        hoverLink: null, hoverLinkLeave: null, hoverClientX: NaN, hoverClientY: NaN,
+        hoverLink: null, hoverLinkLeave: null, hoverLinkBefore: null, hoverClientX: NaN, hoverClientY: NaN,
         forwarding: false, pendingLinkDrag: null, suppressLinkClickUntil: 0,
-        lastScrollAt: 0, staticTimer: 0, scrollEls: new Map(), band, mediaKeys: false,
+        lastScrollAt: 0, staticTimer: 0, scrollEls: new Map(), band, mediaKeys: false, keyUsed: false,
+        visualViewport: null, keyboardShiftY: 0, pendingFieldBlur: false, domFocused: false, focusGen: 0, reconcileRaf: 0, reconcileTimer: 0, reconcileFollowUp: false,
+        pressedPointers: new Map(), pointerEndTimers: new Map(), pointerGen: 0, gestureUsed: false, gestureActive: false,
         pointerLocked: false, pointerLockPending: false, pointerLockSeq: 0, pointerLockHasPromise: false, pointerLockCalling: false, pointerLockSyncError: false, pointerLockUnadjustedFailed: false };
     // `after` runs once the event has reached Rust (or was dropped), even when it is deferred.
     const send = (event, after) => {
@@ -233,7 +342,8 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         h.listeners.push(() => target.removeEventListener(name, handler, options));
     };
     const MOD_KEYS = ['Shift', 'Control', 'Alt', 'Meta', 'AltGraph'];
-    const ownsTarget = target => target === canvas || target === textarea || target === password || (target instanceof Node && a11y.contains(target));
+    listen(form, 'submit', event => event.preventDefault());
+    const ownsTarget = target => target === canvas || target === textarea || target === input || target === password || target === form || (target instanceof Node && a11y.contains(target));
     const syncMods = event => {
         const bits = (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
         if (bits === h.modBits) return;
@@ -261,19 +371,176 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
             if (h.touchTimestamps.length > MAX_TOUCH_TIMESTAMPS) h.touchTimestamps.shift();
         }
     };
+    const clearPointerEndTimer = pid => {
+        const id = h.pointerEndTimers.get(pid);
+        if (id) {
+            clearTimeout(id);
+            h.pointerEndTimers.delete(pid);
+        }
+    };
+    const clearAllPointerEndTimers = () => {
+        for (const id of h.pointerEndTimers.values()) clearTimeout(id);
+        h.pointerEndTimers.clear();
+    };
+    h.clearAllPointerEndTimers = clearAllPointerEndTimers;
     listen(window, 'pointerdown', event => {
+        if (ownsTarget(event.target) && typeof event.pointerId === 'number') {
+            clearPointerEndTimer(event.pointerId);
+            h.pressedPointers.set(event.pointerId, ++h.pointerGen);
+        }
         if (event.target === canvas && event.pointerType === 'touch' && h.activeTouchId === null) {
             h.activeTouchId = event.pointerId;
         }
         recordTouchTimestamp(false, event);
     }, { capture: true, passive: true });
-    listen(window, 'pointermove', event => recordTouchTimestamp(true, event), { capture: true, passive: true });
-    const clearActiveTouch = event => {
-        if (event.pointerType === 'touch' && event.pointerId === h.activeTouchId) h.activeTouchId = null;
+    const RECONCILE_BACKOFF_MS = [40, 120, 400, 1200, 1200];
+    const cancelReconcile = () => {
+        if (h.reconcileRaf) {
+            if (typeof globalThis.cancelAnimationFrame === 'function') globalThis.cancelAnimationFrame(h.reconcileRaf);
+            else clearTimeout(h.reconcileRaf);
+            h.reconcileRaf = 0;
+        }
+        if (h.reconcileTimer) {
+            clearTimeout(h.reconcileTimer);
+            h.reconcileTimer = 0;
+        }
+        h.reconcileFollowUp = false;
+    };
+    const reconcileFocus = (clearPending = false) => {
+        if (h.disposed || h.syncing) return false;
+        if (h.activeTouchId !== null || h.pressedPointers.size > 0) return false;
+        if (clearPending) h.pendingFieldBlur = false;
+        if (!h.key || !h.domFocused || typeof h.menu?.done === 'function') return false;
+        if (document.activeElement === h.field) return false;
+        if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+        if (document.hidden) return false;
+        h.pendingFieldBlur = false;
+        h.domFocused = false;
+        cancelReconcile();
+        send({ kind: 'field_blur', key: h.key });
+        return true;
+    };
+    // Bounded reconciliation after blur, focusout, focusin, window focus, visibility return, or
+    // visualViewport resize so event-order races (delayed activeElement settlement, transient
+    // window blur during keyboard hide, or visualViewport retraction after a suppressed blur)
+    // clear a stale caret without adding any idle timer or frame loop. Tagged with focusGen so a
+    // newer focus cancels any stale check. When followUp is true (blur/focusout fired while
+    // activeElement was still h.field), a short bounded back-off checks at next rAF, +40, +120,
+    // +400, +1200, and +1200 ms (~3 s total) and then stops; document focusin and subsequent user
+    // input (keydown/wheel/pointermove/pointerup) catch arbitrarily late settles at zero idle cost.
+    const scheduleReconcile = (followUp = false) => {
+        if (h.disposed || !h.key || !h.domFocused) return;
+        if (followUp) h.reconcileFollowUp = true;
+        if (h.reconcileRaf) return;
+        if (h.reconcileTimer) {
+            if (document.activeElement === h.field) return;
+            clearTimeout(h.reconcileTimer);
+            h.reconcileTimer = 0;
+        }
+        const gen = h.focusGen;
+        const scheduleBackoff = idx => {
+            if (idx >= RECONCILE_BACKOFF_MS.length || h.disposed || gen !== h.focusGen) {
+                h.pendingFieldBlur = false;
+                h.reconcileFollowUp = false;
+                return;
+            }
+            if (!h.key || !h.domFocused || document.activeElement !== h.field) {
+                reconcileFocus(true);
+                return;
+            }
+            h.reconcileTimer = setTimeout(() => {
+                h.reconcileTimer = 0;
+                if (h.disposed || gen !== h.focusGen) return;
+                const last = idx + 1 >= RECONCILE_BACKOFF_MS.length;
+                if (reconcileFocus(last)) return;
+                if (!last && h.reconcileFollowUp && h.key && h.domFocused && document.activeElement === h.field) {
+                    scheduleBackoff(idx + 1);
+                } else {
+                    h.pendingFieldBlur = false;
+                    h.reconcileFollowUp = false;
+                }
+            }, RECONCILE_BACKOFF_MS[idx]);
+        };
+        const run = () => {
+            h.reconcileRaf = 0;
+            if (h.disposed || gen !== h.focusGen) return;
+            const more = h.reconcileFollowUp;
+            if (reconcileFocus(!more)) return;
+            if (more && !h.disposed && gen === h.focusGen && h.key && h.domFocused && document.activeElement === h.field) {
+                scheduleBackoff(0);
+            } else {
+                h.pendingFieldBlur = false;
+                h.reconcileFollowUp = false;
+            }
+        };
+        if (typeof globalThis.requestAnimationFrame === 'function') {
+            h.reconcileRaf = globalThis.requestAnimationFrame(run);
+        } else {
+            h.reconcileRaf = setTimeout(run, 0);
+        }
+    };
+    h.cancelReconcile = cancelReconcile;
+    h.scheduleReconcile = scheduleReconcile;
+    const checkFieldBlur = () => {
+        if (!h.pendingFieldBlur) return;
+        if (!reconcileFocus(false)) scheduleReconcile(true);
+    };
+    const reconcileOnActivity = () => {
+        if (h.disposed || h.syncing || !h.key || !h.domFocused || typeof h.menu?.done === 'function') return;
+        if (document.activeElement === h.field) return;
+        reconcileFocus(false);
+    };
+    listen(document, 'focusin', event => {
+        if (h.disposed || h.syncing || !h.key || !h.domFocused || typeof h.menu?.done === 'function') return;
+        if (event.target === h.field || event.target?.hasAttribute?.('data-rune-clipboard')) return;
+        h.pendingFieldBlur = true;
+        queueMicrotask(checkFieldBlur);
+    });
+    listen(window, 'keydown', reconcileOnActivity, { capture: true, passive: true });
+    listen(window, 'wheel', reconcileOnActivity, { capture: true, passive: true });
+    listen(window, 'pointermove', event => {
+        recordTouchTimestamp(true, event);
+        reconcileOnActivity();
+    }, { capture: true, passive: true });
+    const finishPointer = (pid, gen) => {
+        if (gen === undefined || h.pressedPointers.get(pid) !== gen) return;
+        clearPointerEndTimer(pid);
+        h.pressedPointers.delete(pid);
+        if (h.disposed) return;
+        if (h.pressedPointers.size === 0) applyKeyboardShift(h);
+        if (h.pendingFieldBlur) queueMicrotask(checkFieldBlur);
+        else if (h.key && h.domFocused && document.activeElement !== h.field) queueMicrotask(reconcileOnActivity);
+    };
+    const capturePointerEnd = event => {
+        const pid = event.pointerId;
+        if (event.pointerType === 'touch' && pid === h.activeTouchId) {
+            h.activeTouchId = null;
+        }
+        // Fallback if a page listener stops propagation before window bubble phase runs;
+        // tagged with this press's generation and cancelled on bubblePointerEnd or a new press.
+        const gen = typeof pid === 'number' ? h.pressedPointers.get(pid) : undefined;
+        if (gen !== undefined) {
+            clearPointerEndTimer(pid);
+            h.pointerEndTimers.set(pid, setTimeout(() => {
+                h.pointerEndTimers.delete(pid);
+                finishPointer(pid, gen);
+            }, 0));
+        } else if (h.pendingFieldBlur) {
+            queueMicrotask(checkFieldBlur);
+        }
         recordTouchTimestamp(false, event);
     };
-    listen(window, 'pointerup', clearActiveTouch, { capture: true, passive: true });
-    listen(window, 'pointercancel', clearActiveTouch, { capture: true, passive: true });
+    // Release pressedPointers in window bubble phase - AFTER winit's target-phase listener on
+    // canvas has already read offsetX/offsetY and completed the press. (A microtask queued from
+    // capture phase runs at the per-listener microtask checkpoint BEFORE canvas's listener.)
+    const bubblePointerEnd = event => {
+        const pid = event.pointerId;
+        if (typeof pid === 'number') finishPointer(pid, h.pressedPointers.get(pid));
+    };
+    listen(window, 'pointerup', capturePointerEnd, { capture: true, passive: true });
+    listen(window, 'pointercancel', capturePointerEnd, { capture: true, passive: true });
+    listen(window, 'pointerup', bubblePointerEnd, { passive: true });
+    listen(window, 'pointercancel', bubblePointerEnd, { passive: true });
     listen(window, 'keyup', event => {
         if (ownsTarget(event.target) && !(event.target === canvas && MOD_KEYS.includes(event.key))) syncMods(event);
     }, { capture: true, passive: true });
@@ -282,13 +549,25 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
     listen(window, 'keyup', event => {
         if (event.target === canvas && MOD_KEYS.includes(event.key)) syncMods(event);
     }, { passive: true });
-    listen(window, 'blur', () => { h.modBits = 0; h.activeTouchId = null; h.a11yTouchId = null; h.pendingLinkDrag = null; disarmLink(h); });
-    listen(document, 'visibilitychange', () => { if (document.hidden) { h.modBits = 0; h.activeTouchId = null; h.a11yTouchId = null; h.pendingLinkDrag = null; disarmLink(h); } });
+    listen(window, 'blur', () => { h.modBits = 0; h.activeTouchId = null; h.a11yTouchId = null; h.pendingLinkDrag = null; h.pendingFieldBlur = false; h.gestureUsed = false; h.gestureActive = false; clearAllPointerEndTimers(); h.pressedPointers.clear(); applyKeyboardShift(h); disarmLink(h); disarmMenu(h); });
+    listen(window, 'focus', () => { if (h.key && h.domFocused && document.activeElement !== h.field) scheduleReconcile(false); });
+    listen(document, 'visibilitychange', () => {
+        if (document.hidden) {
+            h.modBits = 0; h.activeTouchId = null; h.a11yTouchId = null; h.pendingLinkDrag = null; h.pendingFieldBlur = false; h.gestureUsed = false; h.gestureActive = false; clearAllPointerEndTimers(); h.pressedPointers.clear(); applyKeyboardShift(h); disarmLink(h); disarmMenu(h);
+        } else if (h.key && h.domFocused && document.activeElement !== h.field) {
+            scheduleReconcile(false);
+        }
+    });
     listen(document, 'pointerlockchange', () => {
         if (h.disposed) return;
         const locked = document.pointerLockElement === canvas;
         if (locked) {
-            if (!h.pointerLockPending && !h.pointerLocked) {
+            if (h.pointerLocked) {
+                // Second pointerlockchange from an in-place option upgrade (W3C Pointer Lock 2.0
+                // step 6.3.2): already locked, no duplicate event to Rust.
+                return;
+            }
+            if (!h.pointerLockPending) {
                 // Lock arrived after Rune cancelled or unmounted: exit immediately.
                 if (typeof document.exitPointerLock === 'function') {
                     try { document.exitPointerLock(); } catch {}
@@ -298,7 +577,9 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
             h.pointerLocked = true;
             h.pointerLockPending = false;
             h.pointerLockHasPromise = false;
+            const seq = h.pointerLockSeq;
             send({ kind: 'pointer_lock', locked: true });
+            upgradeUnadjustedMovement(h, seq);
         } else if (h.pointerLocked) {
             h.pointerLocked = false;
             h.pointerLockPending = false;
@@ -320,9 +601,12 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         if (dx === 0 && dy === 0) return;
         send({ kind: 'pointer_motion', dx, dy });
     }, { capture: true, passive: true });
-    function changed(preedit = false) {
-        const backward = textarea.selectionDirection === 'backward';
-        const edit = replacement(h.domValue, textarea.value, preedit ? h.composition : '', textarea.selectionEnd);
+    function changed(field, preedit = false) {
+        const val = field.value;
+        const rawStart = typeof field.selectionStart === 'number' ? field.selectionStart : val.length;
+        const rawEnd = typeof field.selectionEnd === 'number' ? field.selectionEnd : val.length;
+        const backward = field.selectionDirection === 'backward';
+        const edit = replacement(h.domValue, val, preedit ? h.composition : '', rawEnd);
         const start = domToRaw(edit.start, h.crlfs);
         const end = domToRaw(edit.end, h.crlfs);
         const mapNext = pos => {
@@ -331,57 +615,107 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
             if (pos <= insertedEnd) return start + (pos - edit.start);
             return start + edit.text.length + (domToRaw(edit.end + (pos - insertedEnd), h.crlfs) - end);
         };
-        const selStart = mapNext(textarea.selectionStart);
-        const selEnd = mapNext(textarea.selectionEnd);
+        const selStart = mapNext(rawStart);
+        const selEnd = mapNext(rawEnd);
         send({ kind: preedit ? 'preedit' : 'edit', key: h.key, base: h.base, expected: h.value,
             start, end, text: edit.text,
             anchor: backward ? selEnd : selStart,
             focus: backward ? selStart : selEnd });
     }
-    const key = (name, event = {}) => send({ kind: 'key', key: name, code: event.code ?? '', shift: !!event.shiftKey,
-        ctrl: !!event.ctrlKey, alt: !!event.altKey, meta: !!event.metaKey, repeat: !!event.repeat });
-    listen(textarea, 'input', event => {
-        // No Rune field has the keyboard: nothing to edit, so the field stays empty.
-        if (!h.key) { textarea.value = ''; return; }
-        changed(h.composing || event.isComposing);
+    const releaseProxyFocus = field => {
+        if (h.disposed || h.key || document.activeElement !== field || typeof h.menu?.done === 'function') return;
+        if (!h.page) h.canvas.focus({ preventScroll: true });
+        if (document.activeElement === field) field.blur?.();
+    };
+    const key = (name, event = {}, after) => send({ kind: 'key', key: name, code: event.code ?? '', shift: !!event.shiftKey,
+        ctrl: !!event.ctrlKey, alt: !!event.altKey, meta: !!event.metaKey, repeat: !!event.repeat }, after);
+    for (const textField of [textarea, input]) {
+        listen(textField, 'input', event => {
+            if (textField === input && h.field !== input) {
+                const text = input.value;
+                input.value = '';
+                if (h.peerKey && !h.peerSecure) send({ kind: 'autofill', key: h.peerKey, text, secure: false });
+                return;
+            }
+            // No Rune field has the keyboard: nothing to edit, so the field stays empty.
+            if (!h.key || h.field !== textField) { textField.value = ''; return; }
+            changed(textField, h.composing || event.isComposing);
+        });
+        listen(textField, 'compositionstart', () => {
+            if (h.key && h.field === textField) { h.composing = true; h.composition = ''; }
+        });
+        listen(textField, 'compositionupdate', event => {
+            if (!h.key || h.field !== textField) return;
+            h.composition = event.data ?? '';
+            queueMicrotask(() => { if (!h.disposed && h.composing && h.key && h.field === textField) changed(textField, true); });
+        });
+        listen(textField, 'compositionend', () => {
+            if (!h.key || h.field !== textField) {
+                if (h.field === textField) { h.composing = false; h.composition = ''; }
+                if (!h.key) textField.value = '';
+                return;
+            }
+            changed(textField);
+            h.composing = false; h.composition = '';
+            send({ kind: 'sync' });
+        });
+        listen(textField, 'select', () => {
+            if (h.syncing || h.composing || !h.key || h.field !== textField || document.activeElement !== textField) return;
+            if (typeof textField.selectionStart !== 'number' || typeof textField.selectionEnd !== 'number') return;
+            const backward = textField.selectionDirection === 'backward';
+            const selStart = domToRaw(textField.selectionStart, h.crlfs);
+            const selEnd = domToRaw(textField.selectionEnd, h.crlfs);
+            send({ kind: 'selection', key: h.key, base: h.base, expected: h.value,
+                anchor: backward ? selEnd : selStart,
+                focus: backward ? selStart : selEnd });
+        });
+    }
+    listen(password, 'input', event => {
+        if (h.field !== password) {
+            const text = password.value;
+            password.value = '';
+            if (h.peerKey && h.peerSecure) send({ kind: 'autofill', key: h.peerKey, text, secure: true });
+            return;
+        }
+        passwordInput(event, password, h.key, send);
     });
-    listen(textarea, 'compositionstart', () => { h.composing = true; h.composition = ''; });
-    listen(textarea, 'compositionupdate', event => {
-        h.composition = event.data ?? '';
-        queueMicrotask(() => { if (!h.disposed && h.composing) changed(true); });
-    });
-    listen(textarea, 'compositionend', () => {
-        changed();
-        h.composing = false; h.composition = '';
-        send({ kind: 'sync' });
-    });
-    listen(password, 'input', event => passwordInput(event, password, h.key, send));
-    for (const field of [textarea, password]) {
+    for (const field of [textarea, input, password]) {
+        const isSecure = field === password;
         listen(field, 'paste', event => {
             // Only a paste into a Rune field is Rune's; the browser keeps the rest.
-            if (!h.key) return;
+            if (!h.key || field !== h.field) return;
             event.preventDefault();
             const data = event.clipboardData;
-            h.image = field === textarea ? [...(data?.items ?? [])].find(i => i.kind === 'file' && i.type === 'image/png')?.getAsFile() ?? undefined : undefined;
-            // Files go only to the text field: a password field takes text alone.
-            const files = field === textarea ? offerFiles(data?.files) : [];
+            h.image = !isSecure ? findClipboardImageFile(data?.items, data?.files) : undefined;
+            // Files go only to non-secure text fields: a password field takes text alone.
+            const files = !isSecure ? offerFiles(data?.files) : [];
             try {
-                send({ kind: 'paste', text: data?.getData('text/plain') ?? '', html: field === textarea ? data?.getData('text/html') ?? '' : '', image: !!h.image, files }, () => settleFiles(files));
+                send({ kind: 'paste', text: data?.getData('text/plain') ?? '', html: !isSecure ? data?.getData('text/html') ?? '' : '', image: !!h.image, files }, () => settleFiles(files));
             } finally {
                 if (h.syncing) queueMicrotask(() => { h.image = undefined; });
                 else h.image = undefined;
             }
         });
         listen(field, 'beforeinput', event => {
+            if (h.key && field !== h.field) return;
+            const after = !h.key ? () => releaseProxyFocus(field) : undefined;
             if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') {
                 event.preventDefault();
-                if (!h.composing && !event.isComposing) key('Enter', { shiftKey: h.shift, code: 'Enter' });
-            } else if (field === password && event.inputType.startsWith('delete')) {
+                if (!h.composing && !event.isComposing) key('Enter', { shiftKey: h.shift, code: 'Enter' }, after);
+            } else if (isSecure && event.inputType.startsWith('delete')) {
                 event.preventDefault();
                 const forward = event.inputType.endsWith('Forward');
                 key(forward ? 'Delete' : 'Backspace',
-                    { altKey: event.inputType.includes('Word'), code: forward ? 'Delete' : 'Backspace' });
-            } else if (field === textarea && !h.composing && !event.isComposing && event.inputType.startsWith('delete')) {
+                    { altKey: event.inputType.includes('Word'), code: forward ? 'Delete' : 'Backspace' }, after);
+            } else if (!h.key && !h.composing && !event.isComposing && event.inputType.startsWith('delete')) {
+                event.preventDefault();
+                const forward = event.inputType.endsWith('Forward');
+                key(forward ? 'Delete' : 'Backspace',
+                    { altKey: event.inputType.includes('Word'), code: forward ? 'Delete' : 'Backspace' }, after);
+            } else if (!h.key && !h.composing && !event.isComposing && event.inputType === 'insertText' && event.data === ' ') {
+                event.preventDefault();
+                key(' ', { shiftKey: h.shift, code: 'Space' }, after);
+            } else if (!isSecure && !h.composing && !event.isComposing && event.inputType.startsWith('delete')) {
                 if (field.selectionStart === 0 && field.selectionEnd === 0 && event.inputType.endsWith('Backward')) {
                     event.preventDefault();
                     key('Backspace', { altKey: event.inputType.includes('Word'), code: 'Backspace' });
@@ -393,13 +727,21 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
             }
         });
         listen(field, 'keydown', event => {
+            if (h.key && field !== h.field) return;
             h.shift = event.shiftKey;
             if (event.isComposing || h.composing || event.keyCode === 229) return;
+            const inField = !!h.key;
             // On Windows European layouts AltGr sets both ctrlKey and altKey; let those characters type.
             const chord = (event.metaKey || event.ctrlKey) && !event.getModifierState?.('AltGraph');
             const editing = ['Enter', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
-            if (field === password) editing.push('Backspace', 'Delete');
-            else {
+            if (!inField) {
+                // A hidden proxy can still hold DOM focus for a turn after Rune focus leaves text
+                // (including an inactive <input> or password proxy after h.field resets). There
+                // Space and editing keys are control keys, not text input for a mirrored field.
+                editing.push(' ', 'Backspace', 'Delete', 'Insert', 'ContextMenu', 'PrintScreen', 'ScrollLock', 'Pause');
+            } else if (isSecure) {
+                editing.push('Backspace', 'Delete');
+            } else {
                 // At either boundary with nothing selected, the browser deletes nothing and fires
                 // no `input` event, so forward Backspace or Delete as a key as native platforms
                 // and password fields do.
@@ -408,27 +750,45 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
             }
             // Forward function keys other than what `browserShortcut` leaves to the browser so
             // focused fields receive them as canvas focus does.
-            const functionKey = FUNCTION_KEY.test(event.key) && !browserShortcut(event);
+            const functionKey = FUNCTION_KEY.test(event.key) && !browserShortcut(event, inField);
             const mediaKey = h.mediaKeys && MEDIA_KEYS.includes(event.key);
-            if (!chord && !functionKey && !mediaKey && !editing.includes(event.key)) return;
-            if (chord && event.key.toLowerCase() === 'v') return;
-            event.preventDefault();
-            key(event.key, event);
+            // When no Rune text field is active, single printable characters are control/shortcut
+            // keys (matching canvas focus) rather than text input for the hidden proxy.
+            const printableKey = !inField && !chord && typeof event.key === 'string'
+                && Array.from(event.key).length === 1 && !/[\u0000-\u001f\u007f-\u009f]/.test(event.key);
+            if (!chord && !functionKey && !mediaKey && !printableKey && !editing.includes(event.key)) return;
+            if (inField && chord && event.key.toLowerCase() === 'v') return;
+            // Browser-reserved chords stay un-prevented unless a Rune handler consumes them
+            // synchronously (signaled via `syncKey`), while text-editing chords always preventDefault.
+            const browser = browserShortcut(event, inField);
+            if (!browser) event.preventDefault();
+            h.keyUsed = false;
+            key(event.key, event, !inField ? () => releaseProxyFocus(field) : undefined);
+            const used = h.keyUsed;
+            h.keyUsed = false;
+            if (browser && shouldPreventKeydown(event, inField, used, h.copyText)) event.preventDefault();
         });
         listen(field, 'keyup', event => { h.shift = event.shiftKey; });
-        listen(field, 'blur', () => { h.shift = false; });
+        listen(field, 'focus', () => {
+            if (!h.disposed && h.key && field === h.field) {
+                h.focusGen += 1;
+                h.domFocused = true;
+                h.pendingFieldBlur = false;
+                cancelReconcile();
+            }
+        });
+        const isTempClipboard = event => !!event?.relatedTarget?.hasAttribute?.('data-rune-clipboard');
+        const onFieldLostFocus = event => {
+            if (h.disposed || h.syncing || !h.key || field !== h.field || isTempClipboard(event)) return;
+            h.pendingFieldBlur = true;
+            queueMicrotask(checkFieldBlur);
+        };
+        listen(field, 'blur', event => { if (isTempClipboard(event)) return; h.shift = false; onFieldLostFocus(event); });
+        listen(field, 'focusout', onFieldLostFocus);
     }
-    listen(textarea, 'select', () => {
-        if (h.syncing || h.composing || document.activeElement !== textarea) return;
-        const backward = textarea.selectionDirection === 'backward';
-        const selStart = domToRaw(textarea.selectionStart, h.crlfs);
-        const selEnd = domToRaw(textarea.selectionEnd, h.crlfs);
-        send({ kind: 'selection', key: h.key, base: h.base, expected: h.value,
-            anchor: backward ? selEnd : selStart,
-            focus: backward ? selStart : selEnd });
-    });
     // Synchronous copy support for read-only `El::selectable` selections (`Edit › Copy` / ⌘C).
     listen(document, 'copy', event => {
+        if (event.target?.hasAttribute?.('data-rune-clipboard')) return;
         const active = document.activeElement;
         if (!h.key && h.copyText && event.clipboardData && (active === canvas || active === document.body)) {
             event.preventDefault();
@@ -436,8 +796,8 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         }
     });
     // Files dropped while a Rune field has the keyboard are pasted into it, as a page's field
-    // takes a drop: the first file as a pasted image when it is a PNG, or as text when it is
-    // text, and every file (up to `MAX_WEB_FILES`) as a handle for `ClipboardContent::web_files`
+    // takes a drop: the first file as a pasted image when it is a raster image, or as text when
+    // it is text, and every file (up to `MAX_WEB_FILES`) as a handle for `ClipboardContent::web_files`
     // unless the field is a password field, which, as with a paste, takes no files.
     // Elsewhere a drop does nothing (the browser would open the file in place of the app).
     listen(canvas, 'dragover', event => {
@@ -452,9 +812,14 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         if (!h.key) return;
         // The `FileList` empties once this handler yields, so take the handles before reading.
         const files = h.field === h.password ? [] : offerFiles(event.dataTransfer.files);
-        if (file.type === 'image/png') {
+        if (h.field !== h.password && isRasterImageType(file.type)) {
             h.image = file;
-            send({ kind: 'paste', text: '', html: '', image: true, files }, () => settleFiles(files));
+            try {
+                send({ kind: 'paste', text: '', html: '', image: true, files }, () => settleFiles(files));
+            } finally {
+                if (h.syncing) queueMicrotask(() => { h.image = undefined; });
+                else h.image = undefined;
+            }
             return;
         }
         // Only a small text file is read as text; a bigger one arrives as a handle alone.
@@ -487,12 +852,21 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         }
     }, { passive: true });
     listen(canvas, 'keydown', event => {
+        const used = h.keyUsed;
+        h.keyUsed = false;
         if (page && !h.focused && SCROLL_KEYS.includes(event.key) && !event.metaKey && !event.ctrlKey) return;
         if (!h.mediaKeys && MEDIA_KEYS.includes(event.key)) return;
-        if (!browserShortcut(event)) event.preventDefault();
+        if (shouldPreventKeydown(event, false, used, h.copyText)) event.preventDefault();
     });
+    if (embedded && !page) {
+        listen(window, 'scroll', () => { if (!h.disposed && h.key && h.caret && !h.fieldArmed) placeCaretFields(h); }, { passive: true });
+    }
     if (page) {
-        const scrolled = () => { h.lastScrollAt = performance.now(); send({ kind: 'scroll', y: window.scrollY }); };
+        const scrolled = () => {
+            h.lastScrollAt = performance.now();
+            if (h.key && h.caret && !h.fieldArmed) placeCaretFields(h);
+            send({ kind: 'scroll', y: window.scrollY });
+        };
         listen(window, 'scroll', scrolled, { passive: true });
         // A finger down or a page still coasting moves the export's layout under the reader; the
         // swap to the live mirror waits for it (see `dropStatic`).
@@ -529,7 +903,32 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
             if (event.ctrlKey && !used) return;
             event.preventDefault();
         }, { passive: false });
-        listen(document, 'gesturestart', event => event.preventDefault(), { passive: false });
+        // Safari/WebKit trackpad and touchscreen pinch-zoom: leave browser zoom alone in document
+        // mode, outside Rune's elements, and whenever no Rune `on_magnify` or `on_rotate` handler
+        // lies under the gesture point (`syncGesture`).
+        if (!page) {
+            listen(document, 'gesturestart', event => {
+                if (!ownsTarget(event.target)) return;
+                h.gestureUsed = false;
+                const payload = { kind: 'gesture_start' };
+                if (Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+                    const r = canvas.getBoundingClientRect();
+                    payload.x = event.clientX - r.left;
+                    payload.y = event.clientY - r.top;
+                }
+                send(payload);
+                h.gestureActive = !!h.gestureUsed;
+                h.gestureUsed = false;
+                if (h.gestureActive) event.preventDefault();
+            }, { passive: false });
+            listen(document, 'gesturechange', event => {
+                if (h.gestureActive && ownsTarget(event.target)) event.preventDefault();
+            }, { passive: false });
+            listen(document, 'gestureend', () => {
+                h.gestureActive = false;
+                h.gestureUsed = false;
+            }, { passive: true });
+        }
     } else {
         listen(canvas, 'wheel', forwardPageWheel, { passive: true });
     }
@@ -537,7 +936,7 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         // Printing prints what's on screen (the canvas, and the mirror's text over it, which the
         // PDF keeps selectable), fitted to the paper's width rather than cut off at its edge.
         const style = document.createElement('style');
-        style.textContent = '@media print{canvas,[data-rune-a11y]{transform:scale(var(--rune-print-scale,1));transform-origin:0 0}}';
+        style.textContent = '@media print{canvas,[data-rune-web-images],[data-rune-a11y]{transform:scale(var(--rune-print-scale,1));transform-origin:0 0}}';
         document.head.append(style);
         listen(window, 'beforeprint', () => {
             // An A4 or Letter page's printable width at the browser's default margins, in CSS pixels.
@@ -594,12 +993,7 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
         // Block native HTML link-drag ghosts so a primary drag starting on an armed link promotes
         // into a Rune text-selection drag instead of cancelling pointer moves.
         listen(a11y, 'dragstart', event => event.preventDefault());
-        listen(a11y, 'click', event => {
-            if (h.suppressLinkClickUntil > performance.now()) {
-                h.suppressLinkClickUntil = 0;
-                event.preventDefault();
-            }
-        });
+        listen(a11y, 'click', event => { consumeSuppressedClick(h, event); }, { capture: true });
         if (!fitHeight) {
             listen(a11y, 'touchstart', event => event.preventDefault(), { passive: false });
         }
@@ -672,12 +1066,13 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
     // field), never the canvas's image menu; Shift+right-click always opens the browser's. Armed
     // before the menu's event, which on Windows and Linux follows the release; macOS's follows the
     // press, which Rune has just heard (`syncSecondary`).
-    const isSecondaryPress = event => event.button === 2 || (MAC && event.button === 0 && event.ctrlKey);
+    const mac = isMac();
+    const isSecondaryPress = event => event.button === 2 || (mac && event.button === 0 && event.ctrlKey);
     const armAt = event => {
         if (!isSecondaryPress(event) || event.pointerType === 'touch' || event.target !== canvas) return;
         if (armMenu(h, event.clientX, event.clientY, event.shiftKey)) send({ kind: 'secondary_browser' });
     };
-    if (MAC) listen(canvas, 'pointerdown', armAt);
+    if (mac) listen(canvas, 'pointerdown', armAt);
     else listen(window, 'pointerup', armAt, { capture: true });
     listen(document, 'contextmenu', event => {
         const touchOrigin = event.target === canvas
@@ -690,7 +1085,10 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
             send({ kind: 'touch_hold', id });
             return;
         }
-        if (h.menu === 'rune' || event.target === canvas) event.preventDefault();
+        // When armMenu armed the browser's menu (h.menu === 'browser') and already abandoned Rune's
+        // menu via secondary_browser, never suppress contextmenu even if Safari/Firefox on macOS
+        // still resolved contextmenu's target to canvas.
+        if (h.menu === 'rune' || (h.menu !== 'browser' && event.target === canvas)) event.preventDefault();
         if (h.menu === 'rune') h.menu = '';
     }, { capture: true });
     for (const name of ['pointerdown', 'keydown', 'wheel']) {
@@ -698,46 +1096,101 @@ export function mount(canvas, callback, embedded, fitHeight, page) {
     }
     queueMicrotask(() => {
         if (!h.disposed && !embedded && !page && document.activeElement === document.body) {
-            (h.key ? h.field : canvas).focus({ preventScroll: true });
-            if (h.key) reselect(h);
+            if (h.key) focusInput(h);
+            else canvas.focus({ preventScroll: true });
         }
     });
     return h;
 }
 
-// Reapplies the synced non-secure selection after focus moves to the hidden textarea (browsers
-// collapse an unfocused textarea's selection to 0), without disturbing an active composition.
+// Reapplies the synced non-secure selection after focus moves to the hidden text field (browsers
+// collapse an unfocused field's selection to 0), without disturbing an active composition.
 function reselect(h) {
-    if (!h.selection || h.field !== h.textarea || h.composing) return;
+    if (!h.selection || h.field === h.password || h.composing) return;
+    const field = h.field;
     const [start, end, direction] = h.selection;
-    if (h.textarea.selectionStart !== start || h.textarea.selectionEnd !== end || h.textarea.selectionDirection !== direction) {
+    if (field.selectionStart !== start || field.selectionEnd !== end || field.selectionDirection !== direction) {
         const syncing = h.syncing;
         h.syncing = true;
-        try { h.textarea.setSelectionRange(start, end, direction); }
+        try { field.setSelectionRange(start, end, direction); }
+        catch {}
         finally { h.syncing = syncing; }
     }
 }
 
-export function sync(h, key, text, base, anchor, focus, secure) {
-    if (h.composing && key === h.key) return;
+// Prepares and focuses the active hidden input (`h.textarea`, `h.input`, or `h.password`) when
+// `h.key` is set. Sets `inert = false` and the field's `inputMode` BEFORE calling `focus()` so
+// iOS Safari evaluates `shouldShowAutomaticKeyboardUI` with the semantic keyboard mode at the
+// moment of focus (while keeping `opacity: 0` so WebKit suppresses native selection UI and
+// zoom-to-focus per r238146). When `force` is true (called from `activate()` inside a user
+// gesture), `focus()` runs even when `field` is already `document.activeElement` so WebKit's
+// `Element::focus` invokes `elementDidRefocus` (r188405/r290646) to re-present the keyboard if
+// dismissed while staying a zero-flicker no-op when the keyboard is already showing (r242833).
+function focusInput(h, force = false) {
+    const field = h.field;
+    h.focusGen += 1;
+    h.pendingFieldBlur = false;
+    h.cancelReconcile?.();
+    field.inert = false;
+    field.removeAttribute('aria-hidden');
+    field.inputMode = h.inputMode || 'text';
+    if (force || document.activeElement !== field) field.focus({ preventScroll: true });
+    if (document.activeElement === field) h.domFocused = true;
+    reselect(h);
+}
+
+export function sync(
+    h, key, text, base, anchor, focus, secure,
+    singleLine = false, inputMode = 'text', autofill = '',
+    peerKey = '', peerSecure = false, peerAutofill = '', peerType = '',
+) {
+    if (h.composing && key && key === h.key) return;
     h.composing = false;
+    h.composition = '';
     h.syncing = true;
     const active = document.activeElement;
-    const editing = active === h.textarea || active === h.password;
+    const editing = active === h.textarea || active === h.input || active === h.password;
     const { dom, crlfs } = key && !secure ? normalizeTextarea(text) : { dom: '', crlfs: null };
+    const mode = inputMode || 'text';
+    const af = autofill || '';
+    const useInput = !secure && !!singleLine && (mode !== 'text' || af !== '');
     h.key = key; h.base = base; h.value = text; h.domValue = dom; h.crlfs = crlfs;
+    h.inputMode = mode; h.autofill = af;
+    h.peerKey = key ? (peerKey || '') : '';
+    h.peerSecure = key ? !!peerSecure : false;
     h.password.value = '';
-    h.field = secure ? h.password : h.textarea;
+    h.field = secure ? h.password : (useInput ? h.input : h.textarea);
     if (!key) {
+        h.focusGen += 1;
+        h.pendingFieldBlur = false;
+        h.domFocused = false;
+        h.cancelReconcile?.();
         h.selection = null;
         h.textarea.value = '';
-        if (editing) h.canvas.focus({ preventScroll: true });
-        h.textarea.inert = true;
-        h.password.inert = true;
-        h.textarea.inputMode = h.password.inputMode = coarse() ? 'none' : 'text';
+        h.input.value = '';
+        if (editing) {
+            h.canvas.focus({ preventScroll: true });
+            if (document.activeElement === active) active.blur?.();
+        }
+        for (const f of [h.textarea, h.input, h.password]) {
+            f.inert = true;
+            f.removeAttribute('aria-hidden');
+            f.inputMode = coarse() ? 'none' : 'text';
+        }
     } else {
         h.field.inert = false;
-        if (h.textarea.value !== dom) h.textarea.value = dom;
+        h.field.removeAttribute('aria-hidden');
+        applyInputSemantics(h.field, mode, af, secure);
+        if (h.field === h.textarea) {
+            if (h.textarea.value !== dom) h.textarea.value = dom;
+            h.input.value = '';
+        } else if (h.field === h.input) {
+            if (h.input.value !== dom) h.input.value = dom;
+            h.textarea.value = '';
+        } else {
+            h.textarea.value = '';
+            h.input.value = '';
+        }
         if (secure) {
             h.selection = null;
         } else {
@@ -747,11 +1200,45 @@ export function sync(h, key, text, base, anchor, focus, secure) {
             h.selection = [start, end, direction];
         }
         if (editing && active !== h.field) activate(h);
-        else if (active === h.canvas) h.field.focus({ preventScroll: true });
-        reselect(h);
-        (secure ? h.textarea : h.password).inert = true;
+        else if (active === h.canvas && !h.pendingFieldBlur) focusInput(h);
+        else {
+            h.field.inputMode = mode;
+            if (active === h.field) h.domFocused = true;
+            reselect(h);
+        }
+        // Pair the sibling credential input inside `h.form` when present so password managers
+        // detect the login form and can fill both fields simultaneously; mark all other inactive
+        // fields inert so they stay out of focus and assistive trees.
+        const peerField = h.peerKey ? (h.peerSecure ? h.password : h.input) : null;
+        for (const f of [h.textarea, h.input, h.password]) {
+            if (f === h.field) continue;
+            if (f === peerField) {
+                f.inert = false;
+                f.setAttribute('aria-hidden', 'true');
+                if (h.peerSecure) {
+                    const pAf = peerAutofill || 'current-password';
+                    f.autocomplete = pAf;
+                    f.setAttribute('autocomplete', pAf);
+                    f.name = pAf === 'new-password' ? 'new-password' : 'password';
+                    f.setAttribute('name', f.name);
+                } else {
+                    const pType = peerType === 'email' ? 'email' : 'text';
+                    if (f.type !== pType) f.type = pType;
+                    const pAf = peerAutofill || 'username';
+                    f.autocomplete = pAf;
+                    f.setAttribute('autocomplete', pAf);
+                    f.name = pAf === 'email' ? 'email' : 'username';
+                    f.setAttribute('name', f.name);
+                }
+                f.value = '';
+            } else {
+                f.inert = true;
+                f.removeAttribute('aria-hidden');
+            }
+        }
     }
     h.syncing = false;
+    applyKeyboardShift(h);
 }
 
 // Drops browser composition tracking after Rune finished/cancelled composition (e.g. on blur or hide).
@@ -775,11 +1262,40 @@ export function syncMediaKeys(h, enabled) {
     h.mediaKeys = !!enabled;
 }
 
-// Requests pointer lock on the canvas inside a user gesture. Tries `{ unadjustedMovement: true }`
-// first for raw unaccelerated deltas where supported, caching and falling back to plain
-// `requestPointerLock()` on `NotSupportedError` or synchronous `TypeError`. Any refusal
-// (`SecurityError`, missing API, or failed fallback) reports `{ kind: 'pointer_lock', locked: false }`
-// so Rune's state machine returns cleanly to Ready without getting stuck.
+// Upgrades an already-active plain pointer lock to `{ unadjustedMovement: true }` in place
+// (W3C Pointer Lock 2.0 step 6.3). If unsupported, the original plain lock remains intact and
+// the fallback is cached so later locks skip the upgrade.
+function upgradeUnadjustedMovement(h, seq) {
+    if (h.disposed || h.pointerLockUnadjustedFailed || !h.pointerLocked || h.pointerLockSeq !== seq) return;
+    const canvas = h.canvas;
+    if (document.pointerLockElement !== canvas || typeof canvas.requestPointerLock !== 'function') return;
+    try {
+        const res = canvas.requestPointerLock({ unadjustedMovement: true });
+        if (res && typeof res.then === 'function') {
+            res.then(
+                () => {},
+                err => {
+                    if (err && err.name === 'NotSupportedError') {
+                        h.pointerLockUnadjustedFailed = true;
+                    }
+                },
+            );
+        } else {
+            h.pointerLockUnadjustedFailed = true;
+        }
+    } catch (err) {
+        if (err && (err.name === 'NotSupportedError' || err.name === 'TypeError')) {
+            h.pointerLockUnadjustedFailed = true;
+        }
+    }
+}
+
+// Requests plain pointer lock synchronously inside the user gesture so the first click never
+// depends on an asynchronous retry (which can lose transient activation or race a stale
+// `pointerlockerror` when a platform rejects `unadjustedMovement`). Once `pointerlockchange`
+// confirms the lock, `upgradeUnadjustedMovement` upgrades it in place where supported. Any
+// refusal (`SecurityError`, missing API, or `pointerlockerror`) reports
+// `{ kind: 'pointer_lock', locked: false, refused: true }` so Rune returns cleanly to Ready.
 export function requestPointerLock(h) {
     if (h.disposed) return;
     const canvas = h.canvas;
@@ -798,70 +1314,28 @@ export function requestPointerLock(h) {
         h.pointerLockHasPromise = false;
         h.send({ kind: 'pointer_lock', locked: false, refused: true });
     };
-    const invoke = opts => {
+    h.syncing = true;
+    try {
         h.pointerLockCalling = true;
         h.pointerLockSyncError = false;
+        let res;
         try {
-            return opts === undefined ? canvas.requestPointerLock() : canvas.requestPointerLock(opts);
+            res = canvas.requestPointerLock();
         } finally {
             h.pointerLockCalling = false;
         }
-    };
-    const tryPlain = () => {
-        if (h.disposed || h.pointerLockSeq !== seq) return;
-        try {
-            const res = invoke(undefined);
-            if (res && typeof res.then === 'function') {
-                h.pointerLockHasPromise = true;
-                h.pointerLockSyncError = false;
-                res.then(
-                    () => { if (h.pointerLockSeq === seq) h.pointerLockHasPromise = false; },
-                    fail,
-                );
-            } else if (h.pointerLockSyncError) {
-                h.pointerLockSyncError = false;
-                fail();
-            }
-        } catch {
+        if (res && typeof res.then === 'function') {
+            // Keep `pointerLockHasPromise` true until `pointerlockchange` or `fail`, never
+            // clearing it in a fulfillment microtask before `pointerlockchange` fires.
+            h.pointerLockHasPromise = true;
+            h.pointerLockSyncError = false;
+            res.then(() => {}, fail);
+        } else if (h.pointerLockSyncError) {
+            h.pointerLockSyncError = false;
             fail();
         }
-    };
-    h.syncing = true;
-    try {
-        if (h.pointerLockUnadjustedFailed) {
-            tryPlain();
-            return;
-        }
-        try {
-            const res = invoke({ unadjustedMovement: true });
-            if (res && typeof res.then === 'function') {
-                h.pointerLockHasPromise = true;
-                h.pointerLockSyncError = false;
-                res.then(
-                    () => { if (h.pointerLockSeq === seq) h.pointerLockHasPromise = false; },
-                    err => {
-                        if (h.disposed || h.pointerLockSeq !== seq) return;
-                        h.pointerLockHasPromise = false;
-                        if (err && err.name === 'NotSupportedError') {
-                            h.pointerLockUnadjustedFailed = true;
-                            tryPlain();
-                            return;
-                        }
-                        fail();
-                    },
-                );
-            } else if (h.pointerLockSyncError) {
-                h.pointerLockSyncError = false;
-                fail();
-            }
-        } catch (err) {
-            if (err && (err.name === 'NotSupportedError' || err.name === 'TypeError')) {
-                h.pointerLockUnadjustedFailed = true;
-                tryPlain();
-            } else {
-                fail();
-            }
-        }
+    } catch {
+        fail();
     } finally {
         h.syncing = false;
     }
@@ -912,11 +1386,13 @@ export function showMenu(h, json, x, y, minWidth, dark) {
         h.send({ kind: 'menu', id });
     };
     const open = (spec, left, top, min, parentItem) => {
+        const vp = visualViewportBox();
+        const maxH = Math.max(40, Math.floor(vp.height - 8));
         const menu = document.createElement('div');
         menu.setAttribute('data-rune-menu', '');
         menu.setAttribute('role', 'menu');
         menu.tabIndex = -1;
-        menu.style.cssText = `position:fixed;left:0;top:0;z-index:2147483647;box-sizing:border-box;min-width:${Math.max(min, 160)}px;max-height:calc(100vh - 8px);overflow-y:auto;padding:${pad}px;margin:0;background:${colors.bg};color:${colors.fg};border:1px solid ${colors.line};border-radius:${radius}px;box-shadow:0 4px 16px rgba(0,0,0,.18);font:13px/18px system-ui,sans-serif;user-select:none;-webkit-user-select:none;outline:none`;
+        menu.style.cssText = `position:fixed;left:0;top:0;z-index:2147483647;box-sizing:border-box;min-width:${Math.max(min, 160)}px;max-height:${maxH}px;overflow-y:auto;padding:${pad}px;margin:0;background:${colors.bg};color:${colors.fg};border:1px solid ${colors.line};border-radius:${radius}px;box-shadow:0 4px 16px rgba(0,0,0,.18);font:13px/18px system-ui,sans-serif;user-select:none;-webkit-user-select:none;outline:none`;
         // The style's font as properties of their own, set after the defaults: a family the
         // browser can't parse (an unclosed quote) is rejected alone, keeping the default family,
         // size and line height and every other declaration.
@@ -971,15 +1447,19 @@ export function showMenu(h, json, x, y, minWidth, dark) {
             menu.append(row);
         }
         document.body.append(menu);
-        // Inside the viewport: flipped left of the parent item, or up, where it would overflow.
+        // Inside the visible viewport (`window.visualViewport` when present, so menus stay clear
+        // of mobile soft keyboards and pinch-zoomed edges): flipped left of the parent item, or
+        // up, where it would overflow.
         const r = menu.getBoundingClientRect();
+        const minL = vp.left + 4, maxR = vp.right - 4;
+        const minT = vp.top + 4, maxB = vp.bottom - 4;
         let l = left, t = top;
-        if (l + r.width > innerWidth - 4) l = parentItem ? parentItem.row.getBoundingClientRect().left - r.width + 4 : innerWidth - 4 - r.width;
+        if (l + r.width > maxR) l = parentItem ? parentItem.row.getBoundingClientRect().left - r.width + 4 : maxR - r.width;
         // A menu at a point opens upward from it where it would run off the bottom, as a context
         // menu does; a submenu moves up.
-        if (t + r.height > innerHeight - 4) t = Math.max(4, parentItem || top - r.height < 4 ? innerHeight - 4 - r.height : top - r.height);
-        menu.style.left = `${Math.max(4, l)}px`;
-        menu.style.top = `${Math.max(4, t)}px`;
+        if (t + r.height > maxB) t = Math.max(minT, parentItem || top - r.height < minT ? maxB - r.height : top - r.height);
+        menu.style.left = `${Math.max(minL, l)}px`;
+        menu.style.top = `${Math.max(minT, t)}px`;
         const level = { menu, rows, active: null, child: null, parentItem };
         menus.push(level);
         const focusRow = (item, fromPointer) => {
@@ -1014,10 +1494,15 @@ export function showMenu(h, json, x, y, minWidth, dark) {
     };
     const top = open(spec, box.left + x, box.top + y, minWidth, null);
     const selected = spec.selected && top.rows.find(r => r.id === spec.selected);
-    // A positioned menu puts its selected item over the point, as a pop-up button opens.
+    // A positioned menu puts its selected item over the point, as a pop-up button opens,
+    // clamped inside the visible viewport.
     if (selected) {
-        const dy = selected.row.getBoundingClientRect().top - top.menu.getBoundingClientRect().top;
-        top.menu.style.top = `${Math.max(4, box.top + y - dy)}px`;
+        const vp = visualViewportBox();
+        const topRect = top.menu.getBoundingClientRect();
+        const dy = selected.row.getBoundingClientRect().top - topRect.top;
+        const minT = vp.top + 4;
+        const maxT = Math.max(minT, vp.bottom - 4 - topRect.height);
+        top.menu.style.top = `${Math.min(maxT, Math.max(minT, box.top + y - dy))}px`;
     }
     top.menu.focus({ preventScroll: true });
     if (selected) top.focusRow(selected, false);
@@ -1089,16 +1574,104 @@ export function syncWheel(h, used) {
     h.wheelUsed = used;
 }
 
+// Whether a Rune `on_magnify` or `on_rotate` handler claimed the Safari `gesturestart` it just heard.
+export function syncGesture(h, used) {
+    h.gestureUsed = !!used;
+}
+
+// Whether a Rune handler consumed the keydown it just heard.
+export function syncKey(h, used) {
+    h.keyUsed = !!used;
+}
+
+// Vertical CSS shift (px, >= 0) to lift a focused field into the visible part of `visualViewport`
+// when the on-screen keyboard shrinks only the visual viewport (iOS Safari, Android Chrome default
+// `resizes-visual`) and no enclosing Rune scroll container could bring the caret above it.
+function keyboardShift(h) {
+    if (h.embedded || h.page || !h.key || !h.caret || !h.visualViewport) return 0;
+    const { top: visTop, bottom: visBottom, layoutH } = h.visualViewport;
+    const coveredBottom = Math.max(0, layoutH - visBottom);
+    if (coveredBottom <= 1) return 0;
+    const pad = 16;
+    const caretTop = h.caret[1];
+    const caretBottom = caretTop + h.caret[3];
+    const need = caretBottom + pad - visBottom;
+    if (need <= 0) return 0;
+    const maxKeepTop = Math.max(0, caretTop - (visTop + pad));
+    return Math.min(need, maxKeepTop, coveredBottom);
+}
+
+function applyKeyboardShift(h) {
+    if (h.pressedPointers.size > 0) return;
+    const shift = keyboardShift(h);
+    const prev = h.keyboardShiftY || 0;
+    if (Math.abs(shift - prev) < 0.5) return;
+    h.keyboardShiftY = shift;
+    const value = shift > 0 ? `translate3d(0, ${-shift}px, 0)` : '';
+    const sibling = h.canvas.previousElementSibling;
+    const targets = sibling?.hasAttribute?.('data-rune-cpu') ? [h.canvas, sibling, h.a11y] : [h.canvas, h.a11y];
+    if (h.webImages) targets.push(h.webImages);
+    for (const target of targets) target.style.transform = value;
+    placeCaretFields(h);
+}
+
+// Visible viewport box in `position: fixed` (layout-viewport) CSS coordinates, preferring
+// `window.visualViewport` when available so popup menus stay clear of mobile software keyboards
+// and pinch-zoomed viewport edges.
+function visualViewportBox() {
+    const layoutW = Number.isFinite(globalThis.innerWidth) && globalThis.innerWidth > 0 ? globalThis.innerWidth : 0;
+    const layoutH = Number.isFinite(globalThis.innerHeight) && globalThis.innerHeight > 0 ? globalThis.innerHeight : 0;
+    const v = globalThis.window?.visualViewport;
+    if (v && Number.isFinite(v.width) && v.width > 0 && Number.isFinite(v.height) && v.height > 0) {
+        const left = Number.isFinite(v.offsetLeft) ? Math.max(0, v.offsetLeft) : 0;
+        const top = Number.isFinite(v.offsetTop) ? Math.max(0, v.offsetTop) : 0;
+        const right = layoutW > 0 ? Math.min(layoutW, left + v.width) : left + v.width;
+        const bottom = layoutH > 0 ? Math.min(layoutH, top + v.height) : top + v.height;
+        if (right > left && bottom > top) {
+            return { left, top, right, bottom, width: right - left, height: bottom - top };
+        }
+    }
+    return { left: 0, top: 0, right: layoutW, bottom: layoutH, width: layoutW, height: layoutH };
+}
+
+// Updates the unzoomed visual viewport vertical band `[top, bottom]` within `layoutH` (CSS px)
+// so a focused field covered by the on-screen keyboard is shifted into view without resizing the
+// canvas. Passing `layoutH <= 0` or `bottom <= top` clears any active shift.
+export function syncVisualViewport(h, top, bottom, layoutH) {
+    h.visualViewport = layoutH > 0 && bottom > top ? { top, bottom, layoutH } : null;
+    applyKeyboardShift(h);
+    if (h.key && h.domFocused && document.activeElement !== h.field) h.scheduleReconcile?.();
+}
+
+// Canvas origin in layout-viewport (`position: fixed`) CSS coordinates: embedded and page
+// canvases use `getBoundingClientRect()` while full-window fixed canvases apply `keyboardShiftY`.
+// `position: fixed` shares layout-viewport coordinates with the canvas under pinch-zoom, so
+// `visualViewport.offsetLeft/offsetTop` is intentionally not added here.
+function caretOrigin(h) {
+    if (h.embedded || h.page) {
+        const box = h.canvas.getBoundingClientRect();
+        return [Number.isFinite(box.left) ? box.left : 0, Number.isFinite(box.top) ? box.top : 0];
+    }
+    return [0, -(h.keyboardShiftY || 0)];
+}
+
+function placeCaretFields(h) {
+    if (!h.caret || h.fieldArmed) return;
+    const [ox, oy] = caretOrigin(h);
+    const rect = [h.caret[0] + ox, h.caret[1] + oy, h.caret[2], h.caret[3]];
+    for (const field of [h.textarea, h.input, h.password]) placeField(field, rect);
+}
+
 // The focused field's IME area in window points: the page's own text field sits there, so an
 // input method's candidate window opens beside the caret, not in the page's corner.
 export function syncCaret(h, x, y, w, height) {
     h.caret = [x, y, Math.max(1, w), Math.max(1, height)];
-    if (h.fieldArmed) return;
-    for (const field of [h.textarea, h.password]) placeField(field, h.caret);
+    applyKeyboardShift(h);
+    placeCaretFields(h);
 }
 
-function placeField(field, [x, y, w, height]) {
-    Object.assign(field.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${height}px`, pointerEvents: 'none' });
+function placeField(field, [x, y, w, height], shiftY = 0) {
+    Object.assign(field.style, { left: `${x}px`, top: `${y - shiftY}px`, width: `${w}px`, height: `${height}px`, pointerEvents: 'none' });
 }
 
 function forwardWheelToCanvas(h, event) {
@@ -1203,18 +1776,37 @@ function linkContains(h, a, x, y) {
     return true;
 }
 
-// The mirror's web link under (x, y), if any.
+function consumeSuppressedClick(h, ev) {
+    if (h.suppressLinkClickUntil > performance.now()) {
+        h.suppressLinkClickUntil = 0;
+        ev.preventDefault();
+        return true;
+    }
+    return false;
+}
+
+// Forces a synchronous style/layout commit so engines that re-hit-test for contextmenu right after
+// pointerdown see the updated pointer-events box immediately.
+function flushLayout(el) {
+    if (typeof el?.getBoundingClientRect === 'function') el.getBoundingClientRect();
+    else void el?.offsetWidth;
+}
+
+// The mirror's navigable link under (x, y), if any (both external and same-origin links, skipping
+// disabled anchors and opaque non-URL action links).
 function linkAt(h, x, y) {
-    for (const a of h.a11y.querySelectorAll('a[target="_blank"]')) {
+    for (const a of h.a11y.querySelectorAll('a[href]')) {
+        if (a._opaqueLink || a.getAttribute('aria-disabled') === 'true') continue;
         if (linkContains(h, a, x, y)) return a;
     }
     return null;
 }
 
 function armLink(h, a) {
-    if (h.hoverLink === a) return;
+    if (!a || h.hoverLink === a || a._blockLink) return;
     disarmLink(h);
     h.hoverLink = a;
+    h.hoverLinkBefore = a.style.pointerEvents;
     a.style.pointerEvents = 'auto';
     a.style.cursor = 'pointer';
     const onLeave = () => { if (h.hoverLink === a) disarmLink(h); };
@@ -1228,7 +1820,8 @@ function disarmLink(h) {
         h.hoverLink.removeEventListener('pointerleave', h.hoverLinkLeave);
         h.hoverLinkLeave = null;
     }
-    h.hoverLink.style.pointerEvents = 'none';
+    h.hoverLink.style.pointerEvents = h.hoverLinkBefore || 'none';
+    h.hoverLinkBefore = null;
     h.hoverLink = null;
 }
 
@@ -1255,6 +1848,7 @@ function armMenu(h, x, y, browser) {
         h.fieldArmed = true;
         placeField(h.field, [x - 2, y - 2, 4, 4]);
         h.field.style.pointerEvents = 'auto';
+        flushLayout(h.field);
         return true;
     }
     if (h.copyText) {
@@ -1275,6 +1869,7 @@ function armMenu(h, x, y, browser) {
         const selection = getSelection();
         selection.removeAllRanges();
         selection.addRange(range);
+        flushLayout(h.pick);
         return true;
     }
     // Flush any deferred mirror update synchronously before hit-testing links/text for the menu.
@@ -1283,6 +1878,7 @@ function armMenu(h, x, y, browser) {
     const el = linkAt(h, x, y) ?? textAt(h, x, y) ?? h.a11y;
     h.armed = [el, el.style.pointerEvents];
     el.style.pointerEvents = 'auto';
+    flushLayout(el);
     return true;
 }
 
@@ -1309,7 +1905,7 @@ function disarmMenu(h) {
     }
     if (h.fieldArmed) {
         h.fieldArmed = false;
-        if (h.caret) placeField(h.field, h.caret);
+        if (h.caret) placeCaretFields(h);
         else Object.assign(h.field.style, { left: '0px', top: '0px', width: '1px', height: '1px', pointerEvents: 'none' });
     }
     if (h.menu === 'browser') h.menu = '';
@@ -1352,7 +1948,7 @@ function safeHref(url) {
     return null;
 }
 
-const TAGS = { heading: null, button: 'button', link: 'a', image: 'div', progressbar: 'div', text: 'p', scroll_x: 'div' };
+const TAGS = { heading: null, button: 'button', link: 'a', image: 'div', progressbar: 'div', text: 'p', scroll_x: 'div', textbox: 'div' };
 const RANGE_ROLES = new Set(['slider', 'spinbutton', 'progressbar', 'meter', 'scrollbar']);
 
 function family(name) {
@@ -1372,7 +1968,9 @@ function firstItem(el) {
 function runs(h, el, item) {
     for (const run of item.u) {
         const href = run.h ? safeHref(run.h) : null;
-        if (!href) { el.append(document.createTextNode(run.t)); continue; }
+        if (run.h && !href) { el.append(document.createTextNode(run.t)); continue; }
+        const hasAction = run.p !== undefined && run.i !== undefined;
+        if (!href && !hasAction) { el.append(document.createTextNode(run.t)); continue; }
         const a = document.createElement('a');
         a.textContent = run.t;
         if (run.d) a.setAttribute('aria-description', run.d);
@@ -1380,13 +1978,23 @@ function runs(h, el, item) {
         if (item.dis) {
             a.setAttribute('role', 'link');
             a.setAttribute('aria-disabled', 'true');
-        } else if (webLink(href)) {
+        } else if (href && webLink(href)) {
             a.href = href;
             a.target = '_blank';
             a.rel = 'noopener noreferrer';
+        } else if (href && href !== '#') {
+            a.href = href;
+            a.addEventListener('click', ev => {
+                if (consumeSuppressedClick(h, ev)) return;
+                if (ev.defaultPrevented || (ev.button ?? 0) !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+                ev.preventDefault();
+                h.send({ kind: 'a11y_link', path: run.p, link: run.i });
+            });
         } else {
             a.href = '#';
+            a._opaqueLink = true;
             a.addEventListener('click', ev => {
+                if (consumeSuppressedClick(h, ev)) return;
                 ev.preventDefault();
                 h.send({ kind: 'a11y_link', path: run.p, link: run.i });
             });
@@ -1409,7 +2017,11 @@ function itemStyle(h, item, origin) {
     const left = round1(x - origin[0]);
     const top = round1(y - origin[1]);
     let css = `position:absolute;left:${left}px;top:${top}px;width:${w}px;height:${bh}px;margin:0;padding:0;border:0;background:transparent;color:transparent;`;
-    if (item.k === 'group') return css + (item.sc ? 'overflow:hidden;list-style:none;pointer-events:none;' : 'overflow:visible;list-style:none;pointer-events:none;');
+    if (item.k === 'group') {
+        const overflow = item.sc ? 'overflow:hidden;' : 'overflow:visible;';
+        const list = item.g === 'ol' || item.g === 'li' ? '' : 'list-style:none;';
+        return css + overflow + list + 'pointer-events:none;';
+    }
     // A page's horizontal scroller: the browser scrolls it natively, so a flick inside a code
     // block scrolls the block at the compositor's rate while a vertical drag still scrolls the
     // page.
@@ -1417,7 +2029,7 @@ function itemStyle(h, item, origin) {
     if (item.k === 'link') return css + (item.dis
         ? 'display:block;overflow:hidden;text-decoration:none;pointer-events:none;font:14px/1.25 sans-serif;'
         : 'display:block;overflow:hidden;text-decoration:none;cursor:pointer;pointer-events:auto;font:14px/1.25 sans-serif;');
-    if (item.k === 'image' || item.k === 'button' || item.k === 'progressbar') return css + 'overflow:hidden;pointer-events:none;font:14px/1.25 sans-serif;';
+    if (item.k === 'image' || item.k === 'button' || item.k === 'progressbar' || item.k === 'textbox') return css + 'overflow:hidden;pointer-events:none;font:14px/1.25 sans-serif;';
     const fs = item.s || 14;
     if (!item.f) return css + `font:${fs}px/1.25 sans-serif;overflow:hidden;white-space:pre-wrap;pointer-events:none;`;
     const [fam, weight, lh, tracking, italic, align] = item.f;
@@ -1458,23 +2070,54 @@ function contentParent(el) {
     return el._scrollContent ?? el;
 }
 
+function a11yItemKey(tag, item) {
+    return item.ca ? `${tag}:${item.p}\x1f${item.ca}` : `${tag}:${item.p}`;
+}
+
 function ensureA11yNode(h, item, tag, key) {
     let el = h.a11yNodes.get(key);
     if (!el) {
         el = document.createElement(tag);
         if (tag === 'button') {
             el.type = 'button';
-            el.tabIndex = h.page ? 0 : -1;
+            el.tabIndex = (h.page && !item.ca) ? 0 : -1;
             el.addEventListener('click', ev => {
                 ev.preventDefault();
                 if (el.getAttribute('aria-disabled') === 'true') return;
-                h.send({ kind: 'a11y_press', path: item.p });
+                if (el._a11yAction) h.send({ kind: 'a11y_custom', path: el._a11yPath, id: el._a11yAction });
+                else h.send({ kind: 'a11y_press', path: el._a11yPath });
+            });
+        } else if (tag === 'a') {
+            el._blockLink = true;
+            el.addEventListener('click', ev => {
+                if (consumeSuppressedClick(h, ev)) return;
+                if (el.getAttribute('aria-disabled') === 'true') { ev.preventDefault(); return; }
+                if (ev.defaultPrevented || (ev.button ?? 0) !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+                if (el.target === '_blank' || !el._sameTabLink) return;
+                ev.preventDefault();
+                h.send({ kind: 'a11y_press', path: el._a11yPath });
             });
         }
         h.a11yNodes.set(key, el);
     }
+    if (item.k === 'textbox' && !el._textboxBound) {
+        el._textboxBound = true;
+        el.tabIndex = h.page ? 0 : -1;
+        const focusField = () => {
+            if (el.getAttribute('aria-disabled') === 'true' || h.disposed || h.syncing) return;
+            h.send({ kind: 'a11y_press', path: el._a11yPath });
+        };
+        el.addEventListener('click', ev => {
+            ev.preventDefault();
+            focusField();
+        });
+        el.addEventListener('focus', () => {
+            focusField();
+        });
+    }
     el._a11yPath = item.p;
-    h.a11yByPath.set(item.p, el);
+    el._a11yAction = item.ca || '';
+    if (!item.ca) h.a11yByPath.set(item.p, el);
     return el;
 }
 
@@ -1484,6 +2127,12 @@ function applyA11yItem(h, el, item, tag, origin) {
     const css = itemStyle(h, item, origin);
     if (el._css !== css) { el._css = css; el.style.cssText = css; }
     if (item.i) el.id = item.i; else el.removeAttribute('id');
+    if (tag === 'ol' && item.st !== undefined) {
+        const v = String(item.st);
+        if (el.getAttribute('start') !== v) el.setAttribute('start', v);
+    } else if (el.getAttribute('start') !== null) {
+        el.removeAttribute('start');
+    }
     // `El::description` and `El::described_by`'s words: what a reader says after the name.
     if (item.d) el.setAttribute('aria-description', item.d); else el.removeAttribute('aria-description');
     // Role-carrying containers, live text (`status`, `alert`, `log`), images and progressbars.
@@ -1509,15 +2158,23 @@ function applyA11yItem(h, el, item, tag, origin) {
         ['aria-valuetext', item.vt],
         ['aria-multiselectable', item.ms ? 'true' : undefined],
         ['aria-required', item.rq ? 'true' : undefined],
+        ['aria-multiline', item.ml ? 'true' : undefined],
+        ['aria-readonly', item.ro ? 'true' : undefined],
+        ['aria-invalid', item.inv ? 'true' : undefined],
+        ['aria-roledescription', item.rd],
+        ['aria-placeholder', item.ph],
         ['aria-haspopup', item.hp],
         ['aria-orientation', item.or],
         ['aria-autocomplete', item.ac],
+        ['aria-current', item.cu],
         ['aria-controls', item.ct],
         ['aria-owns', item.ow],
         ['aria-rowcount', item.rc !== undefined ? String(item.rc) : undefined],
         ['aria-colcount', item.cc !== undefined ? String(item.cc) : undefined],
         ['aria-rowindex', item.ri !== undefined ? String(item.ri) : undefined],
         ['aria-colindex', item.ci !== undefined ? String(item.ci) : undefined],
+        ['aria-posinset', item.n ? String(item.n[0]) : undefined],
+        ['aria-setsize', item.n ? String(item.n[1]) : undefined],
     ];
     for (const [name, value] of rangeAttrs) {
         if (value === undefined) {
@@ -1556,18 +2213,24 @@ function applyA11yItem(h, el, item, tag, origin) {
         }
     }
     if (tag === 'button') {
+        if (item.ca) {
+            el.tabIndex = -1;
+            if (el.getAttribute('data-rune-a11y-action') !== item.ca) el.setAttribute('data-rune-a11y-action', item.ca);
+        } else if (el.getAttribute('data-rune-a11y-action') !== null) {
+            el.removeAttribute('data-rune-a11y-action');
+        }
         // A control's role and states (a palette's option, a tab, a switch, a toggle button, a range control).
         const states = [['role', item.o], ['aria-selected', item.se === undefined ? undefined : String(item.se)],
-            ['aria-checked', item.c], ['aria-pressed', item.pr],
-            ['aria-posinset', item.n ? String(item.n[0]) : undefined], ['aria-setsize', item.n ? String(item.n[1]) : undefined]];
+            ['aria-checked', item.c], ['aria-pressed', item.pr]];
         for (const [name, value] of states) {
             if (value === undefined) el.removeAttribute(name);
             else if (el.getAttribute(name) !== value) el.setAttribute(name, value);
         }
     }
     const combobox = item.k === 'button' && item.o === 'combobox';
+    const textbox = item.k === 'textbox';
     const rangeControl = item.k === 'button' && (item.o === 'slider' || item.o === 'spinbutton');
-    if (item.k === 'group' || item.k === 'image' || item.k === 'progressbar' || combobox || rangeControl) {
+    if (item.k === 'group' || item.k === 'image' || item.k === 'progressbar' || combobox || textbox || rangeControl) {
         if (item.t) {
             if (el.getAttribute('aria-label') !== item.t) el.setAttribute('aria-label', item.t);
         } else if (el.getAttribute('aria-label') !== null) {
@@ -1579,10 +2242,12 @@ function applyA11yItem(h, el, item, tag, origin) {
         const href = item.dis ? null : safeHref(item.h);
         if (href) {
             el.href = href;
+            el._sameTabLink = !webLink(href) && (!h.page || !href.startsWith('#'));
             if (el.getAttribute('role') === 'link') el.removeAttribute('role');
             if (!h.page && webLink(href)) { el.target = '_blank'; el.rel = 'noopener noreferrer'; }
             else { el.removeAttribute('target'); el.removeAttribute('rel'); }
         } else {
+            el._sameTabLink = false;
             el.removeAttribute('href');
             el.removeAttribute('target');
             el.removeAttribute('rel');
@@ -1608,7 +2273,7 @@ function applyA11yItem(h, el, item, tag, origin) {
     syncScrollContent(el, item.k === 'group' ? item.sc : null);
     const container = item.k === 'group' || item.k === 'scroll_x';
     const noContent = container || item.k === 'image' || item.k === 'progressbar';
-    const content = combobox ? (item.v ?? '') : rangeControl ? '' : (item.t ?? '');
+    const content = (combobox || textbox) ? (item.v ?? '') : rangeControl ? '' : (item.t ?? '');
     const sig = noContent ? '' : item.u?.length ? `${item.dis ? '1' : '0'}:${JSON.stringify(item.u)}` : content;
     if (!noContent && el._sig !== sig) {
         el._sig = sig;
@@ -1651,7 +2316,7 @@ function syncA11yPatch(h, patch) {
     if (patch.u) {
         for (const item of patch.u) {
             const tag = itemTag(item);
-            const key = `${tag}:${item.p}`;
+            const key = a11yItemKey(tag, item);
             const el = ensureA11yNode(h, item, tag, key);
             applyA11yItem(h, el, item, tag, [0, 0]);
         }
@@ -1686,7 +2351,7 @@ export function syncA11y(h, json) {
     const cursors = new Map([[h.a11y, firstItem(h.a11y)]]);
     for (const item of items) {
         const tag = itemTag(item);
-        const key = `${tag}:${item.p}`;
+        const key = a11yItemKey(tag, item);
         seen.add(key);
         const el = ensureA11yNode(h, item, tag, key);
         const parent = item.a === undefined ? null : items[item.a];
@@ -1776,6 +2441,35 @@ function clearMirrorSelection(h) {
     h.mirrorSel = false;
 }
 
+function clearFocusProxy(el) {
+    for (const a of [...el.attributes]) {
+        if (a.name === 'role' || a.name.startsWith('aria-') || a.name === 'data-rune-selection') {
+            el.removeAttribute(a.name);
+        }
+    }
+    el.textContent = '';
+}
+
+function syncFieldA11y(field, f, defaultLabel) {
+    field.setAttribute('aria-label', (f && f.t) || defaultLabel);
+    const attrs = [
+        ['aria-description', f?.d || undefined],
+        ['aria-roledescription', f?.rd || undefined],
+        ['aria-disabled', f?.dis ? 'true' : undefined],
+        ['aria-readonly', f?.ro ? 'true' : undefined],
+        ['aria-invalid', f?.inv ? 'true' : undefined],
+        ['aria-required', f?.rq ? 'true' : undefined],
+        ['aria-placeholder', f?.ph || undefined],
+        ['aria-autocomplete', f?.ac || undefined],
+        ['aria-current', f?.cu || undefined],
+        ['aria-multiline', field.tagName === 'TEXTAREA' && f ? (f.ml ? 'true' : 'false') : undefined],
+    ];
+    for (const [name, value] of attrs) {
+        if (value === undefined) field.removeAttribute(name);
+        else field.setAttribute(name, value);
+    }
+}
+
 export function focusA11y(h, json) {
     if (h.disposed || h.page) return;
     const f = json ? JSON.parse(json) : null;
@@ -1791,21 +2485,48 @@ export function focusA11y(h, json) {
         h.canvas.setAttribute('role', 'application');
         if (document.title) h.canvas.setAttribute('aria-label', document.title);
     }
+    const activeText = h.field === h.input ? h.input : h.textarea;
     if (!f) {
         h.canvas.removeAttribute('aria-activedescendant');
-        h.textarea.removeAttribute('aria-autocomplete');
+        h.textarea.removeAttribute('aria-activedescendant');
+        h.input.removeAttribute('aria-activedescendant');
+        for (const p of h.focusProxies) clearFocusProxy(p);
+        syncFieldA11y(h.textarea, null, 'Text input');
+        syncFieldA11y(h.input, null, 'Text input');
+        syncFieldA11y(h.password, null, 'Password input');
         clearMirrorSelection(h);
         return;
     }
-    if (f.o === 'textbox') h.textarea.setAttribute('aria-label', f.t || 'Text input');
-    if (f.f) h.textarea.setAttribute('aria-label', f.f);
+    if (f.o === 'textbox' && !f.f) {
+        // The bridge's real <textarea>, <input>, or <input type="password"> is the sole active control:
+        // clear the canvas focus proxies so no duplicate textbox node appears in the tree.
+        h.canvas.removeAttribute('aria-activedescendant');
+        h.textarea.removeAttribute('aria-activedescendant');
+        h.input.removeAttribute('aria-activedescendant');
+        for (const p of h.focusProxies) clearFocusProxy(p);
+        if (f.sec) {
+            syncFieldA11y(h.password, f, 'Password input');
+            syncFieldA11y(h.textarea, null, 'Text input');
+            syncFieldA11y(h.input, null, 'Text input');
+        } else {
+            syncFieldA11y(activeText, f, 'Text input');
+            syncFieldA11y(activeText === h.input ? h.textarea : h.input, null, 'Text input');
+            syncFieldA11y(h.password, null, 'Password input');
+        }
+        clearMirrorSelection(h);
+        return;
+    }
+    syncFieldA11y(h.password, null, 'Password input');
+    syncFieldA11y(activeText === h.input ? h.textarea : h.input, null, 'Text input');
+    if (f.f) activeText.setAttribute('aria-label', f.f);
+    clearFocusProxy(h.focusProxies[h.focusTurn]);
     h.focusTurn ^= 1;
     const el = h.focusProxies[h.focusTurn];
-    for (const a of [...el.attributes]) if (a.name === 'role' || a.name.startsWith('aria-') || a.name === 'data-rune-selection') el.removeAttribute(a.name);
-    el.textContent = '';
+    clearFocusProxy(el);
     el.setAttribute('role', f.o);
     el.setAttribute('aria-label', f.t ?? '');
     if (f.d) el.setAttribute('aria-description', f.d);
+    if (f.rd) el.setAttribute('aria-roledescription', f.rd);
     if (f.c) el.setAttribute('aria-checked', f.c);
     if (f.pr) el.setAttribute('aria-pressed', f.pr);
     if (f.s !== undefined) el.setAttribute('aria-selected', String(f.s));
@@ -1816,9 +2537,13 @@ export function focusA11y(h, json) {
     if (f.b) el.setAttribute('aria-busy', 'true');
     if (f.ms) el.setAttribute('aria-multiselectable', 'true');
     if (f.rq) el.setAttribute('aria-required', 'true');
+    if (f.ml) el.setAttribute('aria-multiline', 'true');
+    if (f.inv) el.setAttribute('aria-invalid', 'true');
+    if (f.ph) el.setAttribute('aria-placeholder', f.ph);
     if (f.hp) el.setAttribute('aria-haspopup', f.hp);
     if (f.or) el.setAttribute('aria-orientation', f.or);
     if (f.ac) el.setAttribute('aria-autocomplete', f.ac);
+    if (f.cu) el.setAttribute('aria-current', f.cu);
     if (f.ct) el.setAttribute('aria-controls', f.ct);
     if (f.ow) el.setAttribute('aria-owns', f.ow);
     if (f.rc !== undefined) el.setAttribute('aria-rowcount', String(f.rc));
@@ -1845,11 +2570,13 @@ export function focusA11y(h, json) {
     }
     h.canvas.setAttribute('aria-activedescendant', el.id);
     // Typing in a field whose highlighted row this is (the palette): the field says it too.
-    if (f.o !== 'textbox') h.textarea.setAttribute('aria-activedescendant', el.id);
-    else h.textarea.removeAttribute('aria-activedescendant');
-    const taAc = f.fac ?? ((f.o === 'textbox' || f.o === 'combobox') ? f.ac : undefined);
-    if (taAc) h.textarea.setAttribute('aria-autocomplete', taAc);
-    else h.textarea.removeAttribute('aria-autocomplete');
+    const inactiveText = activeText === h.input ? h.textarea : h.input;
+    inactiveText.removeAttribute('aria-activedescendant');
+    inactiveText.removeAttribute('aria-autocomplete');
+    activeText.setAttribute('aria-activedescendant', el.id);
+    const taAc = f.fac ?? (f.o === 'combobox' ? f.ac : undefined);
+    if (taAc) activeText.setAttribute('aria-autocomplete', taAc);
+    else activeText.removeAttribute('aria-autocomplete');
 }
 
 // `Tx::announce`: two live regions in the mirror, polite and assertive, made the first time
@@ -1957,24 +2684,32 @@ export function cancelA11y(h) {
         h.a11yTimer = 0;
     }
     if (h.a11yIdle) {
-        if (h.a11yIdle.kind === 'idle' && globalThis.cancelIdleCallback) cancelIdleCallback(h.a11yIdle.id);
-        else clearTimeout(h.a11yIdle.id);
+        if (h.a11yIdle.idleId && globalThis.cancelIdleCallback) cancelIdleCallback(h.a11yIdle.idleId);
+        if (h.a11yIdle.timerId) clearTimeout(h.a11yIdle.timerId);
         h.a11yIdle = null;
     }
 }
 
 // Schedules a post-frame idle mirror flush off `rAF` (`requestIdleCallback` with bounded timeout,
-// falling back to `setTimeout(..., 0)`).
+// paired with a one-frame `setTimeout` backstop because Blink can stall `requestIdleCallback`
+// past `{ timeout }` after an idle WebGL2 frame with no next `rAF`; falls back to
+// `setTimeout(..., 0)` where `requestIdleCallback` is absent).
 export function scheduleA11yIdle(h, attempt = 0, timeoutMs = 100) {
     cancelA11y(h);
     const due = () => {
+        const cur = h.a11yIdle;
+        if (!cur) return;
         h.a11yIdle = null;
+        if (cur.idleId && globalThis.cancelIdleCallback) cancelIdleCallback(cur.idleId);
+        if (cur.timerId) clearTimeout(cur.timerId);
         if (!h.disposed) h.send({ kind: 'a11y_idle', attempt });
     };
     if (globalThis.requestIdleCallback) {
-        h.a11yIdle = { kind: 'idle', id: requestIdleCallback(due, { timeout: timeoutMs }) };
+        const timerId = setTimeout(due, Math.max(0, Math.min(timeoutMs, 16)));
+        const idleId = requestIdleCallback(due, { timeout: timeoutMs });
+        h.a11yIdle = { idleId, timerId };
     } else {
-        h.a11yIdle = { kind: 'timeout', id: setTimeout(due, 0) };
+        h.a11yIdle = { idleId: 0, timerId: setTimeout(due, 0) };
     }
 }
 
@@ -1991,10 +2726,126 @@ export function scheduleA11y(h, attempt = 0, delayMs = 150) {
 // when none has).
 export function syncPage(h, height, focused) {
     h.focused = focused;
+    h.pageHeight = height;
     h.a11y.style.height = `${height}px`;
+    if (h.webImages) h.webImages.style.height = `${height}px`;
     // The clipper is as tall as the page, so the band's overscan past the document's end is
     // clipped instead of making the page scrollable past its foot.
     if (h.band && h.band.style.height !== `${height}px`) h.band.style.height = `${height}px`;
+}
+
+function ensureWebImagesLayer(h) {
+    if (h.webImages) return h.webImages;
+    const layer = document.createElement('div');
+    layer.setAttribute('data-rune-web-images', '');
+    layer.setAttribute('aria-hidden', 'true');
+    if (h.page) {
+        layer.style.cssText = `position:absolute;left:0;top:0;width:100%;height:${h.pageHeight || 0}px;overflow:hidden;overflow:clip;pointer-events:none;z-index:1;`;
+    } else if (h.embedded && h.canvas.parentElement) {
+        layer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1;';
+    } else {
+        layer.style.cssText = 'position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:1;';
+    }
+    if (h.keyboardShiftY > 0) {
+        layer.style.transform = `translate3d(0, ${-h.keyboardShiftY}px, 0)`;
+    }
+    // Place directly before a11y (same z-index, earlier in DOM order) so the images sit above
+    // the canvas while the a11y mirror stays above them for selection and focus outlines.
+    if (h.a11y.parentElement) h.a11y.parentElement.insertBefore(layer, h.a11y);
+    else document.body.append(layer);
+    h.webImages = layer;
+    return layer;
+}
+
+// Synchronizes display-only cross-origin `<img>` elements (`El::web_image`, `El::web_image_fit`)
+// with Rune's per-frame layout and nested clips without setting `crossOrigin` or reading pixels.
+export function syncWebImages(h, json) {
+    if (h.disposed) return;
+    const items = json ? JSON.parse(json) : [];
+    if (!items.length) {
+        if (h.webImages) {
+            for (const entry of h.webImageNodes.values()) (entry.clips[0] ?? entry.img).remove();
+            h.webImageNodes.clear();
+            h.webImages.remove();
+            h.webImages = null;
+        }
+        return;
+    }
+    const layer = ensureWebImagesLayer(h);
+    const seen = new Set();
+    let cursor = layer.firstElementChild;
+    for (const item of items) {
+        seen.add(item.id);
+        let entry = h.webImageNodes.get(item.id);
+        if (!entry) {
+            const img = document.createElement('img');
+            img.alt = '';
+            img.decoding = 'async';
+            img.draggable = false;
+            img.setAttribute('aria-hidden', 'true');
+            img.setAttribute('data-rune-web-image', item.id);
+            entry = { img, clips: [], url: '' };
+            h.webImageNodes.set(item.id, entry);
+        }
+        const specs = [];
+        if (item.c) specs.push([item.c[0], item.c[1], item.c[2], item.c[3], 0, 0, 0, 0]);
+        if (item.rc) {
+            for (const rc of item.rc) specs.push(rc);
+        }
+        const dropped = entry.clips.length > specs.length ? entry.clips.splice(specs.length) : [];
+        while (entry.clips.length < specs.length) {
+            entry.clips.push(document.createElement('div'));
+        }
+        const rootEl = entry.clips.length > 0 ? entry.clips[0] : entry.img;
+        if (cursor === rootEl) {
+            cursor = cursor.nextElementSibling;
+        } else {
+            while (cursor && (cursor === entry.img || dropped.includes(cursor))) {
+                cursor = cursor.nextElementSibling;
+            }
+        }
+        for (let k = 0; k < entry.clips.length; k++) {
+            const nextChild = k + 1 < entry.clips.length ? entry.clips[k + 1] : entry.img;
+            if (nextChild.parentElement !== entry.clips[k]) entry.clips[k].insertBefore(nextChild, null);
+        }
+        if (rootEl.parentElement !== layer || rootEl.nextElementSibling !== cursor) {
+            layer.insertBefore(rootEl, cursor);
+        }
+        for (const old of dropped) old.remove();
+
+        let ox = 0;
+        let oy = 0;
+        for (let k = 0; k < specs.length; k++) {
+            const [cx, cy, cw, ch, tl, tr, br, bl] = specs[k];
+            const el = entry.clips[k];
+            let css = `position:absolute;left:${cx - ox}px;top:${cy - oy}px;width:${cw}px;height:${ch}px;overflow:hidden;pointer-events:none;`;
+            if (tl || tr || br || bl) css += `border-radius:${tl}px ${tr}px ${br}px ${bl}px;`;
+            if (el.style.cssText !== css) el.style.cssText = css;
+            ox = cx;
+            oy = cy;
+        }
+        if (entry.url !== item.u) {
+            entry.url = item.u;
+            entry.img.src = item.u;
+        }
+        const [x, y, w, hPx] = item.r;
+        const fit = item.f ?? 'fill';
+        const pos = item.p ?? '50% 50%';
+        let css = item.m
+            ? `position:absolute;left:0;top:0;width:${w}px;height:${hPx}px;transform-origin:0 0;transform:matrix(${item.m[0]},${item.m[1]},${item.m[2]},${item.m[3]},${item.m[4] - ox},${item.m[5] - oy});`
+            : `position:absolute;left:${x - ox}px;top:${y - oy}px;width:${w}px;height:${hPx}px;`;
+        css += `display:block;margin:0;padding:0;border:0;max-width:none;max-height:none;object-fit:${fit};object-position:${pos};pointer-events:none;user-select:none;-webkit-user-select:none;-webkit-user-drag:none;`;
+        if (item.rad) css += `border-radius:${item.rad[0]}px ${item.rad[1]}px ${item.rad[2]}px ${item.rad[3]}px;`;
+        if (item.n) css += 'image-rendering:pixelated;';
+        if (item.o !== undefined) css += `opacity:${item.o};`;
+        if (entry.img.style.cssText !== css) entry.img.style.cssText = css;
+    }
+    for (const [id, entry] of h.webImageNodes) {
+        if (!seen.has(id)) {
+            (entry.clips[0] ?? entry.img).remove();
+            h.webImageNodes.delete(id);
+        }
+    }
 }
 
 // Detects how this browser represents `Element.scrollLeft` on a `direction: rtl` container:
@@ -2138,10 +2989,8 @@ export function activate(h) {
     // A page's canvas is `tabindex="-1"`: focusing it on a tap would only drop the reader's text
     // selection or a link's focus. An input that took the keyboard still gets it.
     if (h.page && !h.key) return;
-    const field = h.key ? h.field : h.canvas;
-    if (h.key) field.inputMode = 'text';
-    if (document.activeElement !== field) field.focus({ preventScroll: true });
-    if (h.key) reselect(h);
+    if (h.key) focusInput(h, true);
+    else if (document.activeElement !== h.canvas) h.canvas.focus({ preventScroll: true });
 }
 
 // Browser `File` handles a paste or drop offered the focused field, by id, for
@@ -2183,32 +3032,303 @@ export async function readWebFile(id, max) {
     return file && file.size <= max ? new Uint8Array(await file.arrayBuffer()) : undefined;
 }
 
+async function transcodePastedImage(file, max) {
+    if (typeof globalThis.createImageBitmap !== 'function') return undefined;
+    let bitmap;
+    try {
+        bitmap = await globalThis.createImageBitmap(file);
+    } catch {
+        return undefined;
+    }
+    try {
+        const w = bitmap.width | 0, bh = bitmap.height | 0;
+        if (w <= 0 || bh <= 0 || w * bh > MAX_IMAGE_PIXELS) return undefined;
+        let canvas, ctx;
+        if (typeof globalThis.OffscreenCanvas === 'function') {
+            canvas = new globalThis.OffscreenCanvas(w, bh);
+            ctx = canvas.getContext('2d');
+        } else if (typeof globalThis.document?.createElement === 'function') {
+            canvas = globalThis.document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = bh;
+            ctx = canvas.getContext('2d');
+        }
+        if (!ctx) return undefined;
+        ctx.drawImage(bitmap, 0, 0);
+        let out = null;
+        if (typeof canvas.convertToBlob === 'function') {
+            out = await canvas.convertToBlob({ type: 'image/png' });
+        } else if (typeof canvas.toBlob === 'function') {
+            out = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+        }
+        return out && out.size > 0 && out.size <= max ? new Uint8Array(await out.arrayBuffer()) : undefined;
+    } catch {
+        return undefined;
+    } finally {
+        bitmap.close?.();
+    }
+}
+
 export async function pastedImage(h, max) {
     const file = h.image;
     h.image = undefined;
-    return file && file.size <= max ? new Uint8Array(await file.arrayBuffer()) : undefined;
+    if (!file) return undefined;
+    const type = String(file.type ?? '').toLowerCase();
+    if (!type || type === 'image/png') {
+        return file.size <= max ? new Uint8Array(await file.arrayBuffer()) : undefined;
+    }
+    if (isRasterImageType(type)) return transcodePastedImage(file, max);
+    return undefined;
 }
 
+// Browser file handles opened through `Tx::pick_file`, `Tx::pick_files`, and
+// `Tx::pick_save_file`: Rust holds only the id and display name; nothing is read until the
+// app asks, and the last `FileHandle` clone dropping calls `releasePickedFile(id)`.
+const pickedFiles = new Map();
+let nextPickedFile = 1;
+
+function formatPickerAccept(filters) {
+    const exts = [];
+    for (const f of filters ?? []) {
+        for (const raw of f?.extensions ?? []) {
+            const ext = String(raw ?? "").replace(/^[* .]+/, "").trim();
+            if (ext && ext !== "*") exts.push(`.${ext}`);
+        }
+    }
+    return [...new Set(exts)].join(",");
+}
+
+function formatFsaTypes(filters) {
+    const out = [];
+    for (const f of filters ?? []) {
+        const exts = [];
+        for (const raw of f?.extensions ?? []) {
+            const ext = String(raw ?? "").replace(/^[* .]+/, "").trim();
+            if (ext && ext !== "*") exts.push(`.${ext}`);
+        }
+        if (!exts.length) continue;
+        const description = String(f?.name ?? "").trim() || exts.join(", ");
+        out.push({ description, accept: { "application/octet-stream": [...new Set(exts)] } });
+    }
+    return out;
+}
+
+function offerPickedFiles(entries) {
+    const out = [];
+    for (const entry of entries) {
+        const id = nextPickedFile++;
+        pickedFiles.set(id, Object.assign({ claimed: false }, entry));
+        out.push({ id, name: entry.name ?? "" });
+    }
+    return out;
+}
+
+function settlePickedFiles(offered) {
+    for (const { id } of offered) {
+        if (pickedFiles.get(id)?.claimed === false) pickedFiles.delete(id);
+    }
+}
+
+export function openFilePicker(h, id, kind, multiple, filtersJson, fileName) {
+    h.cancelFilePicker?.();
+    let filters = [];
+    try { filters = JSON.parse(filtersJson || "[]"); } catch { filters = []; }
+    const sendDeferred = (event, after) => {
+        queueMicrotask(() => {
+            if (h.disposed) { after?.(); return; }
+            h.send(event, after);
+        });
+    };
+    if (kind === "save") {
+        const suggestedName = String(fileName || "").trim() || "download";
+        if (typeof globalThis.showSaveFilePicker === "function") {
+            const opts = { suggestedName };
+            const types = formatFsaTypes(filters);
+            if (types.length) opts.types = types;
+            let cancelled = false;
+            h.cancelFilePicker = () => { cancelled = true; h.cancelFilePicker = null; };
+            let promise;
+            try {
+                promise = globalThis.showSaveFilePicker(opts);
+            } catch (err) {
+                h.cancelFilePicker = null;
+                sendDeferred({ kind: "file_dialog", id, error: String(err?.message || err || "save file picker failed") });
+                return;
+            }
+            Promise.resolve(promise).then((handle) => {
+                h.cancelFilePicker = null;
+                if (cancelled || h.disposed) return;
+                const name = handle?.name || suggestedName;
+                const offered = offerPickedFiles([{ kind: "save-fsa", handle, name }]);
+                h.send({ kind: "file_dialog", id, files: offered }, () => settlePickedFiles(offered));
+            }, (err) => {
+                h.cancelFilePicker = null;
+                if (cancelled || h.disposed) return;
+                if (err?.name === "AbortError") {
+                    h.send({ kind: "file_dialog", id, cancel: true });
+                } else {
+                    h.send({ kind: "file_dialog", id, error: String(err?.message || err || "save file picker failed") });
+                }
+            });
+            return;
+        }
+        const offered = offerPickedFiles([{ kind: "save-download", name: suggestedName }]);
+        sendDeferred({ kind: "file_dialog", id, files: offered }, () => settlePickedFiles(offered));
+        return;
+    }
+    if (typeof document?.createElement !== "function") {
+        sendDeferred({ kind: "file_dialog", id, error: "file picker is unavailable in this browser environment" });
+        return;
+    }
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = !!multiple;
+    const accept = formatPickerAccept(filters);
+    if (accept) input.accept = accept;
+    input.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;";
+    document.body?.append?.(input);
+    let settled = false;
+    let focusTimer = 0;
+    const cleanup = () => {
+        if (focusTimer) { clearTimeout(focusTimer); focusTimer = 0; }
+        globalThis.window?.removeEventListener?.("focus", onFocus);
+        input.remove?.();
+        if (h.cancelFilePicker === abort) h.cancelFilePicker = null;
+    };
+    const abort = () => {
+        settled = true;
+        cleanup();
+    };
+    const finishCancel = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (!h.disposed) h.send({ kind: "file_dialog", id, cancel: true });
+    };
+    const onFocus = () => {
+        if (settled) return;
+        if (focusTimer) clearTimeout(focusTimer);
+        focusTimer = setTimeout(() => {
+            focusTimer = 0;
+            if (!settled && !(input.files?.length)) finishCancel();
+        }, 300);
+    };
+    input.addEventListener("change", () => {
+        if (settled) return;
+        settled = true;
+        const list = [...(input.files ?? [])];
+        cleanup();
+        if (!list.length) {
+            if (!h.disposed) h.send({ kind: "file_dialog", id, cancel: true });
+            return;
+        }
+        const offered = offerPickedFiles(list.map(file => ({ kind: "read", file, name: file.name ?? "" })));
+        if (!h.disposed) h.send({ kind: "file_dialog", id, files: offered }, () => settlePickedFiles(offered));
+        else settlePickedFiles(offered);
+    });
+    input.addEventListener("cancel", finishCancel);
+    globalThis.window?.addEventListener?.("focus", onFocus);
+    h.cancelFilePicker = abort;
+    try {
+        input.click();
+    } catch (err) {
+        settled = true;
+        cleanup();
+        sendDeferred({ kind: "file_dialog", id, error: String(err?.message || err || "failed to open file picker") });
+    }
+}
+
+export function claimPickedFile(id) {
+    const entry = pickedFiles.get(id);
+    if (!entry || entry.claimed) return false;
+    entry.claimed = true;
+    return true;
+}
+
+export function pickedFile(id) {
+    const entry = pickedFiles.get(id);
+    return entry?.file ?? entry?.handle;
+}
+
+export function releasePickedFile(id) {
+    pickedFiles.delete(id);
+}
+
+export async function readPickedFile(id) {
+    const entry = pickedFiles.get(id);
+    if (!entry) return undefined;
+    if (entry.kind === "read" && entry.file) {
+        return new Uint8Array(await entry.file.arrayBuffer());
+    }
+    if (entry.kind === "save-fsa" && entry.handle) {
+        const file = await entry.handle.getFile();
+        return new Uint8Array(await file.arrayBuffer());
+    }
+    throw new Error("this browser file handle is write-only");
+}
+
+export async function writePickedFile(id, bytes) {
+    const entry = pickedFiles.get(id);
+    if (!entry) throw new Error("browser file handle is no longer available");
+    if (entry.kind === "save-fsa" && entry.handle) {
+        const writable = await entry.handle.createWritable();
+        try {
+            await writable.write(bytes);
+            await writable.close();
+        } catch (err) {
+            try { await writable.abort?.(); } catch {}
+            throw err;
+        }
+        return;
+    }
+    if (entry.kind === "save-download") {
+        const blob = new Blob([bytes]);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = entry.name || "download";
+        a.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0;";
+        document.body?.append?.(a);
+        try { a.click(); } finally { a.remove?.(); }
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return;
+    }
+    throw new Error("browser <input type=\"file\"> handles are read-only");
+}
 export function destroy(h) {
+    h.cancelFilePicker?.();
     exitPointerLock(h);
     closeMenu(h, false);
     h.disposed = true;
     h.image = undefined;
     clearTimeout(h.staticTimer);
+    h.clearAllPointerEndTimers?.();
+    h.pressedPointers?.clear();
+    h.cancelReconcile?.();
     cancelTouchHoldConfirm(h);
     disarmLink(h);
+    disarmMenu(h);
     h.pendingLinkDrag = null;
     h.a11yTouchId = null;
     h.touchTimestamps.length = 0;
     h.activeTouchId = null;
     cancelA11y(h);
     for (const remove of h.listeners) remove();
-    h.password.value = ''; h.textarea.value = ''; h.value = ''; h.domValue = ''; h.crlfs = null; h.copyText = ''; h.selection = null;
+    h.password.value = ''; h.input.value = ''; h.textarea.value = ''; h.value = ''; h.domValue = ''; h.crlfs = null; h.copyText = ''; h.selection = null; h.peerKey = ''; h.peerSecure = false;
     h.a11yNodes.clear();
     h.a11yByPath.clear();
     h.mirrorSel = false;
     h.scrollEls.clear();
+    if (h.keyboardShiftY) {
+        h.keyboardShiftY = 0;
+        const sibling = h.canvas.previousElementSibling;
+        if (sibling?.hasAttribute?.('data-rune-cpu')) sibling.style.transform = '';
+        h.canvas.style.transform = '';
+    }
+    h.webImageNodes.clear();
+    h.webImages?.remove();
+    h.webImages = null;
     h.a11y.remove();
     h.band?.remove();
-    h.password.remove(); h.textarea.remove();
+    h.password.remove(); h.input.remove(); h.form.remove(); h.textarea.remove();
 }

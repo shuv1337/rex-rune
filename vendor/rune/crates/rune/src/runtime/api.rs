@@ -197,6 +197,12 @@ impl<S: 'static> Runtime<S> {
         core.content_height(&app)
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn measure_content(&mut self) -> (f32, f32) {
+        let (core, app) = self.split_mut();
+        core.measure_content(&app)
+    }
+
     #[inline(always)]
     pub(crate) fn set_window_origin(&mut self, origin: (f32, f32)) -> bool {
         self.core_mut().set_window_origin(origin)
@@ -208,6 +214,22 @@ impl<S: 'static> Runtime<S> {
     pub fn set_system_dark(&mut self, dark: bool) { self.core_mut().set_system_dark(dark); }
     #[inline(always)]
     pub fn set_titlebar_inset(&mut self, points: f32) { self.core_mut().set_titlebar_inset(points); }
+    /// Sets what [`Cx::decoration_mode`], [`Cx::tiled_edges`], and [`Cx::window_actions`] report,
+    /// marking the view dirty when it changes and the last committed view read any of them.
+    ///
+    /// ```
+    /// # use rune::{Cx, DecorationMode, El, Env, Runtime, WindowManagerState, el};
+    /// fn view(_: &(), cx: &mut Cx<()>) -> El {
+    ///     el().w(if cx.decoration_mode() == DecorationMode::Client { 100.0 } else { 50.0 })
+    /// }
+    /// let mut rt = Runtime::new((), view, (200.0, 100.0), Env::default());
+    /// rt.set_window_manager_state(WindowManagerState::default().with_decoration_mode(DecorationMode::Client));
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn set_window_manager_state(&mut self, state: crate::WindowManagerState) {
+        self.core_mut().set_window_manager_state(state);
+    }
     /// Sets what [`Cx::is_maximized`] reports, marking the view dirty when it changes.
     ///
     /// Native windows update this from confirmed OS window state on create, resize, scale change,
@@ -242,6 +264,68 @@ impl<S: 'static> Runtime<S> {
     /// ```
     #[inline(always)]
     pub fn set_full_screen(&mut self, full_screen: bool) { self.core_mut().set_full_screen(full_screen); }
+    /// Sets what [`Cx::window_backdrop`] reports for headless tests, marking the view and its
+    /// memos dirty when it changes.
+    ///
+    /// Native windows and overlays update this only when the OS confirms an active backdrop
+    /// (Windows 11 Build 22621+ `DWMWA_SYSTEMBACKDROP_TYPE`). Headless runs default to
+    /// [`WindowBackdrop::None`](crate::WindowBackdrop::None).
+    ///
+    /// ```
+    /// # use rune::{Color, Cx, El, Env, Runtime, WindowBackdrop, el};
+    /// fn view(_: &(), cx: &mut Cx<()>) -> El {
+    ///     let bg = if cx.window_backdrop().is_active() { Color::TRANSPARENT } else { Color::BLACK };
+    ///     el().w_full().h_full().fill(bg)
+    /// }
+    /// let mut rt = Runtime::new((), view, (200.0, 100.0), Env::default());
+    /// rt.set_window_backdrop(WindowBackdrop::Mica);
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn set_window_backdrop(&mut self, backdrop: crate::WindowBackdrop) { self.core_mut().set_window_backdrop(backdrop); }
+    /// Sets what [`Cx::window_backdrop_supported`] reports for `backdrop` in headless tests,
+    /// marking the view and its memos dirty when it changes.
+    ///
+    /// [`WindowBackdrop::None`](crate::WindowBackdrop::None) is always reported supported and
+    /// ignores calls to this setter. Headless runs default to `false` for all non-`None`
+    /// variants.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, Runtime, WindowBackdrop, el};
+    /// let mut rt = Runtime::new(
+    ///     (),
+    ///     |_: &(), cx: &mut Cx<()>| {
+    ///         let _ = cx.window_backdrop_supported(WindowBackdrop::Blur);
+    ///         el()
+    ///     },
+    ///     (200.0, 100.0),
+    ///     Env::default(),
+    /// );
+    /// rt.set_window_backdrop_supported(WindowBackdrop::Blur, true);
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn set_window_backdrop_supported(&mut self, backdrop: crate::WindowBackdrop, supported: bool) {
+        self.core_mut().set_window_backdrop_supported(backdrop, supported);
+    }
+    /// Sets what [`Cx::renderer_kind`] reports for headless tests, marking the view and its
+    /// memos dirty when it changes. Defaults to [`RendererKind::Gpu`](crate::RendererKind::Gpu).
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, RendererKind, Runtime, el};
+    /// let mut rt = Runtime::new(
+    ///     (),
+    ///     |_: &(), cx: &mut Cx<()>| if cx.renderer_kind().is_cpu() { el() } else { el().blur(8.0) },
+    ///     (200.0, 100.0),
+    ///     Env::default(),
+    /// );
+    /// rt.set_renderer_kind(RendererKind::Cpu);
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn set_renderer_kind(&mut self, kind: crate::RendererKind) {
+        self.core_mut().set_renderer_kind(kind);
+    }
     #[inline(always)]
     pub(crate) fn system_accent(&self) -> crate::SystemAccent { self.core().system_accent() }
     #[inline(always)]
@@ -255,9 +339,17 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn set_system_increased_contrast(&mut self, on: bool) { self.core_mut().set_system_increased_contrast(on); }
     #[inline(always)]
+    pub fn set_system_reduced_transparency(&mut self, reduced: bool) { self.core_mut().set_system_reduced_transparency(reduced); }
+    #[inline(always)]
+    pub fn system_reduced_transparency(&self) -> bool { self.core().host.system_reduced_transparency() }
+    #[inline(always)]
     pub fn set_system_reduced_motion(&mut self, reduced: bool) { self.core_mut().set_system_reduced_motion(reduced); }
     #[inline(always)]
     pub fn system_reduced_motion(&self) -> bool { self.core().host.system_reduced_motion() }
+    #[inline(always)]
+    pub fn set_system_text_scale(&mut self, scale: f32) { self.core_mut().set_system_text_scale(scale); }
+    #[inline(always)]
+    pub fn system_text_scale(&self) -> f32 { self.core().system_text_scale() }
     /// Sets the preferred language list reported by [`Cx::system_languages`] and [`Cx::locale`]
     /// as BCP 47 tags in preference order, overriding the lazily queried platform languages.
     /// Empty and duplicate tags are dropped; a change re-runs the view and its memos.
@@ -296,6 +388,13 @@ impl<S: 'static> Runtime<S> {
     pub fn system_scroller_jumps(&self) -> bool { self.core().host.system_scroller_jumps() }
     #[inline(always)]
     pub fn overlay_scroll_bars(&self) -> bool { self.core().host.overlay_scroll_bars() }
+    /// Whether [`Cx::touch_controls`] currently reports native coarse touch controls.
+    #[inline(always)]
+    pub fn touch_controls(&self) -> bool { self.core().touch_controls() }
+    /// Sets whether [`Cx::touch_controls`] (and [`Cx::hover_none`]) report coarse touch controls
+    /// natively. A change re-runs the view and its memos.
+    #[inline(always)]
+    pub fn set_touch_controls(&mut self, touch: bool) { self.core_mut().set_touch_controls(touch); }
 
     /// Registers font bytes (TTF, OTF, TTC, or variable font) into the process-wide font
     /// collection at runtime, returning the registered family names in registration order.
@@ -533,10 +632,31 @@ impl<S: 'static> Runtime<S> {
 
     // ── Motion, live, timers, paint, clipboard, memo & URLs ────────────────────────────────────
 
+    /// Events whose handler called [`Tx::live_only`](crate::Tx::live_only) and so didn't re-run
+    /// the view, since the runtime started.
     #[inline(always)]
     pub fn live_only_events(&self) -> u64 { self.core().live_only_events() }
+
+    /// Whether debug builds check [`Tx::live_only`](crate::Tx::live_only) handlers (on by
+    /// default): a live-only event a quarter second or more after the last commit still commits,
+    /// and Rune warns when the view built something else. A test counting
+    /// [`FrameStats::commits`](crate::runtime::FrameStats::commits) turns it off; release builds never
+    /// check.
+    ///
+    /// ```
+    /// use rune::{Env, Runtime, el};
+    ///
+    /// let mut rt = Runtime::new((), |_: &(), _| el(), (200.0, 120.0), Env::new(true, 1.0));
+    /// rt.check_live_only(false);
+    /// rt.frame(0.0);
+    /// assert_eq!(rt.live_only_warnings().len(), 0);
+    /// ```
     #[inline(always)]
     pub fn check_live_only(&mut self, on: bool) { self.core_mut().check_live_only(on); }
+
+    /// The stale-view warnings debug builds have printed for
+    /// [`Tx::live_only`](crate::Tx::live_only) handlers, each naming the element and property
+    /// that differed, so a test can assert there are none. Always empty in release builds.
     #[inline(always)]
     pub fn live_only_warnings(&self) -> &[String] { self.core().live_only_warnings() }
 
@@ -602,6 +722,11 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn cancel_timer_frame(&mut self) { self.core_mut().cancel_timer_frame(); }
     #[inline(always)]
     pub(crate) fn rests(&self) -> bool { self.core().rests() }
+    /// Releases state not needed to redraw the current view, as `window::rest` does after
+    /// `REST_AFTER`.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn rest(&mut self) { self.core_mut().rest(); }
 
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     #[inline(always)]
@@ -783,6 +908,12 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn web_secure_replace(&mut self, key: &str, text: String) {
         let (core, mut app) = self.split_mut();
         core.web_secure_replace(&mut app, key, text);
+    }
+    #[cfg(any(test, target_arch = "wasm32"))]
+    #[inline(always)]
+    pub(crate) fn web_autofill(&mut self, key: &str, text: String, secure: bool) {
+        let (core, mut app) = self.split_mut();
+        core.web_autofill(&mut app, key, text, secure);
     }
     #[cfg(any(test, target_arch = "wasm32"))]
     #[inline(always)]

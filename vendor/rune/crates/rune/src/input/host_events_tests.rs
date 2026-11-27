@@ -112,10 +112,8 @@ fn pointer_wheel_hover_and_ime_area_scale_by_view_zoom() {
     rt.frame(0.0);
     assert_eq!(rt.state.clicks, ["mid", "top"]);
 
-    // Wheel delta -30 window points -> -20 view points at zoom 1.5.
-    let (redraw, used) = web_wheel(
-        rt.core_mut(), 0.0, -30.0, crate::Mods::default(), GesturePhase::Moved, true, false, false,
-    );
+    let wheel_in = |dx, dy, mods| WheelInput { dx, dy, ticks: None, mods, phase: GesturePhase::Moved, precise: true, notch: false, pinch: false };
+    let (redraw, used) = web_wheel(rt.core_mut(), wheel_in(0.0, -30.0, crate::Mods::default()), false, false);
     assert!(redraw && used.is_none());
     rt.frame(0.0);
     assert_eq!(rt.state.wheels.len(), 1);
@@ -123,17 +121,17 @@ fn pointer_wheel_hover_and_ime_area_scale_by_view_zoom() {
 
     // Ctrl+wheel pinches in un-zoomed window points; document mode leaves it to the browser.
     let ctrl = crate::Mods { ctrl: true, cmd: true, ..crate::Mods::default() };
-    let (redraw, used) = web_wheel(rt.core_mut(), 0.0, -40.0, ctrl, GesturePhase::Moved, true, false, false);
+    let (redraw, used) = web_wheel(rt.core_mut(), wheel_in(0.0, -40.0, ctrl), false, false);
     assert!(redraw && used == Some(true));
     rt.frame(0.0);
     assert_eq!(rt.state.pinches.len(), 1);
-    let (redraw, used) = web_wheel(rt.core_mut(), 0.0, -40.0, ctrl, GesturePhase::Moved, true, true, false);
+    let (redraw, used) = web_wheel(rt.core_mut(), wheel_in(0.0, -40.0, ctrl), true, false);
     assert!(!redraw && used == Some(false));
 
     // fit_height leaves vertical wheel to the page, while keeping horizontal wheel.
-    let (redraw, used) = web_wheel(rt.core_mut(), 0.0, -30.0, crate::Mods::default(), GesturePhase::Moved, true, false, true);
+    let (redraw, used) = web_wheel(rt.core_mut(), wheel_in(0.0, -30.0, crate::Mods::default()), false, true);
     assert!(!redraw && used.is_none());
-    let (redraw, used) = web_wheel(rt.core_mut(), -30.0, 0.0, crate::Mods::default(), GesturePhase::Moved, true, false, true);
+    let (redraw, used) = web_wheel(rt.core_mut(), wheel_in(-30.0, 0.0, crate::Mods::default()), false, true);
     assert!(redraw && used.is_none());
 
     // IME area in window points scales by zoom (1.5x view ime_area).
@@ -164,18 +162,21 @@ fn web_page_wheel_scales_by_viewport_zoom_and_respects_shift_without_double_swap
     // 1 vertical page down -> -1.0 * 200 * 0.875 = -175 window pt -> -87.5 view pt.
     let (dx, dy) = wheel_page_delta(rt.core(), 0.0, -1.0, false);
     assert!((dx - 0.0).abs() < 1e-4 && (dy - (-175.0)).abs() < 1e-4);
-    let (redraw, _) = web_wheel(rt.core_mut(), dx, dy, crate::Mods::default(), GesturePhase::Moved, false, false, false);
+    let page_in = |dx, dy, mods| WheelInput {
+        dx, dy, ticks: None, mods, phase: GesturePhase::Moved, precise: false, notch: true, pinch: false,
+    };
+    let (redraw, _) = web_wheel(rt.core_mut(), page_in(dx, dy, crate::Mods::default()), false, false);
     assert!(redraw);
     rt.frame(0.0);
     assert_eq!(rt.state.wheels.len(), 1);
     assert!((rt.state.wheels[0].dy - (-87.5)).abs() < 1e-4);
-    assert!(!rt.state.wheels[0].precise && rt.state.wheels[0].phase == GesturePhase::Moved);
+    assert!(!rt.state.wheels[0].precise && rt.state.wheels[0].notch && rt.state.wheels[0].phase == GesturePhase::Moved);
 
     // Shift + vertical page when browser kept dx == 0 turns horizontal using window width (400 * 0.875 = 350 -> 175 view pt).
     let (dx, dy) = wheel_page_delta(rt.core(), 0.0, -1.0, true);
     assert!((dx - (-350.0)).abs() < 1e-4 && dy == 0.0);
     let shift = crate::Mods { shift: true, ..crate::Mods::default() };
-    let (redraw, _) = web_wheel(rt.core_mut(), dx, dy, shift, GesturePhase::Moved, false, false, false);
+    let (redraw, _) = web_wheel(rt.core_mut(), page_in(dx, dy, shift), false, false);
     assert!(redraw);
     rt.frame(0.0);
     assert!((rt.state.wheels[1].dx - (-175.0)).abs() < 1e-4 && rt.state.wheels[1].dy == 0.0);
@@ -938,12 +939,14 @@ fn web_touch_end_does_not_activate_while_popup_menu_is_open_or_touch_ended_in_me
     let mut rt = Runtime::new(S::default(), view, (240.0, 200.0), Env::default());
     rt.frame(0.0);
 
-    // 1. Long press on a focused text field opens field_menu and enters Mode::Menu.
+    // 1. Long press on a text field does not focus on touch-down; once the hold fires it focuses
+    // the field, opens field_menu and enters Mode::Menu.
     let (ex, ey) = rt.find("editor").unwrap();
     rt.touch(1, crate::TouchPhase::Started, ex, ey, 0.0);
     rt.frame(0.0);
-    assert!(rt.core().web_has_editable_focus());
+    assert!(!rt.core().web_has_editable_focus(), "touch-down must not focus before tap-up or hold");
     rt.frame(0.6);
+    assert!(rt.core().web_has_editable_focus(), "long press field_menu focuses the text field");
     assert!(rt.popup_menu().is_some(), "long press on text field must open field_menu");
     assert!(rt.core().touch_in_menu(), "long press must transition touch into Mode::Menu");
 

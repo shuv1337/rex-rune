@@ -27,6 +27,17 @@ use super::report_traffic_light_overlaps;
 /// Bound on extra zero-dt layout-callback passes `--settle` runs at the capture frame.
 pub(in crate::tooling) const SETTLE_PASSES: usize = 3;
 
+/// Maximum sleep interval between readiness polls when a background worker does not call `wake()`.
+const SETTLE_POLL_STEP: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Outcome of an `App::settle_ready` wait during headless `--settle`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SettleReadyOutcome {
+    pub(super) ready: bool,
+    pub(super) timed_out: bool,
+    pub(super) wait_ms: f64,
+}
+
 /// A frame readback's destination and, when `--chrome` is active, the resolved macOS chrome on
 /// that frame so asynchronous readbacks paint the traffic lights that frame drew with.
 #[derive(Clone, Copy)]
@@ -76,6 +87,8 @@ pub(super) struct HeadlessLoop<'a> {
     pub(super) idle: bool,
     pub(super) early_place: Option<crate::windows::PlaceRequest>,
     pub(super) placed: Option<Value>,
+    pub(super) wake: super::HeadlessWake,
+    pub(super) settle_outcome: Option<SettleReadyOutcome>,
     pub(super) snap_crop: &'a Cell<Option<[u32; 4]>>,
     pub(super) cpu_boot: &'a RefCell<Option<crate::render::cpu_boot::tool::Tool>>,
     pub(super) loop_check: loop_check::Tally,
@@ -107,6 +120,8 @@ impl HeadlessLoop<'_> {
 pub(super) struct HeadlessFrame<'a, 'b, F> {
     pub(super) state: &'a mut HeadlessLoop<'b>,
     pub(super) app: &'a mut dyn HeadlessApp,
+    pub(super) shortcuts: &'a crate::shortcuts::Guard,
+    pub(super) menus: &'a mut crate::native_menu::MenuGuard,
     pub(super) deliver: &'a mut F,
     pub(super) k: usize,
     pub(super) real_t: f64,
@@ -116,6 +131,7 @@ pub(super) struct HeadlessFrame<'a, 'b, F> {
     pub(super) want_pixels: bool,
     pub(super) first_pixels: bool,
     pub(super) encoded_stamp: Option<Instant>,
+    pub(super) redraw_stage: crate::frame::stage::StageGuard,
     #[cfg(feature = "frame-profile")]
     pub(super) fp_alloc0: u64,
     #[cfg(feature = "frame-profile")]
@@ -163,6 +179,7 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
 
     #[inline]
     fn step_runtime(&mut self) -> StepInfo {
+        let _runtime = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Runtime);
         let s = &mut *self.state;
         let step = if self.k == 0 { 0.0 } else { s.dt };
         // `RUNE_LOOP_CHECK=1`: every frame asks for a loop-only step first, and the step is
@@ -178,6 +195,69 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
         if s.args.settle && self.k == s.snap_frame {
             if let (_, Some(settled)) = self.app.settle_layout_passes(SETTLE_PASSES) {
                 animating = settled;
+            }
+            if let Some(timeout) = self.app.settle_ready_timeout() {
+                let start = crate::time::now();
+                if self.app.is_settle_ready() {
+                    s.settle_outcome = Some(SettleReadyOutcome {
+                        ready: true,
+                        timed_out: false,
+                        wait_ms: 0.0,
+                    });
+                } else {
+                    let deadline = start + timeout;
+                    loop {
+                        let remaining = deadline.saturating_duration_since(crate::time::now());
+                        if !remaining.is_zero() {
+                            s.wake.wait_timeout(remaining.min(SETTLE_POLL_STEP));
+                        }
+                        self.shortcuts.drain();
+                        self.menus.drain();
+                        self.app.drain_updates(self.menus);
+                        let ready_before = self.app.is_settle_ready();
+                        animating = self.app.frame(0.0);
+                        if let (_, Some(settled)) = self.app.settle_layout_passes(SETTLE_PASSES) {
+                            animating = settled;
+                        }
+                        if ready_before {
+                            s.settle_outcome = Some(SettleReadyOutcome {
+                                ready: true,
+                                timed_out: false,
+                                wait_ms: start.elapsed().as_secs_f64() * 1000.0,
+                            });
+                            break;
+                        }
+                        if self.app.is_settle_ready() {
+                            // Ready flipped during or right before the drain/frame above: run one
+                            // final zero-dt pass so any state published alongside readiness is built.
+                            self.shortcuts.drain();
+                            self.menus.drain();
+                            self.app.drain_updates(self.menus);
+                            animating = self.app.frame(0.0);
+                            if let (_, Some(settled)) = self.app.settle_layout_passes(SETTLE_PASSES) {
+                                animating = settled;
+                            }
+                            s.settle_outcome = Some(SettleReadyOutcome {
+                                ready: true,
+                                timed_out: false,
+                                wait_ms: start.elapsed().as_secs_f64() * 1000.0,
+                            });
+                            break;
+                        }
+                        if crate::time::now() >= deadline {
+                            let wait_ms = start.elapsed().as_secs_f64() * 1000.0;
+                            eprintln!(
+                                "rune: --settle timed out after {wait_ms:.1} ms waiting for settle_ready (capture may be incomplete)"
+                            );
+                            s.settle_outcome = Some(SettleReadyOutcome {
+                                ready: false,
+                                timed_out: true,
+                                wait_ms,
+                            });
+                            break;
+                        }
+                    }
+                }
             }
         }
         StepInfo {
@@ -206,8 +286,10 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
                 self.state.reblend_offscreen(self.app.rt_mut());
                 true
             }
-            #[cfg(any(test, target_os = "macos"))]
+            #[cfg(any(test, target_os = "macos", all(target_os = "windows", feature = "windows-system-material")))]
             ReacquireReason::NativeMaterials => true,
+            #[cfg(not(target_arch = "wasm32"))]
+            ReacquireReason::ContentResize => true,
         }
     }
 
@@ -238,6 +320,7 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
 
     #[inline]
     fn prepare_render(&mut self, _drawable: (), _info: &mut StepInfo) -> RenderPrep<PreparedHeadlessFrame> {
+        let _upload = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Upload);
         let s = &mut *self.state;
         prepare_gpu_resources(&mut s.renderer, s.gpu, self.app.rt_mut(), (s.wp, s.hp), false);
         let encoder = s.gpu.device.create_command_encoder(&Default::default());
@@ -258,6 +341,7 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
 
     #[inline]
     fn render(&mut self, prepared: &mut PreparedHeadlessFrame, info: &StepInfo) -> bool {
+        let _encode = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Encode);
         let s = &mut *self.state;
         let view = s.alpha.as_ref().map_or(&s.target.view, |a| &a.view);
         let comp_animating = if s.has_comp {
@@ -302,7 +386,10 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
     #[inline]
     fn submit_and_present(&mut self, prepared: PreparedHeadlessFrame, _info: &StepInfo) -> Instant {
         let s = &mut *self.state;
-        let submission = s.renderer.submit(&s.gpu.queue, prepared.encoder);
+        let submission = {
+            let _submit = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Submit);
+            s.renderer.submit(&s.gpu.queue, prepared.encoder)
+        };
         s.in_flight.push(submission);
         self.encoded_stamp = s.reports.stamp();
         if self.want_pixels { s.readback.submitted(); }
@@ -317,6 +404,7 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
     #[inline]
     fn settle(&mut self, _submitted: Instant, info: &StepInfo) {
         let s = &mut *self.state;
+        self.redraw_stage.end();
         s.reports.drawn(self.encoded_stamp, None, self.frame_start, info.update_ms);
         let ms = self.frame_start.elapsed().as_secs_f64() * 1000.0;
         #[cfg(feature = "frame-profile")]
@@ -380,6 +468,14 @@ impl<F: FnMut(FrameShot, Vec<u8>)> FrameHost for HeadlessFrame<'_, '_, F> {
         {
             let mut tree = tree_json_core(self.app.rt(), self.real_t);
             if let Some(placed) = &s.placed { tree["placed"] = placed.clone(); }
+            if let Some(outcome) = s.settle_outcome {
+                let wait_ms = (outcome.wait_ms * 1000.0).round() / 1000.0;
+                tree["settle"] = json!({
+                    "ready": outcome.ready,
+                    "timedOut": outcome.timed_out,
+                    "waitMs": wait_ms,
+                });
+            }
             let text = serde_json::to_string_pretty(&tree).unwrap();
             std::fs::write(p, text).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
         }

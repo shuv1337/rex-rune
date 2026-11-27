@@ -2,6 +2,7 @@
 //! outputs owned by [`RuntimeCore`].
 use super::*;
 
+
 /// Retained paint-pass scratch, reuse record, drawn geometry, layer caches and per-frame paint
 /// outputs. Ordered hot-first under `#[repr(C)]` so per-node vectors (`inh_scratch`, `drawn`,
 /// `row_dy`, `row_h`, `row_mask`, `drawn_scale`, `seen`) and `pixel_snap` sit together and first
@@ -9,6 +10,8 @@ use super::*;
 #[repr(C)]
 pub(crate) struct PaintState {
     pub(in crate::runtime) inh_scratch: Vec<Inh>,
+    /// Cold inherited paint fields indexed by `Inh::cold` (1-based; 0 = `InhCold::DEFAULT`).
+    pub(in crate::runtime) inh_cold: Vec<InhCold>,
     /// Drawn rect per node (points, root space), for tools and hit tests.
     pub(crate) drawn: Vec<[f32; 4]>,
     /// Gamma-space (sRGB) blending for translucent fills, shadows and blurs (on by default).
@@ -16,6 +19,15 @@ pub(crate) struct PaintState {
     /// The shell shows native views for the first `max_native_materials` of `materials`; their
     /// elements skip their fill and cut their shadows out of their interior.
     pub(super) native_materials: bool,
+    /// Wayland compositor behind-window blur backs `El::system_material` elements on this
+    /// transparent surface when `WindowBackdrop::None` is active.
+    pub(super) wayland_blur_materials: bool,
+    /// Windows 11 Acrylic behind-window blur backs non-opaque `El::system_material` elements on
+    /// this transparent DirectComposition surface using Wayland-aligned fill rules (opaque fills
+    /// stay opaque and unblurred; translucent fills tint over Acrylic; no fill paints transparent
+    /// so Acrylic supplies the theme-aware system tint).
+    #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+    pub(super) windows_acrylic_materials: bool,
     /// A drawn video is playing or seeking: keep drawing frames.
     pub(super) videos_active: bool,
     /// A drawn animated SVG icon is advancing right now: keep drawing frames.
@@ -84,6 +96,16 @@ pub(crate) struct PaintState {
     pub(in crate::runtime) text_quads: quads::TextQuads,
     /// `El::system_material` elements built this frame, in paint order.
     pub(super) materials: Vec<crate::system_material::MaterialDraw>,
+    /// `El::web_image` / `El::web_image_fit` elements built this frame, in paint order.
+    pub(super) web_images: Vec<crate::web_image::WebImageDraw>,
+    /// Wayland blur regions emitted by `El::system_material` elements this frame (empty unless
+    /// `wayland_blur_materials` is enabled).
+    pub(super) wayland_material_blurs: Vec<crate::system_material::WaylandMaterialBlur>,
+    /// Non-opaque `El::system_material` draws eligible for Windows 11 Acrylic visuals this frame
+    /// (excludes elements whose resolved fill is opaque `alpha * opacity >= 1.0`, while
+    /// `materials` still records all visible material elements for `Runtime::system_materials`).
+    #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+    pub(super) windows_material_draws: Vec<crate::system_material::MaterialDraw>,
     /// Per-window cap on native `El::system_material` views (default `MAX_NATIVE_MATERIALS`,
     /// clamped to `MAX_NATIVE_MATERIALS_CAP`).
     pub(super) max_native_materials: usize,
@@ -109,9 +131,13 @@ impl PaintState {
     pub(in crate::runtime) fn new() -> Self {
         Self {
             inh_scratch: Vec::new(),
+            inh_cold: Vec::new(),
             drawn: Vec::new(),
             srgb_blend: true,
             native_materials: false,
+            wayland_blur_materials: false,
+            #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+            windows_acrylic_materials: false,
             videos_active: false,
             animated_icons: false,
             animated_icons_shown: false,
@@ -148,6 +174,10 @@ impl PaintState {
             text_rows: HashMap::default(),
             text_quads: quads::TextQuads::new(),
             materials: Vec::new(),
+            web_images: Vec::new(),
+            wayland_material_blurs: Vec::new(),
+            #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+            windows_material_draws: Vec::new(),
             max_native_materials: crate::MAX_NATIVE_MATERIALS,
             material_fallbacks: Vec::new(),
             material_fallback_warned: false,
@@ -159,6 +189,53 @@ impl PaintState {
     }
 
     #[inline]
+    pub(in crate::runtime) fn rest(&mut self, live_nodes: usize, live_inst: usize, node_index: &NodeIndex) {
+        fn shrink_vec<T>(v: &mut Vec<T>, floor: usize) {
+            let cap = (v.len().saturating_mul(2)).max(floor);
+            if v.capacity() > cap { v.shrink_to(cap); }
+        }
+        fn shrink_map<K: Eq + std::hash::Hash, V, S: std::hash::BuildHasher>(m: &mut std::collections::HashMap<K, V, S>, floor: usize) {
+            let cap = (m.len().saturating_mul(2)).max(floor);
+            if m.capacity() > cap { m.shrink_to(cap); }
+        }
+        let nf = (live_nodes.saturating_mul(2)).max(64);
+        shrink_vec(&mut self.inh_scratch, nf);
+        shrink_vec(&mut self.inh_cold, 32);
+        shrink_vec(&mut self.drawn, nf);
+        shrink_vec(&mut self.row_dy, nf);
+        shrink_vec(&mut self.row_h, nf);
+        shrink_vec(&mut self.row_mask, nf);
+        shrink_vec(&mut self.drawn_scale, nf);
+        shrink_vec(&mut self.seen, nf);
+        shrink_vec(&mut self.turn_scratch, 16);
+        shrink_vec(&mut self.unturned_drawn, 16);
+        shrink_vec(&mut self.row_lifts, 16);
+        shrink_vec(&mut self.layer_paint_order, 32);
+        shrink_vec(&mut self.lifted_anchors, 16);
+        shrink_vec(&mut self.dissolve_scratch, 32);
+        shrink_vec(&mut self.glyph_scratch, 64);
+        shrink_vec(&mut self.deco_scratch, 32);
+        shrink_vec(&mut self.layer_scratch, 32);
+        shrink_vec(&mut self.cache_live_scratch, 32);
+        shrink_vec(&mut self.cache_check_scratch, 32);
+        shrink_vec(&mut self.cache_paint_scratch, 32);
+        shrink_vec(&mut self.cache_inside_scratch, 32);
+        shrink_vec(&mut self.materials, 16);
+        shrink_vec(&mut self.web_images, 16);
+        shrink_vec(&mut self.wayland_material_blurs, 16);
+        #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+        shrink_vec(&mut self.windows_material_draws, 16);
+        shrink_vec(&mut self.material_fallbacks, 16);
+        shrink_vec(&mut self.icon_aprons, 16);
+        shrink_map(&mut self.node_caches, 16);
+        shrink_map(&mut self.text_rows, 16);
+        shrink_map(&mut self.static_scales, 16);
+        shrink_map(&mut self.icon_anim_mounts, 16);
+        shrink_map(&mut self.last_anchor_targets, 16);
+        self.text_quads.rest(|id| node_index.contains_key(&id));
+        self.keep.rest(live_nodes, live_inst);
+    }
+
     pub(in crate::runtime) fn srgb_blend(&self) -> bool {
         self.srgb_blend
     }
@@ -176,10 +253,34 @@ impl PaintState {
         self.native_materials
     }
 
+    /// Resolves `h.cold` to its `InhCold` entry, or `&InhCold::DEFAULT` when `0`.
+    #[inline(always)]
+    pub(in crate::runtime) fn inh_cold_of(&self, h: &Inh) -> &InhCold {
+        match h.cold.checked_sub(1).and_then(|k| self.inh_cold.get(k as usize)) {
+            Some(c) => c,
+            None => &InhCold::DEFAULT,
+        }
+    }
+
+    /// Stores `cold` in `self.inh_cold` (1-based), returning `0` when equal to `InhCold::DEFAULT`
+    /// and reusing `parent_cold` when unchanged from the parent.
+    #[inline]
+    pub(in crate::runtime) fn store_inh_cold(&mut self, parent_cold: u32, cold: InhCold) -> u32 {
+        if cold == InhCold::DEFAULT {
+            return 0;
+        }
+        if parent_cold != 0 && self.inh_cold.get(parent_cold as usize - 1) == Some(&cold) {
+            return parent_cold;
+        }
+        let idx = self.inh_cold.len() as u32 + 1;
+        self.inh_cold.push(cold);
+        idx
+    }
+
     /// Debug builds: total `PaintKeep` self-check mismatches observed (both unshifted and
     /// scroll-shifted copies). Always `0` in release builds.
     #[inline]
-    pub(in crate::runtime) fn keep_check_mismatches(&self) -> usize {
+    pub(crate) fn keep_check_mismatches(&self) -> usize {
         #[cfg(debug_assertions)]
         {
             self.keep.check_mismatches + self.keep.verify_mismatches
@@ -208,6 +309,30 @@ impl PaintState {
     #[inline]
     pub(crate) fn set_native_materials(&mut self, native: bool) {
         self.native_materials = native;
+    }
+
+    #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+    #[inline]
+    pub(crate) fn set_windows_acrylic_materials(&mut self, on: bool) {
+        self.windows_acrylic_materials = on;
+    }
+
+    #[inline]
+    pub(crate) fn set_wayland_blur_materials(&mut self, on: bool) -> bool {
+        if self.wayland_blur_materials == on {
+            return false;
+        }
+        self.wayland_blur_materials = on;
+        true
+    }
+
+    #[inline]
+    pub(crate) fn tracks_native_materials(&self) -> bool {
+        #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+        if self.windows_acrylic_materials {
+            return true;
+        }
+        self.native_materials || self.wayland_blur_materials
     }
 
     #[inline]
@@ -500,8 +625,50 @@ impl PaintState {
     }
 
     #[inline]
+    pub(in crate::runtime) fn clear_materials(&mut self) {
+        self.materials.clear();
+        self.material_fallbacks.clear();
+        self.wayland_material_blurs.clear();
+        #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+        self.windows_material_draws.clear();
+    }
+
+    #[inline]
     pub(crate) fn materials(&self) -> &[crate::system_material::MaterialDraw] {
         &self.materials
+    }
+
+    #[inline]
+    pub(in crate::runtime) fn clear_web_images(&mut self) {
+        self.web_images.clear();
+    }
+
+    #[inline]
+    pub(crate) fn push_web_image(&mut self, draw: crate::web_image::WebImageDraw) {
+        self.web_images.push(draw);
+    }
+
+    #[inline]
+    pub(crate) fn web_images(&self) -> &[crate::web_image::WebImageDraw] {
+        &self.web_images
+    }
+
+    #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+    #[inline]
+    pub(crate) fn windows_material_draws(&self) -> &[crate::system_material::MaterialDraw] {
+        &self.windows_material_draws
+    }
+
+    #[cfg_attr(
+        not(any(
+            all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+            test
+        )),
+        allow(dead_code)
+    )]
+    #[inline]
+    pub(crate) fn wayland_material_blurs(&self) -> &[crate::system_material::WaylandMaterialBlur] {
+        &self.wayland_material_blurs
     }
 
     #[inline]

@@ -166,6 +166,8 @@ pub(in crate::window) struct Win {
     pub(in crate::window) timer_frame: TimerFrame,
     /// Whether only its loops asked for the next frame (`LoopFrame`).
     pub(in crate::window) loop_frame: LoopFrame,
+    /// What its last frames changed, so the next redraws only that (`damage`).
+    pub(in crate::window) damage: damage::Damage,
     /// The last frame presented, while the window rests.
     pub(in crate::window) presented: Option<Presented>,
     /// A frame asked for while other windows covered it, still to draw (`CoveredDraw`).
@@ -206,6 +208,7 @@ impl Win {
         if (self.config.width, self.config.height) == (width, height) { return false; }
         self.config.width = width;
         self.config.height = height;
+        self.damage.reset();
         // No surface: `Host::reattach` is between the old one and the new, and takes this size
         // from the window itself; or the CPU renderer draws it, whose buffer follows this size.
         let (Some(surface), Some(gpu)) = (&self.surface, gpu) else { return true };
@@ -383,6 +386,17 @@ impl Win {
         return self.native.pacing.as_ref().is_some_and(|p| p.paced());
         #[cfg(not(target_os = "macos"))]
         false
+    }
+
+    /// Arms one-shot urgent frame admission on macOS display-link pacing.
+    pub(in crate::window) fn admit_urgent_frame(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(pacing) = &mut self.native.pacing { pacing.admit_once(); }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(in crate::window) fn has_urgent_admission(&self) -> bool {
+        self.native.pacing.as_ref().is_some_and(|p| p.is_urgent())
     }
 
     /// Consumes a macOS `RedrawRequested` on entry to `paint`, returning `true` when a prior
@@ -604,6 +618,19 @@ impl Win {
         }
     }
 
+    /// Carries out a titlebar action while fencing `TitlebarAction::DoubleClick` in `rt`'s press
+    /// machine so clicks whose native timestamps precede the end of a blocking toggle (macOS
+    /// `NSWindow::zoom:`) are dropped instead of replaying queued drags and zooms.
+    pub(in crate::window) fn run_titlebar_action(
+        &self,
+        rt: &mut crate::runtime::RuntimeCore,
+        action: crate::runtime::TitlebarAction,
+    ) {
+        rt.run_titlebar_action_with(action, |a| self.titlebar_action(a));
+    }
+
+
+
     /// Maximizes or restores this window. Adopted macOS panels ignore it.
     pub(in crate::window) fn toggle_maximized(&self) {
         if self.is_panel() { return; }
@@ -614,7 +641,19 @@ impl Win {
     /// panels ignore it.
     pub(in crate::window) fn set_full_screen(&self, full_screen: bool) {
         if self.is_panel() { return; }
+        #[cfg(target_os = "windows")]
+        let changing = full_screen != self.is_full_screen();
+        #[cfg(target_os = "windows")]
+        if changing {
+            // Cloak with DWM transitions disabled until the resized frame lands so DWM never
+            // composes the classic frame, a transition ghost, or a stale-size swap chain.
+            self.native.cloak.hold_transition(&self.window, crate::time::now() + READY_FALLBACK);
+        }
         crate::window::chrome::set_full_screen(&self.window, full_screen);
+        #[cfg(target_os = "windows")]
+        if changing {
+            self.request_redraw();
+        }
     }
 
     /// Takes this window full screen or brings it back. Adopted macOS panels ignore it.

@@ -37,6 +37,10 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
             out.push(Ev { t, kind: Kind::CloseRequest, pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
+        if e["quit_request"].as_bool() == Some(true) {
+            out.push(Ev { t, kind: Kind::QuitRequest, pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
         if let Some(url) = e["open_url"].as_str() {
             out.push(Ev { t, kind: Kind::OpenUrl(url.into()), pos: Pos::Rel(0.0, 0.0) });
             continue;
@@ -132,6 +136,9 @@ pub(crate) fn parse_script(list: Value) -> Vec<Ev> {
         } else {
             Pos::Rel(0.0, 0.0)
         };
+        if let (Pos::Key(key), Some(wait_s)) = (&pos, parse_wait_s(e.get("wait_s"))) {
+            out.push(Ev { t, kind: Kind::AwaitKey { key: key.clone(), wait_s }, pos: Pos::Rel(0.0, 0.0) });
+        }
         let ty = e["type"].as_str().unwrap_or("tap");
         // `"button": "middle"` (or "back", "forward", "secondary") presses with another button.
         let button = match e["button"].as_str().unwrap_or("primary") {
@@ -345,10 +352,20 @@ pub(crate) fn parse_files(e: &Value, t: f64, out: &mut Vec<Ev>) -> bool {
         (None, Some(key)) => Pos::Key(key.to_owned()),
         _ => die(&format!("{name} needs \"at\": [x, y] or \"key\"")),
     };
+    if let (Pos::Key(key), Some(wait_s)) = (&pos, parse_wait_s(e.get("wait_s").or_else(|| spec.get("wait_s")))) {
+        out.push(Ev { t, kind: Kind::AwaitKey { key: key.clone(), wait_s }, pos: Pos::Rel(0.0, 0.0) });
+    }
     out.push(Ev { t, kind: Kind::Files(FileStep::Hover(paths.clone())), pos: pos.clone() });
     if drop {
         let hover = spec["hover"].as_f64().unwrap_or(0.0).max(0.0);
         out.push(Ev { t: t + hover, kind: Kind::Files(FileStep::Drop(paths)), pos });
     }
     true
+}
+
+fn parse_wait_s(v: Option<&Value>) -> Option<f64> {
+    let v = v.filter(|v| !v.is_null())?;
+    let wait_s = v.as_f64().filter(|w| w.is_finite() && *w >= 0.0)
+        .unwrap_or_else(|| die("wait_s must be a non-negative finite number of seconds"));
+    (wait_s > 0.0).then_some(wait_s)
 }

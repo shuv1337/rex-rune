@@ -1,7 +1,7 @@
 # Vendored Rune
 
 `crates/rune` is [anomalyco/rune](https://github.com/anomalyco/rune) at
-`983e33b916b0da5719442d94ae04a00867c952a3` (MIT, see `LICENSE`). Its manifest
+`f1b079ccad541008073e73d0987b876f4c99c322` (MIT, see `LICENSE`). Its manifest
 expands inherited workspace settings and pins internal dependencies to that
 same revision. All other Rune crates and the eight upstream registry patches
 come from that git revision.
@@ -10,8 +10,8 @@ Rex Rune enables `accessibility`, `dbus`, `metal-backend`, `ogg-audio`, `svg`,
 and `tooling`. It does not use Hunspell or Rune's default embedded faces.
 The app supplies the OpenCode theme's fonts; this also keeps `rune-text`
 from expecting sibling Rune assets in Nix's flat vendor tree. `tooling` keeps `--snap`,
-`--script`, and `--tree` available in release builds. Rune's wasm target
-still enables Hunspell, but native builds do not compile `spellbook`.
+`--script`, and `--tree` available in release builds. Hunspell is opt-in on
+both Linux and wasm at this revision.
 
 ## Local patches
 
@@ -20,19 +20,20 @@ still enables Hunspell, but native builds do not compile `spellbook`.
   these windows with frame callbacks; FIFO can block a second time on KWin
   with Mesa RADV. `RUNE_PRESENT_MODE` can override the mode for top-level
   native windows (`auto`, `fifo`, `fifo-relaxed`, `mailbox`, `immediate`).
-  The selection is made on creation and at GPU reattachment, including the
-  Linux CPU-to-GPU handover. Embedded and overlay surfaces keep upstream
-  policy. `PresentChoice` and `choose_present` are hidden test exports.
+  The selection is made on creation, same-device surface recovery, and GPU
+  reattachment, including CPU-to-GPU handover. Embedded and overlay surfaces
+  keep upstream policy. `PresentChoice` and `choose_present` are hidden test exports.
 - **Optional GSettings session-bus loss ([#79](../../docs/investigations/79-session-bus-loss.md)):**
-  clear GIO's exit-on-close flag before creating GSettings for either fallback
-  preference read. Retain one owned shared connection reference for the
-  backend's deferred acquisition and release the previous reference outside
+  clear GIO's exit-on-close flag before creating GSettings in the shared
+  preference reader. This now covers animation, double-click interval, contrast,
+  text scale and colour scheme fallbacks. Retain one owned shared connection
+  reference for the backend's deferred acquisition and release the previous reference outside
   the mutex. An unavailable or closed bus leaves the preference unavailable.
   No retries or changes to the Settings portal or notification workers.
-- **Native titlebar interactions:** outside macOS, a mouse-initiated window move
-  starts only after 3 pt of travel. An immediate X11 move grab prevents the
-  second click of a double click from reaching Rune. Release or focus loss
-  cancels a pending move. macOS still starts a move inside mouse-down, as
-  AppKit requires. Touch and native edge resizing use upstream behavior.
-  Rune's native secondary-release menu also works on bare drag regions on Unix
-  outside macOS, where the upstream caption check is skipped.
+- **Native titlebar interactions (partly upstream):** top-level mouse moves
+  handled by Rune outside macOS still wait for travel of more than 3 pt on
+  either axis. Upstream's press state machine now handles release, focus loss
+  and double-click pairing. AppKit still starts moves on mouse-down; touch,
+  Windows non-client hit testing and native edge resizing keep upstream policy.
+  Bare-region window menus no longer need a patch: X11 opens on release when
+  the WM supports the menu, Wayland on press while the compositor serial is valid.

@@ -85,12 +85,16 @@ impl crate::Tx {
     /// asked for outside a click or key press, which browsers block, and reports `Ok(())` for
     /// the rest. Headless runs and tests record the link and report `Ok(())`.
     ///
-    /// ```ignore
+    /// ```
+    /// # use rune::{Tx, el};
+    /// # struct App { link_error: Option<String> }
+    /// # let _ = el()
     /// .on_press_tx(|_: &mut App, tx: &mut Tx| {
     ///     let _ = tx.open_url_then("https://example.com/", |s: &mut App, result, _| {
     ///         s.link_error = result.err().map(|e| e.to_string());
     ///     });
     /// })
+    /// # ;
     /// ```
     pub fn open_url_then<S: 'static>(&mut self, url: &str, on_result: impl FnOnce(&mut S, Result<(), OpenUrlError>, &mut crate::Tx) + 'static) -> Result<(), OpenUrlError> {
         let url = check(url)?;
@@ -116,6 +120,13 @@ fn opened<S: 'static>(on_result: impl FnOnce(&mut S, Result<(), OpenUrlError>, &
     Opened(std::rc::Rc::new(std::cell::Cell::new(Some(f))))
 }
 
+/// Whether `url` starts with a URI scheme (`scheme:...`) before any `/`, `?` or `#`,
+/// excluding scheme-relative `//...` references.
+pub(crate) fn has_scheme(url: &str) -> bool {
+    let url = url.trim();
+    !url.starts_with("//") && url.find([':', '/', '?', '#']).is_some_and(|i| url.as_bytes()[i] == b':')
+}
+
 /// The link to open, trimmed and with a lowercase scheme, or why it can't be.
 pub(crate) fn check(url: &str) -> Result<String, OpenUrlError> { check_link(url, false) }
 
@@ -126,6 +137,17 @@ pub(crate) fn check_same_tab(url: &str) -> Result<String, OpenUrlError> { check_
 /// `check` for a web `<a href>` (the accessibility mirror and `--html` export): `http:`,
 /// `https:`, `mailto:`, or a relative path/query/fragment that isn't scheme-relative (`//`).
 pub(crate) fn check_href(url: &str) -> Result<String, OpenUrlError> { check_link(url, true) }
+
+/// `check` for a display-only web `<img src>` (`El::web_image`): `http:`, `https:`, or a
+/// relative path/query/fragment that isn't scheme-relative (`//`). Rejects `mailto:` and
+/// non-HTTP schemes.
+pub(crate) fn check_image_url(url: &str) -> Result<String, OpenUrlError> {
+    let checked = check_link(url, true)?;
+    if checked.starts_with("mailto:") {
+        return Err(OpenUrlError::UnsupportedScheme("mailto".into()));
+    }
+    Ok(checked)
+}
 
 fn check_link(url: &str, relative: bool) -> Result<String, OpenUrlError> {
     let url = url.trim();

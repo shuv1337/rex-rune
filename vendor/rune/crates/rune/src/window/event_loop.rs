@@ -119,6 +119,7 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     crate::render::reopen_prewarm();
     crate::relaunch::wait_for_previous();
     super::displays::reset();
+    super::display_queue::reset_closed();
     crate::tooling::perf_warn::launch::run_starts();
     crate::platform::ready_signal::run_starts();
     // `RUNE_OPEN_INACTIVE` (a tool's launch): the app doesn't take activation at launch either.
@@ -208,6 +209,8 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
         display_error: None,
         wayland_wake: super::wayland_wake::State::default(),
         on_display_close: Vec::new(),
+        display_watch: super::displays::DisplayWatch::default(),
+        free_overlay_slots: Vec::new(),
     };
     crate::open_url::incoming::prepare();
     crate::marks::mark("loop.run");
@@ -217,7 +220,13 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     crate::tooling::interaction::flush();
     let warm_shutdown = crate::render::shutdown_prewarm();
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-    crate::platform::wayland_drop::shutdown();
+    {
+        crate::platform::wayland::primary_selection::wire::shutdown();
+        crate::platform::wayland::drop::shutdown();
+        crate::platform::wayland::backdrop::shutdown();
+        crate::platform::wayland::presentation::shutdown();
+        crate::platform::wayland::serial::wire::shutdown();
+    }
     crate::clipboard::shutdown(); // Also cover an event-loop error before `exiting`.
     crate::platform::ready_signal::clear();
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]

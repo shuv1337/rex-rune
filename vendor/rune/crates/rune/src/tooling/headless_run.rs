@@ -150,6 +150,17 @@ pub enum ScriptEvent {
     /// # );
     /// ```
     CloseRequest,
+    /// `{"quit_request": true}`: an application-level quit request (`App::on_quit_request`).
+    ///
+    /// ```
+    /// # use rune::tooling::ScriptEvent;
+    /// # let event = ScriptEvent::QuitRequest;
+    /// # assert!(
+    /// // JSON script event: {"t": 0.1, "quit_request": true}
+    /// matches!(event, ScriptEvent::QuitRequest)
+    /// # );
+    /// ```
+    QuitRequest,
     /// `{"open_url": …}`: a link the system opened with the app (`App::on_open_url`).
     OpenUrl(String),
     /// `{"open_files": […]}`: files the system opened with the app (`App::on_open_files`).
@@ -192,6 +203,9 @@ pub enum ScriptEvent {
     DropFiles { paths: Vec<std::path::PathBuf>, at: ScriptPoint },
     /// `{"drag_files": "leave"}`: the file drag left the window.
     DragFilesLeave,
+    /// `{"key": …, "wait_s": …}`: wait in headless `--script` up to `wait_s` seconds for an
+    /// element with `key` to exist before playing the keyed event that follows.
+    AwaitKey { key: String, wait_s: f64 },
 }
 
 #[non_exhaustive]

@@ -426,8 +426,8 @@ fn web_frame_host_invokes_on_frame_drawn_only_on_drawn_frames() {
                     WebAcquireAction::Miss(m) => Acquire::Missed(m),
                     WebAcquireAction::ReconfigureAndRetry => Acquire::Missed(Missed::Outdated),
                 },
-                WebDrawKind::Cpu | WebDrawKind::HandingOver { .. } => Acquire::Ready(()),
-                WebDrawKind::ContextLost | WebDrawKind::Moving => Acquire::Missed(Missed::Unconfigured),
+                WebDrawKind::Cpu | WebDrawKind::HandingOver => Acquire::Ready(()),
+                WebDrawKind::ContextLost | WebDrawKind::TerminalFailed | WebDrawKind::Moving => Acquire::Missed(Missed::Unconfigured),
             }
         }
 
@@ -442,7 +442,7 @@ fn web_frame_host_invokes_on_frame_drawn_only_on_drawn_frames() {
         }
 
         fn render(&mut self, _: &mut (), _: &StepInfo) -> bool {
-            if matches!(self.draw, WebDrawKind::Cpu | WebDrawKind::HandingOver { .. }) {
+            if matches!(self.draw, WebDrawKind::Cpu | WebDrawKind::HandingOver) {
                 self.drawn = !self.cpu_needs_gpu;
             }
             false
@@ -545,15 +545,20 @@ fn web_frame_host_invokes_on_frame_drawn_only_on_drawn_frames() {
     assert_eq!(host_step::run(&mut host), Outcome::Unchanged);
     assert_eq!(seen.borrow().len(), 2);
 
-    // 5. Skipped frames (suspended, ContextLost, HandingOver waiting for GPU) -> hook does not run.
+    // 5. Skipped frames (suspended, ContextLost, Moving) -> hook does not run; HandingOver keeps
+    // painting CPU frames (and fires the hook) instead of freezing.
     host.suspended = true;
     assert_eq!(host_step::run(&mut host), Outcome::Skipped);
     host.suspended = false;
     host.draw = WebDrawKind::ContextLost;
     assert_eq!(host_step::run(&mut host), Outcome::Skipped);
-    host.draw = WebDrawKind::HandingOver { waiting_for_gpu: true };
+    host.draw = WebDrawKind::Moving;
     assert_eq!(host_step::run(&mut host), Outcome::Skipped);
     assert_eq!(seen.borrow().len(), 2);
+    host.draw = WebDrawKind::HandingOver;
+    host.step_at += Duration::from_millis(16);
+    assert_eq!(host_step::run(&mut host), Outcome::Presented);
+    assert_eq!(seen.borrow().len(), 3);
 
     // 6. Missed acquire (Timeout / Occluded) and Aborted prepare -> hook does not run.
     host.draw = WebDrawKind::Gpu;
@@ -566,19 +571,138 @@ fn web_frame_host_invokes_on_frame_drawn_only_on_drawn_frames() {
     host.abort_prepare = true;
     assert_eq!(host_step::run(&mut host), Outcome::Aborted);
     host.abort_prepare = false;
-    assert_eq!(seen.borrow().len(), 2);
+    assert_eq!(seen.borrow().len(), 3);
 
     // 7. State change on GPU draws a new frame -> hook runs once with the updated state.
     host.rt.update(|s, _| *s = 42);
     host.step_at += Duration::from_millis(16);
     assert_eq!(host_step::run(&mut host), Outcome::Presented);
-    assert_eq!(seen.borrow().len(), 3);
-    assert_eq!(seen.borrow()[2].0, 42);
+    assert_eq!(seen.borrow().len(), 4);
+    assert_eq!(seen.borrow()[3].0, 42);
 
     // 8. Unset hook runs frames without error.
     host.on_frame_drawn = None;
     host.rt.update(|s, _| *s = 99);
     host.step_at += Duration::from_millis(16);
     assert_eq!(host_step::run(&mut host), Outcome::Presented);
-    assert_eq!(seen.borrow().len(), 3);
+    assert_eq!(seen.borrow().len(), 4);
+}
+
+#[test]
+fn start_web_runtime_lends_window_text_system_during_setup() {
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    const LABEL: &str = "Web setup warm text";
+    const STYLE: crate::TextStyle = crate::TextStyle::new(14.0, 400.0);
+
+    #[derive(Default)]
+    struct WebSetupState {
+        setup_width: f32,
+        view_width: Cell<f32>,
+    }
+
+    fn web_view(s: &WebSetupState, _: &mut crate::Cx<WebSetupState>) -> crate::El {
+        s.view_width.set(crate::text::measure(LABEL, &[], STYLE, None).0);
+        crate::col().size(320.0, 120.0).child(crate::text(LABEL).font(STYLE))
+    }
+
+    // Run on a clean thread so no ambient `with_families` override bypasses `lend`.
+    std::thread::spawn(|| {
+        let mut spec = crate::AppSpec::new("web-setup", (320.0, 120.0), WebSetupState::default, web_view);
+        spec.setup = Some(|s, _| {
+            s.setup_width = crate::text::measure(LABEL, &[], STYLE, None).0;
+        });
+        let app = crate::App::new(spec).font_smoothing(crate::FontSmoothing::Off);
+        let (mut rt, _, _, _, _) = crate::platform::web_math::start_web_runtime(
+            app,
+            (320.0, 120.0),
+            crate::Env::new(true, 1.0),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+        );
+        assert_eq!(rt.font_smoothing(), crate::FontSmoothing::Off);
+        let shaped_after_setup = rt.text.shaped;
+        assert!(shaped_after_setup >= 1, "web setup must shape directly on the window's TextSystem");
+        assert!(rt.text.cached_layout_count() >= 1);
+        rt.frame(0.0);
+        assert_eq!(
+            rt.text.shaped, shaped_after_setup,
+            "first web frame must reuse the layout shaped during setup",
+        );
+        assert_eq!(rt.state.setup_width, rt.state.view_width.get());
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn gpu_startup_needs_gpu_starts_immediately_from_idle_and_bypasses_quiet_wait() {
+    let t0 = crate::time::now();
+
+    // 1. Non-degradable NeedsGpu on frame 1 (Idle): probes WebGPU on the next turn (0 ms) and
+    // skips quiet wait if WebGPU fails over to WebGL2.
+    let mut seq = crate::machine::Seq::default();
+    let mut state = GpuStartup::default();
+    let Some(GpuStartupEffect::ScheduleCheck { attempt: a1, delay }) = step_one(
+        &mut state,
+        &mut seq,
+        GpuStartupEvent::NeedsGpu { at: t0, has_navigator_gpu: true, webgl_enabled: true },
+    ) else {
+        panic!("expected immediate ScheduleCheck");
+    };
+    assert_eq!(delay, Duration::ZERO);
+    assert_eq!(
+        step_one(&mut state, &mut seq, GpuStartupEvent::CheckDue { attempt: a1, now: t0 + Duration::from_millis(1) }),
+        Some(GpuStartupEffect::AskWebGpu),
+    );
+    let Some(GpuStartupEffect::ScheduleCheck { attempt: a2, delay: gl_delay }) = step_one(
+        &mut state,
+        &mut seq,
+        GpuStartupEvent::WebGpuFailed { now: t0 + Duration::from_millis(5) },
+    ) else {
+        panic!("expected immediate macrotask WebGL2 escalation");
+    };
+    assert_eq!(gl_delay, Duration::ZERO);
+    assert_eq!(
+        step_one(&mut state, &mut seq, GpuStartupEvent::CheckDue { attempt: a2, now: t0 + Duration::from_millis(6) }),
+        Some(GpuStartupEffect::AskWebGl2),
+    );
+    assert_eq!(state, GpuStartup::Done);
+
+    // 2. Non-degradable NeedsGpu arriving while waiting in WaitQuietForWebGl2 cancels the quiet
+    // timer and fires AskWebGl2 on the next turn.
+    let mut seq = crate::machine::Seq::default();
+    let mut state = GpuStartup::default();
+    let Some(GpuStartupEffect::ScheduleCheck { attempt: quiet_attempt, delay }) = step_one(
+        &mut state,
+        &mut seq,
+        GpuStartupEvent::FirstPresented {
+            at: t0,
+            has_navigator_gpu: false,
+            compiles_async: false,
+            webgl_enabled: true,
+        },
+    ) else {
+        panic!("expected quiet ScheduleCheck");
+    };
+    assert_eq!(delay, GPU_START_QUIET);
+    let Some(GpuStartupEffect::ScheduleCheck { attempt: urgent_attempt, delay: urgent_delay }) = step_one(
+        &mut state,
+        &mut seq,
+        GpuStartupEvent::NeedsGpu { at: t0 + Duration::from_millis(20), has_navigator_gpu: false, webgl_enabled: true },
+    ) else {
+        panic!("expected urgent escalation");
+    };
+    assert_eq!(urgent_delay, Duration::ZERO);
+    // Stale quiet timer is ignored.
+    assert_eq!(
+        step_one(&mut state, &mut seq, GpuStartupEvent::CheckDue { attempt: quiet_attempt, now: t0 + Duration::from_millis(300) }),
+        None,
+    );
+    assert_eq!(
+        step_one(&mut state, &mut seq, GpuStartupEvent::CheckDue { attempt: urgent_attempt, now: t0 + Duration::from_millis(21) }),
+        Some(GpuStartupEffect::AskWebGl2),
+    );
+    assert_eq!(state, GpuStartup::Done);
 }

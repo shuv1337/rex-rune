@@ -172,8 +172,17 @@ impl RuntimeCore {
 
     /// Window point (x, y) as node `i`'s handlers see it.
     pub(crate) fn pointer_event(&self, i: usize, x: f32, y: f32) -> PointerEvent {
+        let r = self.tree.nodes[i].target;
         let [lx, ly] = self.to_local(i, x, y);
-        PointerEvent { x: lx, y: ly, window_x: x, window_y: y, pressing: self.pointer.any_button_down() }
+        PointerEvent {
+            x: lx,
+            y: ly,
+            w: (r[2] - r[0]).max(0.0),
+            h: (r[3] - r[1]).max(0.0),
+            window_x: x,
+            window_y: y,
+            pressing: self.pointer.any_button_down(),
+        }
     }
 
     /// Window point (x, y) in node `i`'s own layout points: from its top-left as drawn, divided
@@ -388,7 +397,11 @@ impl RuntimeCore {
             if Some(i) == primary { return primary; }
             if std::iter::successors(Some(i), |&k| self.tree.nodes[k].parent)
                 .take_while(|&k| !shared_ancestor(k))
-                .any(|k| self.tree.nodes[k].handlers.cursor.is_some())
+                .any(|k| {
+                    self.tree.nodes[k].handlers.cursor.is_some()
+                        && !(self.tree.nodes[k].text.as_ref().is_some_and(|t| t.flags.has(crate::el::TextFlags::SELECTABLE_CURSOR))
+                            && !self.is_selectable(k))
+                })
             {
                 return Some(i);
             }
@@ -477,7 +490,9 @@ impl RuntimeCore {
         let n = &self.tree.nodes[i];
         let hits_before = self.hit.hits_len();
         if (n.vis_flags.hit() || n.handlers.get().is_some_and(crate::el::Handlers::takes_hit) || n.input.is_some() || n.role == "textbox" || n.window_drag != crate::el::WindowDrag::None || n.focus.get().is_some_and(|f| f.enabled)
-            || n.text.as_ref().is_some_and(|t| t.selectable || !t.cold.links.is_empty()))
+            || n.vis.cold.get().is_some_and(|c| c.image_menu.is_some())
+            || self.is_selectable(i)
+            || (n.text.as_ref().is_some_and(|t| !t.cold.links.is_empty()) && !self.is_text_hidden(i)))
             && !self.subtree_exiting(i)
             && self.allowed(i) && effective_opacity > 0.001 && visible
         {
@@ -511,7 +526,12 @@ impl RuntimeCore {
         // not on what lies beneath. Other boxes without a handler let the wheel through, as an
         // element with `pointer-events: none` does.
         let n = &self.tree.nodes[i];
-        if (self.hit.hits_len() > hits_before || n.scroll.is_some() || n.above.is_some() || n.vis_flags.raise() || n.sticky.is_some())
+        if (self.hit.hits_len() > hits_before
+            || n.scroll.is_some()
+            || n.above.is_some()
+            || n.vis_flags.raise()
+            || n.sticky.is_some()
+            || n.handlers.get().is_some_and(|h| h.edge_drags.is_some()))
             && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible
         {
             let c = if n.parent.is_some() { pinh_clip } else { self.paint.inh_scratch[0].clip };
@@ -531,6 +551,10 @@ impl RuntimeCore {
             let c = if self.tree.nodes[i].parent.is_some() { pinh_clip } else { NO_CLIP };
             self.push_link_help_hits(i, rect_pt, [c[0] / s, c[1] / s, c[2] / s, c[3] / s], hits_before);
         }
+        if self.tree.nodes[i].text.as_ref().is_some_and(|t| t.cold.pills.iter().any(|p| p.bare.as_deref().is_some_and(|b| b.help.is_some()))) && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
+            let c = if self.tree.nodes[i].parent.is_some() { pinh_clip } else { NO_CLIP };
+            self.push_icon_help_hits(i, rect_pt, [c[0] / s, c[1] / s, c[2] / s, c[3] / s], hits_before);
+        }
         if self.tree.nodes[i].handlers.get().is_some_and(|h| h.drop.is_some()) && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
             let c = if self.tree.nodes[i].parent.is_some() { pinh_clip } else { NO_CLIP };
             let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
@@ -538,3 +562,7 @@ impl RuntimeCore {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "hit_tests.rs"]
+mod tests;

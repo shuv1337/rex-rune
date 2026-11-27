@@ -6,7 +6,14 @@ pub(super) struct Backdrop {
     pub(super) format: wgpu::TextureFormat,
     pub(super) texture: wgpu::Texture,
     pub(super) view: wgpu::TextureView,
+    /// Where its first texel sits in the window, in device pixels: `[0, 0]` for a copy of the
+    /// whole target, the corner of the frame's blurred regions for one that holds only those.
+    pub(super) origin: [u32; 2],
 }
+
+/// A backdrop that holds only blurred regions is sized in these steps, so a region that grows or
+/// moves by a few pixels makes no texture.
+pub(super) const BACKDROP_STEP: u32 = 64;
 
 /// The pass a frame records into. Only a pass the renderer opened itself can end mid-frame
 /// (`split`): the caller's own `draw_range` pass has no encoder to copy its target and re-open it.
@@ -44,7 +51,6 @@ impl<'a, 'p> ActivePass<'a, 'p> {
     }
 
     /// A caller's pass whose scissors all stay inside `bound` (`[x, y, width, height]`).
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     pub(super) fn borrowed_within(pass: &'a mut wgpu::RenderPass<'p>, bound: [u32; 4]) -> Self {
         ActivePass::Borrowed { pass, scissor: None, bound: Some(bound) }
     }
@@ -191,14 +197,15 @@ impl<'a, 'p> ActivePass<'a, 'p> {
                 (src_x, src_y, dst_x, dst_y, copy_w, copy_h)
             }
             Some(r) => {
-                let span = |lo: f32, hi: f32, o: f32, src: u32, dst: u32| {
-                    let lo = lo.floor().max(o.ceil()).max(0.0);
-                    let hi = hi.ceil().min(o + src as f32).min(dst as f32);
+                // The backdrop covers the window from `at` for `dst` pixels.
+                let span = |lo: f32, hi: f32, o: f32, src: u32, at: u32, dst: u32| {
+                    let lo = lo.floor().max(o.ceil()).max(at as f32);
+                    let hi = hi.ceil().min(o + src as f32).min((at + dst) as f32);
                     (lo, (hi - lo).max(0.0) as u32)
                 };
-                let (x, w) = span(r[0], r[2], origin[0], size[0].min(src_tex.width()), vw);
-                let (y, h) = span(r[1], r[3], origin[1], size[1].min(src_tex.height()), vh);
-                ((x - origin[0].ceil()) as u32, (y - origin[1].ceil()) as u32, x as u32, y as u32, w, h)
+                let (x, w) = span(r[0], r[2], origin[0], size[0].min(src_tex.width()), bd.origin[0], vw);
+                let (y, h) = span(r[1], r[3], origin[1], size[1].min(src_tex.height()), bd.origin[1], vh);
+                ((x - origin[0].ceil()) as u32, (y - origin[1].ceil()) as u32, x as u32 - bd.origin[0], y as u32 - bd.origin[1], w, h)
             }
         };
         if copy_w > 0 && copy_h > 0 {
@@ -236,8 +243,15 @@ impl<'a, 'p> ActivePass<'a, 'p> {
             occlusion_query_set: None,
             multiview_mask: None,
         }).forget_lifetime();
-        next.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
-        if let Some([x, y, w, h]) = scissor { next.set_scissor_rect(x, y, w, h); }
+        let vw = size[0].min(src_tex.width());
+        let vh = size[1].min(src_tex.height());
+        if vw > 0 && vh > 0 {
+            next.set_viewport(0.0, 0.0, vw as f32, vh as f32, 0.0, 1.0);
+            match scissor {
+                Some([x, y, w, h]) => next.set_scissor_rect(x, y, w, h),
+                None => next.set_scissor_rect(0, 0, vw, vh),
+            }
+        }
         *self = ActivePass::Owned(OpenPass { pass: next, encoder, view, scissor, timestamps });
         Some(bd)
     }
@@ -265,13 +279,63 @@ impl<'p> std::ops::DerefMut for ActivePass<'_, 'p> {
 }
 
 impl Renderer {
-    pub(super) fn ensure_backdrop(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, (width, height): (u32, u32)) {
-        let (width, height) = (width.max(1), height.max(1));
-        if let Some(b) = self.backdrops.iter().find(|b| b.format == format)
-            && b.texture.width() == width && b.texture.height() == height
+    /// Effect slots prepared for this frame (`El::effect`), with each slot's resolved pass
+    /// `origin`, `size`, `format`, `in_layer`, `scale`, `mark`, and `data` available after
+    /// `prepare` and before opening any render pass (`draw_with` / `encode_layers_with`).
+    ///
+    /// Use this when a compositor runs compute or offscreen passes before `draw_with` and needs
+    /// to know whether a slot sits inside an isolated layer (and that layer's window-pixel
+    /// `origin` and `size`) without requesting `El::effect_backdrop(true)`. Slots inside
+    /// skipped or cached layers, internal backdrop-blur records, and slots clipped empty are
+    /// omitted, matching the slots `encode_layers_with` and `draw_with` will visit.
+    /// `EffectSite::backdrop` is always `None` here.
+    pub fn effect_sites(&self) -> Vec<EffectSite<'_>> {
+        let mut out = Vec::new();
+        let edge = |v: f32, o: f32, max: u32| (v - o).clamp(0.0, max as f32) as u32;
+        for (at, instance) in &self.effects {
+            if instance.kind() == Some(Kind::BackdropBlur) {
+                continue;
+            }
+            let Some((target, inline_clip)) = self.effect_target(*at) else { continue };
+            let (origin, size) = self.target_frame(target);
+            if let Some(ic) = inline_clip {
+                let (ix0, iy0) = (edge(ic[0].floor(), origin[0], size[0]), edge(ic[1].floor(), origin[1], size[1]));
+                let (ix1, iy1) = (edge(ic[2].ceil(), origin[0], size[0]), edge(ic[3].ceil(), origin[1], size[1]));
+                if ix1 <= ix0 || iy1 <= iy0 { continue; }
+            }
+            let c = instance.clip;
+            let (x0, y0) = (edge(c[0].floor(), origin[0], size[0]), edge(c[1].floor(), origin[1], size[1]));
+            let (x1, y1) = (edge(c[2].ceil(), origin[0], size[0]), edge(c[3].ceil(), origin[1], size[1]));
+            if x1 <= x0 || y1 <= y0 { continue; }
+            let format = if target.is_some() { layers::FORMAT } else { self.format };
+            out.push(EffectSite {
+                index: *at,
+                instance,
+                mark: super::effect_mark(instance),
+                data: instance.uv,
+                scale: instance.params[3],
+                format,
+                origin,
+                size,
+                in_layer: target.is_some(),
+                srgb_blend: self.srgb_blend,
+                backdrop: None,
+                fade_stops: self.fade_stops,
+            });
+        }
+        out
+    }
+
+    /// The pooled backdrop of `format` sits at `origin` in the window and is `size` device
+    /// pixels (`Renderer::backdrop_frame`): kept when it has that size, made again otherwise.
+    pub(super) fn ensure_backdrop(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, origin: [u32; 2], size: [u32; 2]) {
+        if let Some(b) = self.backdrops.iter_mut().find(|b| b.format == format)
+            && [b.texture.width(), b.texture.height()] == size
         {
+            b.origin = origin;
             return;
         }
+        let (width, height) = (size[0].max(1), size[1].max(1));
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("effect backdrop"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -285,9 +349,27 @@ impl Renderer {
         let view = texture.create_view(&Default::default());
         if let Some(blur) = &mut self.backdrop_blur { blur.bind_backdrop(device, format, &view); }
         if let Some(b) = self.backdrops.iter_mut().find(|b| b.format == format) {
-            *b = Backdrop { format, texture, view };
+            *b = Backdrop { format, texture, view, origin };
         } else {
-            self.backdrops.push(Backdrop { format, texture, view });
+            self.backdrops.push(Backdrop { format, texture, view, origin });
         }
+    }
+}
+
+/// Restricts a root render pass to the top-left `viewport` sub-rectangle when rendering into a
+/// larger capacited target texture (such as the Windows drag-resize shared texture ring). No-op
+/// when the target texture matches `viewport`.
+pub(super) fn apply_subrect_viewport(
+    pass: &mut wgpu::RenderPass<'_>,
+    view: &wgpu::TextureView,
+    viewport: [u32; 2],
+) {
+    let [vw, vh] = viewport;
+    let tex = view.texture();
+    if vw > 0 && vh > 0 && (vw != tex.width() || vh != tex.height()) {
+        let vw = vw.min(tex.width());
+        let vh = vh.min(tex.height());
+        pass.set_viewport(0.0, 0.0, vw as f32, vh as f32, 0.0, 1.0);
+        pass.set_scissor_rect(0, 0, vw, vh);
     }
 }

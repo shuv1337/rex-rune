@@ -79,10 +79,16 @@ pub(in crate::window) struct Native {
     #[cfg(target_os = "linux")]
     pub(in crate::window) mode: crate::window::linux::handover::SurfaceMode,
     /// Lazy `wl_data_device` binding state machine (pre-first-frame, bound, teardown grace, unavailable).
-    pub(in crate::window) drop_binding: crate::platform::wayland_drop::binding::State,
+    pub(in crate::window) drop_binding: crate::platform::wayland::drop::binding::State,
     pub(in crate::window) drop_seq: crate::machine::Seq,
     /// Unregisters the window's Wayland drop target before the window's `wl_surface` drops.
-    pub(in crate::window) drop_target: Option<crate::platform::wayland_drop::DropTarget>,
+    pub(in crate::window) drop_target: Option<crate::platform::wayland::drop::DropTarget>,
+    /// Unwatched Wayland press/touch serial listener guard kept while `drag_out` is mounted or active.
+    pub(in crate::window) drag_serial: Option<crate::platform::wayland::serial::wire::SerialGuard>,
+    /// Per-surface Wayland behind-window blur controller, dropped strictly before `wl_surface`.
+    pub(in crate::window) wayland_backdrop: Option<crate::platform::wayland::backdrop::SurfaceBlur>,
+    /// Per-surface Wayland `wp_presentation` feedback handle, dropped strictly before `wl_surface`.
+    pub(in crate::window) wayland_present: Option<crate::platform::wayland::presentation::SurfacePresentation>,
 }
 
 #[cfg(target_os = "windows")]
@@ -101,20 +107,29 @@ pub(in crate::window) struct Native {
     pub(in crate::window) look: crate::window::win32::look::Look,
     /// Whether its swap chain can take the next frame (`slot`).
     pub(in crate::window) slot: crate::window::win32::slot::Slot,
+    /// DXGI swap-chain presentation timestamp tracker for `App::on_frame_presented`.
+    pub(in crate::window) dxgi_present: crate::window::win32::present_time::DxgiPresentTracker,
     /// Paces sub-frame `poll` wakes onto the display's vblank grid (`poll_pace`).
     pub(in crate::window) poll_pace: crate::window::win32::poll_pace::PollPace,
-    /// What its last frames changed, so the next redraws only that (`damage`).
-    pub(in crate::window) damage: crate::window::win32::damage::Damage,
+    /// Opt-in Windows 11 `El::system_material` visuals behind the swap chain. Declared before
+    /// `mode` so `DesktopWindowTarget` closes before `Handover` drops.
+    #[cfg(feature = "windows-system-material")]
+    pub(in crate::window) materials: crate::system_material::windows::Materials,
     /// Whether the CPU renderer or the GPU draws its frames (`cpu_frame`).
     pub(in crate::window) mode: crate::window::win32::handover::SurfaceMode,
     /// Whether its accessibility adapter waits for the first frame (`Host::a11y_after_frame`).
     pub(in crate::window) a11y_start: A11yStart,
     /// Opt-in synchronized drag resize state and D3D11 copy-model resources (`resize_sync`).
-    pub(in crate::window) resize_sync: crate::window::win32::resize_sync::ResizeSync,
+    pub(in crate::window) resize_sync: crate::window::win32::resize_sync::DragResizeSync,
     /// Playing clips shown on their own layer under the UI (`video_layer`).
     pub(in crate::window) video_layers: crate::window::win32::video_layer::VideoLayers,
     /// Revokes the window's OLE drop target and prunes its registry entry when the window goes.
     pub(in crate::window) drop_target: Option<crate::platform::win32::drop_target::DropTarget>,
+    /// Cached DWM system backdrop state for this live `HWND` (`platform::win32::backdrop`).
+    pub(in crate::window) backdrop: crate::platform::win32::backdrop::BackdropTracker,
+    /// Last observed maximized state, so maximize/unmaximize transitions re-apply an active DWM
+    /// backdrop without touching plain drag-resizes.
+    pub(in crate::window) last_maximized: bool,
 }
 
 /// When a window's UI Automation adapter is made: with the window (a screen reader is running),

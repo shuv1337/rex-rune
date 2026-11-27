@@ -15,9 +15,10 @@ use std::time::Duration;
 use winit::window::Window;
 
 use super::frame::OverlayRenderArgs;
-use super::{OverlayCore, OverlayHandle, Placement, Shared, SharedCore};
+use super::requests::AfterHidden;
 #[cfg(test)]
 use super::requests::Update;
+use super::{OverlayCore, OverlayHandle, Placement, Shared};
 use crate::compose::{Compositor, Frame};
 use crate::el::Tx;
 use crate::frame::clock::FrameClock;
@@ -38,6 +39,14 @@ pub(super) trait OverlayApp {
     fn notify_availability(&mut self, availability: super::Availability) -> bool;
     /// Drains queued typed updates into `rt`, returning `(queued, updated)`.
     fn drain_updates(&mut self) -> (bool, bool);
+    /// Moves newly queued `OverlayHandle::after_hidden` callbacks into this host's pending list.
+    fn take_after_hidden(&mut self) -> bool;
+    /// Runs all pending `after_hidden` callbacks once in FIFO order; returns whether any ran.
+    fn run_after_hidden(&mut self) -> bool;
+    /// Drops all pending `after_hidden` callbacks unrun (both moved and still in `Shared<T>`).
+    fn drop_after_hidden(&mut self);
+    /// Closes the `after_hidden` queue and drops all pending callbacks unrun.
+    fn close_after_hidden(&mut self);
     fn has_compositor(&self) -> bool;
     fn compositor_features(&self) -> wgpu::Features;
     fn compositor_animating(&self) -> bool;
@@ -67,8 +76,29 @@ impl dyn OverlayApp + '_ {
         self.driver(|rt, app| clock.advance_core(rt, app, at, compositing))
     }
 
-    pub(super) fn poll_hidden(&mut self) -> bool {
-        self.driver(|rt, app| rt.poll_hidden(app))
+    pub(super) fn immediate_keyboard_step(
+        &mut self,
+        policy: crate::KeyboardDispatch,
+        clock: &mut FrameClock,
+        now: Instant,
+        compositing: bool,
+    ) -> bool {
+        self.driver(|rt, app| crate::window::step_immediate_core(policy, rt, app, clock, now, compositing))
+    }
+
+    pub(super) fn poll_hidden_for_wake(&mut self) -> bool {
+        self.driver(|rt, app| rt.poll_hidden_or_arm_follow_up(app).1)
+    }
+
+    pub(super) fn drain_hidden_input(&mut self) {
+        self.driver(|rt, app| {
+            let wake_clock = rt.polled_at();
+            rt.drain_hidden_input(app, wake_clock);
+        });
+    }
+
+    pub(super) fn measure_content(&mut self) -> (f32, f32) {
+        self.driver(|rt, app| rt.measure_content(app))
     }
 
     pub(super) fn window_focus(&mut self, focused: bool) {
@@ -156,6 +186,69 @@ impl dyn OverlayApp + '_ {
     }
 }
 
+/// Owns parked `after_hidden` callbacks for one overlay host and closes the handle's queue on drop.
+pub(super) struct AfterHiddenSlot<T: 'static> {
+    shared: Arc<Shared<T>>,
+    pending: Vec<AfterHidden<T>>,
+}
+
+impl<T: 'static> AfterHiddenSlot<T> {
+    pub(super) fn new(shared: Arc<Shared<T>>) -> Self {
+        Self { shared, pending: Vec::new() }
+    }
+
+    pub(super) fn take_from_shared(&mut self) -> bool {
+        let newly = self
+            .shared
+            .after_hidden
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let any = !newly.is_empty();
+        self.pending.extend(newly);
+        any
+    }
+
+    pub(super) fn run(&mut self, rt: &mut Runtime<T>) -> bool {
+        let callbacks = std::mem::take(&mut self.pending);
+        if callbacks.is_empty() {
+            return false;
+        }
+        for f in callbacks {
+            rt.update(f);
+        }
+        true
+    }
+
+    pub(super) fn drop_all(&mut self) {
+        let queued = self
+            .shared
+            .after_hidden
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let parked = std::mem::take(&mut self.pending);
+        drop((queued, parked));
+    }
+
+    pub(super) fn close(&mut self) {
+        let queued = self
+            .shared
+            .after_hidden
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .close();
+        let parked = std::mem::take(&mut self.pending);
+        drop((queued, parked));
+    }
+}
+
+impl<T: 'static> Drop for AfterHiddenSlot<T> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// The only per-state-type structure owned by a live overlay host.
 pub(super) struct TypedOverlayApp<T: 'static> {
     pub(super) rt: Runtime<T>,
@@ -163,6 +256,7 @@ pub(super) struct TypedOverlayApp<T: 'static> {
     pub(super) setup: Option<fn(&mut T, Waker)>,
     pub(super) on_availability: Option<fn(&mut T, super::Availability, &mut Tx)>,
     pub(super) shared: Arc<Shared<T>>,
+    pub(super) after_hidden_slot: AfterHiddenSlot<T>,
 }
 
 impl<T: 'static> OverlayApp for TypedOverlayApp<T> {
@@ -179,7 +273,7 @@ impl<T: 'static> OverlayApp for TypedOverlayApp<T> {
 
     fn run_setup(&mut self, waker: Waker) {
         if let Some(setup) = self.setup.take() {
-            setup(&mut self.rt.state, waker);
+            crate::text::lend(&mut self.rt.text, || setup(&mut self.rt.state, waker));
         }
     }
 
@@ -203,6 +297,14 @@ impl<T: 'static> OverlayApp for TypedOverlayApp<T> {
         }
         (queued, updated)
     }
+
+    fn take_after_hidden(&mut self) -> bool { self.after_hidden_slot.take_from_shared() }
+
+    fn run_after_hidden(&mut self) -> bool { self.after_hidden_slot.run(&mut self.rt) }
+
+    fn drop_after_hidden(&mut self) { self.after_hidden_slot.drop_all(); }
+
+    fn close_after_hidden(&mut self) { self.after_hidden_slot.close(); }
 
     fn has_compositor(&self) -> bool { self.compositor.is_some() }
 
@@ -239,40 +341,135 @@ impl<T: 'static> OverlayApp for TypedOverlayApp<T> {
     }
 }
 
+/// App-wide runtime defaults inherited by overlays unless overridden on `ConfiguredOverlay`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AppOverlayDefaults {
+    pub(crate) font_smoothing: crate::FontSmoothing,
+    pub(crate) wheel_glide: bool,
+    pub(crate) wheel_line: Option<f32>,
+}
+
+impl Default for AppOverlayDefaults {
+    fn default() -> Self {
+        Self {
+            font_smoothing: crate::FontSmoothing::default(),
+            wheel_glide: true,
+            wheel_line: None,
+        }
+    }
+}
+
+/// App-level defaults inherited by overlays added dynamically through `AppHandle::overlay`.
+#[derive(Clone)]
+pub(crate) struct OverlayDefaults {
+    pub fonts: &'static [&'static [u8]],
+    pub families: (&'static str, &'static str),
+    pub poll: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub app: AppOverlayDefaults,
+    pub emoji_family: Option<String>,
+    pub prewarm_effects: crate::PrewarmEffects,
+    pub gpu_loss_latch: Option<Arc<crate::render::loss_latch::GpuLossLatch>>,
+}
+
+impl OverlayDefaults {
+    pub(crate) fn from_spec<S: 'static>(
+        spec: &AppSpec<S>,
+        app: AppOverlayDefaults,
+        emoji_family: Option<String>,
+        prewarm_effects: crate::PrewarmEffects,
+        gpu_loss_latch: Option<Arc<crate::render::loss_latch::GpuLossLatch>>,
+    ) -> Self {
+        Self {
+            fonts: spec.fonts,
+            families: spec.families,
+            poll: spec.poll.map(|f| Arc::new(f) as Arc<dyn std::any::Any + Send + Sync>),
+            app,
+            emoji_family,
+            prewarm_effects,
+            gpu_loss_latch,
+        }
+    }
+}
+
+/// Deferred overlay builder queued by `AppHandle::overlay` and run on the UI thread in the next turn.
+pub(crate) type OverlayBuilder =
+    Box<dyn FnOnce(&OverlayDefaults) -> Option<Box<dyn super::PendingOverlay>> + Send>;
+
+/// Allocates a live `OverlayHandle<T>` immediately and pairs it with a deferred builder that
+/// constructs its `OverlayHost` on the UI thread against that same shared state.
+pub(crate) fn make_pending_overlay<T: 'static, C: Into<ConfiguredOverlay<T>>>(
+    build: impl FnOnce() -> (C, T) + Send + 'static,
+) -> (OverlayBuilder, OverlayHandle<T>) {
+    let (shared, handle) = OverlayHandle::<T>::pending();
+    let builder: OverlayBuilder = Box::new(move |defaults| {
+        if shared.core.is_closed() {
+            return None;
+        }
+        let (configured, state) = build();
+        if shared.core.is_closed() {
+            return None;
+        }
+        Some(Box::new(OverlayHost::from_shared(configured.into(), state, defaults, shared)))
+    });
+    (builder, handle)
+}
+
+#[derive(Clone, Copy)]
+struct InheritedOverlaySettings {
+    font_smoothing: bool,
+    wheel_glide: bool,
+    wheel_line: bool,
+}
+
 /// Non-generic overlay host stored in `App::overlays` and `Windows::hosts`.
 pub(crate) struct OverlayHost {
     pub(super) core: OverlayCore,
     pub(super) app: Box<dyn OverlayApp>,
-    inherits_font_smoothing: bool,
+    inherited: InheritedOverlaySettings,
 }
 
-fn build_parts<S, T: 'static>(
-    configured: ConfiguredOverlay<T>,
+fn build_parts<T: 'static>(
+    mut configured: ConfiguredOverlay<T>,
     state: T,
-    app: &AppSpec<S>,
-    app_font_smoothing: crate::FontSmoothing,
-) -> (OverlayCore, TypedOverlayApp<T>, OverlayHandle<T>, bool) {
+    defaults: &OverlayDefaults,
+    shared: Arc<Shared<T>>,
+) -> (OverlayCore, TypedOverlayApp<T>, InheritedOverlaySettings) {
+    if configured.runtime.emoji_family.is_none() {
+        configured.runtime.emoji_family = defaults.emoji_family.clone();
+    }
     let ConfiguredOverlay {
         spec, options, on_key, on_created, on_availability, poll, compositor, setup, mut runtime, font_smoothing,
-        macos_level, macos_color_space, animate_reveal, release_after,
+        wheel_glide, wheel_line, macos_level, macos_color_space, window_backdrop, frame_latency, keyboard_dispatch,
+        on_materials, animate_reveal, release_after, renderer, sizing, min_size, max_size,
     } = configured;
-    let inherits_font_smoothing = font_smoothing.is_none();
-    runtime.font_smoothing = font_smoothing.unwrap_or(app_font_smoothing);
-    let shared_core = Arc::new(SharedCore::default());
-    let shared = Arc::new(Shared { core: shared_core.clone(), updates: Default::default() });
-    let text = TextSystem::for_window(app.fonts, app.families);
+    let inherited = InheritedOverlaySettings {
+        font_smoothing: font_smoothing.is_none(),
+        wheel_glide: wheel_glide.is_none(),
+        wheel_line: wheel_line.is_none(),
+    };
+    runtime.font_smoothing = font_smoothing.unwrap_or(defaults.app.font_smoothing);
+    runtime.wheel_glide = wheel_glide.unwrap_or(defaults.app.wheel_glide);
+    runtime.wheel_line = wheel_line.unwrap_or(defaults.app.wheel_line);
+    let shared_core = shared.core.clone();
+    let text = TextSystem::for_window(defaults.fonts, defaults.families);
     let mut rt = Runtime::with_text(state, spec.view, spec.size, Env::default(), text);
     rt.configure(runtime);
     rt.track_marks = compositor.is_some();
     rt.on_key = on_key;
     // App and overlay may use different state types. Downcast the function pointer
     // once, without a per-frame adapter or changing App::overlay's generic API.
-    rt.poll = poll.or_else(|| app.poll.and_then(|f| {
-        (&f as &dyn std::any::Any).downcast_ref::<fn(&mut T, f64, &mut Tx) -> bool>().copied()
-    }));
+    rt.poll = poll.or_else(|| {
+        defaults
+            .poll
+            .as_deref()
+            .and_then(|f| f.downcast_ref::<fn(&mut T, f64, &mut Tx) -> bool>())
+            .copied()
+    });
     rt.set_live_visible(false);
+    rt.core_mut().host.content_sizing = sizing;
+    rt.core_mut().host.content_limits = (min_size, max_size);
     let at = Placement { size: spec.size, edge: spec.edge, margin: spec.margin, align: spec.align, inset: spec.inset };
-    let core = OverlayCore::new(
+    let mut core = OverlayCore::new(
         rt.core_mut(),
         shared_core,
         spec.name,
@@ -282,32 +479,69 @@ fn build_parts<S, T: 'static>(
         on_created,
         macos_level,
         macos_color_space,
+        window_backdrop,
         animate_reveal,
         release_after,
     );
-    let typed = TypedOverlayApp { rt, compositor, setup, on_availability, shared: shared.clone() };
-    (core, typed, OverlayHandle { shared }, inherits_font_smoothing)
+    core.frame_latency = frame_latency;
+    core.keyboard_dispatch = keyboard_dispatch;
+    core.on_materials = on_materials;
+    core.requested_renderer = renderer;
+    core.sizing = super::sizing::SizingConfig { mode: sizing, min_size, max_size };
+    core.prewarm_effects = defaults.prewarm_effects;
+    core.gpu_loss_latch = defaults.gpu_loss_latch.clone();
+    let after_hidden_slot = AfterHiddenSlot::new(shared.clone());
+    let typed = TypedOverlayApp { rt, compositor, setup, on_availability, shared, after_hidden_slot };
+    (core, typed, inherited)
 }
 
 impl OverlayHost {
-    pub(crate) fn new<S, T: 'static>(
+    pub(crate) fn new<S: 'static, T: 'static>(
         configured: impl Into<ConfiguredOverlay<T>>,
         state: T,
         app: &AppSpec<S>,
-        app_font_smoothing: crate::FontSmoothing,
+        app_defaults: AppOverlayDefaults,
     ) -> (Self, OverlayHandle<T>) {
-        let (core, typed, handle, inherits_font_smoothing) = build_parts(configured.into(), state, app, app_font_smoothing);
-        (OverlayHost { core, app: Box::new(typed), inherits_font_smoothing }, handle)
+        let defaults = OverlayDefaults::from_spec(app, app_defaults, None, crate::PrewarmEffects::NONE, None);
+        let (shared, handle) = OverlayHandle::<T>::pending();
+        let host = Self::from_shared(configured.into(), state, &defaults, shared);
+        (host, handle)
+    }
+
+    pub(in crate::overlay) fn from_shared<T: 'static>(
+        configured: ConfiguredOverlay<T>,
+        state: T,
+        defaults: &OverlayDefaults,
+        shared: Arc<Shared<T>>,
+    ) -> Self {
+        let (core, typed, inherited) = build_parts(configured, state, defaults, shared);
+        OverlayHost { core, app: Box::new(typed), inherited }
     }
 
     pub(super) fn inherit_font_smoothing(&mut self, mode: crate::FontSmoothing) {
-        if self.inherits_font_smoothing {
+        if self.inherited.font_smoothing {
             self.app.rt_mut().set_font_smoothing(mode);
+        }
+    }
+
+    pub(super) fn inherit_wheel_glide(&mut self, on: bool) {
+        if self.inherited.wheel_glide {
+            self.app.rt_mut().set_wheel_glide(on);
+        }
+    }
+
+    pub(super) fn inherit_wheel_line(&mut self, points: Option<f32>) {
+        if self.inherited.wheel_line {
+            self.app.rt_mut().set_wheel_line(points);
         }
     }
 
     pub(crate) fn set_prewarm_effects(&mut self, effects: crate::PrewarmEffects) {
         self.core.prewarm_effects = effects;
+    }
+
+    pub(crate) fn set_gpu_loss_latch(&mut self, latch: Option<Arc<crate::render::loss_latch::GpuLossLatch>>) {
+        self.core.gpu_loss_latch = latch;
     }
 }
 
@@ -321,6 +555,7 @@ pub(super) struct Overlay<T: 'static> {
     pub(super) setup: Option<fn(&mut T, Waker)>,
     pub(super) on_availability: Option<fn(&mut T, super::Availability, &mut Tx)>,
     pub(super) shared: Arc<Shared<T>>,
+    pub(super) after_hidden_slot: AfterHiddenSlot<T>,
 }
 
 #[cfg(test)]
@@ -341,6 +576,7 @@ struct BorrowOverlayApp<'a, T: 'static> {
     setup: &'a mut Option<fn(&mut T, Waker)>,
     on_availability: Option<fn(&mut T, super::Availability, &mut Tx)>,
     shared: &'a Arc<Shared<T>>,
+    after_hidden_slot: &'a mut AfterHiddenSlot<T>,
 }
 
 #[cfg(test)]
@@ -353,7 +589,9 @@ impl<T: 'static> OverlayApp for BorrowOverlayApp<'_, T> {
     }
     fn has_poll(&self) -> bool { self.rt.poll.is_some() }
     fn run_setup(&mut self, waker: Waker) {
-        if let Some(setup) = self.setup.take() { setup(&mut self.rt.state, waker); }
+        if let Some(setup) = self.setup.take() {
+            crate::text::lend(&mut self.rt.text, || setup(&mut self.rt.state, waker));
+        }
     }
     fn notify_availability(&mut self, availability: super::Availability) -> bool {
         let Some(f) = self.on_availability else { return false };
@@ -372,6 +610,10 @@ impl<T: 'static> OverlayApp for BorrowOverlayApp<'_, T> {
         for f in updates { updated |= self.rt.update_if(f); }
         (queued, updated)
     }
+    fn take_after_hidden(&mut self) -> bool { self.after_hidden_slot.take_from_shared() }
+    fn run_after_hidden(&mut self) -> bool { self.after_hidden_slot.run(self.rt) }
+    fn drop_after_hidden(&mut self) { self.after_hidden_slot.drop_all(); }
+    fn close_after_hidden(&mut self) { self.after_hidden_slot.close(); }
     fn has_compositor(&self) -> bool { self.compositor.is_some() }
     fn compositor_features(&self) -> wgpu::Features {
         self.compositor.as_ref().map_or(wgpu::Features::empty(), |c| c.features())
@@ -415,6 +657,7 @@ macro_rules! with_app {
             setup: &mut $self.setup,
             on_availability: $self.on_availability,
             shared: &$self.shared,
+            after_hidden_slot: &mut $self.after_hidden_slot,
         };
         $body
     }};
@@ -422,17 +665,19 @@ macro_rules! with_app {
 
 #[cfg(test)]
 impl<T: 'static> Overlay<T> {
-    pub(super) fn new<S>(configured: impl Into<ConfiguredOverlay<T>>, state: T, app: &AppSpec<S>) -> (Self, OverlayHandle<T>) {
-        let (core, typed, handle, _) = build_parts(configured.into(), state, app, crate::FontSmoothing::default());
-        let TypedOverlayApp { rt, compositor, setup, on_availability, shared } = typed;
-        (Overlay { core, rt, compositor, setup, on_availability, shared }, handle)
+    pub(super) fn new<S: 'static>(configured: impl Into<ConfiguredOverlay<T>>, state: T, app: &AppSpec<S>) -> (Self, OverlayHandle<T>) {
+        let defaults = OverlayDefaults::from_spec(app, AppOverlayDefaults::default(), None, crate::PrewarmEffects::NONE, None);
+        let (shared, handle) = OverlayHandle::<T>::pending();
+        let (core, typed, _) = build_parts(configured.into(), state, &defaults, shared);
+        let TypedOverlayApp { rt, compositor, setup, on_availability, shared, after_hidden_slot } = typed;
+        (Overlay { core, rt, compositor, setup, on_availability, shared, after_hidden_slot }, handle)
     }
 
     pub(super) fn wake_deadline(&self) -> Option<Instant> { self.core.wake_deadline(self.rt.core()) }
     pub(super) fn connect(&mut self, wake: Waker, frame_wake: Waker, slot_wake: Waker, gpu: Rc<RefCell<Weak<crate::render::Gpu>>>) {
         with_app!(self, |core, app| core.connect(&mut app, wake, frame_wake, slot_wake, gpu))
     }
-    pub(super) fn draw(&mut self) -> bool { with_app!(self, |core, app| core.draw(&mut app)) }
+    pub(super) fn draw(&mut self) -> bool { with_app!(self, |core, app| core.draw(&mut app, None)) }
     #[cfg(target_os = "macos")]
     pub(super) fn warm(&mut self) { with_app!(self, |core, app| core.warm(&mut app)) }
     pub(super) fn warm_offscreen(&mut self, size: (u32, u32)) { with_app!(self, |core, app| core.warm_offscreen(&mut app, size)) }
@@ -446,10 +691,36 @@ impl<T: 'static> Overlay<T> {
     pub(super) fn fail(&mut self, reason: String) { with_app!(self, |core, app| core.fail(&mut app, reason)) }
     pub(super) fn set_availability_notify(&mut self, a: super::Availability) -> bool { with_app!(self, |core, app| core.set_availability_notify(&mut app, a)) }
     pub(super) fn surface_refused(&mut self, reason: String) { with_app!(self, |core, app| core.surface_refused(&mut app, reason)) }
+    pub(super) fn poll_terminal_gpu_loss(&mut self) -> bool { with_app!(self, |core, app| core.poll_terminal_gpu_loss(&mut app)) }
+    pub(super) fn poll_device_for_terminal_loss(&mut self) -> bool { with_app!(self, |core, app| core.poll_device_for_terminal_loss(&mut app)) }
+    pub(super) fn note_frame_texture_released(&mut self) { with_app!(self, |core, app| core.note_frame_texture_released(&mut app)) }
+    pub(super) fn latch_terminal_loss_latch(&mut self, kind: crate::render::loss_latch::GpuFailureKind, reason: impl Into<String>) {
+        with_app!(self, |core, app| core.latch_terminal_loss_latch(&mut app, kind, reason))
+    }
     pub(super) fn layer_closed(&mut self, reason: Option<&str>) { with_app!(self, |core, app| core.layer_closed(&mut app, reason)) }
+    pub(super) fn layer_output_gone(&mut self) { with_app!(self, |core, app| core.layer_output_gone(&mut app)) }
+    pub(super) fn finish_prepare_output_gone(&mut self, showing: bool) { with_app!(self, |core, app| core.finish_prepare(&mut app, showing, super::lifetime::PrepareOutcome::OutputGone)) }
     pub(super) fn drop_hidden_images(&mut self) { with_app!(self, |core, app| core.drop_hidden_images(&mut app)) }
     pub(super) fn hide_fading(&mut self, fade: Duration) { with_app!(self, |core, app| core.hide_fading(&mut app, fade)) }
     pub(super) fn presence_due(&mut self, now: Instant) { with_app!(self, |core, app| core.presence_due(&mut app, now)) }
+    pub(super) fn sync_after_hidden(&mut self) {
+        with_app!(self, |core, app| {
+            if app.take_after_hidden() {
+                core.after_hidden_queued(&mut app);
+            }
+        })
+    }
+    pub(super) fn mark_shown_for_test(&mut self) {
+        with_app!(self, |core, app| {
+            let effects = core.presence.step(super::presence::Event::Show, core.release);
+            core.carry_out(&mut app, effects);
+            core.after_hidden_shown(&mut app);
+        })
+    }
+    pub(super) fn after_hidden_new_turn(&mut self) { with_app!(self, |core, app| core.after_hidden_new_turn(&mut app)) }
+    pub(super) fn poll_after_hidden(&mut self) { with_app!(self, |core, app| core.poll_after_hidden(&mut app)) }
+    pub(super) fn cancel_after_hidden(&mut self) { with_app!(self, |core, app| core.cancel_after_hidden(&mut app)) }
+    pub(super) fn close_after_hidden(&mut self) { with_app!(self, |core, app| core.close_after_hidden(&mut app)) }
     pub(super) fn accent_changed(&mut self, accent: crate::SystemAccent) { self.core.accent_changed(self.rt.core_mut(), accent) }
     pub(super) fn scroll_bars_changed(&mut self, bars: crate::platform::scroll_bars::SystemScrollBars) { self.core.scroll_bars_changed(self.rt.core_mut(), bars) }
     pub(super) fn theme_changed(&mut self, dark: bool) { self.core.theme_changed(self.rt.core_mut(), dark) }
@@ -458,10 +729,25 @@ impl<T: 'static> Overlay<T> {
     #[cfg(target_os = "macos")]
     pub(super) fn refresh_for_reveal_at(&mut self, now: Instant) { with_app!(self, |core, app| core.refresh_for_reveal_at(&mut app, now)) }
     pub(super) fn resume_live(&mut self) { with_app!(self, |core, app| core.resume_live(&mut app)) }
+    pub(super) fn fit_for_show(&mut self) { with_app!(self, |core, app| core.fit_for_show(&mut app)) }
+    pub(super) fn take_window_requests(&mut self) { self.core.take_window_requests(self.rt.core_mut()) }
     pub(super) fn settle_before_reveal(&mut self) { self.core.settle_before_reveal(self.rt.core_mut()) }
     pub(super) fn hidden_input(&mut self) { with_app!(self, |core, app| core.hidden_input(&mut app)) }
+    #[cfg(test)]
+    pub(super) fn dispatch_immediate_keyboard(&mut self) -> bool {
+        with_app!(self, |core, app| core.dispatch_immediate_keyboard(&mut app))
+    }
     pub(super) fn apply_input(&mut self) { self.core.apply_input(self.rt.core()) }
     pub(super) fn left_button(&mut self, pressed: bool, point: Option<(f32, f32)>) { with_app!(self, |core, app| core.left_button(&mut app, pressed, point)) }
+    #[cfg(test)]
+    pub(super) fn cursor_moved(&mut self, x: f32, y: f32) { with_app!(self, |core, app| core.cursor_moved(&mut app, x, y)) }
+    #[cfg(test)]
+    pub(super) fn drain_injected_pointers(&mut self) { with_app!(self, |core, app| core.drain_injected_pointers(&mut app)) }
+    #[cfg(test)]
+    pub(super) fn dispatch_pointer(&mut self, source: super::pointer_inject::InputSource, event: crate::PointerInput) {
+        with_app!(self, |core, app| core.dispatch_pointer(&mut app, source, event))
+    }
+
     pub(super) fn touch_event(&mut self, touch: &winit::event::Touch) {
         with_app!(self, |core, app| {
             let app: &mut dyn OverlayApp = &mut app;

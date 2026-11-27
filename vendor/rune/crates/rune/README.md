@@ -36,15 +36,15 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   - **Builders and commit-time style rewrites**:
     - `.w_frac(f)` / `.h_frac(f)` set `width` / `height` to `percent(f)` (`.h_frac(0.4)` is `height: 40%`); `.w_fit()` / `.h_fit()` set `width` / `height: fit-content` so an element hugs its content without stretching while keeping `align-self: auto`; `.self_auto()` resets `align-self` to `auto` (deferring to the parent's `align-items`). Each has a `set_*` in-place twin.
     - `.grow(g)` sets `flex: g 1 0` (`flex-grow: g`, `flex-shrink: 1`, `flex-basis: 0`).
-    - `.shrink()` and the single-line truncation builders (`.truncate()`, `.truncate_middle()`, `.truncate_head()`, `.truncate_fade()`, `.truncate_fade_width(..)`) set `flex-shrink: 1` and `min-width: 0`, **not** `min-height: 0` (nested vertical flex columns still need explicit `.min_h(0.0)`).
+    - `.shrink()` and the single-line truncation builders (`.truncate()`, `.truncate_middle()`, `.truncate_head()`, `.truncate_fade()`, `.truncate_fade_width(..)`) set `flex-shrink: 1` and lower an automatic `min-width` to `0` while preserving any explicit `.min_w(..)` in either call order, **not** `min-height: 0` (nested vertical flex columns still need explicit `.min_h(0.0)`; pass `.min_w(0.0)` after to override an earlier explicit minimum).
     - `.scroll(..)`, `.scroll_x()`, and `.scroll_xy()` set Taffy `overflow` (`hidden`/`scroll`, `scroll`/`hidden`, `scroll`/`scroll`). At commit time (`runtime/commit/flatten.rs`, `runtime/commit.rs::unwrapped_width`), a `scroll_x` viewport—and a single-child `scroll_xy` viewport—forces `flex-direction: row`. Each direct child of `scroll_x`/`scroll_xy` gets `flex-shrink: 0`; if its width is `auto` or `100%` (`.w_full()`), width is rewritten to `max-content` with `min-width: 100%` when `min-width` is `auto` (on both `auto` and `w_full` for single-child viewports, and on `w_full` for multi-child viewports). Under `scroll_xy`, children with no explicit `align_self` also receive `align-self: flex-start`.
     - `.border_layout()` copies the border widths into Taffy's `border` rect at commit time (`runtime/commit/device.rs::border`), snapped to whole device pixels so layout matches rendered hairlines across scales.
-    - `.equal_columns(n)` switches the container to CSS Grid (`display: grid; grid-template-columns: repeat(n, 1fr)`) and `.grid_cell(col)` places a child in 1-based column `col + 1` of row 1 (`span 1`).
+    - `.equal_columns(n)` switches the container to CSS Grid (`display: grid; grid-template-columns: repeat(n, 1fr)`), `.auto_fit_columns(min)` / `.auto_fill_columns(min)` switch it to `repeat(auto-fit, minmax(min, 1fr))` / `repeat(auto-fill, minmax(min, 1fr))` (with `set_*` in-place twins, falling back to `1fr` for non-positive or non-finite `min`), and `.grid_cell(col)` places a child in 1-based column `col + 1` of row 1 (`span 1`).
     - `.absolute(left, top)`, `.pin(l, t, r, b)`, and `.anchored*`/`.above` set `position: absolute` against the parent's padding box; anchored overlays are then positioned by the runtime relative to their target anchor and flipped/clamped to the window, or to a named boundary element via `.anchored_in(key)` (with pure helpers `anchor_rect` and `anchor_rect_in`). `.anchored_fit` clamps overflowing surfaces on both the main axis and the cross axis (8 pt inside the window or boundary) so scrolling menus and submenus stay inside small windows.
     - `.sticky_top`, `.sticky_top_showing`, `.sticky_bottom`, and `.sticky_left` run outside Taffy in the paint and hit-test pass (`runtime/scroll/sticky.rs`); laid-out rects stay at their unscrolled positions.
     - `.aspect_ratio(r)` passes CSS `aspect-ratio` directly to Taffy; `.aspect_fit(r)` runs a two-pass commit rewrite (`fit_room` → `fitted` in `commit/flatten.rs`) to measure the available room first and then lay out the largest box at ratio `r` inside it.
-  - **Static `--html` export differences** (`crates/rune/src/runtime/web/export/page.rs`, `css.rs`, `export.rs`): `BASE_CSS` sets `min-width: 0` globally (instead of `auto`) and leaves `flex-shrink` at CSS's default `1` (so `css::layout` emits `flex-shrink: 0` per element and omits `min-width: auto`). The export omits `calc()` and `fr` values (including `equal_columns` grid template tracks and `grid_cell` placement, even when `display: grid` is emitted), text inputs and secure/redacted nodes, and disallowed, exiting, or invisible (`opacity <= 0.01`) subtrees.
-  - **Taffy features with no `El` builder**: `calc()` lengths, arbitrary CSS Grid tracks/rows/areas/auto-flow/placement beyond `equal_columns` and first-row `grid_cell`, `display: block` / `display: none` / `display: flow-root` (omit elements from the view tree instead of `display: none`), arbitrary `flex-basis` (only `auto` or `0` via `.grow(..)`), `order`, `box-sizing: content-box`, and reverse flex directions or wrap (`row-reverse`, `column-reverse`, `wrap-reverse`).
+  - **Static `--html` export differences** (`crates/rune/src/runtime/web/export/page.rs`, `css.rs`, `export.rs`): `BASE_CSS` sets `min-width: 0` globally (instead of `auto`) and leaves `flex-shrink` at CSS's default `1` (so `css::layout` emits `flex-shrink: 0` per element and omits `min-width: auto`). The export omits `calc()` values and `grid_cell` placement (though `display: grid` and `grid-template-columns` are emitted), text inputs and secure/redacted nodes, and disallowed, exiting, or invisible (`opacity <= 0.01`) subtrees.
+  - **Taffy features with no `El` builder**: `calc()` lengths, arbitrary CSS Grid tracks/rows/areas/auto-flow/placement beyond `equal_columns`, `auto_fit_columns`, `auto_fill_columns`, and first-row `grid_cell`, `display: block` / `display: none` / `display: flow-root` (omit elements from the view tree instead of `display: none`), arbitrary `flex-basis` (only `auto` or `0` via `.grow(..)`), `order`, `box-sizing: content-box`, and reverse flex directions or wrap (`row-reverse`, `column-reverse`, `wrap-reverse`).
 - **Animation** (`rune-motion`, `runtime.rs`): analytic springs (`Spring::new(duration, bounce)`),
   tweens, decay and transitions driven through `rune_motion::Scene` and `AnimationStore`. Retargets
   keep exact position and velocity.
@@ -220,8 +220,9 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   presses, hovers, cursors, scrolls, drops and tooltips go to whatever is under it, nothing inside
   takes focus, and `ElementInfo::inert` reports it (a document drawn under an editor's canvas).
 - **Cursors**: `.cursor(Cursor::Pointer)` and the other system shapes (including
-  `ResizeColumn`, `ResizeRow`, bidirectional `ResizeEw` / `ResizeNs`, and diagonal
-  `ResizeNwse` / `ResizeNesw`); children inherit their nearest ancestor's. Set
+  `ResizeColumn`, `ResizeRow`, bidirectional `ResizeEw` / `ResizeNs`, diagonal
+  `ResizeNwse` / `ResizeNesw`, one-way `ResizeN` / `ResizeE` / `ResizeS` / `ResizeW`,
+  `Alias`, and `Copy`); children inherit their nearest ancestor's. Set
   `cx.press_cursor(Cursor::Pointer)` on `Cx` for a view-wide opt-in default cursor over pressable
   elements (`on_press` / `on_double_press`) that set no cursor of their own; it wins over
   inherited ancestor cursors while explicit `.cursor(..)`, `disabled`/`aria_disabled` controls
@@ -294,8 +295,11 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     text, layout, hover/focus/selection, theme and scale) with an optional `.cache_key(u64)` hint.
   - **Live fallback:** while any node inside the subtree animates (springs, transitions, loops,
     growth, word reveals, flights) or hosts a live compositor `El::effect` slot, `NativeSurface`,
-    native `SystemMaterial`, image pixels or focused text input, the subtree bypasses the cache and draws live,
-    then re-caches once settled.
+    native or Wayland-blur `SystemMaterial`, image pixels or focused text input, the subtree
+    bypasses the cache and draws live, then re-caches once settled. A subtree holding a
+    fallback-only `El::system_material` (native and Wayland blur modes off) stays cached and replays
+    its recorded material rects - translated and scaled with the cached layer - into
+    `Runtime::system_materials` and `ConfiguredOverlay::on_materials` when reused.
   - **Scale and budget:** while an ancestor's live scale or scale spring is changing without view
     commits, the existing cached texture is composited with clamped bilinear filtering and
     re-rasterized at the new device-pixel resolution once the scale holds still for 0.1 s.
@@ -557,10 +561,29 @@ policy changes are applied in the same mutation phase.
   and the element then hears the rest of that gesture, its momentum included, wherever the
   pointer goes, until it declines (passing the delta to outer handlers and then scrolling) or a
   modifier change starts a new unphased gesture. `.on_magnify(|s, e: MagnifyEvent, tx| -> bool)` hears trackpad
-  pinches (scale by `1 + delta`) at the pointer: macOS reports them, and Ctrl + wheel also
-  goes to `on_magnify` (`1.2^ticks - 1` per line-delta notch, or `dy / 200` per pixel-precise
-  point, with `MagnifyEvent::wheel == true`) when one is under the pointer. `.on_rotate` and `.on_smart_magnify` (a two-finger double tap)
-  are macOS only. `.pointer_buttons([PointerButton::Middle])` lets the middle, back, forward,
+  and touchscreen two-finger pinches (scale by `1 + delta`) at the pointer or fingers' midpoint:
+  macOS trackpads and touchscreens (`Runtime::touch`, after a 16 pt span slop subtracted on activation
+  with a 16 pt floor, cancelling the first finger's pending press, hold, drag or pan with no click or
+  fling, keeping the surviving finger quiescent on lift with re-pinch ratcheting, and ignoring 3rd+
+  fingers) report phased `Began`/`Moved`/`Ended` pinches (`wheel: false`) locked to the accepting
+  `Began` handler until `Ended`, and Ctrl + wheel also goes to `on_magnify` (`1.2^ticks - 1` per
+  line-delta notch, or `dy / 200` per pixel-precise point, with `MagnifyEvent::wheel == true`) when
+  one is under the pointer. On a touchscreen, two fingers moving together over an `on_wheel`,
+  `on_magnify`, or `on_rotate` handler also deliver midpoint panning through `on_wheel` with
+  `WheelEvent::touch == true` and `precise == true` (8 pt slop subtracted on activation, or started
+  at `(0, 0)` when pinch begins; handler-only, locked to the `Began` owner, never scrolling outer
+  scroll views, emitted before `on_magnify` on the same move so pan and zoom keep both fingers
+  pinned) and counterclockwise turns through `.on_rotate` (8° angular slop subtracted on activation
+  with at least 16 pt between the fingers, locked from `Began` to `Ended`; macOS trackpads also
+  feed `on_rotate` with the same owner lock). Over plain scroll areas without `on_wheel`,
+  `on_magnify`, or `on_rotate`, a second finger stays ignored. `.on_edge_drag(edge: SwipeEdge, width, |s, d: &mut Drag, tx| ..)`
+  lets an ancestor (app root drawer, detail-page back swipe) claim a touch swipe starting within
+  `[0, safe_inset + width]` of a window edge (using `Runtime::set_safe_area([top, right, bottom, left])`
+  or browser safe-area insets) when its first move past 8 pt slop goes mostly away from that edge,
+  cancelling any child press/drag/pan (with `Drag::edge() == Some(edge)`, multi-edge and corner
+  disambiguation, paint-order occlusion by raised overlays and modals, and cancelled `Phase::Up`
+  delivery on unmount, Escape, focus loss, modal open, or `cancel_pointer`). `.on_smart_magnify` (a two-finger
+  double tap) is macOS only. `.pointer_buttons([PointerButton::Middle])` lets the middle, back, forward,
   or other buttons press and drag the element through its own `on_press` and `on_drag`, from
   anywhere inside it; `tx.button()` says which button. Including `PointerButton::Secondary` lets
   a right-button drag drive `on_drag` (with `tx.button() == PointerButton::Secondary`) while a
@@ -583,8 +606,8 @@ policy changes are applied in the same mutation phase.
   relative mouse-look capture on desktop windows and web browsers (iOS and native overlays never
   capture): a primary press whose primary target is that element captures (HUD buttons and covering
   elements do not), hides the cursor while focused (desktop `CursorGrabMode::Locked`, falling back
-  to `Confined` on X11; web `canvas.requestPointerLock({ unadjustedMovement: true })` with cached
-  `NotSupportedError` fallback to plain `requestPointerLock()` inside the user gesture), freezes the
+  to `Confined` on X11; web plain `canvas.requestPointerLock()` synchronously inside the user gesture, then
+  upgrading in place to `{ unadjustedMovement: true }` once locked where supported), freezes the
   runtime pointer at the press point (ignoring `pointer_move`/`pointer_leave` so all buttons and
   wheels land on the viewport), and delivers coalesced relative `[dx, dy]` deltas in logical points
   (`tx.live_only()` supported; `DeviceEvent::MouseMotion` scaled by `1/scale_factor` on Windows and
@@ -646,8 +669,16 @@ policy changes are applied in the same mutation phase.
   text or text field with `Tx::text_offset_at(key, x, y, f)` and
   `Runtime::text_offset_at(key, x, y)`.
 - **App hooks**: `AppSpec::setup` (once, with a `Waker` for background threads), `poll(state, clock,
-  tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags, ready before
-  `run` (to choose the file a window opens).
+  tx)`, `on_key`, and `extra_args()` for the app's own flags, ready before
+  `run` (to choose the file a window opens). At the start of a frame, `poll` runs (unless a
+  resting timer's poll already stood for it) so background data and timers can update the tree
+  before input routes. Queued input and event handlers then run; whenever a non-`live_only`
+  handler runs, `poll` runs again at the same frame clock before the view commits, alternating
+  with any input `poll` itself queues (`Tx::send_key`) up to 4 follow-up rounds so work queued
+  in a turn never waits for the next mouse move or wake. Idle frames, animation-only frames,
+  `Tx::live_only` handlers, layout observers, and apps without `poll` run no extra poll; call
+  `tx.request_poll()` from a `live_only` handler (for another round in the same frame) or outside
+  a frame (for the next turn) when one is still needed.
   `tx.wake_after(Duration::from_millis(250))` schedules a poll on the unscaled app clock,
   even when poll returns false. Equal deadlines coalesce; the shell sleeps until the earliest
   deadline without a timer thread. Every deadline due by a frame collapses into that frame's
@@ -734,10 +765,10 @@ top-left, which is what popups and context menus anchor to.
 | --- | --- | --- |
 | `on_drag` | `Drag::x`, `y`; `start_x`, `start_y`, `w`, `h` captured at press | local |
 | `on_drag` | `Drag::dx`, `dy` (travel since the press) | window |
-| `on_wheel` | `WheelEvent::x`, `y` (`dx`, `dy` are the scroll in points) | local |
-| `on_magnify`, `on_rotate` | `MagnifyEvent::x`, `y`, `RotateEvent::x`, `y` | local |
+| `on_wheel`, `on_wheel_any` | `WheelEvent::x`, `y` (`dx`, `dy` are the scroll in points) | local |
+| `on_magnify`, `on_magnify_any`, `on_rotate` | `MagnifyEvent::x`, `y`, `RotateEvent::x`, `y` | local |
 | `on_smart_magnify` | `x`, `y` | local |
-| `on_pointer_move_local`, `on_secondary_press_local`, `on_any_press` | `PointerEvent::x`, `y` | local |
+| `on_pointer_move_local`, `on_secondary_press_local`, `on_any_press` | `PointerEvent::x`, `y`, `w`, `h` | local |
 | | `PointerEvent::window_x`, `window_y`, `window()` | window |
 | | `PointerEvent::pressing` (whether any mouse button is held down) | window-wide |
 | `on_pointer_move`, `on_secondary_press` | `PointerPress::x`, `y` | window |
@@ -751,7 +782,7 @@ top-left, which is what popups and context menus anchor to.
 | `on_link_hover` | `Option<[left, top, width, height]>` of the hovered link's hit line box on enter/switch, `None` on leave | window |
 | `context_menu`, `PopupAnchor::from(PointerPress)` | the anchor they take | window |
 
-`on_press_tx`, `on_background_press_tx`, `on_double_press_tx`, and `on_middle_press` expose
+`on_press_tx`, `on_press_tx_any`, `on_background_press_tx`, `on_double_press_tx`, and `on_middle_press` expose
 the pointer activation position through `tx.press_point() -> Option<PointerEvent>` (element-local
 `x`/`y` and window `window_x`/`window_y` on mouse or touch activation, `None` on keyboard or
 assistive-technology activation and outside press handlers). Inside `El::on_link` (and
@@ -775,9 +806,10 @@ remounting fires it again; call `Tx::live_only` to skip the follow-up commit whe
 `on_drawn_layout_tx` also re-fire once when the display scale changes (even when the logical
 point rect is unchanged), and `Tx::scale()` reports the current display scale (device pixels per
 view point, including `Cx::zoom`) in any handler or `poll`. State-independent `_any` builders
-(`on_drag_any`, `on_pointer_move_any`, `on_hover_change_any`, `on_focus_change_any`,
-`on_focus_within_change_any`, `on_layout_any`, `on_visible_any`, and `on_key_any`) omit the
-app state type parameter so reusable components can mount under any host state.
+(`on_press_tx_any`, `on_drag_any`, `on_pointer_move_any`, `on_hover_change_any`,
+`on_focus_change_any`, `on_focus_within_change_any`, `on_layout_any`, `on_visible_any`,
+`on_key_any`, `on_wheel_any`, and `on_magnify_any`) omit the app state type parameter so reusable
+components can mount under any host state.
 
 ### App lifetime (`app.rs`, for apps that outlive their window)
 
@@ -792,6 +824,7 @@ let app = rune::App::new(spec)
     .keep_running()                // closing the window keeps the process, state and loop
     .release_gpu_when_closed()     // optional: drop the GPU device while closed
     .gpu_memory_policy(GpuMemoryPolicy::MemoryUsage) // optional: wgpu suballocation policy
+    .gpu_loss_policy(GpuLossPolicy::Recover) // optional: Recover (default) or Terminal
     .cpu_first(CpuFirst::Auto)     // optional: Windows/Linux/web startup CPU-first policy
     .accessory()                   // macOS: menu-bar app, no Dock icon (h.set_dock_icon(true) shows it)
     .standard_menus()              // macOS: Edit, Minimize ⌘M and Close ⌘W (no Quit); regular apps get them anyway
@@ -840,9 +873,10 @@ app.run();
 - Closing hides the window on macOS, Windows and X11, and destroys it on Wayland (no hidden
   toplevel exists there); `open` recreates it with the same app id (`set_app_id`).
 - Activation: the first window takes the launcher's `XDG_ACTIVATION_TOKEN`/`DESKTOP_STARTUP_ID`
-  and clears them from the environment. A new window gets a forwarded token through winit's
-  `with_activation_token`. An open Wayland window is activated with `xdg_activation_v1` bound on
-  winit's own display (`platform/activation.rs`), since winit 0.30 can't. Without a token Wayland can only
+  and clears them from the environment. A new window gets a forwarded token (via
+  `AppHandle::activate` or `WindowHandle::activate`) through winit's `with_activation_token`. An
+  open Wayland window is activated with `xdg_activation_v1` bound on winit's own display
+  (`platform/activation.rs`), since winit 0.30 can't. Without a token Wayland can only
   request attention (most compositors mark it urgent); X11, macOS and Windows use `focus_window`.
 - Headless tooling runs ignore window requests and apply updates before each frame.
 - `AppHandle::is_visible()` reports whether the window is on screen; `AppHandle::window_error()`
@@ -865,13 +899,38 @@ app.run();
   `AppHandle::close`, `WindowHandle::close`), quit/relaunch, teardown, and an already-exiting loop
   bypass `on_close_request`, and apps without the hook behave as before. Headless scripts deliver
   it with `{"close_request": true}`.
+- `App::on_quit_request(|s, tx| -> QuitResponse)` (also forwarded on `WindowSpec::on_quit_request`)
+  intercepts application-level quit requests on macOS (the Dock's Quit, the default application
+  Quit menu item / unhandled ⌘Q, logout, restart, and shutdown) before `quitting()` becomes true
+  or `App::on_quit` runs. When registered on any live non-finished host (including hidden
+  `keep_running` and `windowless` hosts; overlays and finished hosts are skipped), Rune returns
+  `NSTerminateLater` from `applicationShouldTerminate:`, asks live hosts in registration order
+  inside normal update transactions until the first returns `QuitResponse::Defer` or all return
+  `QuitResponse::Quit`, and sends `replyToApplicationShouldTerminate:` once outside any winit
+  handler. `QuitResponse::Defer` replies `NO` so the app stays open, commits state/`Tx` updates,
+  and draws its confirmation UI (cancelling a macOS logout or shutdown with macOS's standard
+  notice); a later `Tx::quit` or `AppHandle::quit` exits without asking again. Programmatic
+  quit/relaunch, last-main-window exit (already gated by `on_close_request`), teardown, panics,
+  and Force Quit bypass `on_quit_request`. Apps without `on_quit_request` return
+  `NSTerminateNow` immediately, unchanged. Note that macOS `NSSupportsSuddenTermination` or
+  `NSSupportsAutomaticTermination` in `Info.plist` can let the OS terminate an idle app without
+  calling `applicationShouldTerminate:`. On Windows, Linux, and web, `on_quit_request` compiles
+  as an honest no-op (use `on_close_request` for window closes; Windows `WM_QUERYENDSESSION` /
+  `ShutdownBlockReasonCreate`, Linux `org.freedesktop.portal.Inhibit`, and web `beforeunload`
+  are not interactive quit-dialog hooks). Headless scripts deliver it with `{"quit_request": true}`.
 - `App::on_window(|w: &WindowHandle| ..)` runs on the UI thread after every native creation, for
   icons, native styles, or display-bound protocol objects through `WindowHandle::with_raw_handle`
   and `WindowHandle::with_raw_display_handle`. Pair `with_raw_display_handle` with
   `App::on_display_close(|| ..)` (also forwarded on `WindowSpec::on_display_close`), which runs
   once on the UI thread immediately before the event loop drops windows and tears down the native
   display connection (after `on_close` and `on_quit`), so foreign proxies or queues bound on
-  winit's display can be destroyed before the display closes.
+  winit's display can be destroyed before the display closes. To dispatch secondary Wayland
+  `wl_display` event queues on the UI thread without a reader thread, register
+  `rune::watch_display_queue(pending, dispatch) -> DisplayQueueWatch` (for `wayland-client`,
+  `queue.prepare_read().is_none()` and `queue.dispatch_pending(&mut state)`): several watches may
+  live across multi-window or `.windowless().keep_running()` apps, wake-on-read stays off when no
+  watch is active, every watch is stopped and its closures dropped before `on_display_close` runs,
+  and on X11, macOS, Windows, and web the guard compiles as an inert no-op.
 - `App::on_window_geometry(|s, g: WindowGeometry, tx| -> bool)` (also on `WindowSpec`) reports
   the native window's applied content size in physical pixels (`physical_size`), its
   `scale_factor`, and `has_output` (whether it's on a monitor). It runs at every native creation
@@ -918,7 +977,10 @@ app.run();
   The default looks again after the hooks, so a window a hook opened counts as showing.
   Rune adds `applicationShouldHandleReopen:hasVisibleWindows:` to winit's app delegate, which
   lacks it. An app that installs its own reopen Apple event handler replaces AppKit's, which is
-  what asks the delegate, so Rune's reopening never runs; use `on_reopen` instead. Other platforms
+  what asks the delegate, so Rune's reopening never runs; use `on_reopen` instead. On Windows and
+  Linux a reopen is a later launch without links (or files, on Linux) handed to the running app
+  by `rune::single_instance`, and on Linux also `org.freedesktop.Application.Activate` or
+  `ActivateAction` (see "Links and relaunches on Windows" and "on Linux" below). Other platforms
   have no reopen, so the hook never runs there. Headless scripts send it with `{"reopen": true}`.
 - Links opened with the app (macOS): `App::on_open_url(|s, url: &str, tx| ..)` runs on the main
   thread for each `myapp://...` link the system hands the app (`open`, a browser, another app),
@@ -947,8 +1009,10 @@ app.run();
 
   Launch Services learns the scheme when the bundle is opened or registered (`lsregister -f
   MyApp.app`); then `open 'myapp://x'` launches or reaches the app. A bare `cargo run` binary has
-  no bundle and gets no links. iOS isn't wired yet (winit owns the scene delegate), and Linux
-  passes a link to a new process as a launch argument, so the hook never runs there.
+  no bundle and gets no links. iOS isn't wired yet (winit owns the scene delegate). On Linux the
+  hook receives the links among the launch arguments, and with `rune::single_instance` those of
+  later launches and of `org.freedesktop.Application.Open` (see "Links and relaunches on Linux"
+  below).
 - Files opened with the app (macOS): `App::on_open_files(|s, paths: &[PathBuf], tx| ..)` (and
   `WindowSpec::on_open_files`) runs on the main thread for each batch of files the system hands
   the app (Finder double-click or "Open With", files dropped on the Dock icon, or `open -a MyApp
@@ -993,8 +1057,13 @@ app.run();
   ```
 
   Register the bundle (`lsregister -f MyApp.app`) so Launch Services learns the document types.
-  Never called on Windows or Linux, which pass opened files to a new process as launch arguments.
-  Headless scripts send it with `{"open_files": ["a.torrent"]}`.
+  Never called on Windows, which passes opened files to a new process as launch arguments. On
+  Linux it receives the local `file://` URIs among the launch arguments (`Exec=myapp %U` in the
+  desktop entry), and with `rune::single_instance` those of later launches and of
+  `org.freedesktop.Application.Open` calls (below). A plain path argument isn't one: the first
+  process reads its own from its arguments, and a later launch's are not passed on (that launch
+  reopens the app), so use `%U` rather than `%F`. Headless scripts send it with
+  `{"open_files": ["a.torrent"]}`.
 - Links and relaunches on Windows: Windows starts a new process for each launch, passing a link
   as an argument. The hook receives the links among the first process's arguments
   (`scheme://…`) like the launching link on macOS. Call `rune::single_instance("com.example.myapp")`
@@ -1017,6 +1086,35 @@ app.run();
   binary not running from a bundle and older macOS answer `UrlSchemeError::Unsupported`.
   Headless runs and tests change nothing: they record the scheme for
   `Runtime::take_url_scheme_requests` and answer `Ok(())`.
+- Links and relaunches on Linux: `rune::single_instance("com.example.myapp")` keeps one process
+  as on Windows, over a Unix socket in `$XDG_RUNTIME_DIR`. A later launch sends its arguments and
+  its activation token (`XDG_ACTIVATION_TOKEN`, `DESKTOP_STARTUP_ID`) to the running process and
+  `single_instance` returns false. Its links reach `on_open_url` and its local `file://` URIs
+  `on_open_files`; a launch with neither reopens the app (`App::on_reopen`, then the default).
+  `rune::url_schemes` works as on Windows, for launch arguments and `Open`'s links alike. A
+  launch that comes while the app quits starts it again with its arguments (an `Open`, its URIs)
+  and its token as `XDG_ACTIVATION_TOKEN`. The token goes to the window the launch brings
+  forward: the one the default reopen shows or, when one already shows, that window; otherwise
+  the next window the app opens (`AppHandle::open()` from `on_open_url`), within 20 s. A
+  reopen's token that no window took (an `on_reopen` hook handled it without opening one) is
+  dropped once the reopen is done.
+  With the `dbus` feature (on by default) the first process also owns the id on the session bus
+  and serves `org.freedesktop.Application` at `/com/example/myapp` (dots as slashes, dashes as
+  underscores): `Activate` and `ActivateAction` reopen the app (the action's name isn't passed
+  on), and `Open` sends links to `on_open_url` and `file://` URIs to `on_open_files`, with the
+  platform data's `activation-token` kept as above. The id must be a valid bus name (two or more
+  dot-separated elements of ASCII letters, digits, `_` and `-`, none starting with a digit), or
+  only the socket is used. The name is taken without queueing, so while an earlier process
+  still holds it (it hasn't exited or called `rune::release_instance`) the new one serves only
+  the socket. For `DBusActivatable=true`, name the desktop entry `com.example.myapp.desktop`
+  (with `MimeType=x-scheme-handler/myapp;` for a scheme) and install a session service file,
+  `~/.local/share/dbus-1/services/com.example.myapp.service`:
+
+  ```ini
+  [D-BUS Service]
+  Name=com.example.myapp
+  Exec=/path/to/myapp
+  ```
 - Edge overlays (HUDs): see `App::overlay` below.
 
 ### Launching fast
@@ -1060,15 +1158,7 @@ Staying fast afterwards is "Fast apps" (`site/src/FastApps.tsx`) and "Smooth scr
   host DirectComposition video layers (video falls back to UI-drawn playback), skips the seamless
   visual commit and NVIDIA G-SYNC premultiplied VRR guard on CPU-to-GPU handover, and Windows
   overlays (`App::overlay`) refuse cleanly because they require DirectComposition.
-  `RUNE_RESIZE_SYNC=1` (Windows, off by default) opts opaque app windows with a Rune-owned
-  DirectComposition `Handover` into a drag-only synchronized resize path between
-  `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE` using public APIs only: drag frames render into a
-  D3D12 shared texture synchronized via shared fences into a D3D11 `DXGI_SWAP_EFFECT_DISCARD`
-  copy-model HWND swap chain presented inside `WM_PAINT`, paired with `WM_NCCALCSIZE`
-  `WVR_VALIDRECTS` and `WM_ERASEBKGND` suppression, with zero presents to the hidden D3D12
-  composition swap chain during the drag. Transparent windows, overlays, `DxgiFromHwnd`, and
-  CPU/handover/rebinding windows always keep the normal path; with `RUNE_RESIZE_SYNC` unset or
-  `0`, no D3D11 device, shared texture, or second swap chain is created. After editing
+  After editing
   `clip.wgsl` or `shader.wgsl`, run
   `cargo test -p rune --lib --features metal-backend precompiled_uber_metallib_is_fresh` on a Mac;
   if the MSL, flags or library hash changed, run `scripts/precompile-metal-shaders.sh` (needs
@@ -1105,6 +1195,36 @@ Staying fast afterwards is "Fast apps" (`site/src/FastApps.tsx`) and "Smooth scr
   values leave the builder in effect), matching `RUNE_GPU_BACKEND`. Ignored on macOS, iOS, headless
   runs, Windows transparent windows (which use WARP on GPU-less Windows), and inline/document web
   pages.
+- **Windows drag-only resize synchronization (`ResizeSync`, `App::resize_sync`,
+  `WindowSpec::resize_sync`).** Controls whether an eligible Windows app window uses Rune's
+  drag-only copy-model path between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE` to keep content in
+  step with left- and top-edge drags using public Microsoft-documented APIs only (drag frames
+  render into a capacited 2-slot D3D12 shared texture ring copied via `CopySubresourceRegion`
+  and shared fences into a D3D11 `DXGI_SWAP_EFFECT_DISCARD` HWND swap chain inside `WM_PAINT`,
+  with `IDCompositionTarget::SetRoot` detaching DirectComposition and `WM_NCCALCSIZE`
+  `WVR_VALIDRECTS` + `WM_ERASEBKGND` suppression, and zero presents to the hidden D3D12
+  composition swap chain during the drag). Defaults to `ResizeSync::Auto`, which resolves to off
+  today so existing apps stay on DirectComposition flip-model presentation with zero D3D11
+  devices, shared textures, or second swap chains created; `Auto` may turn on for eligible
+  Windows windows in a later release once more GPU and OS configurations have been verified.
+  `ResizeSync::On` opts a window in (try it via `cargo run --release -p settings -- --resize-sync`),
+  and `ResizeSync::Off` keeps normal flip-model presentation. `RUNE_RESIZE_SYNC` overrides every
+  window without a rebuild (`1`/`true`/`yes`/`on` => `On`, `0`/`false`/`no`/`off` => `Off` as an
+  unconditional kill switch over `ResizeSync::On`, `auto` => `Auto`; unset, empty, or
+  unrecognized values leave the builder in effect). Cost: zero at launch and on non-drag frames;
+  the capacited 2-slot shared texture ring and copy-model swap chain are freed immediately on
+  `WM_EXITSIZEMOVE`, while the lazily created D3D11 device (~15–40 MiB) stays cached on that
+  window for later drags until device loss or window destruction; per Microsoft Learn (*For best
+  performance, use DXGI flip model*), bitblt (`DXGI_SWAP_EFFECT_DISCARD`) presents can incur an
+  extra cross-adapter copy on hybrid GPU laptops. Limit: per Microsoft Learn (`DXGI_SWAP_EFFECT`,
+  `DXGI_SCALING`, `WM_NCCALCSIZE`, `IDCompositionTarget::SetRoot`), `DXGI_SWAP_EFFECT_DISCARD`
+  requires `DXGI_SCALING_STRETCH` (only flip-model supports `DXGI_SCALING_NONE`), so the HWND
+  swap chain resizes per step and an occasional step that straddles a refresh boundary (~5% on
+  fast 239 Hz drags) can still appear one step out of place; undocumented Windows resize-sync
+  interfaces are declined. Ignored on macOS, Linux, web, iOS, headless runs, overlays,
+  transparent windows (including `WindowBackdrop` and `El::system_material`),
+  `WGPU_DX12_PRESENTATION_SYSTEM=hwnd`, software/WARP adapters, non-8-bit (HDR) surface formats,
+  and CPU-first/handover/rebinding states.
 - **GPU memory policy (`GpuMemoryPolicy`).** By default Rune creates wgpu devices with
   `GpuMemoryPolicy::MemoryUsage` (smaller suballocation blocks than wgpu's `Performance` default).
   Apps can choose `MemoryUsage`, `Performance`, or `Manual { block_size }` at startup via
@@ -1114,6 +1234,23 @@ Staying fast afterwards is "Fast apps" (`site/src/FastApps.tsx`) and "Smooth scr
   ignored by Rune's native Metal backend, wgpu's Metal backend, and browser backends (WebGPU/WebGL2).
   In `Manual`, `block_size` bounds suballocator block sizes rather than texture or buffer sizes:
   larger resources still succeed via dedicated allocations.
+- **Memory at rest and Linux/glibc heap trimming (`App::trim_heap_at_rest`).** When a window or
+  overlay goes to rest (after 10 s without drawing, 1 s under low memory, or immediately when
+  hidden, minimised, or fully covered), Rune releases off-screen text layouts and glyph runs,
+  unused images, dormant scene slots, oversized node/paint/memo buffers, and spare GPU targets,
+  then runs `App::on_rest`. On Linux with glibc, freed arena chunks stay resident in `VmRSS`
+  until trimmed, so after rest finishes its releases Rune calls `malloc_trim(0)` once off the UI
+  thread on its shared task pool - coalesced across resting windows and overlays with a 30 s
+  cooldown and never on a periodic idle timer. Because glibc holds each arena's lock while
+  trimming it, a thread allocating in the same arena during a large trim can pause for ~7 ms on a
+  ~206 MiB freed heap and ~14 ms on a ~387 MiB freed heap (more than one 120 Hz frame at 8.3 ms);
+  apps with allocating latency-sensitive threads can turn it off with
+  `App::trim_heap_at_rest(false)` or `RUNE_MALLOC_TRIM=0` (Rune's own `AudioOutput` worker
+  allocates nothing while playing). Apps using a custom `#[global_allocator]` (such as mimalloc
+  or jemalloc) or an `LD_PRELOAD` allocator see a no-op: a once-per-process runtime probe checks
+  whether Rust allocations move glibc's `mallinfo2`/`mallinfo` counters and skips trimming
+  otherwise, and non-glibc targets (macOS, Windows, musl, Android, iOS, and `wasm32`) compile it
+  out completely.
 - **Opt-in effect pipeline warming, per effect (`App::prewarm_effects(PrewarmEffects::BACKDROP_BLUR)`,
   `WindowSpec::prewarm_effects`, `Renderer::set_prewarm_effects`).** Off by default, so apps pay
   no background compilation CPU, driver memory, or worker thread for effects they never draw, and
@@ -1218,7 +1355,10 @@ Fast apps page (`site/src/FastApps.tsx`); `scripts/app-audit <repo>` greps for t
   still pointer.
 - **Layout handlers that follow a scroll say `Tx::live_only`.** `on_layout` and `on_drawn_layout` report every
   frame of a scroll for an element inside it; their `_tx` forms can say `live_only` when the handler only moves
-  live values or bookkeeping.
+  live values or bookkeeping. In debug builds, one self-check commit still runs a quarter second after the last
+  commit on the next `Tx::live_only` event (such as a kit scroll bar's hover/pointer handlers) to catch stale-view
+  bugs; release builds never check, and a test counting `rt.stats.commits` turns it off with
+  `rt.check_live_only(false)`.
 - **Read `Cx::layout_size` or `Cx::layout`, not `Cx::window_layout`,** unless the view needs where the window
   shows the element; then read `window_layout_with` and only what it decides.
 - **Glide with `Tx::scroll_to_with(key, x, y, spring)`**, on Rune's clock, rather than an instant scroll stepped by a
@@ -1411,9 +1551,13 @@ For an app's own perf log, with nothing changed about how its windows draw:
   `p.presented_at() == None`). `p.seq()` matches `FrameEncoded::seq()` for that `Drawn` frame (and
   `on_frame_encoded` always runs before `on_frame_presented` for the same `seq`), so apps can measure real
   input-to-photon latency and detect missed vsyncs against `FrameEncoded::presents_at()`. Called on platforms with
-  reliable actual presentation timestamps (macOS Metal via `MTLDrawable::addPresentedHandler`); Windows, Linux,
-  headless runs, overlays and the web never call it. Without it, no layer hook is attached; once in-flight drawables
-  land, the wake watch clears automatically so an idle window never wakes or draws.
+  reliable actual presentation timestamps: macOS Metal (`MTLDrawable::addPresentedHandler`), Windows DX12/DXGI
+  flip-model swap chains (`IDXGISwapChain::GetFrameStatistics` / `GetFrameStatisticsMedia`, reporting `None` if an
+  older frame was skipped or overwritten before polling), and Linux Wayland compositors advertising `wp_presentation`
+  (`wp_presentation_feedback.presented` / `discarded`). Linux X11, Wayland without `wp_presentation`, Windows
+  CPU-first / bitblt / unsupported DXGI, web (browsers do not expose canvas scanout timestamps), overlays, and
+  headless runs never call it instead of faking submit or target times. Without it, no platform hook is attached;
+  once in-flight frames land (or settle), watches and poll timers clear automatically so an idle window never wakes.
 - **`App::on_frame_drawn(|rt: &Runtime<S>| ..)`** runs on the UI thread after each `Drawn` frame (on desktop
   windows and in the web runner, and not on unchanged or skipped frames) with the runtime as it presented that frame,
   so an app can watch its own motion, query the focused presented element without building the tree
@@ -1430,6 +1574,12 @@ For an app's own perf log, with nothing changed about how its windows draw:
   panels) bounds both steered and ambient frames, and combining `ambient_fps` with `App::reveal_fps` paces
   reveal-only tails on the `reveal_fps` timer while concurrent unsteered motion paces at `ambient_fps`. Enforced
   on macOS `DisplayLink` windows today; Windows, Linux, web, overlays, and headless runs ignore it.
+- **`App::frame_latency(frames)`** (also on `WindowSpec::frame_latency` and
+  `ConfiguredOverlay::frame_latency`) caps a macOS surface's swap-chain latency at creation time
+  (`1` = 2 `CAMetalLayer` drawables, `2` = 3 drawables; clamped to `1..=2`, default `2`). Ignored
+  on Windows, Linux, and the web. With two drawables a frame that runs late waits instead of
+  overlapping the next, which at 120 Hz can show as a dropped frame during fast animation; for a
+  rarely animating window or overlay it saves one full window-sized IOSurface.
 
 ### Compact tray-controlled windows
 
@@ -1472,7 +1622,8 @@ while every window is hidden, including in an accessory app), sizes the icon in 
 AppKit tints the glyph for light and dark menu bars; primary click sends
 `TrayEvent::Activate`, and secondary click or Control-click opens the menu. `set_menu`,
 `set_tooltip`, `set_icon`, `set_icon_name` (Linux SNI `IconName`), `set_title` (macOS
-monospaced-digit menu-bar title beside the icon; Linux SNI `Title`), `rect` (physical
+monospaced-digit menu-bar title beside the icon; Linux SNI `Title`), `set_highlighted`
+(holds the macOS status item's pressed highlight; no-op elsewhere), `rect` (physical
 desktop `[x, y, width, height]` on macOS and Windows; `None` on Linux SNI), and dropping
 `Tray` may run from any thread. `TrayItem::Check` (`TrayItem::check` / `TrayItem::checked`)
 adds toggleable checkmarked menu items across macOS, Windows, and Linux.
@@ -1520,7 +1671,22 @@ rune::App::new(spec).fit_content_height().run();
   change's spring. A width change jumps, and a window the user resizes goes back to its
   content's height. Unless the app sets a minimum, its minimum height is 0 rather than the
   default 400 pt.
-- Overlays ignore these; use `OverlayHandle::resize`.
+- Overlays ignore these (`Tx::resize_window` included); use `OverlayHandle::resize`, or
+  `ConfiguredOverlay::sizing(ContentSizing)` (`Fixed`, `Fit`, `FitHeight`, `FitWidth`) with
+  optional `min_size((w, h))` / `max_size((w, h))` - or `ConfiguredOverlay::fit_content_height()`
+  as shorthand for `ContentSizing::FitHeight` - for an overlay whose size follows its content
+  (a candidate list, a horizontal IME bar, a HUD). Fitted axes are measured before each show
+  and prewarm (at the target monitor's scale and active `RendererKind`, clamped to `min_size`,
+  `max_size`, and the display's sizing bounds - on Windows, `Display::work_area()` for edge
+  placements and full display bounds for `OverlayPlacement::Rect`, matching placement
+  coordinates; full display bounds elsewhere; pass `max_size` from `Display::work_area()` if
+  a content-sized `Rect` overlay should stay within the work area - with text wrapping at
+  `max_size.0`), so its first
+  frame draws at the exact content size with no flash. While shown, a content size change
+  resizes and re-places the overlay before painting in the same frame (no spring; on Wayland
+  layer-shell, holds the previous frame until the compositor confirms the new size).
+  `OverlaySpec::size` and `OverlayHandle::resize` set only non-fitted axes; give fitted axes
+  no fixed or `fill` size on the root.
 
 ### Window chrome and shell controls (OpenCode Desktop fidelity)
 
@@ -1541,8 +1707,17 @@ rune::App::new(spec).fit_content_height().run();
   Maximize or Restore, and Close for assistive technology (localized through `rune::set_labels`
   with `Label::Minimize`, `Label::Maximize`, `Label::Restore`, and `Label::Close`), still in
   reach while the view holds a modal. A window that isn't resizable never maximizes: its maximize button is dimmed, with no snap
-  layouts. `Cx::chrome_insets()` says what the controls take (`leading`, `trailing`, `height`; zero
-  where the native frame stays, as on Linux; memos rebuild when it changes), `Cx::caption_color(c)`
+  layouts. Linux on Wayland, where the compositor draws no window frame (GNOME: no `xdg-decoration`),
+  loses the grey bar winit would draw above the app's titlebar: Rune draws the caption buttons the
+  desktop's `button-layout` names (GNOME's default is close alone; a layout on the left puts them
+  there; all three at the right where no settings portal says) as round buttons in the band, the
+  window resizes from a 5 point band inside its edges (none along a side the compositor tiled), a
+  button the window can't act on isn't drawn (`Cx::window_actions`), and `.window_drag()` regions move it,
+  maximize it on a double click and open the compositor's window menu on a right click. That window
+  has no shadow and square corners. X11 and compositors that draw the frame themselves (KDE, Sway,
+  Hyprland) keep the native frame; `RUNE_LINUX_FRAME=0` keeps winit's everywhere and `=1` draws
+  Rune's under any Wayland compositor. `Cx::chrome_insets()` says what the controls take (`leading`,
+  `trailing`, `height`; zero where the native frame stays; memos rebuild when it changes), `Cx::caption_color(c)`
   colours the caption symbols for an app theme, `Cx::titlebar_height(h)` changes the band's height
   as the app runs (a UI zoom), `Cx::is_maximized()` reports confirmed OS maximized state and
   `Cx::is_full_screen()` reports full-screen state (flipping at the start of the macOS Space
@@ -1552,6 +1727,25 @@ rune::App::new(spec).fit_content_height().run();
   headlessly via `Runtime::set_maximized` and `Runtime::set_full_screen`), and `Tx::toggle_maximized()`,
   `Tx::toggle_full_screen()`, and `Tx::set_full_screen(bool)` request state changes.
   `cargo run -p rune --example custom_titlebar` shows it.
+- **Window-manager state** (`Cx::decoration_mode()`, `Cx::tiled_edges()`, `Cx::window_actions()`,
+  backed by `DecorationMode`, `TiledEdges`, `WindowActions`, and `WindowManagerState`): reactive
+  tri-state accessors preserving explicit unknown values (`DecorationMode::Unknown` and `None`)
+  wherever the platform or window manager does not report a fact. Reading views and their `memo`
+  closures rebuild automatically on change, while views that never read them do no extra work.
+  On Linux Wayland, Rune reads `xdg-decoration` and `xdg_toplevel` configure state gated by
+  protocol version (`>= 2` for tiled edges - reporting the exact `TILED_*` states the compositor
+  sends, so extensions tiling via vertical maximize report only top and bottom - `>= 5` for
+  `wm_capabilities` combined with window resizability for `maximize`, and `close: Some(true)` once
+  configured, matching GTK4) and wakes on decoration-mode or capability changes without a resize;
+  on Linux X11, Rune reads `_NET_FRAME_EXTENTS` (preserving the non-fullscreen mode during and
+  right after full screen), `_GTK_EDGE_CONSTRAINTS` (preferring Mutter's reparented frame parent),
+  `_NET_WM_STATE` / `_NET_WORKAREA` (reporting `TiledEdges::ALL` while maximized consistently with
+  Wayland and resolving flush half-tile side edges), per-window `_NET_WM_ALLOWED_ACTIONS`, and
+  root `_NET_SUPPORTED` in pipelined queries on chrome sync, window move, and `PropertyNotify`
+  (zero X11 round trips on ordinary redraws). Layer-shell overlays, macOS, Windows, web, adopted macOS
+  panels, and staged playground subviews report unknown values. Testable headlessly via
+  `Runtime::set_window_manager_state`;
+  `cargo run -p rune --example custom_titlebar` displays the live values.
 - **`AppSpec::new(title, size, init, view)`** fills every other field with its default; literals
   that set a few more end with `..AppSpec::new(..)`. Window chrome lives on the builders, keeping
   existing exhaustive `AppSpec` literals source-compatible.
@@ -1614,8 +1808,10 @@ rune::App::new(spec).fit_content_height().run();
 
 ### Finite choreography
 
-`El::sequence` uses the same render-clock tracks as loops, then holds the final pose
-and sleeps. No app phases, poll callback, or `wake_after` calls are needed.
+`El::sequence` uses the same render-clock tracks as loops, holding the final pose
+by default (or returning to the element's own pose with `Sequence::release()`, like CSS
+`animation-fill-mode: none`) and sleeping once finished. No app phases, poll callback, or
+`wake_after` calls are needed.
 
 ```rust,ignore
 use rune::{Beat, Sequence, el};
@@ -1835,6 +2031,16 @@ thread, falling back once off the UI thread to KDE's duration factor or GNOME's
 false; tests can call `rt.set_system_reduced_motion(value)` and inspect
 `rt.system_reduced_motion()`.
 
+`cx.system_reduced_transparency()` reports whether the OS or browser asks apps to reduce
+transparency: macOS reads `NSWorkspace.accessibilityDisplayShouldReduceTransparency` (updating
+live on `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`), Windows reads
+Transparency effects (`EnableTransparency` / `UISettings::AdvancedEffectsEnabled`, updating live
+on `WM_SETTINGCHANGE` and material policy notifications), and the web watches
+`(prefers-reduced-transparency: reduce)`. Headless captures accept `RUNE_REDUCE_TRANSPARENCY=1`;
+tests can call `rt.set_system_reduced_transparency(value)` and inspect
+`rt.system_reduced_transparency()`. While true, `El::backdrop_blur` skips the blur and draws only
+its fill.
+
 `cx.system_languages()` returns the user's preferred BCP 47 language tags in
 preference order and `cx.locale()` returns the primary tag (`Option<&str>`). Both
 query the platform lazily on first call (`GetUserPreferredUILanguages` on Windows,
@@ -2026,7 +2232,20 @@ Hooks also hear a pasted image (a screenshot, an image copied from a browser or 
 (`size()`), whatever form the clipboard held it in. Rune fetches it only for a target with a
 hook (`on_input_paste`, `on_paste_content`, `read_clipboard`), so pasting text into other fields
 never decodes one, and leaves out images over `clipboard::MAX_IMAGE_BYTES` (32 MiB as PNG).
-An image alone, with no text, reaches only hooks. Copies don't write images yet. On the web,
+An image alone, with no text, reaches only hooks. To copy an image an `ImageCache` decoded,
+`tx.copy_image(&image)` (or `tx.copy_image_then(&image, on_result)` returning
+`Result<(), CopyImageError>`) encodes it as PNG off the event thread on the clipboard worker
+(on the web, off the main thread in a Web Worker via `CompressionStream("deflate")` inside a
+`ClipboardItem` `Promise<Blob>` created during the user gesture on Chrome 80+, Firefox 113+,
+and Safari 16.4+, with a time-sliced `CompressionStream` fallback under strict `blob:` CSP
+and a legacy fallback on older browsers without `CompressionStream`), with no second decode
+and without overwriting newer clipboard writes if a slow
+encode finishes late. Opaque 8-bit sRGB pixels round-trip bit-exactly; translucent pixels
+round-trip through premultiplied 8-bit sRGB mip 0 (`Image::to_rgba` / `Pixels::to_rgba`),
+animated GIF/WebP/APNG copy frame 0, native `avif` copies stills, and `ImageCache::load` SVGs
+copy at rounded intrinsic size (up to 4096 px/side; `ImageCache::svg` rasterized smaller copies
+at its raster size). `ClipboardImage::from_rgba(w, h, &rgba)` encodes straight-alpha sRGB
+RGBA8 synchronously on the calling thread for `ClipboardContent::with_image`. On the web,
 hooks also hear files pasted into or dropped on the field as `content.web_files()`: up to
 `clipboard::MAX_WEB_FILES` `WebFile` handles with a name, type and size, no path, and nothing
 read until `WebFile::read(max)` (see WEB.md). A dropped PNG or text file is also the image or
@@ -2128,7 +2347,7 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
   `edit.replace_with_pill(range, id, label)` to swap a typed `@query` for one (one undo step;
   wrap multi-part edits like `replace_with_pill` + `insert(" ")` in `edit.undo_group(|e| ..)`).
   `edit.pills()` lists `(range, id)` for each. The field draws each pill as a rounded chip
-  (`.pill_style(|id| PillStyle::new().bg(..).fg(..).icon(..).ring(color, width).radius(points))`,
+  (`.pill_style(|id| PillStyle::new().bg(..).fg(..).icon(..).ring(color, width).radius(points).pad_x(points).margin_x(points))`,
   `.pill_image(|id| ...)` for a full-colour `Pixels` logo in the leading slot, or `.pill_colors(bg, fg)`
   and `.pill_icon(|id| ...)`), and a chip never splits across lines (static text supports the same
   `PillStyle` via `.pill(range, style)`, `.pills(..)` and `.pill_with_image(range, style, pixels)`).
@@ -2407,12 +2626,16 @@ Or ask from a handler, with no executor or waker to wire up:
 
 ### Dragging out to other apps (`drag_out`)
 
-`.drag_out(..)` makes an element a system drag source: drag it into Finder, Mail or System
-Settings and the other app receives files, PNG data or text.
+`.drag_out(..)` makes an element a system drag source: drag it into Finder, Explorer, Mail or
+System Settings and the other app receives files, PNG data, plain text, or custom MIME bytes.
 
 ```rust
 el().child(text("Example"))
-    .drag_out(|s: &App| Some(DragItem::new().file("/Applications/Example.app")))
+    .drag_out(|s: &App| {
+        Some(DragItem::new()
+            .file("/Applications/Example.app")
+            .data("text/uri-list", "sftp://host/file.txt\r\n"))
+    })
     .on_drag_end(|s: &mut App, outcome, _tx| s.last_drop = Some(outcome))
 ```
 
@@ -2422,14 +2645,32 @@ released before the threshold still runs `on_press`; a drag-out element never ru
 Once the system drag starts, Rune drops the pointer capture and hover, so nothing stays pressed.
 Files are offered as copies (`DragItem::allow_move` also offers a move), an app bundle can be
 dropped into System Settings' privacy lists, and the picture under the pointer is a snapshot of
-the element unless `DragItem::image` sets one. `on_drag_end` receives `DragOutcome::Copied`,
-`Moved`, `Linked` or `Cancelled`. The app's own windows take no drop from its drags unless
-`DragItem::within_app` offers it to them: their `on_drop_files` targets then receive the files
-as they would from Finder (an image dragged from a list into a composer).
+the element unless `DragItem::image` sets one (call `DragImage::hotspot(x, y)` to pin an
+image-local point under the pointer instead of centring the image). `on_drag_end` receives
+`DragOutcome::Copied`, `Moved`, `Linked` or `Cancelled`. The app's own windows take no drop
+from its drags unless `DragItem::within_app` offers it to them: their `on_drop_files` targets
+then receive the files as they would from Finder (an image dragged from a list into a composer).
 
-macOS only for now. Elsewhere `drag_out` is ignored and the element keeps its press and
-`on_drag` behaviour. Headless runs record `drag-out <path>` in `--trace` and mark the node
-`dragOut` in `--tree`. `examples/drag-out` drags a file, an app and some text.
+Custom MIME payloads use `DragItem::data(mime, bytes)` (read back with `data_for` and
+`custom_data`). Entries keep their insertion order (repeating a MIME type replaces its bytes in
+place), and each `DragItem` is bounded to `drag_out::MAX_CUSTOM_DATA_ENTRIES` (64) entries and
+`drag_out::MAX_CUSTOM_DATA_BYTES` (32 MiB) total. On macOS each MIME type is converted to a
+Uniform Type Identifier via `UniformTypeIdentifiers` (`UTType`) / `CoreServices` (with a
+deterministic `dyn.*` UTI for unregistered MIME types) and written onto the first
+`NSPasteboardItem`. On Windows each MIME type is registered with `RegisterClipboardFormatW` and
+attached to the OLE `IDataObject` via `TYMED_HGLOBAL`, backed by a process-wide cache capped at
+256 distinct custom format names so callers cannot exhaust Windows' unreleasable 16k USER atom
+table. On Wayland each MIME type is offered on `wl_data_source` in insertion order (overriding
+any colliding built-in MIME type), payloads stream off the UI thread over non-blocking pipes
+(bounded to 8 concurrent writers and 5 s per write), the drag icon renders to a `wl_shm`
+`wl_surface` with `DragImage::hotspot` placement, and Copy/Move actions map to
+`wl_data_device_manager::dnd_action` (Wayland has no Link action).
+
+macOS, Windows, and Linux Wayland run native OS drag sessions; on Linux X11 `drag_out` is ignored
+and the element keeps its press and `on_drag` behaviour. Headless runs record `drag-out <path>` in
+`--trace` and mark the node `dragOut` in `--tree`. `examples/drag-out` drags a file, an app,
+text, and (under `--scene custom-mime`) a Copy/Move item with custom MIME payloads and a custom
+hotspot icon.
 
 ### Dropping files in from other apps (`on_drop_files`)
 
@@ -2515,6 +2756,63 @@ drops them. `--trace` records `drop-hover:true:<path>`, `drop-hover:false:<path>
 - Once the frame finishes, desktop hosts execute the request off the UI thread: `NSWorkspace` on macOS (`openURL:configuration:completionHandler:` / `activateFileViewerSelectingURLs:` after background path resolution), a background STA worker calling `ShellExecuteW` / `SHOpenFolderAndSelectItems` on Windows, and the shared portal worker on Linux (`org.freedesktop.portal.OpenURI.OpenFile` for open, `org.freedesktop.FileManager1.ShowItems` then `OpenURI.OpenDirectory` for reveal, falling back to `xdg-open`).
 - Headless runs and tests launch nothing and capture every request as `PathRequest { path, action: PathAction }` via `Runtime::take_path_requests()`. `examples/drop-files` shows Open and Reveal buttons for dropped files.
 
+### Keeping secrets (`rune::credentials`)
+
+`Credentials::system()` keeps an API token or password in the platform's credential store between launches: the Keychain on macOS and iOS, Credential Manager on Windows, the Secret Service on Linux (with the default `dbus` feature). Each credential is keyed by a service name and holds one account name and a secret as bytes; `write` replaces what the service held (a failed write leaves it as it was), `read` returns `Option<Credential>`, `delete` is fine when nothing is stored. The web, Android and Linux without `dbus` return `CredentialError::Unsupported`, so the app can ask again each launch.
+
+Every call blocks and may show a system prompt, so run it off the UI thread and land the answer in `poll`. Keep the `Result`, so "nothing stored" (`Ok(None)`) stays apart from a store that refused (`Denied`, `Unsupported`, `Failed`):
+
+```rust
+// state: token: Latest<Result<Option<Credential>, CredentialError>>
+s.token.request("com.example.images.api", |service| Credentials::system().read(service));
+// poll:
+let Some(answer) = s.token.take() else { return false };
+match answer {
+    Ok(Some(found)) => s.api_token = Some(found),
+    Ok(None) => s.ask_for_token = true,
+    Err(e) => s.error = Some(e.to_string()),
+}
+true
+```
+
+Headless work never touches the person's store: once the process has a headless run (`--snap`, `--script`, `--tree`, `--html` and the like, through `run` or `App::args`), has built a runtime with `App::headless_runtime`, or runs with `RUNE_CREDENTIALS=memory`, `Credentials::system()` is one in-memory store shared by the process. Windows, overlays and an app's own `Runtime::new` (thumbnails, an export) keep the platform's store, so a test that drives `Runtime::new` itself, or makes no runtime at all, looks like the app: use `Credentials::memory()` there (a store of its own) or set `RUNE_CREDENTIALS=memory`. On Linux, Rune's items carry `xdg:schema` `dev.rune.Credential` beside `service` and `account`, so other apps' items for the same service name stay untouched. `Credential`'s `Debug` output redacts the secret, and the copy a `Credential` holds is zeroed on drop (copies the platform's API or D-Bus make are outside Rune's reach).
+
+### System haptic feedback (`Tx::haptic`)
+
+Handlers request semantic haptic feedback without knowing which platform they run on:
+
+```rust
+el().key("stop").on_press_tx(|s: &mut App, tx: &mut Tx| {
+    s.detent = next_detent(s.detent);
+    tx.haptic(Haptic::Selection);
+});
+```
+
+An embedding host drains queued requests right after each `LayerHost::frame()` call (on the main thread) and forwards them to the platform's native feedback generator:
+
+```rust
+let frame = host.frame();
+for haptic in host.take_haptics() { play_native(haptic); }
+```
+
+- **Types**: `Haptic::Selection`, `Haptic::Impact(ImpactStrength::{Light, Medium, Heavy, Soft, Rigid})` and `Haptic::Notify(HapticOutcome::{Success, Warning, Error})`. There is intentionally no `is_available()` query: like AppKit `NSHapticFeedbackManager`, UIKit `UIFeedbackGenerator`, SwiftUI `SensoryFeedback`, Flutter `HapticFeedback` and Android `HapticFeedbackConstants`, requests are fire-and-forget no-ops where unsupported or muted by system settings.
+- **Timing, cooldown and bounds**: requests made during a frame (including `on_mount` and deferred field menus) commit once at the end of the frame so feedback aligns with the presented pixels, and `Tx::haptic` marks `frame_work` without dirtying the view (compatible with `Tx::live_only()`). Identical `Haptic` variants within 30 ms on the runtime clock are coalesced while different variants fire immediately. Pending requests sit in a fixed inline 32-entry ring buffer (oldest dropped first, zero heap allocation).
+- **Platform mapping**:
+
+| Rune `Haptic` | iOS (embedding host after `LayerHost::frame()`) | Android (embedding host via `View.performHapticFeedback`) | macOS (Rune windows & overlays via `NSHapticFeedbackManager`) | Windows / Linux / Web |
+| --- | --- | --- | --- | --- |
+| `Selection` | `UISelectionFeedbackGenerator.selectionChanged()` | `SEGMENT_TICK` (API 34+, fallback `CLOCK_TICK`) | `LevelChange` (`PerformanceTime::Now`) | no-op |
+| `Impact(Light)` | `UIImpactFeedbackGenerator(style: .light, view:).impactOccurred()` | `VIRTUAL_KEY` | `Alignment` (`PerformanceTime::Now`) | no-op |
+| `Impact(Medium)` | `UIImpactFeedbackGenerator(style: .medium, view:).impactOccurred()` | `KEYBOARD_TAP` | `Generic` (`PerformanceTime::Now`) | no-op |
+| `Impact(Heavy)` | `UIImpactFeedbackGenerator(style: .heavy, view:).impactOccurred()` | `CONTEXT_CLICK` (API 23+, fallback `LONG_PRESS`) | `Generic` (`PerformanceTime::Now`) | no-op |
+| `Impact(Soft)` | `UIImpactFeedbackGenerator(style: .soft, view:).impactOccurred()` | `SEGMENT_FREQUENT_TICK` (API 34+, fallback `CLOCK_TICK`) | `Alignment` (`PerformanceTime::Now`) | no-op |
+| `Impact(Rigid)` | `UIImpactFeedbackGenerator(style: .rigid, view:).impactOccurred()` | `CONTEXT_CLICK` (API 23+, fallback `KEYBOARD_TAP`) | `Generic` (`PerformanceTime::Now`) | no-op |
+| `Notify(Success)` | `UINotificationFeedbackGenerator(view:).notificationOccurred(.success)` | `CONFIRM` (API 30+, compat fallback `VIRTUAL_KEY`) | no-op | no-op |
+| `Notify(Warning)` | `UINotificationFeedbackGenerator(view:).notificationOccurred(.warning)` | `KEYBOARD_TAP` | no-op | no-op |
+| `Notify(Error)` | `UINotificationFeedbackGenerator(view:).notificationOccurred(.error)` | `REJECT` (API 30+, compat fallback `LONG_PRESS`) | no-op | no-op |
+
+- **Platform notes**: on iOS, prefer iOS 17.5+ view-bound `UIFeedbackGenerator(view:)` initialisers and host-managed `prepare()`. On Android, use `HapticFeedbackConstants` / `HapticFeedbackConstantsCompat` on the host `View` (no `VIBRATE` permission required). On macOS, shown Rune windows and overlays drain and play haptics right after presentation (and on unchanged frames for boundary bumps), while hidden/covered/prewarm frames discard them; `Notify(_)` is silent because AppKit has no notification patterns (matching SwiftUI). Web never calls `Navigator.vibrate` (non-Baseline, Android-only millisecond buzzes unsupported on iOS Safari). `examples/playground` includes a `Controls/Haptics` story. Tactile output has not yet been tested on a physical iPhone, Android device, or Force Touch trackpad, so the 30 ms cooldown and macOS pattern mapping may be tuned after hardware feedback.
+
 ### Pop-up and context menus
 
 `tx.popup_menu(menu, anchor, on_pick)` opens a native menu once the handler's frame is done.
@@ -2567,7 +2865,16 @@ row().key("theme").child(text(theme_title(&s.theme)))
   `FieldMenuRequest` (`field_key`, `field_path`, `point`, `menu` / `PopupMenu::entries`) to
   your hook so you can render it in-window and run the chosen action with
   `tx.resolve_field_menu(Some(id))` (or `None` to cancel), while macOS and Windows keep their
-  native menus unchanged. `cargo run -p rune --example popup_menu` shows both kinds.
+  native menus unchanged. For a general Linux in-window fallback covering every Rune pop-up menu
+  (`Tx::popup_menu`, selectable-text Copy, default link/image menus, and text-field menus when
+  `on_field_menu` is unset), opt in with `App::on_popup_menu(|s, req, tx| ...)` (also on
+  `WindowSpec` and `ConfiguredOverlay`): when `!popup_menu_supported() && !cfg!(target_arch = "wasm32")`,
+  Rune hands a `PopupMenuRequest` (`menu`, `into_menu`, `anchor`, `point`, `anchor_rect`,
+  `min_width`, `positioned`) to your hook and you answer with `tx.resolve_popup_menu(Some(id))`
+  or `None` (in `rune-kit`, `Menu::from_popup_menu` renders it in one call). `popup_menu_supported()`
+  continues reporting platform-native support (`false` on Linux, `true` on macOS/Windows), and
+  macOS, Windows, and web keep their existing menu presenters untouched. `cargo run -p rune --example popup_menu`
+  and `cargo run -p kit-gallery -- --scene rune-menu--popup-menu-fallback` show them.
 - **Web style**: on the web the menu is the page's own elements (`role="menu"`), light or dark
   as the window draws. `PopupMenu::style(PopupMenuStyle::new().background(..).text(..))` draws
   it from the app's palette instead: `background`, `text`, `muted`, `separator`, `highlight`,
@@ -2575,6 +2882,8 @@ row().key("theme").child(text(theme_title(&s.theme)))
   `item_corner_radius`, each unset one keeping its default. Submenus use the top menu's style
   (their own isn't used or shown in `--tree`); keyboard, pointer and screen-reader use don't
   change, and native menus ignore it.
+- **Default link context menu**: right-clicking (or pressing Menu / Shift+F10, or long-pressing on touch) an inline `Link` span with a real address - explicit `Link::href(url)`, or an `id` passing `http:`/`https:`/`mailto:` - shows **Open Link** (when `on_link` is set) and **Copy Link** (`Label::OpenLink`, `Label::CopyLink`), followed by a separator and **Copy** on selectable text, without selecting a word on macOS. Bare internal ids, `role("button")` chips, non-openable schemes, and redacted text never get the default menu; `El::on_link_secondary` and any element or ancestor `El::on_secondary_press` win when set. Pass `El::link_menu(false)` (or `Markdown::link_menu(false)`) to opt out. On the web, mouse right-click still hands off to the browser's `<a href>` menu; on Linux it flows through the same popup queue so an in-window fallback renders it.
+- **Opt-in image context menu**: attach `El::image_menu(ImageMenu::new(&img).save_bytes(..).file_name(..).address(..))` (or `.save_path(..)`) to any image element (`El::pixels` / `El::pixels_fit`, or inside `rune_kit::Markdown::image_frame`). Shows **Save Image As…** (native only, omitted on `wasm32` where `Tx::save_file` is unsupported; writes original bytes/file verbatim on a background thread so SVG and animated images stay intact), **Copy Image** (off-thread PNG encode via `Tx::copy_image_then`, disabled while pending/failed/over 64 MP, leaving the clipboard untouched and announcing/logging on error), and **Copy Image Address** (when `address` passes `http:`/`https:`/`mailto:`), localisable via `Label::{SaveImageAs, CopyImage, CopyImageAddress}`. Plain image elements get no menu by default; an element's own `on_secondary_press` wins, while explicit `El::image_menu` wins over an ancestor's `on_secondary_press`. When an opted-in image sits inside an `El::href` link, the menu shows the link items, a separator, and the image items. On Linux it flows through the same `Popups` queue so the in-window fallback renders it.
 - **Headless**: `--tree` has a `popupMenu` object (items, anchor, `selected`, `queued`, and
   `style` when set) while a menu is open, and `--trace` notes `popup-menu:open`, `popup-menu:pick:{id}` and
   `popup-menu:cancel`. Scripts answer it with `{"type": "menu-pick", "id": "dark"}` or
@@ -3049,6 +3358,62 @@ let clip = rune::Player::audio(note.path);
 - **Other platforms** (Linux, Windows, the web): `start` ends in `Failed("recording isn't
   supported on this platform")`.
 
+### Streaming PCM audio output (`AudioOutput`, `crates/rune-media/src/audio/`)
+
+`AudioOutput` is a cheap-to-clone, thread-safe PCM sink for apps that decode their own audio
+(for example from a sandboxed helper) and need a monotonic heard-frame clock to pace video or
+index a spectrum. Every post-open method is non-blocking.
+
+```rust
+let spec = rune::AudioOutputSpec::new(rune::SampleFormat::I16, 48_000, 2)
+    .buffer_duration(std::time::Duration::from_millis(2_400))
+    .app_name("Preview")
+    .stream_name("Media audio")
+    .volume(0.8);
+let audio = rune::AudioOutput::open(spec.clone())
+    .or_else(|_| rune::AudioOutput::open_silent(spec))?;
+audio.set_waker(waker);
+
+// Producer loop: push while capacity holds, pace video on `position()`, drain with `finish()`.
+while audio.has_capacity(960) {
+    match audio.push_bytes(&pcm_s16le_chunk) {
+        Ok(_accepted_bytes) => break,
+        Err(rune::AudioPushError::Full) => break,
+        Err(err) => return Err(err.into()),
+    }
+}
+audio.play();
+let pos = audio.position(); // pos.duration() for video pacing, pos.heard_frames() for spectrum
+for event in audio.take_events() { /* AudioEvent::Underrun | Ended | DeviceLost(_) */ }
+```
+
+- **Formats and bounds**: supports `SampleFormat::I16` (interleaved signed 16-bit LE) and
+  `SampleFormat::F32` (interleaved 32-bit float LE), 8–192 kHz, 1–8 channels. The pre-gain
+  ring buffer defaults to 2.5 s, clamps to 100 ms..=10 s, and is hard-capped at 16 MiB; the
+  rolling written-tail and rewound front buffers used for pause rewind are capped at ~500 ms
+  (2 MiB each), and the event queue is capped at 64 entries. Steady-state `push_*`,
+  `position`, and `free_frames` allocate nothing.
+- **Post-buffer volume and pause rewind**: linear `set_volume` (`0.0..=1.0`) and
+  `set_muted` apply in ~10 ms write quanta right before each device write, so slider changes
+  take effect immediately even with seconds queued. `pause()` flushes the device immediately,
+  snaps `heard_frames` monotonically, and rewinds unheard frames from the tail buffer ahead
+  of the unread ring so `play()` resumes seamlessly with the current volume and mute.
+- **Events and idle cost**: `set_waker` fires once per discrete `AudioEvent::Underrun`,
+  `Ended`, or `DeviceLost` transition (read via `take_events()`). Paused, ended, and
+  device-lost outputs park their worker with zero wakeups. `flush()` clears queued and device
+  audio, resets `heard_frames` to 0, preserves `Playing` without spurious underruns until
+  new samples arrive, and returns `Draining` or `Ended` outputs to `Paused`.
+- **Backends**:
+  - **Linux**: `AudioOutput::open` loads `libpulse-simple.so.0` at run time via `dlopen`
+    (serving PulseAudio and PipeWire via `pipewire-pulse`, with ~60 ms `tlength` and ~10 ms
+    `minreq`) and falls back to `libasound.so.2` (ALSA `default`, 60 ms latency, `-EPIPE`
+    underrun recovery). Nothing is linked at build time; if neither library or daemon can open,
+    `open` returns `AudioOutputError::OpenFailed` naming both reasons.
+  - **Windows, macOS, and `wasm32`**: `AudioOutput::open` returns
+    `AudioOutputError::Unsupported` until native backends follow.
+  - **Silent fallback**: `AudioOutput::open_silent` works on every platform (including
+    `wasm32`, driven lazily against `rune_core::time::now()` with no threads).
+
 ### Edge overlays (`App::overlay`, `overlay.rs`, `platform/layer_shell.rs`)
 
 `app.overlay(OverlaySpec { name, size, edge, margin, align, inset, interactive, view }, state)
@@ -3086,9 +3451,36 @@ is one more host on the event loop
   unless interactive. Clicks still reach Rune through winit's view (`platform/macos.rs`).
 - Windows: a topmost tool window with `WS_EX_NOACTIVATE` (plus `WS_EX_TRANSPARENT|WS_EX_LAYERED`
   unless interactive), shown with `SW_SHOWNOACTIVATE`; edge-placed overlays (both `OverlaySpec`
-  defaults and `OverlayPlacement::Edge`) anchor inside all four sides of `Display::work_area()`
-  (`GetMonitorInfoW`'s `rcWork` in `platform/win32.rs`), while `OverlayPlacement::Rect` and
-  `OverlayPlacement::FullScreen` stay in full display coordinates.
+  defaults and `OverlayPlacement::Edge`) anchor and clamp `ContentSizing` inside all four sides
+  of `Display::work_area()` (`GetMonitorInfoW`'s `rcWork` in `platform/win32.rs`), while
+  `OverlayPlacement::Rect` and `OverlayPlacement::FullScreen` stay in full display coordinates
+  for both placement and `ContentSizing` (pass `max_size` from `Display::work_area()` if a
+  content-sized `Rect` overlay should stay within the work area).
+- Opt-in CPU rendering on Windows (`ConfiguredOverlay::renderer(RendererKind::Cpu)`, default
+  `RendererKind::Gpu`): keeps a transparent Windows overlay on `CpuPainter` for its whole
+  lifetime and presents premultiplied BGRA frames (`clear = [0.0; 4]`, `lcd = false`) through
+  documented Win32 `UpdateLayeredWindowIndirect` (`ULW_ALPHA`) without creating a GPU device,
+  swap chain, or `wgpu::Surface` (and without calling `SetLayeredWindowAttributes`; fade-out
+  steps `BLENDFUNCTION::SourceConstantAlpha` without repainting). Query the active renderer in
+  any window or overlay view with memo-tracked `Cx::renderer_kind()` (and set it in headless
+  tests with `Runtime::set_renderer_kind`). The backing DIB is bounded to 8192×8192 / 128 MiB,
+  reused across steady frames with zero heap allocations, and freed when the overlay hides.
+  On macOS, Linux, iOS, and web in this step, `RendererKind::Cpu` is ignored cleanly (staying on
+  GPU with `Cx::renderer_kind() == RendererKind::Gpu`); macOS has no CPU painter, and Linux
+  transparent CPU overlays (`wl_shm` ARGB8888 / 32-bit ARGB X11) are a planned follow-up on the
+  same builder. Trade-offs: layered CPU overlays have no DXGI swap chain or hardware vsync queue
+  and pace animations with `PollPace` + `DwmGetCompositionTimingInfo` (expect minor cadence drift
+  on high-refresh monitors, ~4–5% measured at 165 Hz; keep continuous 120–165 Hz animating
+  overlays on `RendererKind::Gpu`); `WindowBackdrop` reports `WindowBackdrop::None`
+  (`window_backdrop_supported` returns `false`), `El::system_material` draws its fallback fill
+  (refusing `windows-system-material` host backdrop visuals), `.compositor(...)` overrides
+  `RendererKind::Cpu` back to GPU, and `NativeSurface`, `El::blur`, non-90° `El::rotate`, nested
+  `El::backdrop_blur`, and `FontSmoothing::Slug` require the GPU (degradable modifiers paint
+  without the GPU-only effect; non-degradable features hold the previous frame or fail frame 1
+  cleanly). Under `ULW_ALPHA`, Win32 treats pixels with `alpha == 0` as click-through before
+  `WM_NCHITTEST` (invisible hit targets need `alpha >= 1/255`). Pass `--cpu` to
+  `examples/overlay-lab` to try it. Live Windows desktop presentation has not yet been watched by
+  the team.
 - Keys: `OverlayOptions::keys: KeyPolicy::OnDemand` lets an overlay take the keyboard on
   `OverlayHandle::request_keys` or a click, and `capabilities().nonactivating_keys` says whether
   its backend can: the macOS panel becomes key, a layer-shell (v4) surface asks for keyboard
@@ -3101,6 +3493,14 @@ is one more host on the event loop
   backends it does nothing yet. No safety net exists yet: an app whose event loop hangs while an
   `Exclusive` layer holds the keys leaves the desktop without a keyboard until it exits or is
   killed.
+- Activation tokens: `OverlayHandle::activation_token(reply)` asks a shown Wayland layer-shell
+  overlay's compositor for an `xdg_activation_v1` token using the latest pointer-button, key,
+  keyboard-enter, or touch-down serial on the surface. It commits the request ahead of the same
+  turn's `hide()` or `release_keys()` without blocking the event thread in a compositor roundtrip
+  and invokes `reply` when `xdg_activation_token_v1.done` arrives on the token's private queue
+  (even after the overlay hid or released exclusive keyboard focus), so a program launched with
+  `XDG_ACTIVATION_TOKEN` can come to the front under focus-stealing prevention. Other platforms,
+  hidden or closed overlays, timed-out requests, and dropped handles answer `None`.
 - Checked under headless sway (layer shell, and Xwayland for X11) and on macOS (panel level,
   bounds, hide and reshow). Windows builds are checked with `cargo xwin clippy` only.
 - `El::window_drag()` (and `El::no_window_drag()`) moves window-backed overlays (Windows, macOS
@@ -3108,6 +3508,17 @@ is one more host on the event loop
   `OverlayInput::Regions`. Titlebar double-clicks are ignored, and a user-dragged overlay keeps
   its position across shows, resizes, and `follow_pointer` until the app sends a new placement
   request. Wayland layer-shell overlays cannot be interactively dragged and ignore it.
+- Pointer injection: `OverlayHandle::send_pointer(PointerInput)` (paired with
+  `OverlayHandle::screen_to_local((x_px, y_px)) -> Option<(f32, f32)>`) forwards external
+  pointer streams (for example from a low-level hook or another thread) through the same
+  hit-testing, hover, press, drag, and wheel pipeline as native input, bypassing
+  `OverlayInput::None` and `OverlayInput::Regions` click-through gating across GPU, Windows
+  CPU layered, macOS panel, X11, and Wayland layer-shell overlays. Queued in a bounded
+  128-slot zero-allocation ring buffer (coalescing consecutive moves), dropped while hidden
+  or fading out, and arbitrated by an explicit ownership state machine (latest source wins
+  in idle/hover; active capture ignores the other source until release, cancel, or hide).
+  Injected events never move or set the OS cursor, never activate or focus the overlay, and
+  refuse native `window_drag` and OS `drag_out` sessions.
 - `Tx::copy` works in overlays (a meeting capsule's Copy button).
 - Unsupported: hover in a non-key macOS panel (mouse-moved events go to the key window).
 
@@ -3133,9 +3544,30 @@ and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` 
   `Compositor::release_gpu`, and call `Frame::restore_device_callbacks()` right after initializing
   a renderer that overwrites wgpu's single-slot `set_device_lost_callback` or
   `on_uncaptured_error` handlers so Rune keeps owning device-loss recovery and bounded error
-  logging. On macOS, engines that need depth/stencil, MSAA, render bundles, indirect draws, or
+  logging. On macOS, engines that need render bundles, indirect draws, occlusion queries, or
   other wgpu features beyond Rune's native Metal subset should opt into
   `App::gpu_backend(GpuBackend::Wgpu)` and `prewarm_gpu_on(GpuBackend::Wgpu)`.
+- **Terminal GPU loss policy (`GpuLossPolicy::Terminal`).** Apps embedding a renderer with
+  device-bound resources that cannot silently migrate to a replacement device can opt in via
+  `App::gpu_loss_policy(GpuLossPolicy::Terminal)` or `WindowSpec::gpu_loss_policy`. The first GPU
+  device loss (including `DeviceLostReason::Destroyed` outside clean shutdown or
+  `release_gpu_when_closed`), D3D12 device removal, uncaptured `wgpu::Error`, initialization failure,
+  or failed same-device surface configuration latches permanently and populates
+  `AppHandle::window_error()`. Open windows stay visible on their last presented frame with view
+  input and rendering stopped while close/quit paths and non-GPU shell actions (`Tx::set_title`)
+  keep working; `AppSpec::poll` wakes once without redrawing; owned `App::overlay` overlays share
+  the latch, drop their GPU resources, and report `Availability::Unavailable`; and Rune never
+  replaces the device or falls back to CPU (including on reopen and on `wasm32`, where the page and
+  canvas stay alive in the DOM). Same-device surface recreation on a healthy device stays allowed
+  without calling `Compositor::release_gpu`. Hard limits: commands already submitted to
+  `queue.submit`/`present` cannot be recalled; on macOS, Rune's native Metal backend implements
+  `set_device_lost_callback` while uncaptured errors require `App::gpu_backend(GpuBackend::Wgpu)`.
+  On Windows and Linux, `AppHandle::warm_gpu_with(features, prepare)` (no-op on macOS and
+  `wasm32`) is the app-attributed form of `rune::warm_gpu_with`: under `GpuLossPolicy::Terminal`,
+  it binds the initiating app's latch to warm-up creation, `prepare`, and the parked device,
+  refuses warm-up once latched, propagates creation/preparation/parked-device failures to the app
+  instead of creating a replacement device, and detaches cleanly on normal linger expiry or
+  shutdown.
 - `Renderer::prepare_lists` uploads several instance lists in one buffer (one glyph upload) and
   returns their ranges; `encode_layers` records isolated groups before the containing pass;
   `draw_range` draws complete scopes into that pass; `add_format` builds the uber
@@ -3180,7 +3612,13 @@ and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` 
   One compositor serves any number of formats: build pipelines per `EffectSite::format`.
 - **Per-slot identity and payload.** `EffectSite::mark` is the slot's `El::effect` tag and
   `EffectSite::data` its `El::effect_data([f32; 4])` payload, both carried in the slot's record, so
-  a compositor needs neither `Runtime::marks` nor its own copy of app state. A removed element keeps
+  a compositor needs neither `Runtime::marks` nor its own copy of app state. Before opening its own
+  passes or calling `Renderer::prepare`, a compositor can inspect the current frame's laid-out slots
+  via `Frame::effect_slots` / `Frame::effect_slot(mark)` (or `Runtime::effect_slots` /
+  `Runtime::effect_slot(mark)` to borrow only `f.rt` while encoding into `f.encoder`), or read a
+  raw record's tag directly with `Instance::effect_mark()`, returning `compose::EffectSlot` with
+  each slot's `index`, `instance`, `mark`, `data`, device-pixel `rect`, `scale`, `bleed` and
+  `backdrop`. A removed element keeps
   its last-built payload through its exit transition, so an outgoing slot keeps drawing its own
   content while its replacement enters beside it. Keep resources per mark and drop a mark's once a
   frame passes without it (the example on `compose::Compositor`). The slot's rect and `scale`
@@ -3324,15 +3762,94 @@ clamped to 64). Visible material elements past the limit draw their fallback ins
 `ElementInfo::material_fallback = true`, emit `"materialFallback": true` in `--tree` JSON, and
 log a one-time notice to stderr when native materials are active.
 
+**Fill rules (Windows 11 and Linux Wayland):** on Windows 11 (`windows-system-material`) and
+Wayland, an element's fill controls whether behind-window blur is requested (on macOS, native
+views still replace the fill while active):
+
+```rust,ignore
+// 1. No fill: the material alone (Windows 11 supplies WinUI 3 light/dark Acrylic tint).
+el().size(220.0, 48.0).radius(24.0)
+    .system_material(SystemMaterial::Popover)
+
+// 2. Translucent fill (alpha < 1.0): drawn as a tint over the live blur.
+el().size(320.0, 180.0).radius(12.0)
+    .fill(Color::BLACK.alpha(0.35))
+    .system_material(SystemMaterial::Glass)
+
+// 3. Opaque fill (alpha >= 1.0): the fill wins and no material is requested
+//    (used for surfaces like rune-kit::Toolbar that blur only when a theme is translucent).
+el().w_full().h(48.0)
+    .fill(Color::WHITE)
+    .system_material(SystemMaterial::Sidebar)
+```
+
+Where native or compositor materials are inactive, the element draws its fallback fill, and the
+frame's material rects remain public so an app can still drive its own backdrop under them (on
+Windows, a companion window or composition visual). `Runtime::system_materials` lists the last built frame's
+`MaterialDraw`s (element id, material, rect and corner radius in physical pixels, `points(scale)`
+for window points), readable from `App::on_frame_drawn`. `ConfiguredOverlay::on_materials` hears
+each overlay frame's (`MaterialFrame`: draws and window scale) just before it presents. Give the
+element a translucent `fill` of its own to replace the neutral fallback tint. The hook runs only
+for presented frames: hiding the overlay, releasing or losing its surface sends no final empty
+frame, so hide the backdrop with the app's own `OverlayHandle::hide` calls and on
+`ConfiguredOverlay::on_availability`.
+
 Rune draws the shadow, so make the window larger than the card and turn the system shadow off
 with `MacWindowOptions::default().shadow(false)`, or the window gets a second, rectangular
 shadow. An outer shadow under a material leaves the material's interior clear.
 
-Opaque windows, other platforms and headless renders draw the element's fill instead, or a
-neutral tint when it has none; native views never appear in offscreen output, so goldens stay
-deterministic. `RUNE_SYSTEM_MATERIAL=legacy` forces the pre-26 view, `unsynced` moves the views
-outside the drawable's transaction (for comparison) and `off` draws the fallback.
-`examples/glass-card` flies a card over a test pattern; research note 26 has the measurements.
+On Windows 11 Build 22000+, an off-by-default `windows-system-material` Cargo feature backs
+`El::system_material` on transparent DirectComposition hardware-GPU windows and overlays with
+documented `DWMWA_USE_HOSTBACKDROPBRUSH` and a Windows 11 Acrylic Luminosity + Color
+`CompositionEffectBrush` (built with `IGraphicsEffect` / `IGraphicsEffectD2D1Interop` over
+`Compositor::CreateHostBackdropBrush`, zero Win2D) clipped per frame under Rune's swap-chain
+visual. Each resolved Acrylic recipe is cached per target (`Popover` = Default Acrylic,
+`Sidebar` = Base Acrylic, `Glass` = clearer chromatic Acrylic; plain `El::system_material` caches
+at most 6 brushes per window, and `El::system_material_with(material, MaterialParams)` overrides
+optional tint RGB, tint opacity, luminosity opacity, and `0.0..=4.0` backdrop saturation via
+`CLSID_D2D1ColorMatrix` in a bounded LRU cache) and degrades gracefully to a WCAG >=4.5:1 flat
+tint if effect compilation fails.
+Light-theme Acrylic uses Microsoft's WinUI 3 light recipes (`#FCFCFC` / `#F3F3F3`), which are
+designed for dark text chosen from the active theme (`cx.system_dark()`). Windows
+follows the same fill rules as Wayland: opaque fills (`alpha >= 1.0`, such as `rune-kit::Toolbar`)
+stay opaque with no backdrop visual (keeping windows with only opaque materials idle with zero
+WinRT/DWM calls), translucent fills paint above Acrylic as an authored tint, and unfilled elements
+show self-tinted Acrylic. While the feature is off (the default), no `Windows.UI.Composition` or
+Direct2D types are compiled in; while on, Transparency effects off, Battery/Energy Saver on,
+unsupported/slow composition capabilities, High Contrast, Remote Desktop, active `WindowBackdrop`,
+opaque windows, Windows 10, `DxgiFromHwnd`, CPU painter frames, software/WARP adapters, and
+`RUNE_SYSTEM_MATERIAL=off` draw the fallback fill. Diagnostic switches for hardware verification:
+`RUNE_WIN_MATERIAL_CLIP=geo` (`CompositionGeometricClip` instead of `RectangleClip`),
+`RUNE_WIN_MATERIAL_TINT=acrylic|flat|raw` (default `acrylic`), and
+`RUNE_WIN_OVERLAY_NO_LAYERED=1` (omit `WS_EX_LAYERED` on overlays).
+
+On Linux Wayland, `El::system_material` drives per-element shaped compositor blur on transparent
+GPU windows and overlays (`zwlr_layer_shell_v1` and toplevel fallbacks) whenever
+`WindowBackdrop::None` is active and the compositor advertises `ext_background_effect_v1`
+(`Capability::Blur`) or `org_kde_kwin_blur_manager` (opt out with `RUNE_SYSTEM_MATERIAL=off`).
+Unlike macOS (where native material views sit behind the element and replace its fill), Wayland
+compositor blur has no tint of its own (sharing the same opaque/translucent/empty fill rules as
+Windows): translucent fills are kept as the tint,
+unfilled elements draw transparent instead of the opaque fallback, outer-shadow interior holes
+are punched, opaque fills (`alpha >= 1.0`) stay opaque with no blur region, elements beyond
+`App::max_native_materials` (default `MAX_NATIVE_MATERIALS` = 4) draw their fallback fill,
+Wayland blur protocols have no opacity parameter so blur is all-or-nothing under a fading card
+(staying at full strength until opacity crosses `0.10`, then dropping cleanly), ancestor clips
+and all four rounded corners are decomposed
+conservatively inward into logical `wl_region` spans (bounded at 512 rects per surface), and
+updates flush right before present so region and pixels commit atomically. Use
+`Cx::window_backdrop_supported(WindowBackdrop::Blur)` to query capability for both
+`WindowBackdrop::Blur` (whole surface, taking precedence) and `El::system_material` (per
+element). Shaped per-element Wayland blur is unit-tested off-screen and awaiting live compositor
+confirmation on issue #1381.
+
+Opaque windows, X11/XWayland, unsupported compositors, web and headless renders draw the
+element's fill instead, or a neutral tint when it has none; native materials never appear in
+offscreen output, so goldens stay deterministic. `RUNE_SYSTEM_MATERIAL=legacy` forces the pre-26
+macOS view, `unsynced` moves macOS views outside the drawable's transaction (for comparison) and
+`off` disables native materials on macOS, Windows, and Wayland.
+`examples/glass-card` flies a card over a test pattern (pass `--overlay` for a springing pill
+inside a transparent non-activating overlay); research note 26 has the measurements.
 
 To match a native AppKit card on top of the material, three more opt-ins:
 
@@ -3350,13 +3867,88 @@ AppKit window level, `ConfiguredOverlay::macos_color_space` selects `MacColorSpa
 `examples/glass-panel` puts it together: a card that flies across a large window, hands off
 to a card-sized window that moves 60 times a second, and fades out.
 
+### Window backdrops (`WindowBackdrop`)
+
+```rust,ignore
+let opts = WindowOptions { transparent: true, ..Default::default() };
+let spec = AppSpec::new("Files", (960.0, 640.0), || (), |_, cx| {
+    let base = theme_bg(cx);
+    let bg = match cx.window_backdrop() {
+        WindowBackdrop::Blur => base.alpha(0.75),
+        b if b.is_active() => Color::TRANSPARENT,
+        _ => base,
+    };
+    el().w_full().h_full().fill(bg)
+});
+App::new(spec).window_options(opts).window_backdrop(WindowBackdrop::Blur).run();
+```
+
+Opt-in whole-window OS backdrop material behind the entire window or overlay (`WindowBackdrop::None`
+default, `Mica`, `MicaAlt`, `Acrylic`, `Blur`), configured with `App::window_backdrop`,
+`WindowSpec::window_backdrop`, or `ConfiguredOverlay::window_backdrop`, updated at runtime with
+`Tx::set_window_backdrop`, `WindowHandle::set_window_backdrop`, or
+`OverlayHandle::set_window_backdrop`, and queried in views with `Cx::window_backdrop()` and
+`Cx::window_backdrop_supported(backdrop)` (both memo-tracked; headless tests can drive them with
+`Runtime::set_window_backdrop` and `Runtime::set_window_backdrop_supported`).
+
+- **Windows 11 Build 22621+ (22H2)**: `Mica`, `MicaAlt`, and `Acrylic` apply only the documented
+  Win32 attribute `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE)` (`DWMSBT_MAINWINDOW`,
+  `DWMSBT_TABBEDWINDOW`, `DWMSBT_TRANSIENTWINDOW`; `DWMSBT_NONE` when clearing) and sync
+  `DWMWA_USE_IMMERSIVE_DARK_MODE` while active. Never uses undocumented
+  `SetWindowCompositionAttribute`, accent policies, or pre-22H2 `DWMWA_MICA_EFFECT`. Activates
+  only on transparent windows and overlays presenting on a hardware GPU through DirectComposition
+  (`DxgiFromVisual`, `CompositeAlphaMode::PreMultiplied`, not on the CPU painter or WARP).
+  Re-applied across window recreation, hide/show, maximize/unmaximize, device reattach, and theme
+  updates.
+- **Linux Wayland (`WindowBackdrop::Blur`)**: binds `ext_background_effect_v1` (version 1,
+  checking `Capability::Blur`; KWin 6.7+, GNOME Mutter 51+, Hyprland 0.56+, niri 26.04+, COSMIC
+  1.11) with `org_kde_kwin_blur_manager` (version 1) as fallback only when
+  `ext_background_effect_v1` is absent (KDE Plasma 5.x–6.6.x). Works on transparent GPU toplevel
+  windows, toplevel-fallback overlays, and `zwlr_layer_shell_v1` overlays, using surface-local
+  logical `wl_region` coordinates (approximating `sctk-adwaita` rounded bottom corners) and
+  tracking runtime `capabilities` changes with zero background threads. Unlike Windows Mica or
+  Acrylic (which paint DWM's own tint behind `Color::TRANSPARENT`), Wayland blur is untinted:
+  draw a translucent fill (such as `bg.alpha(0.75)`) over it when `cx.window_backdrop() ==
+  WindowBackdrop::Blur`.
+- **Zero cost when unused**: opaque windows make zero DWM or Wayland registry/blur calls.
+  Transparent Wayland windows left at `WindowBackdrop::None` never create a per-surface blur
+  object (preserving Hyprland global blur rules) and bind only the shared display manager lazily
+  after the first frame to populate `Cx::window_backdrop_supported(WindowBackdrop::Blur)`.
+- **Active state and compositor policies**: on Windows 11, DWM draws Mica, Mica Alt, and Desktop
+  Acrylic only while the window is the foreground window and shows its own solid neutral fallback
+  when unfocused, in Battery Saver, in High Contrast, or when Transparency Effects are turned off.
+  `Cx::window_backdrop().is_active()` stays `true` once DWM accepts the attribute (including on
+  non-activating `KeyPolicy::None` overlays, which never take focus and never show the live
+  material); apps wanting their own unfocused fill can pair `cx.window_backdrop().is_active()`
+  with `App::on_focus` or `El::on_window_focus`. On Wayland, neither `ext_background_effect_v1`
+  nor `org_kde_kwin_blur_manager` couples blur to focus - compositors such as KWin blur mapped
+  unfocused windows and layer-shell overlays alike - though blur appearance remains subject to
+  compositor policy.
+- **No transparent holes**: on Windows builds before 22621, X11/XWayland, unsupported Wayland
+  compositors (or when blur capability is revoked), opaque windows, `DxgiFromHwnd`, the CPU
+  painter, WARP, DWM error, macOS, web, and headless renders, `Cx::window_backdrop()` reports
+  `WindowBackdrop::None`. If a non-overlay Windows or Linux transparent window requested an active
+  backdrop that could not activate, Rune clears its surface to an opaque theme-matched fallback so
+  even a view that skips `cx.window_backdrop()` never opens a transparent hole.
+- **Live verification status**: Windows 11 Mica, Mica Alt, and Desktop Acrylic have been verified
+  on live Windows 11 hardware (#300), and whole-surface Wayland `WindowBackdrop::Blur` on a
+  `zwlr_layer_shell_v1` overlay has been verified live on KDE Plasma / KWin 6.8.3. Toplevel
+  Wayland windows, other compositors, and per-element `El::system_material` shaped blur are
+  unit-tested off-screen and awaiting live reports on issue #1381. Try it with
+  `cargo run -p settings -- --backdrop mica` (Windows) or
+  `cargo run -p settings -- --backdrop blur` (Linux Wayland).
+
 ### Frosted panels
 
-Which blur a frosted panel needs depends on what sits behind it:
+Which blur a frosted surface needs depends on what sits behind it and whether it covers the whole
+window or one element:
 
-- **The desktop or other windows:** `El::system_material` above, in a transparent window. Only
-  the platform can see behind the window.
-- **The app's own content:** `El::backdrop_blur` below. (`El::blur(σ)` blurs the element's own
+- **The whole window over the desktop (Windows 11 22H2+ / Linux Wayland):** `WindowBackdrop` above
+  (`Mica`, `MicaAlt`, `Acrylic` on Windows; `Blur` on Wayland), in a transparent window or overlay.
+- **One or more rounded elements over the desktop (macOS / Linux Wayland / opt-in Windows 11):**
+  `El::system_material` above, in a transparent window or overlay. Only the platform can see behind
+  the window.
+- **The app's own content (every platform):** `El::backdrop_blur` below. (`El::blur(σ)` blurs the element's own
   subtree, not its backdrop.) For refraction, a saturation lift and grain on top of the blur,
   `rune-fx`'s `Fx::lens(LensParams { frost: 1.0, .. })` is Liquid Glass "regular": put
   `.effect_backdrop(true)` on its effect slot and draw through `Renderer::draw_with_backdrop`,
@@ -3388,9 +3980,9 @@ follows the element's presented rect, its opacity fades the blur, and its outer 
 blurred interior clear. A still frame doesn't redraw.
 
 Every blurred element in a frame blurs, growing the blur uniform buffer past
-`MAX_BACKDROP_BLURS` (4) when needed, as in CSS `backdrop-filter`. Blurs drawn into a target
-without `COPY_SRC`, or into a caller's own `wgpu::RenderPass` through `Renderer::draw_range`,
-draw only their fill. The web backend asks the canvas for `COPY_SRC`. An element fading on its
+`MAX_BACKDROP_BLURS` (4) when needed, as in CSS `backdrop-filter`. While `cx.system_reduced_transparency()` is true, blurs are skipped and the element draws only
+its fill. Blurs drawn into a target without `COPY_SRC`, or into a caller's own `wgpu::RenderPass`
+through `Renderer::draw_range`, also draw only their fill. The web backend asks the canvas for `COPY_SRC`. An element fading on its
 own still blurs what is behind it, while inside an ancestor drawn as one layer (opacity below 1,
 including a fading wrapper, `El::group_opacity`, `El::blur`, `El::cache`, or a rotation) the
 backdrop is what that layer has drawn so far, matching CSS's Backdrop Root. A frame without a
@@ -3417,13 +4009,14 @@ feature (`crates/rune/src/a11y/`).
   offsets, modal dialogs (the background leaves the tree), and secure text (never exposed).
   Plain layout boxes with no key, label or role join their parent, so the tree reads like the
   interface, not the layout.
-- **Builders for the rest**: `description`, `a11y_value`, `range_value` and `range_step`,
+- **Builders for the rest**: `description` / `description_static`, `role_description` / `role_description_static` (ARIA `aria-roledescription`, ignored on elements with no role), `a11y_value`, `range_value` and `range_step`,
   `checked` and `checked_mixed`, `disabled`, `aria_disabled` (unavailable to assistive tech
   without stripping keyboard focusability, still advertising `Action::Focus` while suppressing
   activation actions), `read_only`, `invalid`, `required`, `multiselectable`,
   `has_popup(HasPopup::Menu | Listbox | Tree | Grid | Dialog)`,
   `orientation(Orientation::Horizontal | Vertical)`,
-  `auto_complete(AutoComplete::Inline | List | Both)`, `controls(key)`, `owns(key)`, `sorted`,
+  `auto_complete(AutoComplete::Inline | List | Both)`,
+  `current(Current::Page | Step | Location | Date | Time | True)`, `controls(key)`, `owns(key)`, `sorted`,
   `a11y_hidden`, `live_region(LiveRegion::Polite)`, `position_in_set`, `shortcut_hint` and
   `active_descendant` (the highlighted row of a tree, table or suggestion list whose container
   or field keeps focus). An icon-only button needs `.label("Close")`. An `El::help` tooltip
@@ -3486,10 +4079,78 @@ accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "<re
 Patch both `winit` and `sctk-adwaita`, and from the same revision: Rune's winit calls
 `AdwaitaFrame::content_corner_radius`, which only the vendored frame has, so a workspace that
 patches winit without sctk-adwaita doesn't compile. With both, a decorated Wayland window's
-buttons, titlebar and rounded bottom corners are drawn by the vendored frame.
+buttons, titlebar, window title (enabled by the default `wayland-csd-title` feature; disable with
+`default-features = false` for custom-titlebar or minimal Linux builds to omit `ab_glyph` and its
+fallback font while keeping CSD frames and buttons) and rounded bottom corners are drawn by the
+vendored frame.
 
 When you update Rune, check its [root `Cargo.toml`](../../Cargo.toml) at the new revision and
 use that same `rev` for Rune and every patch.
+
+#### From a mirror or without network
+
+Cargo treats each git URL and `rev` as a separate source, so every Rune line (`rune`, any other
+Rune crate and every patch) must name the same URL and the same `rev`. Moving `rune` to a mirror
+and leaving a patch on github.com, or the other way round, makes two sources: a second Rune crate
+from the other one is a second copy of Rune whose types don't match the first, and a patch from it
+can be a different version than Rune asks for, which Cargo skips with a ``Patch `naga` was not used
+in the crate graph`` warning. Pick one of these, in this order:
+
+- **Rewrite the URL in git (recommended).** Keep the public URL in your manifests and have git
+  fetch from the mirror. In `.cargo/config.toml`:
+
+  ```toml
+  [net]
+  git-fetch-with-cli = true
+  ```
+
+  and on the CI runner (or in its image), with your mirror's URL:
+
+  ```sh
+  git config --global url."https://ghe.example.com/mirrors/rune".insteadOf "https://github.com/anomalyco/rune"
+  ```
+
+  `git-fetch-with-cli` has Cargo run `git` for fetches, and `git` reads `insteadOf`. `Cargo.lock`
+  keeps `git+https://github.com/anomalyco/rune?rev=<rev>#<commit>`, so it is the same with and
+  without the mirror, and machines that can reach github.com need no setup. The mirror must have
+  the commit before you bump to it.
+- **Name the mirror in the manifest.** Put the mirror's URL on all of the lines at once.
+  `Cargo.lock` records the mirror's URL in each Rune package's `source`, so everyone who builds the
+  app needs access to the mirror, and moving back is a change to every line and the lock.
+- **Vendor.** `cargo vendor` copies every dependency, Rune's git crates included, into `vendor/`
+  and prints a `[source]` table for `.cargo/config.toml` that replaces crates.io and the Rune git
+  source with that folder. `Cargo.lock` doesn't change. Builds need no network; each bump re-runs
+  `cargo vendor` where the network (or the mirror) is reachable and commits the result.
+
+For CI without network access: with the first two, fetch once where the mirror is reachable
+(`cargo fetch` with the committed lock) and build with `--offline` (or `--frozen`, or
+`CARGO_NET_OFFLINE=true`) from that warm `CARGO_HOME`; vendoring needs no fetch at all. Keep one
+stable `CARGO_HOME` path across jobs. Cargo compiles a git dependency from its checkout under
+`$CARGO_HOME/git/checkouts` and fingerprints it by that path, so a `CARGO_HOME` per checkout
+fetches Rune again and rebuilds every dependency even with a cached `target/`.
+
+#### Bumping Rune
+
+1. Pick a `dev` rev (with a mirror, check that it has the commit).
+2. Read Rune's root `Cargo.toml` at that rev (`git show <rev>:Cargo.toml` in a clone of Rune or of
+   the mirror). Set the `rev` on `rune` and on every patch, and add or remove patch entries to
+   match its `[patch.crates-io]` list.
+3. Run `cargo check`, which moves `Cargo.lock` to the new rev, and look for ``Patch `…` was not
+   used in the crate graph`` warnings: each one is a patch on the wrong URL, the wrong rev, or one
+   Rune no longer needs.
+4. For a web build, match the `wasm-bindgen-cli` your CI images and Dockerfiles install to the
+   `wasm-bindgen` version in your `Cargo.lock`; `scripts/web-build.sh` refuses any other CLI.
+   [`WEB.md`](../../WEB.md) names the version Rune uses at that rev.
+
+[`scripts/check_rune_pins.py`](../../scripts/check_rune_pins.py) checks steps 2 to 4 with no
+network: one URL and `rev` on every Rune line, the patch list against Rune's at that rev, one Rune
+commit in `Cargo.lock`, and (with `--wasm-bindgen-cli`) the CLI pin. Copy it into your app and run
+it in CI:
+
+```sh
+git -C path/to/rune show <rev>:Cargo.toml > rune-Cargo.toml
+python3 check_rune_pins.py --rune-manifest rune-Cargo.toml --wasm-bindgen-cli 0.2.129
+```
 
 ### Linux
 
@@ -3535,7 +4196,7 @@ $S --script examples/settings/scripts/keycaps.json --video keys.mov --keys --key
 $S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every 3 --cols 4 \
    --strip strip.png --crop 370,74,214,36 --crop 530,305,60,30     # crops stacked per frame
 $S --tree tree.json [--at T] [--settle]  # key, path, role, label, description, text, presented rect, target,
-                                 # opacity, radius, fill/borderColor/text colour, textStyle (resolved
+                                 # opacity, layerOpacity, blur, backdropBlur, radius, shadows, fill/borderColor/text colour, textStyle (resolved
                                  # family, size, weight, lineHeight, tracking, italic), hover/press, moving
 $S --trace run.jsonl             # motion-trace JSONL (the app trace format); keyed elements only
 $S --native --trace run.jsonl --frames 240  # native submission timestamps, then close the traced window
@@ -3544,6 +4205,18 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
    --video desktop.mp4 --keys --pointer
 ```
 
+- **Fonts across operating systems**: text uses system fonts for what the registered fonts
+  lack, and the system's lookup (CoreText, DirectWrite, fontconfig) differs per host, so
+  `--tree` metrics and `--snap` text can differ between macOS, Windows and Linux. Set
+  `RUNE_SYSTEM_FONTS=off` (or call `rune::text::set_system_fonts(false)` before the first text
+  lays out; it covers `--snap`, `--tree`, scripts and `App::headless_runtime`) to load no
+  system font at all: text shapes with only the bundled faces, `AppSpec::fonts` and `add_font`,
+  `ui-monospace` and `Family::SystemMono` fall back to the sans slot, a `families` slot or
+  `Family::Named` that names an installed font falls back to sans, and a character none of the
+  registered fonts has draws as the font's missing glyph. Bundle every face the app shows
+  (both `families` slots, plus any script, symbol or emoji font) for its text to look the same.
+  Text metrics then match across hosts; glyph pixels still rasterize with each platform's own
+  smoothing.
 - **Settling layout callbacks** (`--settle`, valid with `--snap` or `--tree`): runs up to 3
   zero-dt passes at the capture frame while layout callbacks (`on_layout`, `on_layout_tx`,
   `on_screen_layout`, `on_drawn_layout`, `drawn_rect_into`, `on_visible`, `on_visible_rows`,
@@ -3766,7 +4439,7 @@ if let Some(menu) = rt.popup_menu() {
   while `Tx::input_time()` stays `None`.
 - Inspect `rt.state`, `rt.presented_focus_key()` (zero-allocation focus key query matching
   `rt.elements()`), `rt.elements()` (`ElementInfo`: `key`, `path`, `role`, `label`,
-  `description`, `text`, `rect`, `inset`, `fill`, `border_color`, `text_color`,
+  `description`, `text`, `rect`, `opacity`, `layer_opacity`, `blur`, `backdrop_blur`, `inset`, `fill`, `border_color`, `text_color`,
   `text_style`, `text_size`, `wrap`, `truncate`, `text_cut`, `clips`, `scroll_axes`,
   `raised`, `focused`, `exiting`, ...), `Tx::read_elements` (deferred presented-frame element
   reads from handlers and `poll`), `Tx::read_layout` / `Tx::read_presented` (one keyed
@@ -3953,6 +4626,8 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 
 ## Live Rust editing (desktop development)
 
+For a cross-platform CLI without Bash or Python (`rune new`, `rune dev`, `rune check`, `rune doctor`), see [`crates/rune-cli`](../rune-cli/README.md). `scripts/rune-dev` below remains available for the maintainers' remote build-worker and desk-Mac relay workflow.
+
 ```sh
 scripts/rune-dev settings -- --snap-on-patch perf/live-edit/settings.png --hot-control perf/live-edit/control.json
 ```
@@ -3975,7 +4650,10 @@ each PNG and matching `.json` tree into this checkout. Install **Dioxus CLI 0.7.
 as `dx` in Cargo's bin directory first (`RUNE_DX` overrides the path); the
 Homebrew/Deno command with the same name is unrelated. The first build is a full
 development build; subsequent runs reuse `target/rune-dev/<example>`.
-Compiler artifacts live in `target/live-edit-build`.
+Compiler artifacts live in `target/live-edit-build` for an example, and under
+`$XDG_CACHE_HOME/rune-dev` (or `~/.cache/rune-dev`) for an app's crate, so a read-only Rune
+checkout such as a Cargo git dependency is never written; `RUNE_DEV_TARGET_DIR` picks another
+directory. Builds run with `RUNE_DEV_JOBS`, else an exported `CARGO_BUILD_JOBS`, else 2 jobs.
 
 `--local` (or `RUNE_DEV_LOCAL=1`) skips the worker setup: the compiler, the edit guard and
 the app all run on this machine, and an edit that needs a restart rebuilds and relaunches the
@@ -4036,15 +4714,16 @@ Source edits here are relayed to the build Mac as before.
 ### Compatible edits and restart boundaries
 
 The launcher validates Rust syntax, then copies compatible edits into a private compiler
-mirror. It accepts function-body changes in Settings' `main.rs`. Use stable keys to preserve node identity.
+mirror. It accepts function-body changes in Settings' `main.rs`, in free functions and in
+methods of inherent impls (`impl S { ... }`). Use stable keys to preserve node identity.
 
 **Restart needed** is printed before publishing changes to state/type declarations,
-function signatures, imports, constants, const-fn bodies, impl methods, startup code, dependencies,
+function signatures, imports, constants, const-fn bodies, impl headers, trait impl methods, startup code, dependencies,
 assets or framework code. This catches same-size field/type changes too; `size_of`
 alone cannot. Syntax errors stay outside the mirror until fixed. Stop and rerun the
 command after an incompatible change (`--local` and `scripts/rune-hot` rebuild and relaunch
 on their own). State is not migrated across restarts.
-Function attributes other than `doc`, `inline`, `cold` and `allow` also keep the whole
+Function and impl attributes other than `doc`, `inline`, `cold` and `allow` also keep the whole
 body in the restart contract, since attribute macros can generate persistent types.
 
 Keep persistent state in `AppSpec::init`'s returned value. Tip-crate statics and thread

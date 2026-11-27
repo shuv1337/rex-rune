@@ -3,22 +3,25 @@
 //! (`BeginPaint`/`EndPaint`) paired with `Handover::detach_root` / `Handover::attach_root`.
 //!
 //! Kept deliberately minimal because it requires a live Win32 `HWND` inside a live modal
-//! size-move loop.
+//! size-move loop. Per Microsoft Learn (`DXGI_SWAP_CHAIN_DESC1`, `DXGI_SCALING`), copy-model
+//! `DXGI_SWAP_EFFECT_DISCARD` requires `DXGI_SCALING_STRETCH`, so the HWND swap chain resizes to
+//! `copy_size` on each size step while copying only the `(0, 0, copy_size.0, copy_size.1)`
+//! sub-rectangle from Rune's capacited shared texture.
 
 #![allow(unsafe_code)]
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
     DXGI_SAMPLE_DESC,
 };
-use windows::core::BOOL;
 use windows::Win32::Graphics::Dxgi::{
     DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
     DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
     IDXGISwapChain1,
 };
+use windows::core::BOOL;
 
 use super::gpu::{DragDevice, DragSeam, SharedDragTarget};
 use crate::platform::win32::dcomp_handover::Handover;
@@ -89,12 +92,22 @@ impl DxgiDragSwapChain {
         &mut self,
         drag: &mut DragDevice,
         target: &SharedDragTarget,
+        copy_size: (u32, u32),
         ready_value: u64,
-    ) -> Result<(), String> {
-        self.ensure_size(target.size, target.format)?;
+        wait_for_present: bool,
+    ) -> Result<(u64, Option<u64>), String> {
+        let src_box = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: copy_size.0,
+            bottom: copy_size.1,
+            back: 1,
+        };
         let release_value = drag.next_release_value();
-        // SAFETY: waits on the shared ready fence, copies the shared D3D12 texture into buffer 0
-        // of the DISCARD swap chain, drops buffer 0 immediately, signals release, and presents.
+        // SAFETY: waits on the shared ready fence, copies the `(0, 0)..copy_size` sub-rectangle
+        // from the capacited shared D3D12 texture into buffer 0 of the DISCARD swap chain, drops
+        // buffer 0 immediately, signals release, and presents with sync interval 0.
         unsafe {
             drag.d3d11
                 .context
@@ -104,7 +117,16 @@ impl DxgiDragSwapChain {
                 .swap_chain
                 .GetBuffer(0)
                 .map_err(|e| format!("drag swap chain GetBuffer(0): {e}"))?;
-            drag.d3d11.context.CopyResource(&back_buffer, &target.d3d11_texture);
+            drag.d3d11.context.CopySubresourceRegion(
+                &back_buffer,
+                0,
+                0,
+                0,
+                0,
+                &target.d3d11_texture,
+                0,
+                Some(&src_box),
+            );
             drop(back_buffer);
             drag.d3d11
                 .context
@@ -115,13 +137,14 @@ impl DxgiDragSwapChain {
                 .ok()
                 .map_err(|e| format!("drag swap chain Present: {e}"))?;
         }
-        Ok(())
+        let present_done = if wait_for_present { Some(drag.signal_post_present()?) } else { None };
+        Ok((release_value, present_done))
     }
 }
 
-/// DXGI swap chains always take a non-sRGB UNORM back-buffer format; `CopyResource` copies raw
-/// bytes from either the UNORM or SRGB shared texture in the same typeless family without
-/// re-encoding.
+/// DXGI swap chains always take a non-sRGB UNORM back-buffer format; `CopySubresourceRegion`
+/// copies raw bytes from either the UNORM or SRGB shared texture in the same typeless family
+/// without re-encoding.
 fn swap_chain_format(
     format: wgpu::TextureFormat,
 ) -> windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT {
@@ -147,24 +170,43 @@ impl DragSeam for Win32DragSeam<'_> {
         &mut self,
         drag: &mut DragDevice,
         target: &SharedDragTarget,
+        copy_size: (u32, u32),
         ready_value: u64,
-    ) -> Result<(), String> {
+        wait_for_present: bool,
+    ) -> Result<u64, String> {
         let win_hwnd = HWND(self.hwnd);
         if self.swap_chain.is_none() {
-            *self.swap_chain = Some(DxgiDragSwapChain::new(drag, win_hwnd, target.size, target.format)?);
+            *self.swap_chain = Some(DxgiDragSwapChain::new(drag, win_hwnd, copy_size, target.format)?);
         }
         let sc = self.swap_chain.as_mut().ok_or("drag swap chain missing")?;
-        let mut present_result: Option<Result<(), String>> = None;
+        // Resize the copy-model swap chain before `BeginPaint` so the paint critical section only
+        // executes the GPU wait, sub-rect copy, release signal, and `Present(0, 0)`.
+        sc.ensure_size(copy_size, target.format)?;
+        let mut present_result: Option<Result<(u64, Option<u64>), String>> = None;
         let ran = crate::platform::win32::run_in_paint(self.hwnd, || {
-            present_result = Some(sc.copy_and_present(drag, target, ready_value));
+            present_result = Some(sc.copy_and_present(
+                drag,
+                target,
+                copy_size,
+                ready_value,
+                wait_for_present,
+            ));
         });
-        match present_result {
-            Some(result) => result,
+        let (release_value, present_done) = match present_result {
+            Some(result) => result?,
             // If `UpdateWindow` found nothing to paint (for example a transiently empty clip),
             // present directly so the copy-model back buffer still receives the frame.
-            None if !ran => sc.copy_and_present(drag, target, ready_value),
-            None => Ok(()),
+            None if !ran => sc.copy_and_present(drag, target, copy_size, ready_value, wait_for_present)?,
+            None => (0, None),
+        };
+        // On `BeginDrag`, wait outside `BeginPaint..EndPaint` until the GPU has finished the
+        // D3D12 render, D3D11 copy, and DXGI `Present(0, 0)` blt into the HWND redirection surface
+        // so the subsequent `detach_dcomp` never exposes a stale pre-drag redirection bitmap.
+        if let Some(done) = present_done {
+            drag.wait_for_release(done)?;
+            return Ok(done);
         }
+        Ok(release_value)
     }
 
     fn detach_dcomp(&mut self) -> Result<(), String> {

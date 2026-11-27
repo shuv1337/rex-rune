@@ -227,12 +227,17 @@ fn window_drag_in_window_backed_overlay_starts_drag_and_keeps_children_interacti
 
     // Bare .window_drag() header [160..300, 0..40] starts a native window drag and drains the action.
     overlay.left_button(true, Some((220.0, 20.0)));
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    {
+        assert_eq!(overlay.core.test_window_drags, 0, "Linux defers mouse drag until motion crosses threshold");
+        overlay.cursor_moved(230.0, 20.0);
+    }
     assert_eq!(overlay.core.test_window_drags, 1, "bare .window_drag() starts a window drag");
-    assert_eq!(overlay.rt.take_titlebar_action(), None, "TitlebarAction::Drag must be consumed in left_button");
+    assert_eq!(overlay.rt.take_titlebar_action(), None, "TitlebarAction::Drag must be consumed");
     assert!(!overlay.rt.pointer_captured(), "window drag must not leave pointer capture stuck");
     assert_eq!(overlay.core.position_owner, PositionOwner::Dragging);
     overlay.left_button(false, Some((220.0, 20.0)));
-    assert_eq!(overlay.core.position_owner, PositionOwner::Managed, "zero-movement click releases back to Managed");
+    assert_eq!(overlay.core.position_owner, PositionOwner::Managed, "release returns to Managed");
 
     // Interactive child button [0..60, 0..40] inside .window_drag() keeps its press.
     overlay.left_button(true, Some((30.0, 20.0)));
@@ -269,18 +274,42 @@ fn window_drag_in_window_backed_overlay_starts_drag_and_keeps_children_interacti
 #[test]
 fn window_drag_double_click_is_drained_without_starting_a_second_drag() {
     let mut overlay = drag_bar_overlay(true);
+    let expected_first = u32::from(!cfg!(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))));
 
-    // First press starts the drag.
+    // First press starts the drag immediately off Linux, or stays deferred on Linux.
     overlay.left_button(true, Some((220.0, 20.0)));
-    assert_eq!(overlay.core.test_window_drags, 1);
+    assert_eq!(overlay.core.test_window_drags, expected_first);
     overlay.left_button(false, Some((220.0, 20.0)));
 
     // Second press within double-click interval emits TitlebarAction::DoubleClick, which overlays
     // drain and ignore (no maximize/minimize and no second drag).
     overlay.left_button(true, Some((220.0, 20.0)));
     assert_eq!(overlay.rt.take_titlebar_action(), None, "TitlebarAction::DoubleClick must be drained");
-    assert_eq!(overlay.core.test_window_drags, 1, "double-click on overlay drag region must not start a drag");
+    assert_eq!(overlay.core.test_window_drags, expected_first, "double-click on overlay drag region must not start a drag");
     overlay.left_button(false, Some((220.0, 20.0)));
+}
+
+#[test]
+fn deferred_overlay_window_drag_starts_only_after_crossing_threshold() {
+    use super::PositionOwner;
+
+    let mut overlay = drag_bar_overlay(true);
+    overlay.rt.core_mut().set_defer_titlebar_drag(true);
+
+    // Stationary click starts no drag.
+    overlay.left_button(true, Some((220.0, 20.0)));
+    assert_eq!(overlay.core.test_window_drags, 0);
+    overlay.cursor_moved(225.0, 20.0);
+    assert_eq!(overlay.core.test_window_drags, 0);
+    assert_eq!(overlay.core.position_owner, PositionOwner::Managed);
+
+    // Crossing the 8 pt drag threshold starts the native move from cursor_moved.
+    overlay.cursor_moved(228.0, 20.0);
+    assert_eq!(overlay.core.test_window_drags, 1);
+    assert_eq!(overlay.rt.take_titlebar_action(), None);
+    assert_eq!(overlay.core.position_owner, PositionOwner::Dragging);
+    overlay.left_button(false, Some((228.0, 20.0)));
+    assert_eq!(overlay.core.position_owner, PositionOwner::Managed);
 }
 
 #[test]
@@ -306,10 +335,12 @@ fn window_drag_clears_capture_disarms_drag_out_and_applies_pending_input() {
     overlay.rt.set_viewport(app.size, 1.0);
     overlay.rt.frame(0.0);
 
-    // Queue a deferred input-mode switch and press the bare window-drag region: pointer capture
+    // Queue a deferred input-mode switch and drag the bare window-drag region: pointer capture
     // is not held, no drag-out request remains, and deferred input applies cleanly.
     overlay.core.pending_input = Some(OverlayInput::Regions);
     overlay.left_button(true, Some((150.0, 20.0)));
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    overlay.cursor_moved(160.0, 20.0);
     assert_eq!(overlay.core.test_window_drags, 1);
     assert!(!overlay.rt.pointer_captured());
     assert!(overlay.rt.core_mut().take_drag_out().is_none(), "drag-out must not remain armed");
@@ -322,6 +353,8 @@ fn window_drag_without_window_backing_drains_action_without_starting_drag() {
 
     let mut overlay = drag_bar_overlay(false);
     overlay.left_button(true, Some((220.0, 20.0)));
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    overlay.cursor_moved(230.0, 20.0);
     assert_eq!(overlay.core.test_window_drags, 0, "non-window backing (e.g. Wayland layer-shell) ignores drag");
     assert_eq!(overlay.rt.take_titlebar_action(), None, "TitlebarAction::Drag must still be drained");
     assert_eq!(overlay.core.position_owner, PositionOwner::Managed);
@@ -511,13 +544,374 @@ fn macos_window_drag_in_overlay_starts_drag_and_pointer_released_clears_native_c
     assert!(!pointer.captured(), "native panel capture clears once OS drag takes mouse-up");
 }
 
+type TokenLog = Arc<std::sync::Mutex<Vec<(&'static str, Option<String>)>>>;
+
 #[test]
-fn activation_token_waits_for_the_next_turn_and_keeps_every_reply() {
-    let req = requests_after(|h| {
-        h.activation_token(|_| {});
-        h.hide();
-        h.activation_token(|_| {});
-    });
+fn activation_token_answers_ahead_of_hide_and_returns_none_when_hidden_or_non_layer() {
+    use super::{Overlay, OverlayOptions, OverlaySpec, Presence};
+    use crate::tooling::AppSpec;
+    use crate::{Cx, El};
+
+    fn view(_: &(), _: &mut Cx<()>) -> El { crate::el().size(40.0, 20.0) }
+    let app = AppSpec::new("launcher", (40.0, 20.0), || (), view);
+    let spec = OverlaySpec::new("launcher", app.size, view).options(OverlayOptions::default());
+    let (mut overlay, handle) = Overlay::new(spec, (), &app);
+    overlay.rt.frame(0.0);
+
+    let log: TokenLog = Arc::default();
+    let push = |tag: &'static str| {
+        let log = log.clone();
+        move |tok: Option<String>| log.lock().unwrap().push((tag, tok))
+    };
+
+    // Queuing activation_token and hide in one turn keeps both token replies in FIFO order so
+    // sync() starts them before Visibility::Hide runs.
+    let now = crate::time::now();
+    overlay.presence = Presence::Shown { occluded: false };
+    handle.activation_token(push("first"));
+    handle.hide();
+    handle.activation_token(push("second"));
+    let mut req = std::mem::take(&mut *overlay.shared.core.requests.lock().unwrap());
     assert_eq!(req.tokens.len(), 2);
     assert_eq!(req.visible(), Some(false));
+    assert!(overlay.presence.shown(), "sync starts tokens while the overlay is still shown");
+    overlay.start_tokens(req.tokens.take(), now);
+    overlay.hide();
+    assert!(!overlay.presence.shown());
+    assert_eq!(*log.lock().unwrap(), [("first", None), ("second", None)]);
+
+    // Hidden overlay answers None once; fading-out overlay answers None once too.
+    handle.activation_token(push("hidden"));
+    overlay.start_queued_tokens(now);
+    overlay.start_queued_tokens(now);
+    overlay.presence = Presence::Shown { occluded: false };
+    overlay.hide_fading(std::time::Duration::from_millis(150));
+    handle.activation_token(push("fading"));
+    overlay.start_queued_tokens(now);
+    assert_eq!(
+        *log.lock().unwrap(),
+        [("first", None), ("second", None), ("hidden", None), ("fading", None)]
+    );
+}
+
+#[test]
+fn activation_token_drains_with_none_on_hide_close_refusal_and_drop() {
+    use super::{KeyPolicy, Overlay, OverlayOptions, OverlaySpec, Presence};
+    use crate::tooling::AppSpec;
+    use crate::{Cx, El};
+
+    struct State {
+        handle: Option<OverlayHandle<State>>,
+        log: TokenLog,
+    }
+    fn view(_: &State, _: &mut Cx<State>) -> El { crate::el().size(40.0, 20.0) }
+    let log: TokenLog = Arc::default();
+    let app = AppSpec::new("launcher", (40.0, 20.0), || (), |_, _| crate::el());
+    let spec = OverlaySpec::new("launcher", app.size, view)
+        .options(OverlayOptions { keys: KeyPolicy::OnDemand, ..Default::default() })
+        .on_focus(|s: &mut State, focused, _| {
+            if !focused && let Some(h) = &s.handle {
+                let log = s.log.clone();
+                h.activation_token(move |tok| log.lock().unwrap().push(("from_blur", tok)));
+            }
+        });
+    let (mut overlay, handle) = Overlay::new(spec, State { handle: None, log: log.clone() }, &app);
+    overlay.rt.state.handle = Some(handle.clone());
+    overlay.rt.frame(0.0);
+
+    let push = |tag: &'static str| {
+        let log = log.clone();
+        move |tok: Option<String>| log.lock().unwrap().push((tag, tok))
+    };
+    let now = crate::time::now();
+
+    // Synchronous hide (e.g. Shell::Close) starts queued tokens before hiding and drains any
+    // token requested inside on_focus(false) during hide_window, answering each exactly once.
+    overlay.presence = Presence::Shown { occluded: false };
+    overlay.rt.window_focus(true);
+    handle.activation_token(push("before_hide"));
+    overlay.hide();
+    overlay.start_queued_tokens(now);
+    assert_eq!(*log.lock().unwrap(), [("before_hide", None), ("from_blur", None)]);
+    assert_eq!(overlay.shared.core.requests.lock().unwrap().tokens.len(), 0);
+
+    // Compositor layer close / surface refusal answers pending tokens with None once.
+    overlay.presence = Presence::Shown { occluded: false };
+    handle.activation_token(push("on_close"));
+    overlay.layer_closed(Some("compositor closed layer surface"));
+    overlay.start_queued_tokens(now);
+    assert_eq!(*log.lock().unwrap(), [("before_hide", None), ("from_blur", None), ("on_close", None)]);
+
+    // Dropping the overlay answers queued tokens with None (even when a reply re-entrantly asks
+    // for another token), and calls after drop answer None immediately without hanging.
+    let reentrant_handle = handle.clone();
+    let reentrant_log = log.clone();
+    handle.activation_token(move |tok| {
+        reentrant_log.lock().unwrap().push(("on_drop_1", tok));
+        let inner_log = reentrant_log.clone();
+        reentrant_handle.activation_token(move |tok2| inner_log.lock().unwrap().push(("reentrant", tok2)));
+    });
+    handle.activation_token(push("on_drop_2"));
+    drop(overlay);
+    handle.activation_token(push("after_drop"));
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        [
+            ("before_hide", None),
+            ("from_blur", None),
+            ("on_close", None),
+            ("on_drop_1", None),
+            ("reentrant", None),
+            ("on_drop_2", None),
+            ("after_drop", None),
+        ]
+    );
+}
+
+#[test]
+fn activation_token_completes_async_after_same_turn_hide_times_out_and_cancels_on_drop() {
+    use std::time::Duration;
+    use super::{KeyPolicy, Overlay, OverlayOptions, OverlaySpec, Presence};
+    use super::requests::TokenSource;
+    use crate::platform::layer_shell_machine::activation::{TIMEOUT, TokenPoll};
+    use crate::tooling::AppSpec;
+    use crate::{Cx, El};
+
+    struct State {
+        handle: Option<OverlayHandle<State>>,
+        log: TokenLog,
+    }
+    fn view(_: &State, _: &mut Cx<State>) -> El { crate::el().size(40.0, 20.0) }
+    let log: TokenLog = Arc::default();
+    let app = AppSpec::new("launcher", (40.0, 20.0), || (), |_, _| crate::el());
+    let spec = OverlaySpec::new("launcher", app.size, view)
+        .options(OverlayOptions { keys: KeyPolicy::Exclusive, ..Default::default() })
+        .on_focus(|s: &mut State, focused, _| {
+            if !focused && let Some(h) = &s.handle {
+                let log = s.log.clone();
+                h.activation_token(move |tok| log.lock().unwrap().push(("from_blur", tok)));
+            }
+        });
+    let (mut overlay, handle) = Overlay::new(spec, State { handle: None, log: log.clone() }, &app);
+    overlay.rt.state.handle = Some(handle.clone());
+    overlay.rt.frame(0.0);
+
+    let slots: Arc<std::sync::Mutex<Vec<Arc<std::sync::Mutex<TokenPoll>>>>> = Arc::default();
+    let slots_factory = slots.clone();
+    overlay.core.test_activation_source = Some(Box::new(move || {
+        let slot = Arc::new(std::sync::Mutex::new(TokenPoll::Pending));
+        slots_factory.lock().unwrap().push(slot.clone());
+        Some(TokenSource::Mock(Box::new(move || slot.lock().unwrap().clone())))
+    }));
+
+    let push = |tag: &'static str| {
+        let log = log.clone();
+        move |tok: Option<String>| log.lock().unwrap().push((tag, tok))
+    };
+    let t0 = crate::time::now();
+
+    // 1. Launcher asks for a token and hides in one turn: token starts without blocking,
+    //    hide runs immediately, on_focus(false) request drains None, and the pre-hide token
+    //    delivers its answer after the overlay is already hidden.
+    overlay.presence = Presence::Shown { occluded: false };
+    overlay.rt.window_focus(true);
+    handle.activation_token(push("before_hide"));
+    overlay.start_queued_tokens(t0);
+    assert_eq!(overlay.activation_tokens.in_flight_len(), 1);
+    assert_eq!(overlay.core.wake_deadline(overlay.rt.core()), Some(t0 + TIMEOUT));
+    overlay.hide();
+    assert!(!overlay.presence.shown(), "hide must not wait for the activation token");
+    assert_eq!(*log.lock().unwrap(), [("from_blur", None)]);
+    assert_eq!(overlay.activation_tokens.in_flight_len(), 1);
+
+    // Polling before the compositor answers keeps the request in flight.
+    overlay.poll_activation_tokens(t0 + Duration::from_millis(5));
+    assert_eq!(overlay.activation_tokens.in_flight_len(), 1);
+
+    // Once the compositor delivers done, polling runs the callback after hide.
+    *slots.lock().unwrap()[0].lock().unwrap() = TokenPoll::Done(Some("niri-token".into()));
+    overlay.poll_activation_tokens(t0 + Duration::from_millis(10));
+    assert_eq!(overlay.activation_tokens.in_flight_len(), 0);
+    assert_eq!(overlay.core.wake_deadline(overlay.rt.core()), None);
+    assert_eq!(*log.lock().unwrap(), [("from_blur", None), ("before_hide", Some("niri-token".into()))]);
+
+    // 2. A silent compositor times out at the fallback deadline and answers None once.
+    overlay.presence = Presence::Shown { occluded: false };
+    handle.activation_token(push("timed_out"));
+    overlay.start_queued_tokens(t0);
+    assert_eq!(overlay.core.wake_deadline(overlay.rt.core()), Some(t0 + TIMEOUT));
+    overlay.poll_activation_tokens(t0 + TIMEOUT - Duration::from_millis(1));
+    assert_eq!(overlay.activation_tokens.in_flight_len(), 1);
+    overlay.poll_activation_tokens(t0 + TIMEOUT);
+    assert_eq!(overlay.activation_tokens.in_flight_len(), 0);
+    assert_eq!(
+        *log.lock().unwrap(),
+        [("from_blur", None), ("before_hide", Some("niri-token".into())), ("timed_out", None)]
+    );
+
+    // 3. Drop cancels in-flight tokens before queued ones and answers re-entrant calls None.
+    let reentrant_handle = handle.clone();
+    let reentrant_log = log.clone();
+    handle.activation_token(move |tok| {
+        reentrant_log.lock().unwrap().push(("in_flight_drop", tok));
+        let inner = reentrant_log.clone();
+        reentrant_handle.activation_token(move |tok2| inner.lock().unwrap().push(("reentrant", tok2)));
+    });
+    overlay.start_queued_tokens(t0);
+    handle.activation_token(push("queued_drop"));
+    drop(overlay);
+    assert_eq!(
+        *log.lock().unwrap(),
+        [
+            ("from_blur", None),
+            ("before_hide", Some("niri-token".into())),
+            ("timed_out", None),
+            ("in_flight_drop", None),
+            ("reentrant", None),
+            ("queued_drop", None),
+        ]
+    );
+}
+
+#[test]
+fn occluded_and_hidden_overlay_wakes_deliver_poll_keys_once_with_poll_clock_and_injected_pointers() {
+    use super::{Overlay, OverlayOptions, OverlaySpec, Presence};
+    use crate::tooling::AppSpec;
+    use crate::{Cx, El, Key, KeyEvent, Mods, OverlayInput, PointerButton, PointerInput, Tx, col, el};
+
+    #[derive(Default)]
+    struct S {
+        polls: Vec<f64>,
+        focuses: Vec<(&'static str, f64)>,
+        clicks: u32,
+        send_tab: bool,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        let btn = |key: &'static str| {
+            el().key(key)
+                .role("button")
+                .focusable(true)
+                .hit()
+                .size(80.0, 30.0)
+                .on_press(|s: &mut S| s.clicks += 1)
+                .on_focus_change(move |s: &mut S, focused, tx: &mut Tx| {
+                    if focused { s.focuses.push((key, tx.clock())); }
+                })
+        };
+        col().size(120.0, 80.0).children([btn("one"), btn("two")])
+    }
+    let app = AppSpec::new("ov-hidden-key", (120.0, 80.0), S::default, view);
+    let spec = OverlaySpec::new("ov-hidden-key", app.size, view)
+        .options(OverlayOptions { input: OverlayInput::All, ..Default::default() })
+        .poll(|s, now, tx| {
+            s.polls.push(now);
+            if std::mem::take(&mut s.send_tab) {
+                tx.send_key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+            }
+            false
+        });
+    let (mut overlay, handle) = Overlay::new(spec, S::default(), &app);
+    overlay.rt.set_tab_visits_controls(true);
+    overlay.rt.wall_start = Some(crate::time::now());
+    overlay.rt.frame.set_test_clock(crate::ManualClock::new(10.0));
+    overlay.rt.frame(0.0);
+
+    // 1. Hidden overlay: poll sends Tab -> delivered in the same wake with poll's clock, 1 poll.
+    overlay.presence = Presence::default();
+    assert!(overlay.frameless());
+    let polls_before = overlay.rt.state.polls.len();
+    overlay.rt.state.send_tab = true;
+    overlay.advance();
+    let poll_clock = overlay.rt.state.polls[polls_before];
+    assert_eq!(overlay.rt.state.polls[polls_before..], [poll_clock, poll_clock], "hidden overlay runs initial + post-handler follow-up poll at poll_clock");
+    assert_eq!(overlay.rt.state.focuses, [("one", poll_clock)]);
+    assert!(!overlay.rt.has_input_waiting());
+
+    // 2. Shown but occluded overlay: poll sends Tab -> delivered in the same wake at poll_clock.
+    overlay.presence = Presence::Shown { occluded: true };
+    assert!(overlay.frameless());
+    overlay.rt.frame.test_clock_mut().unwrap().seek(10.5);
+    let polls_before = overlay.rt.state.polls.len();
+    overlay.rt.state.send_tab = true;
+    overlay.advance();
+    let poll_clock = overlay.rt.state.polls[polls_before];
+    assert_eq!(overlay.rt.state.polls[polls_before..], [poll_clock, poll_clock], "occluded overlay runs initial + post-handler follow-up poll at poll_clock");
+    let poll_clock = *overlay.rt.state.polls.last().unwrap();
+    assert_eq!(overlay.rt.state.focuses.last().copied(), Some(("two", poll_clock)));
+    assert!(!overlay.rt.has_input_waiting());
+
+    // 3. Shown but occluded overlay receiving injected pointer click delivers immediately.
+    handle.send_pointer(PointerInput::move_to(20.0, 15.0));
+    handle.send_pointer(PointerInput::down(20.0, 15.0, PointerButton::Primary));
+    handle.send_pointer(PointerInput::up(20.0, 15.0, PointerButton::Primary));
+    overlay.drain_injected_pointers();
+    assert!(overlay.rt.has_input_waiting());
+    overlay.advance();
+    assert_eq!(overlay.rt.state.clicks, 1);
+    assert!(!overlay.rt.has_input_waiting());
+}
+
+#[test]
+fn overlay_immediate_keyboard_dispatch_respects_policy_and_key_policy() {
+    use crate::overlay::{Overlay, Presence};
+    use crate::{AppSpec, Key, KeyEvent, KeyPolicy, Mods, OverlayOptions, OverlaySpec, el};
+
+    let app = AppSpec::new("app", (400.0, 200.0), || (), |_, _| el());
+
+    // 1. Default Batched policy does not drain immediately.
+    let batched_spec = OverlaySpec::new("ov-batched", app.size, |_: &Vec<Key>, _| el().size(200.0, 80.0))
+        .options(OverlayOptions { keys: KeyPolicy::OnDemand, ..Default::default() })
+        .on_key(|keys, ev, _| {
+            keys.push(ev.key.clone());
+            true
+        });
+    assert_eq!(batched_spec.keyboard_dispatch, crate::KeyboardDispatch::Batched);
+    let (mut batched, _h) = Overlay::new(batched_spec, Vec::new(), &app);
+    batched.presence = Presence::Shown { occluded: false };
+    batched.rt.frame(0.0);
+    batched.rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    assert!(!batched.dispatch_immediate_keyboard());
+    assert!(batched.rt.state.is_empty());
+    assert!(batched.rt.has_input_waiting());
+
+    // 2. Immediate policy with KeyPolicy::None still does not drain (overlay does not take keys).
+    let no_keys_spec = OverlaySpec::new("ov-no-keys", app.size, |_: &Vec<Key>, _| el().size(200.0, 80.0))
+        .options(OverlayOptions { keys: KeyPolicy::None, ..Default::default() })
+        .keyboard_dispatch(crate::KeyboardDispatch::Immediate)
+        .on_key(|keys, ev, _| {
+            keys.push(ev.key.clone());
+            true
+        });
+    let (mut no_keys, _h) = Overlay::new(no_keys_spec, Vec::new(), &app);
+    no_keys.presence = Presence::Shown { occluded: false };
+    no_keys.rt.frame(0.0);
+    no_keys.rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    assert!(!no_keys.dispatch_immediate_keyboard());
+    assert!(no_keys.rt.state.is_empty());
+
+    // 3. Immediate policy with KeyPolicy::OnDemand drains immediately without double delivery
+    //    and marks the overlay dirty / non-idle for the next paced draw.
+    let imm_spec = OverlaySpec::new("ov-imm", app.size, |_: &Vec<Key>, _| el().size(200.0, 80.0))
+        .options(OverlayOptions { keys: KeyPolicy::OnDemand, ..Default::default() })
+        .keyboard_dispatch(crate::KeyboardDispatch::Immediate)
+        .on_key(|keys, ev, _| {
+            keys.push(ev.key.clone());
+            true
+        });
+    let (mut imm, _h) = Overlay::new(imm_spec, Vec::new(), &app);
+    imm.presence = Presence::Shown { occluded: false };
+    imm.idle = true;
+    imm.dirty = false;
+    imm.rt.frame(0.0);
+    imm.rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    assert!(imm.dispatch_immediate_keyboard());
+    assert_eq!(imm.rt.state, vec![Key::Enter]);
+    assert!(!imm.rt.has_input_waiting());
+    assert!(imm.dirty && !imm.idle, "overlay stays dirty so the next paced frame presents");
+
+    // Next paced frame must not redeliver the Enter key.
+    let next = crate::time::now() + std::time::Duration::from_millis(16);
+    imm.step_frame(next, false);
+    assert_eq!(imm.rt.state, vec![Key::Enter]);
 }

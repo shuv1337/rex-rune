@@ -1,11 +1,13 @@
 use super::*;
 use objc2_foundation::NSPoint;
-use std::sync::atomic::AtomicUsize;
+use std::{collections::VecDeque, sync::atomic::AtomicUsize};
 
 struct FakeStatusItem {
     image: RefCell<Option<Retained<NSImage>>>,
     titles: RefCell<Vec<String>>,
     tooltips: RefCell<Vec<Option<String>>>,
+    highlights: RefCell<Vec<bool>>,
+    pending_main: RefCell<VecDeque<Box<dyn FnOnce() + Send>>>,
     rect: Cell<Option<[i32; 4]>>,
     popped_menus: RefCell<Vec<Retained<NSMenu>>>,
     removed: Cell<bool>,
@@ -18,11 +20,24 @@ impl FakeStatusItem {
             image: RefCell::new(None),
             titles: RefCell::new(Vec::new()),
             tooltips: RefCell::new(Vec::new()),
+            highlights: RefCell::new(Vec::new()),
+            pending_main: RefCell::new(VecDeque::new()),
             rect: Cell::new(Some([2400, 0, 56, 48])),
             popped_menus: RefCell::new(Vec::new()),
             removed: Cell::new(false),
             on_pop_up: RefCell::new(None),
         }
+    }
+
+    fn drain_main(&self) -> usize {
+        let mut ran = 0;
+        loop {
+            let next = self.pending_main.borrow_mut().pop_front();
+            let Some(work) = next else { break };
+            work();
+            ran += 1;
+        }
+        ran
     }
 }
 
@@ -39,6 +54,10 @@ impl StatusItemHost for FakeStatusItem {
         self.tooltips.borrow_mut().push(tooltip.map(str::to_owned));
     }
 
+    fn set_highlighted(&self, highlighted: bool) {
+        self.highlights.borrow_mut().push(highlighted);
+    }
+
     fn screen_rect(&self, _mtm: MainThreadMarker) -> Option<[i32; 4]> {
         if self.removed.get() { None } else { self.rect.get() }
     }
@@ -48,6 +67,10 @@ impl StatusItemHost for FakeStatusItem {
         if let Some(cb) = self.on_pop_up.borrow().as_ref() {
             cb(menu);
         }
+    }
+
+    fn on_main(&self, work: Box<dyn FnOnce() + Send>) {
+        self.pending_main.borrow_mut().push_back(work);
     }
 
     fn remove(&self) {
@@ -73,6 +96,7 @@ fn new_with_fake(
         thickness,
         menu: spec.menu,
         rect: None,
+        highlighted: false,
     }));
     let target = alloc_button_target(mtm, id, model.clone(), Arc::new(on_event));
     let fake = Rc::new(FakeStatusItem::new());
@@ -370,5 +394,76 @@ fn fake_host_set_icon_set_title_rect_and_check_menu_items() {
     assert!(fake.removed.get(), "remove_all must remove live status items immediately");
     assert_eq!(native.rect(), None);
 
+    drop(native);
+}
+
+#[test]
+fn set_highlighted_survives_icon_title_and_menu_updates() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let spec = TraySpec::new("dev.rune.pill", "Pill", TrayIcon::rgba(16, 16, vec![255; 16 * 16 * 4]))
+        .menu(vec![TrayItem::action("a", "A")]);
+    let (native, fake, target) = new_with_fake(mtm, spec, 22.0, |_| {}).unwrap();
+
+    // Not highlighted: live updates and clicks leave the button alone and queue no reapply.
+    native.set_title("1".into());
+    native.set_icon(TrayIcon::rgba(16, 16, vec![0; 16 * 16 * 4])).unwrap();
+    target.handle_click(mtm, MacClickAction::Activate);
+    target.handle_click(mtm, MacClickAction::ShowMenu);
+    assert_eq!(fake.popped_menus.borrow().len(), 1);
+    assert_eq!(fake.drain_main(), 0);
+    assert!(fake.highlights.borrow().is_empty());
+
+    // Highlighted: immediate apply plus queued follow-up on the main queue, and synchronous
+    // reapply across title and icon changes.
+    native.set_highlighted(true);
+    assert_eq!(*fake.highlights.borrow(), vec![true]);
+    assert_eq!(fake.drain_main(), 1);
+    assert_eq!(*fake.highlights.borrow(), vec![true, true]);
+
+    fake.highlights.borrow_mut().clear();
+    native.set_title("2".into());
+    native.set_icon(TrayIcon::rgba(16, 16, vec![255; 16 * 16 * 4])).unwrap();
+    assert_eq!(*fake.highlights.borrow(), vec![true, true]);
+
+    // Non-empty context menu click queues reapply_highlight on the main queue after pop_up_menu.
+    fake.highlights.borrow_mut().clear();
+    target.handle_click(mtm, MacClickAction::ShowMenu);
+    assert_eq!(fake.popped_menus.borrow().len(), 2);
+    assert!(fake.highlights.borrow().is_empty());
+    assert_eq!(fake.drain_main(), 1);
+    assert_eq!(*fake.highlights.borrow(), vec![true]);
+
+    // Empty-menu right-click / Control-click skips pop_up_menu but still queues reapply_highlight.
+    native.set_menu(Vec::new());
+    fake.highlights.borrow_mut().clear();
+    target.handle_click(mtm, MacClickAction::ShowMenu);
+    assert_eq!(fake.popped_menus.borrow().len(), 2);
+    assert!(fake.highlights.borrow().is_empty());
+    assert_eq!(fake.drain_main(), 1);
+    assert_eq!(*fake.highlights.borrow(), vec![true]);
+
+    // Activate click when the app keeps its popover open without calling set_highlighted again
+    // also queues reapply_highlight on the main queue.
+    fake.highlights.borrow_mut().clear();
+    target.handle_click(mtm, MacClickAction::Activate);
+    assert!(fake.highlights.borrow().is_empty());
+    assert_eq!(fake.drain_main(), 1);
+    assert_eq!(*fake.highlights.borrow(), vec![true]);
+
+    // Clearing the highlight before the queued click reapply runs prevents a stale true reapply.
+    fake.highlights.borrow_mut().clear();
+    target.handle_click(mtm, MacClickAction::Activate);
+    native.set_highlighted(false);
+    assert_eq!(*fake.highlights.borrow(), vec![false]);
+    assert_eq!(fake.drain_main(), 2);
+    assert_eq!(*fake.highlights.borrow(), vec![false, false]);
+
+    // Once unhighlighted, further updates and clicks leave the button alone.
+    fake.highlights.borrow_mut().clear();
+    native.set_title("3".into());
+    target.handle_click(mtm, MacClickAction::Activate);
+    target.handle_click(mtm, MacClickAction::ShowMenu);
+    assert_eq!(fake.drain_main(), 0);
+    assert!(fake.highlights.borrow().is_empty());
     drop(native);
 }

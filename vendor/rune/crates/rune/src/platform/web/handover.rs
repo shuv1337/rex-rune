@@ -26,6 +26,7 @@ impl Browser {
         );
         self.webgl_watch = Some(health::WebglWatch::new(
             &canvas,
+            web_math::webgl_prevent_default(self.gpu_loss_policy),
             move |why| {
                 restored_lost.set(false);
                 *lost.borrow_mut() = Some(Loss::WebGl(why));
@@ -38,10 +39,12 @@ impl Browser {
         ));
     }
 
-    /// The browser lost the GPU device or WebGL2 context. WebGPU loss keeps the existing policy
-    /// (CPU fallback on CPU-first pages, fatal on GPU-first pages). WebGL2 context loss falls back
-    /// to the CPU canvas on full-window pages or pauses inline/document pages without exiting, so
-    /// a later `webglcontextrestored` brings WebGL2 back. True when the app ended.
+    /// The browser lost the GPU device or WebGL2 context. Under `GpuLossPolicy::Recover`, WebGPU
+    /// loss triggers bounded re-acquisition (`WebGpuRecovery`), mirroring WebGL2 restore (falling
+    /// back to CPU on full-window `CpuFirst` pages or pausing in `Draw::ContextLost` on `GpuFirst`
+    /// / inline / document pages). WebGL2 context loss falls back to the CPU canvas on full-window
+    /// pages or pauses inline/document pages without exiting, so a later `webglcontextrestored`
+    /// brings WebGL2 back. True when the app ended.
     pub(super) fn lost_device(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let mut loss = self.lost.borrow_mut().take();
         if loss.is_none()
@@ -54,8 +57,22 @@ impl Browser {
         let Some(window) = self.window.clone() else { return false };
         let canvas = window.canvas();
         let why = loss.reason();
-        match web_math::loss_action(loss.is_webgl(), self.start == Start::GpuFirst, self.embedded, self.document) {
+        if self.gpu_loss_policy == crate::GpuLossPolicy::Terminal {
+            self.enter_terminal_gpu_loss(why.to_owned());
+            self.notify_gpu_fallback(crate::GpuFallbackStage::DeviceLost, why);
+            return false;
+        }
+        if !loss.is_webgl() {
+            return self.handle_webgpu_loss(event_loop, why);
+        }
+        match web_math::loss_action_for_policy(self.gpu_loss_policy, true, self.start == Start::GpuFirst, self.embedded, self.document) {
+            web_math::LossAction::TerminalLatch => {
+                self.enter_terminal_gpu_loss(why.to_owned());
+                self.notify_gpu_fallback(crate::GpuFallbackStage::DeviceLost, why);
+                return false;
+            }
             web_math::LossAction::Fatal => {
+                self.notify_gpu_fallback(crate::GpuFallbackStage::DeviceLost, why);
                 error(&format!("The GPU device was lost ({why}). Reload the page to draw again."), canvas.as_ref(), self.embedded, self.document);
                 self.end(event_loop);
                 return true;
@@ -119,58 +136,132 @@ impl Browser {
             r.draw.gpu_mut().and_then(|side| side.renderer.poll_uber_check())
         };
         let Some(why) = why else { return false };
+        self.cancel_webgpu_recovery();
+        if self.gpu_loss_policy == crate::GpuLossPolicy::Terminal {
+            self.enter_terminal_gpu_loss(format!("The GPU rejected Rune's shader ({why})."));
+            self.notify_gpu_fallback(crate::GpuFallbackStage::Shader, &why);
+            return false;
+        }
         let Some(window) = self.window.clone() else { return false };
         let canvas = window.canvas();
         if self.start == Start::GpuFirst || self.embedded || self.document {
             let message = format!("The GPU rejected Rune's shader ({why}).");
             self.shared.set_window_error(Some(message.clone()));
+            self.notify_gpu_fallback(crate::GpuFallbackStage::Shader, &why);
             error(&message, canvas.as_ref(), self.embedded, self.document);
             self.end(event_loop);
             return true;
         }
-        let mut running = self.running.borrow_mut();
-        let Some(r) = &mut *running else { return false };
-        let side = match std::mem::replace(&mut r.draw, Draw::Moving) {
-            Draw::HandingOver { cpu, side, .. } => {
-                r.draw = Draw::Cpu { cpu, failed: true };
-                r.last_presented = None;
-                side
-            }
-            Draw::Gpu(side) => match canvas.as_ref().and_then(cpu_canvas::CpuCanvas::under) {
-                Some(cpu) => {
+        let fell_back = {
+            let mut running = self.running.borrow_mut();
+            let Some(r) = &mut *running else { return false };
+            let side = match std::mem::replace(&mut r.draw, Draw::Moving) {
+                Draw::HandingOver { cpu, side, .. } => {
                     r.draw = Draw::Cpu { cpu, failed: true };
                     r.last_presented = None;
                     side
                 }
-                None => {
-                    r.draw = Draw::Gpu(side);
-                    drop(running);
-                    let message = format!("The GPU rejected Rune's shader ({why}).");
-                    self.shared.set_window_error(Some(message.clone()));
-                    error(&message, canvas.as_ref(), self.embedded, self.document);
-                    self.end(event_loop);
-                    return true;
+                Draw::Gpu(side) => match canvas.as_ref().and_then(cpu_canvas::CpuCanvas::under) {
+                    Some(cpu) => {
+                        r.draw = Draw::Cpu { cpu, failed: true };
+                        r.last_presented = None;
+                        side
+                    }
+                    None => {
+                        r.draw = Draw::Gpu(side);
+                        drop(running);
+                        let message = format!("The GPU rejected Rune's shader ({why}).");
+                        self.shared.set_window_error(Some(message.clone()));
+                        self.notify_gpu_fallback(crate::GpuFallbackStage::Shader, &why);
+                        error(&message, canvas.as_ref(), self.embedded, self.document);
+                        self.end(event_loop);
+                        return true;
+                    }
+                },
+                other => {
+                    r.draw = other;
+                    return false;
                 }
-            },
-            other => {
-                r.draw = other;
-                return false;
-            }
+            };
+            web_sys::console::warn_1(&format!("rune: the GPU rejected the renderer shader ({why}); the page draws on the CPU").into());
+            crate::marks::mark("web.gpu.failed");
+            side.gpu.device.destroy();
+            drop(side);
+            let atlas = &mut r.app.rt_mut().text.atlas;
+            crate::render::cpu_boot::attach_text(atlas);
+            atlas.refill_gpu_masks();
+            if let Some(c) = &canvas { c.style().set_property("opacity", "0").ok(); }
+            window.request_redraw();
+            true
         };
-        web_sys::console::warn_1(&format!("rune: the GPU rejected the renderer shader ({why}); the page draws on the CPU").into());
-        crate::marks::mark("web.gpu.failed");
-        side.gpu.device.destroy();
-        drop(side);
-        let atlas = &mut r.app.rt_mut().text.atlas;
-        crate::render::cpu_boot::attach_text(atlas);
-        atlas.refill_gpu_masks();
-        if let Some(c) = &canvas { c.style().set_property("opacity", "0").ok(); }
-        window.request_redraw();
+        if fell_back {
+            self.notify_gpu_fallback(crate::GpuFallbackStage::Shader, &why);
+        }
         false
     }
 
     /// Rebuilds the WebGL2 `GpuSide` after `webglcontextrestored` fires on the canvas.
+    /// Enters `GpuLossPolicy::Terminal` latched state on web: keeps the page and canvas alive in
+    /// the DOM (never calling `self.end(event_loop)`), drops `GpuSide` and calls
+    /// `release_compositor_gpu()`, refuses CPU fallback and WebGL2 restore, records the first
+    /// reason in `SharedCore::window_error`, and wakes `AppSpec::poll` once.
+    pub(super) fn enter_terminal_gpu_loss(&mut self, reason: String) {
+        if self.terminal_failed {
+            return;
+        }
+        self.cancel_webgpu_recovery();
+        let bounded = crate::render::loss_latch::truncate_reason(&reason, crate::render::loss_latch::GpuFailureKind::DeviceLost);
+        self.terminal_failed = true;
+        self.terminal_poll_pending = true;
+        self.webgl_restored.set(false);
+        self.webgl_restoring = false;
+        self.shared.set_window_error(Some(bounded));
+        crate::marks::mark("web.gpu.lost");
+        if let Some(r) = &mut *self.running.borrow_mut() {
+            r.last_presented = None;
+            let old = std::mem::replace(&mut r.draw, Draw::TerminalFailed);
+            match old {
+                Draw::Gpu(side) | Draw::HandingOver { side, .. } => {
+                    side.gpu.device.destroy();
+                    drop(side);
+                }
+                _ => {}
+            }
+            r.app.release_compositor_gpu();
+        }
+        self.proxy.send_event(Wake::App).ok();
+    }
+
+    /// Handles `Wake::App` while `terminal_failed` is set: runs `AppSpec::poll` once without
+    /// redrawing, applies non-GPU requests (page title, clipboard, quit), and stays idle.
+    pub(super) fn drain_terminal_wake(&mut self, event_loop: &ActiveEventLoop) {
+        let requests = self.shared.take_window();
+        if requests.quit.is_some() {
+            self.end(event_loop);
+            return;
+        }
+        let Some(window) = self.window.as_ref() else { return };
+        let should_end = if let Some(r) = &mut *self.running.borrow_mut() {
+            let _ = r.app.drain_updates();
+            if std::mem::take(&mut self.terminal_poll_pending) {
+                let _ = r.app.poll_hidden();
+            }
+            r.apply_frame_requests(window);
+            r.clipboard.flush_core(r.app.rt_mut());
+            r.app.rt_mut().shell_request.take().is_some()
+        } else {
+            false
+        };
+        if should_end {
+            self.end(event_loop);
+        }
+    }
+
     pub(super) fn maybe_restore_webgl(&mut self) {
+        if self.gpu_loss_policy == crate::GpuLossPolicy::Terminal || self.terminal_failed {
+            self.webgl_restored.set(false);
+            return;
+        }
         if !self.webgl_restored.get() || self.webgl_restoring { return; }
         if self.webgl_watch.as_ref().is_some_and(health::WebglWatch::is_lost) { return; }
         let (features, canvas_now, srgb_blend) = {
@@ -188,9 +279,10 @@ impl Browser {
         #[cfg(feature = "webgl")]
         {
             self.webgl_restoring = true;
+            let reject_software = web_math::gpu_recovery::reject_software_adapters(self.start);
             let (pending, proxy, shared) = (self.pending.clone(), self.proxy.clone(), self.shared.clone());
             wasm_bindgen_futures::spawn_local(async move {
-                let result = gpu::try_webgl2(&canvas, features, &shared.quitting).await;
+                let result = gpu::try_webgl2(&canvas, features, &shared.quitting, reject_software).await;
                 deliver_gpu(result, canvas_now, srgb_blend, pending, None, proxy, shared, false).await;
             });
         }
@@ -202,12 +294,17 @@ impl Browser {
     /// `webglcontextrestored`: its side is made and either handed over from the CPU canvas or
     /// installed directly for inline/document pages waiting in `Draw::ContextLost`.
     pub(super) fn gpu_came(&mut self) {
+        let mut fallback = None;
         let watch_webgl = {
             let mut running = self.running.borrow_mut();
             let Some(r) = &mut *running else { return };
-            let can_take = r.presented && (
-                (self.start == Start::CpuFirst && matches!(r.draw, Draw::Cpu { failed: false, .. }))
-                || (self.webgl_restoring && matches!(r.draw, Draw::Cpu { .. } | Draw::ContextLost))
+            let can_take = web_math::cpu_canvas::can_take_pending_gpu(
+                r.presented,
+                r.cpu_blocked_on_gpu,
+                self.start == Start::CpuFirst,
+                matches!(r.draw, Draw::Cpu { failed: false, .. }),
+                self.webgl_restoring,
+                matches!(r.draw, Draw::Cpu { .. } | Draw::ContextLost),
             );
             if !can_take { return; }
             let Some(made) = self.pending.borrow_mut().take() else { return };
@@ -217,46 +314,57 @@ impl Browser {
                 let _ = startup.step(seq, web_math::GpuStartupEvent::WebGpuSucceeded);
             }
             let side = made.and_then(|ready| {
-                gpu::gpu_side(ready, r.size, r.app.rt_mut(), self.lost.clone(), self.proxy.clone())
+                gpu::gpu_side(ready, r.size, r.app.rt_mut(), self.gpu_loss_policy, self.lost.clone(), self.proxy.clone())
             });
             // The renderer is made: the pipelines compiled ahead for it can go.
             self.warmed.borrow_mut().take();
-            let side = match side {
-                Ok(side) => side,
+            match side {
                 Err(why) => {
                     web_sys::console::warn_1(&format!("rune: the page draws on the CPU ({why})").into());
                     crate::marks::mark("web.gpu.failed");
                     if let Draw::Cpu { failed, .. } = &mut r.draw { *failed = true; }
-                    return;
+                    let stage = if restoring {
+                        crate::GpuFallbackStage::DeviceLost
+                    } else {
+                        crate::GpuFallbackStage::Init
+                    };
+                    fallback = Some((stage, why));
+                    false
                 }
-            };
-            let is_gl = side.backend == wgpu::Backend::Gl;
-            r.last_presented = None;
-            if matches!(r.draw, Draw::ContextLost) {
-                r.draw = Draw::Gpu(side);
-                r.app.rt_mut().invalidate();
-                crate::marks::mark("web.gpu.restored");
-                if let Some(window) = &self.window { window.request_redraw(); }
-            } else {
-                // The browser compiles the renderer's pipelines in its GPU process, in order: a submit
-                // made after them is answered once they're built.
-                side.gpu.queue.submit([]);
-                let barrier = gpu::when_done(&side, &self.proxy, Wake::HandoverBuilt);
-                let Draw::Cpu { mut cpu, .. } = std::mem::replace(&mut r.draw, Draw::Moving) else { unreachable!("checked above") };
-                cpu.half = crate::render::cpu_boot::HalfRounding::of_vendor(side.gpu.adapter.get_info().vendor);
-                r.draw = Draw::HandingOver {
-                    cpu,
-                    side,
-                    seq: crate::machine::Seq::default(),
-                    state: web_math::handover_machine::HandoverState::default(),
-                    barrier: Some(barrier),
-                };
-                if restoring { crate::marks::mark("web.gpu.restored"); }
-                crate::marks::mark("web.gpu.ready");
+                Ok(side) => {
+                    let is_gl = side.backend == wgpu::Backend::Gl;
+                    r.last_presented = None;
+                    if matches!(r.draw, Draw::ContextLost) {
+                        r.draw = Draw::Gpu(side);
+                        r.app.rt_mut().invalidate();
+                        crate::marks::mark("web.gpu.restored");
+                        if let Some(window) = &self.window { window.request_redraw(); }
+                    } else {
+                        // The browser compiles the renderer's pipelines in its GPU process, in order: a submit
+                        // made after them is answered once they're built.
+                        side.gpu.queue.submit([]);
+                        let barrier = gpu::when_done(&side, &self.proxy, Wake::HandoverBuilt);
+                        let Draw::Cpu { mut cpu, .. } = std::mem::replace(&mut r.draw, Draw::Moving) else { unreachable!("checked above") };
+                        cpu.half = crate::render::cpu_boot::HalfRounding::of_vendor(side.gpu.adapter.get_info().vendor);
+                        r.draw = Draw::HandingOver {
+                            cpu,
+                            side,
+                            seq: crate::machine::Seq::default(),
+                            state: web_math::handover_machine::HandoverState::default(),
+                            barrier: Some(barrier),
+                        };
+                        if restoring { crate::marks::mark("web.gpu.restored"); }
+                        crate::marks::mark("web.gpu.ready");
+                    }
+                    is_gl
+                }
             }
-            is_gl
         };
-        if watch_webgl { self.ensure_webgl_watch(); }
+        if let Some((stage, why)) = fallback {
+            self.notify_gpu_fallback(stage, &why);
+        } else if watch_webgl {
+            self.ensure_webgl_watch();
+        }
     }
 
     /// An async browser error-scope check (`uber_check` or a lazy feature breaker) resolved.
@@ -310,9 +418,27 @@ impl Browser {
         self.step_handover(web_math::handover_machine::HandoverEvent::GpuDone { attempt });
     }
 
-    /// The `FINISH_LIMIT` timeout timer fired for `attempt`.
-    pub(super) fn on_handover_timeout(&mut self, _attempt: crate::machine::Attempt) {
-        self.poll_handover_timeout();
+    /// The `FINISH_LIMIT` timeout timer fired for `attempt`. On WebGL2, gives the device one
+    /// final non-blocking poll first so a tab that was hidden (pausing rAF) still completes
+    /// cleanly if the GPU already finished.
+    pub(super) fn on_handover_timeout(&mut self, attempt: crate::machine::Attempt) {
+        let polled_done = {
+            let running = self.running.borrow();
+            match running.as_ref().map(|r| &r.draw) {
+                Some(Draw::HandingOver { side, barrier: Some(barrier), state, .. })
+                    if state.waiting_for_gpu() && web_math::needs_device_poll(side.backend) =>
+                {
+                    let _ = side.gpu.device.poll(wgpu::PollType::Poll);
+                    barrier.is_done()
+                }
+                _ => false,
+            }
+        };
+        if polled_done {
+            self.on_handover_done(attempt);
+        } else {
+            self.poll_handover_timeout();
+        }
     }
 
     /// Checks whether a hand-over frame in `WaitingDone` has passed `FINISH_LIMIT`.
@@ -340,23 +466,33 @@ impl Browser {
                 HandoverEffect::RequestRedraw => {
                     if let Some(window) = &self.window { window.request_redraw(); }
                 }
-                HandoverEffect::Complete => self.finish_handover(true),
-                HandoverEffect::FailTimeout => self.finish_handover(false),
+                HandoverEffect::FailTimeout => self.fail_handover_timeout(),
                 HandoverEffect::PrecheckFeatures
                 | HandoverEffect::DrawGpuFrame
-                | HandoverEffect::ArmFinishWait { .. } => {}
+                | HandoverEffect::DrawFlipFrame
+                | HandoverEffect::ArmFinishWait { .. }
+                | HandoverEffect::Complete => {}
             }
         }
     }
 
-    /// Finishes `Draw::HandingOver`: reveals the GPU canvas and removes the CPU canvas when
-    /// `succeeded`, or destroys the GPU and falls back to the CPU canvas on timeout.
-    fn finish_handover(&mut self, succeeded: bool) {
-        let mut running = self.running.borrow_mut();
-        let Some(r) = &mut *running else { return };
-        let Draw::HandingOver { cpu, side, .. } = std::mem::replace(&mut r.draw, Draw::Moving) else { return };
-        let canvas = self.window.as_ref().and_then(|w| w.canvas());
-        if !succeeded {
+    /// Arms the optional `globalThis.RUNE_LOSE_GPU_AFTER` harness timer after hand-over completes.
+    pub(super) fn arm_lose_gpu_harness(&self) {
+        if let Some(ms) = js_sys::Reflect::get(&js_sys::global(), &"RUNE_LOSE_GPU_AFTER".into()).ok().and_then(|v| v.as_f64()) {
+            let (lost, proxy) = (self.lost.clone(), self.proxy.clone());
+            after(Duration::from_millis(ms as u64), move || {
+                *lost.borrow_mut() = Some(Loss::WebGpu("RUNE_LOSE_GPU_AFTER".into()));
+                proxy.send_event(Wake::App).ok();
+            });
+        }
+    }
+
+    /// Destroys the timed-out GPU device and falls back to the CPU canvas after `FINISH_LIMIT`.
+    fn fail_handover_timeout(&mut self) {
+        {
+            let mut running = self.running.borrow_mut();
+            let Some(r) = &mut *running else { return };
+            let Draw::HandingOver { cpu, side, .. } = std::mem::replace(&mut r.draw, Draw::Moving) else { return };
             web_sys::console::warn_1(&"rune: the GPU didn't finish its first frame; the page draws on the CPU".into());
             crate::marks::mark("web.handover.failed");
             side.gpu.device.destroy();
@@ -366,23 +502,12 @@ impl Browser {
             crate::render::cpu_boot::attach_text(atlas);
             atlas.refill_gpu_masks();
             r.draw = Draw::Cpu { cpu, failed: true };
-            return;
         }
-        if let Some(c) = &canvas { c.style().remove_property("opacity").ok(); }
-        cpu.remove();
-        // A harness checking the way back to the CPU (`globalThis.RUNE_LOSE_GPU_AFTER`, in ms)
-        // has the device count as lost that long after the hand-over, as the browser reports it.
-        if let Some(ms) = js_sys::Reflect::get(&js_sys::global(), &"RUNE_LOSE_GPU_AFTER".into()).ok().and_then(|v| v.as_f64()) {
-            let (lost, proxy) = (self.lost.clone(), self.proxy.clone());
-            after(Duration::from_millis(ms as u64), move || {
-                *lost.borrow_mut() = Some(Loss::WebGpu("RUNE_LOSE_GPU_AFTER".into()));
-                proxy.send_event(Wake::App).ok();
-            });
-        }
-        r.draw = Draw::Gpu(side);
-        r.last_presented = None;
-        crate::marks::mark("web.handover.done");
-        if let Some(window) = &self.window { window.request_redraw(); }
+        self.cancel_webgpu_recovery();
+        self.notify_gpu_fallback(
+            crate::GpuFallbackStage::HandoverTimeout,
+            "GPU hand-over frame timed out",
+        );
     }
 
     fn requested_features(&self) -> wgpu::Features {
@@ -404,9 +529,10 @@ impl Browser {
             .map(|(_, s)| s)
             .or_else(|| self.app.as_ref().map(|a| a.srgb_blend))
             .unwrap_or(true);
+        let reject_software = web_math::gpu_recovery::reject_software_adapters(self.start);
         let (pending, warmed, proxy, shared) = (self.pending.clone(), self.warmed.clone(), self.proxy.clone(), self.shared.clone());
         wasm_bindgen_futures::spawn_local(async move {
-            let result = gpu::gpu(canvas, features, &shared.quitting).await;
+            let result = gpu::gpu(canvas, features, &shared.quitting, reject_software).await;
             deliver_gpu(result, canvas_now, srgb_blend, pending, Some(warmed), proxy, shared, true).await;
         });
     }
@@ -429,6 +555,20 @@ impl Browser {
     pub(super) fn on_cpu_frame_drawn(&mut self, at: Instant) {
         let (seq, startup) = &mut self.gpu_startup;
         let _ = startup.step(seq, web_math::GpuStartupEvent::FrameDrawn { at });
+    }
+
+    /// A frame hit a non-degradable `NeedsGpu` error on the CPU canvas: start or escalate GPU
+    /// acquisition immediately on the next macrotask instead of waiting for frame 1 or quiet.
+    pub(super) fn on_cpu_needs_gpu(&mut self, at: Instant) {
+        let effects = {
+            let (seq, startup) = &mut self.gpu_startup;
+            startup.step(seq, web_math::GpuStartupEvent::NeedsGpu {
+                at,
+                has_navigator_gpu: health::has_navigator_gpu(),
+                webgl_enabled: cfg!(feature = "webgl"),
+            })
+        };
+        self.run_gpu_startup_effects(effects);
     }
 
     /// A scheduled CPU-first GPU startup timer fired.
@@ -478,6 +618,7 @@ impl Browser {
         let features = self.requested_features();
         let canvas_now = self.running.borrow().as_ref().map(|r| (r.size, r.app.rt().srgb_blend()));
         let srgb_blend = canvas_now.map_or(true, |(_, s)| s);
+        let reject_software = web_math::gpu_recovery::reject_software_adapters(self.start);
         let (pending, warmed, webgpu_err, proxy, shared) = (
             self.pending.clone(),
             self.warmed.clone(),
@@ -486,7 +627,7 @@ impl Browser {
             self.shared.clone(),
         );
         wasm_bindgen_futures::spawn_local(async move {
-            match gpu::try_webgpu(&canvas, features).await {
+            match gpu::try_webgpu(&canvas, features, reject_software).await {
                 Ok(pair) => deliver_gpu(Ok(pair), canvas_now, srgb_blend, pending, Some(warmed), proxy, shared, true).await,
                 Err(err) => {
                     if shared.quitting.load(Ordering::Acquire) { return; }
@@ -509,6 +650,7 @@ impl Browser {
         let features = self.requested_features();
         let canvas_now = self.running.borrow().as_ref().map(|r| (r.size, r.app.rt().srgb_blend()));
         let srgb_blend = canvas_now.map_or(true, |(_, s)| s);
+        let reject_software = web_math::gpu_recovery::reject_software_adapters(self.start);
         let (pending, webgpu_err, proxy, shared) = (
             self.pending.clone(),
             self.webgpu_err.clone(),
@@ -516,7 +658,7 @@ impl Browser {
             self.shared.clone(),
         );
         wasm_bindgen_futures::spawn_local(async move {
-            let result = match gpu::try_webgl2(&canvas, features, &shared.quitting).await {
+            let result = match gpu::try_webgl2(&canvas, features, &shared.quitting, reject_software).await {
                 Ok(pair) => Ok(pair),
                 Err(gl_err) => {
                     let prev = webgpu_err.borrow_mut().take();

@@ -385,6 +385,129 @@ fn tree_json_emits_description_and_border_color_when_present() {
 }
 
 #[test]
+fn tree_json_emits_layer_opacity_matching_element_info() {
+    let view = |_: &(), _: &mut Cx<()>| {
+        crate::col().key("root").size(240.0, 160.0)
+            .child(crate::el().key("plain").size(40.0, 20.0))
+            .child(
+                crate::col().key("box").size(100.0, 40.0).layer_opacity(0.65)
+                    .child(crate::text("Hi").key("label"))
+                    .child(crate::el().key("nested").size(40.0, 20.0).layer_opacity(0.5)),
+            )
+            .child(crate::el().key("both").size(40.0, 20.0).opacity(0.8).layer_opacity(0.65))
+            .child(crate::el().key("zero").size(40.0, 20.0).layer_opacity(0.0))
+    };
+    let mut rt = Runtime::new((), view, (240.0, 160.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let tree = tree_json(&rt, 0.0);
+    let tree_els = tree["elements"].as_array().unwrap();
+    let find_json = |key: &str| tree_els.iter().find(|e| e["key"].as_str() == Some(key)).unwrap();
+
+    assert_eq!(find_json("plain")["opacity"], serde_json::json!(1.0));
+    assert_eq!(find_json("plain")["layerOpacity"], serde_json::json!(1.0));
+    assert_eq!(find_json("box")["opacity"], serde_json::json!(1.0));
+    assert_eq!(find_json("box")["layerOpacity"], serde_json::json!(0.65));
+    assert_eq!(find_json("label")["opacity"], serde_json::json!(1.0));
+    assert_eq!(find_json("label")["layerOpacity"], serde_json::json!(0.65));
+    assert_eq!(find_json("nested")["layerOpacity"], serde_json::json!(0.325));
+    assert_eq!(find_json("both")["layerOpacity"], serde_json::json!(0.65));
+    assert_eq!(find_json("zero")["opacity"], serde_json::json!(1.0));
+    assert_eq!(find_json("zero")["layerOpacity"], serde_json::json!(0.0));
+}
+
+#[test]
+fn tree_json_emits_backdrop_blur_stuck_and_shadows_matching_presented_state() {
+    const DROP: crate::Shadow = crate::Shadow {
+        x: 0.0,
+        y: 4.0,
+        blur: 12.0,
+        spread: 0.0,
+        color: crate::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 },
+        inset: false,
+    };
+    const RING: crate::Shadow = crate::Shadow {
+        x: 0.0,
+        y: 1.0,
+        blur: 0.0,
+        spread: 0.5,
+        color: crate::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.5 },
+        inset: true,
+    };
+    let view = |_: &(), _: &mut Cx<()>| {
+        let bar = crate::row().key("bar").w_full().h(54.0).fill(crate::Color::WHITE)
+            .backdrop_blur(24.0)
+            .sticky_top(0.0)
+            .stuck_shadow(DROP);
+        crate::col().key("scroll").size(300.0, 200.0).scroll(crate::ScrollSpec::default())
+            .child(
+                crate::col().w_full()
+                    .child(bar)
+                    .child(crate::el().key("plain").w_full().h(40.0))
+                    .child(crate::el().key("ringed").w_full().h(40.0).box_shadow(RING))
+                    .child(crate::el().key("body").w_full().h(800.0)),
+            )
+    };
+    let mut rt = Runtime::new((), view, (300.0, 200.0), Env::new(false, 1.0));
+    rt.frame(0.0);
+
+    let find_in = |tree: &Value, key: &str| {
+        tree["elements"].as_array().unwrap().iter().find(|e| e["key"].as_str() == Some(key)).unwrap().clone()
+    };
+
+    // At rest: plain has backdropBlur 0 and omits stuck/shadows; bar has backdropBlur 24 and omits stuck/shadows.
+    let tree = tree_json(&rt, 0.0);
+    let plain = find_in(&tree, "plain");
+    assert_eq!(plain["blur"], serde_json::json!(0.0));
+    assert_eq!(plain["backdropBlur"], serde_json::json!(0.0));
+    assert!(plain.get("stuck").is_none());
+    assert!(plain.get("shadows").is_none());
+
+    let bar_rest = find_in(&tree, "bar");
+    assert_eq!(bar_rest["blur"], serde_json::json!(0.0));
+    assert_eq!(bar_rest["backdropBlur"], serde_json::json!(24.0));
+    assert!(bar_rest.get("stuck").is_none());
+    assert!(bar_rest.get("shadows").is_none());
+
+    let ringed = find_in(&tree, "ringed");
+    assert_eq!(ringed["shadows"], serde_json::json!([{
+        "x": 0.0, "y": 1.0, "blur": 0.0, "spread": 0.5, "color": RING.color.hex(), "inset": true,
+    }]));
+
+    // Halfway through the 8pt sticky shadow ramp: stuck is 4 and shadow alpha is halved.
+    rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 4.0));
+    rt.frame(1.0 / 120.0);
+    let tree_half = tree_json(&rt, 0.01);
+    let bar_half = find_in(&tree_half, "bar");
+    assert_eq!(bar_half["stuck"], serde_json::json!(4.0));
+    assert_eq!(bar_half["backdropBlur"], serde_json::json!(24.0));
+    assert_eq!(bar_half["shadows"], serde_json::json!([{
+        "x": 0.0, "y": 4.0, "blur": 12.0, "spread": 0.0,
+        "color": DROP.color.alpha(DROP.color.a * 0.5).hex(), "inset": false,
+    }]));
+
+    // Fully stuck at 60pt: stuck is 60 and shadow is at full alpha.
+    rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 60.0));
+    for _ in 0..4 { rt.frame(1.0 / 120.0); }
+    let tree_full = tree_json(&rt, 0.05);
+    let bar_full = find_in(&tree_full, "bar");
+    assert_eq!(bar_full["stuck"], serde_json::json!(60.0));
+    assert_eq!(bar_full["backdropBlur"], serde_json::json!(24.0));
+    assert_eq!(bar_full["shadows"], serde_json::json!([{
+        "x": 0.0, "y": 4.0, "blur": 12.0, "spread": 0.0,
+        "color": DROP.color.hex(), "inset": false,
+    }]));
+
+    // Under Reduce Transparency, backdropBlur reports 0.0 while stuck and shadows stay intact.
+    rt.set_system_reduced_transparency(true);
+    rt.frame(0.0);
+    let tree_rt = tree_json(&rt, 0.06);
+    let bar_rt = find_in(&tree_rt, "bar");
+    assert_eq!(bar_rt["backdropBlur"], serde_json::json!(0.0));
+    assert_eq!(bar_rt["stuck"], serde_json::json!(60.0));
+    assert_eq!(bar_rt["shadows"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn tree_json_reports_the_pointer_and_the_cursor_on_the_element_it_is_read_from() {
     use crate::Cursor;
     let view = |_: &(), _: &mut Cx<()>| {
@@ -415,4 +538,97 @@ fn tree_json_reports_the_pointer_and_the_cursor_on_the_element_it_is_read_from()
     assert_eq!(tree["pointer"]["cursor"], "default");
     assert_eq!(cursor_of(&tree, "button"), "default");
     assert!(cursor_of(&tree, "handle").is_null());
+}
+
+/// A sink that holds every write until its gate opens, as a disk that stalls does, and says which
+/// thread wrote each piece.
+#[cfg(not(target_arch = "wasm32"))]
+struct GatedSink {
+    gate: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    written: std::sync::Arc<std::sync::Mutex<Vec<(std::thread::ThreadId, Vec<u8>)>>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::io::Write for GatedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let (open, opened) = &*self.gate;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = opened.wait(open).unwrap();
+        }
+        self.written.lock().unwrap().push((std::thread::current().id(), buf.to_vec()));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn trace_lines_are_written_by_another_thread_and_a_stalled_disk_holds_no_frame() {
+    use std::io::Write;
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out = TraceOut::new(GatedSink { gate: gate.clone(), written: written.clone() });
+
+    // The frames' thread: three lines while the sink can write nothing. A writer that wrote on
+    // this thread would never answer; the test then opens the gate and fails instead of hanging.
+    let (wrote, frames_done) = std::sync::mpsc::channel();
+    let frames = std::thread::spawn(move || {
+        let mut out = out;
+        for k in 0..3 {
+            writeln!(out, r#"{{"t":{k},"n":{}}}"#, k + 1).unwrap();
+        }
+        wrote.send(std::thread::current().id()).unwrap();
+        out
+    });
+    let frames_thread = frames_done.recv_timeout(std::time::Duration::from_secs(10));
+    let stalled = written.lock().unwrap().len();
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let mut out = frames.join().unwrap();
+    let frames_thread = frames_thread.expect("three lines were handed over while the sink was stalled");
+    assert_eq!(stalled, 0, "nothing can have reached a stalled sink");
+
+    out.flush().unwrap();
+    let written = written.lock().unwrap();
+    let text: Vec<u8> = written.iter().flat_map(|(_, bytes)| bytes.clone()).collect();
+    assert_eq!(String::from_utf8(text).unwrap(), "{\"t\":0,\"n\":1}\n{\"t\":1,\"n\":2}\n{\"t\":2,\"n\":3}\n");
+    assert_eq!(written.len(), 3, "one write a line, whole lines");
+    assert!(written.iter().all(|(thread, _)| *thread != frames_thread && *thread != std::thread::current().id()), "the sink is written by the writer's own thread");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn trace_file_holds_every_line_after_a_flush_and_after_the_drop() {
+    use std::io::Write;
+    let tmp = TempFile(std::env::temp_dir().join(format!("rune-trace-out-{}.jsonl", std::process::id())));
+    let mut out = TraceOut::new(std::fs::File::create(&tmp.0).unwrap());
+    writeln!(out, "first").unwrap();
+    out.flush().unwrap();
+    assert_eq!(std::fs::read_to_string(&tmp.0).unwrap(), "first\n", "a flush waits for the file");
+    writeln!(out, "second").unwrap();
+    write!(out, "an unfinished line").unwrap();
+    drop(out);
+    assert_eq!(std::fs::read_to_string(&tmp.0).unwrap(), "first\nsecond\nan unfinished line", "the drop writes what is left and waits for it");
+}
+
+#[test]
+fn settled_trace_file_holds_every_frame_while_the_trace_is_still_open() {
+    // A `--frames` run ends by a fast exit that drops nothing: the settle is its last chance.
+    let view = |_: &bool, _: &mut Cx<bool>| crate::el().key("box").size(20.0, 20.0);
+    let mut rt = Runtime::new(false, view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
+    let tmp = TempFile(std::env::temp_dir().join(format!("rune-trace-settled-{}.jsonl", std::process::id())));
+    let mut trace = Trace::open(&tmp.0, rt.viewport, 60.0, 1.0);
+    for n in 0..40u32 {
+        rt.frame(1.0 / 60.0);
+        trace.frame(&mut rt, f64::from(n) * 1000.0 / 60.0, 0.0);
+    }
+    trace.settle_presents(std::time::Duration::ZERO);
+    let text = std::fs::read_to_string(&tmp.0).unwrap();
+    assert_eq!(text.lines().count(), 41, "the header and all forty frames, before the trace is dropped");
+    assert!(text.ends_with('\n'), "whole lines");
+    drop(trace);
 }

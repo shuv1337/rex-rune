@@ -18,10 +18,18 @@ mod actions_tests;
 mod aria_tests;
 #[cfg(test)]
 mod auto_complete_tests;
+#[cfg(test)]
+mod current_tests;
+#[cfg(test)]
+mod custom_actions_tests;
 pub(crate) mod dump;
 #[cfg(test)]
 mod dump_tests;
+#[cfg(test)]
+mod macos_tests;
 pub(crate) mod node;
+#[cfg(test)]
+mod role_description_tests;
 pub(crate) mod roles;
 #[cfg(test)]
 mod tests;
@@ -189,8 +197,11 @@ impl AccessibilityLink {
         if inbox.settings {
             let was_dirty = rt.commit.dirty;
             rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
-            rt.set_system_contrast(crate::platform::preferences::contrast());
-            rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast());
+            let contrast = crate::platform::preferences::contrast();
+            rt.set_system_contrast(contrast);
+            rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_with(contrast.is_some()));
+            rt.set_system_text_scale(crate::platform::text_scale::current());
+            rt.set_system_reduced_transparency(crate::platform::preferences::reduced_transparency());
             queued |= !was_dirty && rt.commit.dirty;
         }
         match inbox.asked {

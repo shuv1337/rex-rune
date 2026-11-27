@@ -288,6 +288,11 @@ pub(crate) struct KeyboardState {
     pub(in crate::runtime) held_mods: crate::Mods,
     /// `keys_lost` queued its `FocusLost` since the window last had focus.
     pub(in crate::runtime) keys_lost: bool,
+    /// The queued window-deactivation `FocusLost` already ran; suppress duplicate element-move
+    /// `FocusLost` until window focus returns.
+    pub(in crate::runtime) focus_lost_sent: bool,
+    /// `physical_focus_lost` ran a handler that dirtied app state (not `live_only`).
+    pub(in crate::runtime) focus_lost_dirty: bool,
     /// Tab visits every control; off, only text fields and lists (macOS Full Keyboard
     /// Access off). Native hosts sample the system setting; headless runtimes default on.
     pub(in crate::runtime) full_keyboard_access: bool,
@@ -298,6 +303,8 @@ pub(crate) struct KeyboardState {
     /// This commit's focus is a `Tx::return_focus` hand-back, which a modal opening in it
     /// doesn't take as where focus was.
     focus_returned: bool,
+    /// Whether the most recently dispatched key press was consumed by a Rune handler or editor.
+    last_key_consumed: bool,
 }
 
 impl KeyboardState {
@@ -314,6 +321,8 @@ impl KeyboardState {
             held_mods: Default::default(),
             key_releases: Default::default(),
             keys_lost: false,
+            focus_lost_sent: false,
+            focus_lost_dirty: false,
             full_keyboard_access: true,
             tab_visits_controls: false,
             media_keys: false,
@@ -322,9 +331,21 @@ impl KeyboardState {
             focus_request: None,
             focus_owed: None,
             focus_returned: false,
+            last_key_consumed: false,
             unmounted_focused: Vec::new(),
             modal_scope: None,
         }
+    }
+
+    #[inline]
+    pub(in crate::runtime) fn note_key_consumed(&mut self, consumed: bool) {
+        self.last_key_consumed = consumed;
+    }
+
+    #[inline]
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(in crate::runtime) fn take_key_consumed(&mut self) -> bool {
+        std::mem::take(&mut self.last_key_consumed)
     }
 
     #[inline]
