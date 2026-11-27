@@ -141,7 +141,7 @@ pub fn floating(s: &Workspace, toolbar: El) -> El {
         .pin(Some(0.), Some(0.), Some(0.), None)
         .h(bar_height(s))
         .fill(rgb(popover()))
-        .box_shadow(shadow(0., 8., 24., black(0.4)))
+        .box_shadow(shadow(0., 8., 24., drop_shadow(0.4)))
         .transition(
             Transition::move_edge(Edge::Top)
                 .combined(Transition::opacity())
@@ -151,7 +151,7 @@ pub fn floating(s: &Workspace, toolbar: El) -> El {
         .child(
             el().pin(Some(0.), None, Some(0.), Some(0.))
                 .h(1.)
-                .fill(white(0.09)),
+                .fill(tint(0.09)),
         )
 }
 
@@ -218,7 +218,7 @@ pub fn sequence_float(chip: El) -> El {
         .radius(10.)
         .continuous_corners()
         .fill(rgb(popover()))
-        .box_shadow(shadow(0., 4., 16., black(0.45)))
+        .box_shadow(shadow(0., 4., 16., drop_shadow(0.45)))
         .transition(Transition::opacity().springs(SpringPair::new(SNAPPY, SNAPPY)))
         .child(chip)
 }

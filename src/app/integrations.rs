@@ -737,7 +737,7 @@ pub fn section(s: &Workspace) -> El {
                         .label("Let agents name sessions")
                         .hide_label()
                         .on_toggle(|s: &mut Workspace| s.toggle_session_naming())
-                        .build(kit())
+                        .build(palette().kit())
                         .key("agent-naming"),
                 )]),
                 footnote(

@@ -885,7 +885,7 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     );
     assert_eq!(
         sent[0].2["layout"]["block"]["options"],
-        serde_json::json!({"shell":"fish","theme":{"background":"#001528","scheme":"dark"}}),
+        serde_json::json!({"shell":"fish","theme":rex_rune::terminal_theme::TerminalTheme::midnight().args()}),
         "a declared theme goes into new blocks' layouts"
     );
     std::fs::remove_file(&ws.settings_path).ok();
@@ -2234,18 +2234,22 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
             .collect::<Vec<_>>()
     };
     let row = |label: &str, group: &str, current| (label.to_owned(), group.to_owned(), current);
+    let all = rows(&rt.state);
+    assert_eq!(all.len(), 55);
     assert_eq!(
-        rows(&rt.state),
+        all[..4],
         [
             row("Follow server", "Server", true),
             row("Rex default colours", "Server", false),
             row("Follow chrome", "Built in", false),
-            row("Midnight", "Built in", false),
-            row("Rosé Pine", "Built in", false),
-            row("Rosé Pine Moon", "Built in", false),
-            row("Gruvbox Dark", "Built in", false),
+            row("S2Code Dark", "Built in", false)
+        ]
+    );
+    assert_eq!(
+        all[53..],
+        [
             row("Rex Test Mocha", "Dark", false),
-            row("Paper", "Light", false),
+            row("Paper", "Light", false)
         ]
     );
     press(&mut rt, Key::Escape);
@@ -2260,7 +2264,7 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
 
     click(&mut rt, "terminal-theme");
     rt.update(|s, _| {
-        s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("mocha");
+        s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("rex test mocha");
         s.query_changed();
     });
     assert_eq!(rows(&rt.state), [row("Rex Test Mocha", "Dark", false)]);
@@ -3997,15 +4001,26 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
         .into_iter()
         .map(|e| (e.label, e.current))
         .collect();
-    assert_eq!(
-        rows,
-        [
-            ("Midnight".to_owned(), true),
-            ("Rosé Pine".to_owned(), false),
-            ("Rosé Pine Moon".to_owned(), false),
-            ("Gruvbox Dark".to_owned(), false),
-        ]
-    );
+    assert_eq!(rows.len(), 50);
+    assert_eq!(rows[0], ("S2Code Dark".to_string(), false));
+    assert_eq!(rows[1], ("Midnight".to_string(), true));
+    assert_eq!(rows[35].0, "Catppuccin Latte");
+    for (query, count) in [
+        ("light", 15),
+        ("rose_pine", 2),
+        ("Rosé Pine", 2),
+        ("no matching theme", 0),
+        ("", 50),
+    ] {
+        rt.update(|s, _| {
+            s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new(query);
+            s.query_changed();
+        });
+        assert_eq!(rt.state.entries().len(), count, "{query}");
+    }
+    for _ in 0..40 {
+        rt.frame(1. / 60.);
+    }
     let rose = rt
         .elements()
         .into_iter()
@@ -4035,7 +4050,10 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
         super::theme::rgb(0x191724),
         "the ground changes in one frame, without a spring"
     );
-    assert_eq!(super::theme::kit().c.page, super::theme::rgb(0x191724));
+    assert_eq!(
+        super::theme::palette().kit().c.page,
+        super::theme::rgb(0x191724)
+    );
     let s = &rt.state.settings;
     assert_eq!(s.chrome_theme, ChromeTheme::RosePine);
     assert_eq!(
@@ -5781,4 +5799,80 @@ fn the_switcher_names_its_highlighted_row_to_assistive_technology() {
         Some(serde_json::json!(format!("entry:{}", first + 1))),
         "moving the highlight moves the active descendant"
     );
+}
+
+/// Identical real-font views for comparing sidebar, terminal and tab surfaces.
+#[test]
+#[ignore = "run individually with REX_TEST_SNAP_DIR"]
+fn chrome_palette_gallery_draw() {
+    use pane_verb_tests::{Camera, framed_terminal};
+    use rex_rune::settings::{ChromeTheme, interface::TabIconColor};
+    let _families = rune::text::with_families("Inter", "IBM Plex Mono");
+    let mut camera = Camera::new().unwrap();
+    for id in ["midnight", "catppuccin_latte", "merino-light", "s2-dark"] {
+        let chrome = ChromeTheme::from_id(id);
+        let (sample, _host) = tabbed_workspace("single");
+        let mut ws = workspace_hosts(5);
+        ws.hosts[0].model = sample.hosts[0].model.clone();
+        for (i, name) in ["Studio", "Build host", "MacBook", "Relay", "Workshop"]
+            .into_iter()
+            .enumerate()
+        {
+            ws.settings.hosts[i].label = name.into();
+            ws.settings.hosts[i].collapsed = i != 0;
+            ws.hosts[i].model.connected = true;
+        }
+        let m = &mut ws.hosts[0].model;
+        let view = m.views.get_mut("s").unwrap();
+        view.label = Some("wandering-creek".into());
+        view.windows.truncate(1);
+        view.windows[0].label = Some("studio: ~/src".into());
+        m.sessions[0].label = "wandering-creek".into();
+        for name in ["release-notes", "dotfiles"] {
+            let mut item = session(name);
+            item.label = name.into();
+            m.sessions.push(item);
+        }
+        m.programs.insert("block:a".into(), "zsh".into());
+        ws.settings.chrome_theme = chrome.clone();
+        ws.term_theme = Some(chrome.preset().theme());
+        ws.settings.interface.tab_icon_color = TabIconColor::Always;
+        ws.sidebar.toggle();
+        let theme = ws.term_theme.as_ref().unwrap();
+        let output = format!(
+            "\x1b]11;#{:06x}\x07\x1b]10;#{:06x}\x07studio:~/src $ git branch --show-current\r\nmaster\r\nstudio:~/src $ ",
+            theme.background.unwrap(),
+            theme.foreground.unwrap()
+        );
+        let (sender, _sent) = flume::unbounded();
+        framed_terminal(&mut ws, "block:a", &sender, output.as_bytes());
+        let fonts = super::fonts::load("IBM Plex Mono", &[]);
+        let mut rt = Runtime::with_text(
+            ws,
+            super::view,
+            (1280., 800.),
+            Env::new(chrome.preset().palette.dark, 1.),
+            rune::text::TextSystem::new(fonts.files, fonts.families),
+        );
+        rt.set_srgb_blend(true);
+        let settle = |rt: &mut Runtime<Workspace>| {
+            for _ in 0..75 {
+                rt.frame(1. / 60.);
+            }
+        };
+        settle(&mut rt);
+        camera.snap(&mut rt, &format!("{}-main", id.replace('_', "-")));
+        if id == "s2-dark" {
+            rt.update(|s, tx| s.perform(Intent::Settings, tx));
+            settle(&mut rt);
+            click(&mut rt, "chrome-theme");
+            // A cross-polarity family makes both group headings visible in one capture.
+            rt.update(|s, _| {
+                s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("Catppuccin");
+                s.query_changed();
+            });
+            settle(&mut rt);
+            camera.snap(&mut rt, "theme-picker");
+        }
+    }
 }

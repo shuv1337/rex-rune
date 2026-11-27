@@ -68,14 +68,14 @@ pub fn card(rows: impl IntoIterator<Item = El>) -> El {
         .w_full()
         .radius(CARD_RADIUS)
         .continuous_corners()
-        .fill(white(0.04));
+        .fill(tint(0.04));
     for (index, row_el) in rows.into_iter().enumerate() {
         if index > 0 {
             card = card.child(
                 row()
                     .w_full()
                     .px(INSET)
-                    .child(el().role("separator").grow(1.).h(1.).fill(white(0.06))),
+                    .child(el().role("separator").grow(1.).h(1.).fill(tint(0.06))),
             );
         }
         card = card.child(row_el);
@@ -101,7 +101,7 @@ pub fn search_box(key: &str, height: f32, input: El) -> El {
         .center_y()
         .radius(8.)
         .continuous_corners()
-        .fill(white(0.055))
+        .fill(tint(0.055))
         .focus_within_ring(1.5, 0., rgb(accent()).alpha(0.7))
         .child(input.w_full())
 }
@@ -131,7 +131,7 @@ pub fn preview_well(key: &str, label: &str, ground: u32, height: f32, content: E
             .radius(8.)
             .clip_rounded(8.)
             .fill(rgb(ground))
-            .border(1., white(0.09))
+            .border(1., tint(0.09))
             .child(content),
     )
 }
@@ -217,8 +217,8 @@ pub enum ChipTone {
 /// needs a sentence.
 pub fn state_chip(key: &str, label: &str, tone: ChipTone, why: &str) -> El {
     let (ink_color, chip) = match tone {
-        ChipTone::Good => (rgb(ink()), row().fill(white(0.07))),
-        ChipTone::Off => (rgb(muted()), row().border(1., white(0.1))),
+        ChipTone::Good => (rgb(ink()), row().fill(tint(0.07))),
+        ChipTone::Off => (rgb(muted()), row().border(1., tint(0.1))),
         ChipTone::Attention => (rgb(warning()), row().fill(rgb(warning()).alpha(0.12))),
     };
     let mut chip = chip
@@ -277,7 +277,8 @@ pub fn stepper(
     down: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
     up: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
 ) -> El {
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     row()
         .gap(8.)
         .center_y()
@@ -356,7 +357,8 @@ pub fn segmented_fixed(
     selected: Option<usize>,
     pick: impl Fn(&mut Workspace, usize, &mut Tx) + Clone + 'static,
 ) -> El {
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     let c = &k.c;
     let each = width / segments.len().max(1) as f32;
     let hairline = |color| Shadow {
@@ -429,14 +431,16 @@ pub fn segmented_fixed(
 /// this control, and focus comes back here when it closes. `key` names the control and is
 /// what the list is placed by.
 pub fn value_popup(key: &str, value: &str, open: Intent) -> El {
+    let sample = matches!(open, Intent::ChooseChrome).then(|| swatch(&palette()));
     let control = key.to_owned();
     let press = move |s: &mut Workspace, tx: &mut Tx| s.open_anchored(&control, open.clone(), tx);
-    popup_button(key, value, press)
+    popup_button(key, value, sample, press)
 }
 
 fn popup_button(
     key: &str,
     value: &str,
+    leading: Option<El>,
     press: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
 ) -> El {
     on_return(
@@ -452,11 +456,12 @@ fn popup_button(
             .radius(CONTROL / 2.)
             .continuous_corners()
             .cursor(Cursor::Pointer)
-            .hover(white(0.07))
-            .press(white(0.11))
+            .hover(tint(0.07))
+            .press(tint(0.11))
             .focusable(true)
             .focus_ring(2., 2., rgb(accent()))
             .on_press_tx(press.clone())
+            .children(leading)
             .child(
                 text(value.to_owned())
                     .font(medium(13.))
@@ -467,7 +472,7 @@ fn popup_button(
             .child(
                 el().size(20., 20.)
                     .radius(10.)
-                    .fill(white(0.09))
+                    .fill(tint(0.09))
                     .center()
                     .child(glyph(&UPDOWN, 15., rgb(muted()))),
             ),
@@ -505,6 +510,7 @@ pub fn select_row(
         popup_button(
             key,
             options.get(current).copied().unwrap_or_default(),
+            None,
             press,
         ),
     )
@@ -526,8 +532,8 @@ pub fn disclosure(
         .label(label.to_owned())
         .cursor(Cursor::Pointer)
         .radius(CARD_RADIUS - 2.)
-        .hover(white(0.04))
-        .press(white(0.07))
+        .hover(tint(0.04))
+        .press(tint(0.07))
         .focusable(true)
         .focus_ring(2., -2., rgb(accent()))
         .on_press_tx(open.clone())

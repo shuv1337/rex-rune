@@ -81,8 +81,8 @@ pub fn keycap(label: &str, lit: bool) -> El {
         .center()
         .radius(4.5)
         .continuous_corners()
-        .fill(white(if lit { KEYCAP_LIT } else { KEYCAP_FILL }))
-        .border(1., white(0.06))
+        .fill(tint(keycap_alpha(lit)))
+        .border(1., tint(0.06))
         .child(text(label.to_owned()).font(medium(10.5)).color(rgb(if lit {
             ink()
         } else {

@@ -1057,7 +1057,7 @@ pub fn section(s: &Workspace) -> El {
                 .on_toggle_tx(|s: &mut Workspace, tx: &mut Tx| {
                     s.set_sync_shared_hosts(!s.settings.sync_shared_hosts, tx)
                 })
-                .build(kit())
+                .build(palette().kit())
                 .key("sync-shared-hosts"),
         ),
         setting(

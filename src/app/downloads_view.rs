@@ -51,7 +51,8 @@ fn folder_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// The Download from <host> dialog: ask, wait for Rex, question, or an error before any bytes.
 pub fn dialog(s: &Workspace, d: &Dialog) -> El {
     let panel = s.panel.as_ref().expect("download panel");
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     let host = panel
         .target
         .as_ref()
@@ -319,7 +320,7 @@ fn download_row(r: &Row<'_>) -> El {
             Some(f) => {
                 let f = f.clamp(0.02, 1.);
                 bar.range_value(f64::from(f), 0., 1.)
-                    .fill(white(0.08))
+                    .fill(tint(0.08))
                     .child(el().grow(f).h_full().radius(1.5).fill(rgb(accent())))
                     .child(el().grow((1. - f).max(0.0001)))
             }

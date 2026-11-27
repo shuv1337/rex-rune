@@ -152,8 +152,8 @@ fn session_button(s: &Workspace) -> El {
             .center_y()
             .radius(8.)
             .continuous_corners()
-            .hover(white(0.08))
-            .press(white(0.12))
+            .hover(tint(0.08))
+            .press(tint(0.12))
             .help(format!(
                 "{session} · {host} · {}",
                 s.shortcut_help("Switch session", "session.switch")
@@ -276,7 +276,7 @@ fn pane_end(s: &Workspace, bar: El, divider: bool) -> El {
                 .w(1.)
                 .h(16.)
                 .mx(4.)
-                .fill(white(0.1))
+                .fill(tint(0.1))
         }))
         .child(pane_header::actions(s, window, &block, width, true))
 }

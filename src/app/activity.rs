@@ -264,7 +264,7 @@ pub fn progress_bar(key: String, (percent, tone): (Option<u8>, u32), inset: f32)
     match percent {
         Some(percent) => {
             let fraction = (f32::from(percent.min(100)) / 100.).max(0.02);
-            bar.fill(white(0.08))
+            bar.fill(tint(0.08))
                 .child(el().grow(fraction).h_full().radius(1.).fill(rgb(tone)))
                 .child(el().grow(1. - fraction))
         }

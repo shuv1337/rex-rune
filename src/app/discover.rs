@@ -367,7 +367,7 @@ impl Workspace {
                         .center()
                         .radius(6.)
                         .continuous_corners()
-                        .fill(white(0.08))
+                        .fill(tint(0.08))
                         .help(added)
                         .child(text("Added").font(medium(10.5)).color(tone))
                 }),

@@ -124,8 +124,8 @@ fn the_most_pressing_tab_speaks_for_its_session() {
 #[test]
 fn the_ranking_colours_are_distinct_in_every_palette() {
     // The rank after needs-you is read from the word's colour.
-    for chrome in rex_rune::settings::ChromeTheme::ALL {
-        let p = crate::app::theme::palette_of(chrome);
+    for chrome in rex_rune::settings::ChromeTheme::all() {
+        let p = crate::app::theme::palette_of(&chrome);
         assert!(
             p.accent != p.warning && p.warning != p.danger && p.accent != p.danger,
             "{}",

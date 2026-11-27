@@ -402,36 +402,30 @@ fn colour_search_anchored_keyboard_save_relaunch_and_inert_count_preview() {
     }
 }
 
-/// The renderer composites translucent white in linear RGB. Test the actual
-/// supported surfaces, not an sRGB mix (which understates their brightness).
+/// Actual tab, header and preview surfaces are composited in encoded sRGB.
 #[test]
 fn glyph_tints_contrast_on_supported_tab_and_preview_surfaces() {
-    fn over(base: rune::Color, alpha: f32) -> rune::Color {
-        rune::Color {
-            r: alpha + base.r * (1. - alpha),
-            g: alpha + base.g * (1. - alpha),
-            b: alpha + base.b * (1. - alpha),
-            a: 1.,
-        }
-    }
-    fn luminance(c: rune::Color) -> f32 {
-        c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722
-    }
-    for chrome in ChromeTheme::ALL {
-        let p = palette_of(chrome);
+    use rex_rune::color::{contrast, over};
+    for chrome in ChromeTheme::all() {
+        let p = palette_of(&chrome);
+        let overlay = if p.dark { 0xffffff } else { p.ink };
         for (surface, base) in [
-            ("toolbar", rgb(p.ground)),
-            ("sidebar", over(rgb(p.ground), 0.025)),
-            ("preview", over(rgb(p.popover), 0.04)),
+            (
+                "toolbar",
+                p.surface_raised
+                    .unwrap_or_else(|| over(overlay, p.ground, 0.055)),
+            ),
+            ("sidebar", p.sidebar),
+            ("header", p.card),
+            ("preview", over(overlay, p.popover, 0.04)),
         ] {
             for (state, alpha) in [("plain", 0.), ("hover", 0.05), ("selected", 0.11)] {
-                let background = over(base, alpha);
+                let bg = over(overlay, base, alpha);
                 for icon in all() {
-                    let foreground = rgb(icon.tint);
-                    let contrast = (luminance(foreground) + 0.05) / (luminance(background) + 0.05);
+                    let fg = glyph_tint(icon.tint, p.dark);
                     assert!(
-                        contrast >= 3.,
-                        "{} {surface} {state} {}: {contrast}",
+                        contrast(fg, bg) >= 3.,
+                        "{} {surface} {state} {}",
                         chrome.name(),
                         icon.slug
                     );
@@ -479,10 +473,10 @@ fn tab_icon_colours_draw() {
         rune::text::TextSystem::new(fonts.files, fonts.families),
     );
     rt.on_key = Some(crate::app::input::on_key);
-    for (palette, chrome) in ChromeTheme::ALL.into_iter().enumerate() {
+    for (palette, chrome) in ChromeTheme::all().enumerate() {
         for (mode_id, mode) in MODES.into_iter().enumerate() {
             rt.update(|s, _| {
-                s.settings.chrome_theme = chrome;
+                s.settings.chrome_theme = chrome.clone();
                 s.settings.interface.tab_icon_color = mode;
             });
             settle(&mut rt);

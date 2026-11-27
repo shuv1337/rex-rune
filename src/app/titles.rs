@@ -5,7 +5,7 @@
 //! preference to `activity::tab_name` or `activity::pane_name`.
 use super::{
     settings_kit::{card, footnote, section, setting},
-    theme::kit,
+    theme::palette,
     workspace::Workspace,
 };
 use rune::{El, Tx};
@@ -25,7 +25,7 @@ pub fn titles(s: &Workspace) -> El {
                     .on_toggle_tx(|s: &mut Workspace, tx: &mut Tx| {
                         s.prefer_generated_titles(!s.generated_titles(), tx)
                     })
-                    .build(kit())
+                    .build(palette().kit())
                     .key("generated-titles"),
             )]),
             footnote(

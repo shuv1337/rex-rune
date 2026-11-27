@@ -1089,7 +1089,8 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
     let Some(active) = s.prompts.open_prompt() else {
         return super::popups::overlay();
     };
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     let now = Instant::now();
     let prompt = &active.prompt;
     let is_pick = matches!(prompt.kind, PromptKind::Pick { .. });
@@ -1141,7 +1142,7 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
         .size(24., 24.)
         .center()
         .radius(8.)
-        .hover(white(0.08))
+        .hover(tint(0.08))
         .cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
         .tab_index(-1)
@@ -1275,8 +1276,8 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
                 .center_y()
                 .radius(8.)
                 .continuous_corners()
-                .fill(white(0.045))
-                .border(1., white(0.1))
+                .fill(tint(0.045))
+                .border(1., tint(0.1))
                 .child(
                     TextInput::new(&active.edit)
                         .placeholder(placeholder)
@@ -1360,6 +1361,7 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
                                     surface: "prompt-pick",
                                     activity: None,
                                     program: None,
+                                    leading: None,
                                     icon: Some(&PLUS),
                                     subtitle: None,
                                     label: &label,
@@ -1396,6 +1398,7 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> El {
                                     surface: "prompt-pick",
                                     activity: None,
                                     program: None,
+                                    leading: None,
                                     icon: Some(icon_for(item.icon)),
                                     subtitle: item.subtitle.as_deref(),
                                     label: &item.title,

@@ -90,7 +90,7 @@ fn toggle(key: &str, label: &str, on: bool, field: fn(&mut TerminalConfig) -> &m
             *value = !*value;
             s.save();
         })
-        .build(kit())
+        .build(palette().kit())
         .key(key.to_owned())
 }
 
@@ -551,7 +551,7 @@ pub fn terminal(s: &Workspace) -> El {
                         .on_toggle(|s: &mut Workspace| {
                             s.set_show_recent_paths(!s.settings.terminal.show_recent_paths);
                         })
-                        .build(kit())
+                        .build(palette().kit())
                         .key("show-recent-paths"),
                 )]),
                 footnote(

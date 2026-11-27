@@ -1635,7 +1635,8 @@ impl Default for TermColors {
 impl TermColors {
     /// For the theme this client declares, if any, in chrome `palette`.
     pub fn of(theme: Option<&TerminalTheme>, palette: &Palette) -> Self {
-        let theme = theme.cloned().unwrap_or_default();
+        let defaults = TerminalTheme::default();
+        let theme = theme.unwrap_or(&defaults);
         Self {
             background: theme.background.unwrap_or(palette.card),
             selection_bg: theme
@@ -1664,7 +1665,7 @@ impl TermColors {
 
     /// What the server's default background `frame_bg` draws as: `frame_bg` when a program
     /// chose it (`from_program`) and `keep_program_background` is on; otherwise `background`
-    /// when both are equally dark or light (Rex's built-in black, or another owner's theme),
+    /// when both are equally dark or light (Rex's built-in drop_shadow, or another owner's theme),
     /// so a single pane reads as one surface with the chrome; otherwise the server's own, so
     /// the default text drawn for it stays readable. Only that exact colour is replaced, so
     /// explicit backgrounds and inverse video's block keep theirs.
@@ -2605,13 +2606,20 @@ mod tests {
             "a server without set_theme keeps its black under its light default text"
         );
         let midnight = TermColors::of(Some(&TerminalTheme::midnight()), &MIDNIGHT);
-        assert_eq!(midnight, follow, "Midnight's background is the card's");
+        assert_eq!(
+            midnight.background, follow.background,
+            "Midnight sits on its card"
+        );
+        assert_eq!(midnight.selection_bg, follow.selection_bg);
         assert_eq!(
             TermColors::of(Some(&TerminalTheme::default()), &MIDNIGHT),
             follow,
             "Rex's own colours draw like Follow server"
         );
-        let rose = TermColors::of(None, &crate::app::theme::ROSE_PINE);
+        let rose = TermColors::of(
+            None,
+            &crate::app::theme::palette_of(&rex_rune::settings::ChromeTheme::RosePine),
+        );
         assert_eq!(
             rose.body(0x000000, false),
             0x191724,

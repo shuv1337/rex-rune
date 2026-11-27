@@ -821,7 +821,13 @@ pub fn filter_field(s: &Workspace, inset: f32) -> El {
         .h(FILTER)
         .px(inset)
         .gap(8.)
-        .child(field.build(kit()).key("shortcut-filter").grow(1.).min_w(0.))
+        .child(
+            field
+                .build(palette().kit())
+                .key("shortcut-filter")
+                .grow(1.)
+                .min_w(0.),
+        )
         .child(recorder::menu_button())
 }
 

@@ -92,7 +92,7 @@ fn label_color(rt: &mut Runtime<Workspace>, label: &str) -> rune::Color {
 
 #[test]
 fn every_menu_separates_its_groups_and_ends_with_its_destructive_row() {
-    set_palette(&MIDNIGHT);
+    set_palette(MIDNIGHT.clone());
     let (mut ws, _rx) = tabbed_workspace("split");
     ws.sidebar.toggle();
     ws.settings.hosts.push(Host {
@@ -140,7 +140,7 @@ fn every_menu_separates_its_groups_and_ends_with_its_destructive_row() {
 
 #[test]
 fn a_destructive_row_that_cannot_run_is_muted_not_red() {
-    set_palette(&MIDNIGHT);
+    set_palette(MIDNIGHT.clone());
     let mut ws = workspace();
     ws.sidebar.toggle();
     ws.hosts[0].model.connected = true;
@@ -240,7 +240,7 @@ fn commands_keep_destructive_rows_last_and_a_filtered_list_is_flat() {
 
 #[test]
 fn the_selected_row_is_tinted_and_outlined_and_a_destructive_one_in_danger() {
-    set_palette(&MIDNIGHT);
+    set_palette(MIDNIGHT.clone());
     let (ws, _rx) = tabbed_workspace("split");
     let mut rt = runtime(ws);
     rt.update(|s, _| s.pane_menu("block:b".into(), Some((300., 200.))));

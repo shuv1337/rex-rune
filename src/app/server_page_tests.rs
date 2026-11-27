@@ -838,11 +838,11 @@ fn pair_largest_symbol_fits_both_sizes_and_keeps_black_white_in_every_theme() {
     let _families = rune::text::with_families("Inter", "Inter");
     let prefix = "https://build.tail1234.ts.net/";
     let address = format!("{prefix}{}", "a".repeat(213 - prefix.len()));
-    for theme in rex_rune::settings::ChromeTheme::ALL {
+    for theme in rex_rune::settings::ChromeTheme::all() {
         for size in [(1024., 700.), (640., 480.)] {
             for scale in [1., 2.] {
                 let mut ws = fixture();
-                ws.settings.chrome_theme = theme;
+                ws.settings.chrome_theme = theme.clone();
                 pair_report(&mut ws, 0, "available", &address);
                 prepare(&mut ws, size);
                 ws.pair_device();

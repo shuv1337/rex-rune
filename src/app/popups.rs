@@ -195,10 +195,10 @@ fn activity_view(s: &Workspace) -> El {
             .font(if on { medium(11.) } else { ui(11.) })
             .color(rgb(if on { ink() } else { muted() }));
         if on {
-            cell = cell.fill(white(0.09));
+            cell = cell.fill(tint(0.09));
         } else {
             word = word.group_color(rgb(ink()));
-            cell = cell.cursor(rune::Cursor::Pointer).hover(white(0.05));
+            cell = cell.cursor(rune::Cursor::Pointer).hover(tint(0.05));
         }
         cell.child(word)
     };
@@ -221,7 +221,8 @@ fn activity_view(s: &Workspace) -> El {
 }
 
 pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     let panel = s.panel.as_ref().expect("list panel");
     let sessions = matches!(panel.kind, PanelKind::Picker(true) | PanelKind::Hosts(_));
     // Context menus (a pane's, a tab's, a sidebar session's) share one shape.
@@ -259,7 +260,9 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     });
     // Add host: machines in columns, each name whole.
     let discover = matches!(panel.kind, PanelKind::Discover);
-    let width = (if values {
+    let width = (if matches!(panel.kind, PanelKind::Chromes) {
+        272.
+    } else if values {
         220.
     } else if pane || matches!(panel.kind, PanelKind::ShortcutMenu) {
         280.
@@ -413,8 +416,8 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                                 .mr(-4.)
                                 .center()
                                 .radius(6.)
-                                .hover(white(0.08))
-                                .press(white(0.12))
+                                .hover(tint(0.08))
+                                .press(tint(0.12))
                                 .cursor(rune::Cursor::Pointer)
                                 .preserve_focus_on_press(true)
                                 .tab_index(-1)
@@ -490,6 +493,10 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                     activity: entry.activity.as_ref(),
                     program: entry.program,
                     icon: None,
+                    leading: match &entry.action {
+                        Intent::Chrome(chrome) => Some(swatch(&chrome.preset().palette)),
+                        _ => None,
+                    },
                     subtitle: None,
                     label: &entry.label,
                     detail: &entry.detail,
@@ -568,7 +575,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .error
                 .clone()
                 .unwrap_or_else(|| "Reading folder…".into()),
-            PanelKind::Themes => "No matching themes.".to_owned(),
+            PanelKind::Themes | PanelKind::Chromes => "No matching themes.".to_owned(),
             PanelKind::Discover => s.discovery_empty_message(),
             _ => "No matches. Try another name or create a session.".to_owned(),
         };
@@ -712,7 +719,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .center_y()
                 .radius(8.)
                 .continuous_corners()
-                .fill(white(0.045))
+                .fill(tint(0.045))
                 .child(
                     TextInput::new(&panel.inputs[0])
                         .placeholder(placeholder)
@@ -782,7 +789,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     }
     if footer_count > 0 {
         surface = surface
-            .child(el().h(1.).mx(8.).my(3.).fill(white(0.07)))
+            .child(el().h(1.).mx(8.).my(3.).fill(tint(0.07)))
             .child(footer.px(0.).py(0.));
     }
     if let Some(ports) = &ports {
@@ -860,7 +867,7 @@ fn rename_row(edit: &TextEdit, height: f32, current: bool, surface: &str) -> El 
         .center_y()
         .radius(7.)
         .continuous_corners()
-        .fill(white(0.05))
+        .fill(tint(0.05))
         .border(1., rgb(accent()).alpha(0.55))
         .child(el().w(14.).center().child(if current {
             glyph(&CHECK, 14., rgb(accent()))
@@ -876,7 +883,7 @@ fn rename_row(edit: &TextEdit, height: f32, current: bool, surface: &str) -> El 
                 .on_edit(|s: &mut Workspace| s.rename_input())
                 .on_key(rename_key)
                 .width(None)
-                .build(kit())
+                .build(palette().kit())
                 .key("session-rename")
                 // The field's own inset, so the name stays where the row's label was.
                 .ml(-8.)

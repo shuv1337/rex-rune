@@ -202,7 +202,8 @@ impl Updates {
 }
 
 pub fn section(s: &Workspace) -> El {
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     let u = &s.updates;
     let current = &rex_rune::format_version(&u.config.current_version);
     let channel_label = u.channel.label();
@@ -459,7 +460,7 @@ pub fn toast_card(s: &Workspace) -> Option<El> {
                         .size(24., 24.)
                         .center()
                         .radius(8.)
-                        .hover(white(0.08))
+                        .hover(tint(0.08))
                         .cursor(Cursor::Pointer)
                         .preserve_focus_on_press(true)
                         .on_press(move |s: &mut Workspace| {

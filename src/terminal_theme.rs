@@ -23,11 +23,6 @@ use std::{
 /// Midnight's background: the navy the Midnight chrome is drawn in.
 pub const MIDNIGHT_BACKGROUND: u32 = 0x001528;
 
-const GRUVBOX_DARK: [u32; 16] = [
-    0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984, 0x928374,
-    0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
-];
-
 /// A theme's colours; a colour left out is Rex's built-in one.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TerminalTheme {
@@ -43,44 +38,8 @@ pub struct TerminalTheme {
     pub scheme: Option<&'static str>,
 }
 
-/// A terminal theme that ships with the client, paired with a chrome palette.
-pub struct Builtin {
-    /// Its id in the `terminal_theme` setting, after [`BUILTIN_PREFIX`].
-    pub id: &'static str,
-    pub name: &'static str,
-    pub chrome: ChromeTheme,
-    pub theme: fn() -> TerminalTheme,
-}
-
-/// Built-in theme ids carry this prefix; Ghostty theme names never contain a slash.
+pub use crate::chrome_theme::{BUILTINS, Builtin};
 pub const BUILTIN_PREFIX: &str = "rex/";
-
-pub const BUILTINS: &[Builtin] = &[
-    Builtin {
-        id: "midnight",
-        name: "Midnight",
-        chrome: ChromeTheme::Midnight,
-        theme: TerminalTheme::midnight,
-    },
-    Builtin {
-        id: "rose-pine",
-        name: "Rosé Pine",
-        chrome: ChromeTheme::RosePine,
-        theme: TerminalTheme::rose_pine,
-    },
-    Builtin {
-        id: "rose-pine-moon",
-        name: "Rosé Pine Moon",
-        chrome: ChromeTheme::RosePineMoon,
-        theme: TerminalTheme::rose_pine_moon,
-    },
-    Builtin {
-        id: "gruvbox-dark",
-        name: "Gruvbox Dark",
-        chrome: ChromeTheme::GruvboxDark,
-        theme: TerminalTheme::gruvbox_dark,
-    },
-];
 
 /// The built-in theme a `named:` id refers to, if it names one.
 pub fn builtin(id: &str) -> Option<&'static Builtin> {
@@ -89,76 +48,22 @@ pub fn builtin(id: &str) -> Option<&'static Builtin> {
 }
 
 /// The built-in theme paired with `chrome`: its background is the chrome's ground.
-pub fn paired(chrome: ChromeTheme) -> &'static Builtin {
-    BUILTINS
-        .iter()
-        .find(|b| b.chrome == chrome)
-        .expect("every chrome palette has a paired theme")
+pub fn paired(chrome: &ChromeTheme) -> &'static Builtin {
+    chrome.preset()
 }
 
 impl TerminalTheme {
-    /// Midnight's own: the chrome's navy behind Rex's default text, dark.
     pub fn midnight() -> Self {
-        Self {
-            background: Some(MIDNIGHT_BACKGROUND),
-            scheme: Some("dark"),
-            ..Self::default()
-        }
+        ChromeTheme::Midnight.preset().theme()
     }
-
-    /// Rosé Pine, as its Ghostty theme draws it.
     pub fn rose_pine() -> Self {
-        Self::full(
-            0x191724,
-            [0xe0def4, 0xe0def4, 0x191724, 0x403d52, 0xe0def4],
-            [
-                0x26233a, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4,
-                0x6e6a86, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4,
-            ],
-        )
+        ChromeTheme::RosePine.preset().theme()
     }
-
-    /// Rosé Pine Moon, as its Ghostty theme draws it.
     pub fn rose_pine_moon() -> Self {
-        Self::full(
-            0x232136,
-            [0xe0def4, 0xe0def4, 0x232136, 0x44415a, 0xe0def4],
-            [
-                0x393552, 0xeb6f92, 0x3e8fb0, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xea9a97, 0xe0def4,
-                0x6e6a86, 0xeb6f92, 0x3e8fb0, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xea9a97, 0xe0def4,
-            ],
-        )
+        ChromeTheme::RosePineMoon.preset().theme()
     }
-
-    /// Gruvbox Dark's background, text, cursor and palette; selection stays the chrome's.
     pub fn gruvbox_dark() -> Self {
-        Self {
-            background: Some(0x282828),
-            foreground: Some(0xebdbb2),
-            cursor: Some(0xebdbb2),
-            palette: (0..).zip(GRUVBOX_DARK).collect(),
-            scheme: Some("dark"),
-            ..Self::default()
-        }
-    }
-
-    /// A dark theme with every colour: foreground, cursor, cursor text, selection background
-    /// and selection foreground, then palette colours 0–15.
-    fn full(
-        background: u32,
-        [fg, cursor, cursor_text, sel_bg, sel_fg]: [u32; 5],
-        palette: [u32; 16],
-    ) -> Self {
-        Self {
-            background: Some(background),
-            foreground: Some(fg),
-            cursor: Some(cursor),
-            cursor_text: Some(cursor_text),
-            selection_background: Some(sel_bg),
-            selection_foreground: Some(sel_fg),
-            palette: (0..).zip(palette).collect(),
-            scheme: Some("dark"),
-        }
+        ChromeTheme::GruvboxDark.preset().theme()
     }
 
     /// A Ghostty theme file's colours, starting from none: a colour the file doesn't set
@@ -235,11 +140,7 @@ impl TerminalTheme {
     }
 }
 
-/// Whether a colour reads as light: perceived brightness above half.
-pub fn is_light(color: u32) -> bool {
-    let (r, g, b) = ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff);
-    (299 * r + 587 * g + 114 * b) / 1000 > 128
-}
+pub use crate::color::is_light;
 
 /// Where Ghostty themes are found, in Ghostty's order: the user's own, then Ghostty's.
 pub struct ThemeDirs {
@@ -331,14 +232,14 @@ impl ThemeDirs {
     pub fn resolve(
         &self,
         choice: &TerminalThemeChoice,
-        chrome: ChromeTheme,
+        chrome: &ChromeTheme,
     ) -> Result<Option<TerminalTheme>> {
         Ok(match choice {
             TerminalThemeChoice::FollowServer => None,
             TerminalThemeChoice::RexDefault => Some(TerminalTheme::default()),
-            TerminalThemeChoice::FollowChrome => Some((paired(chrome).theme)()),
+            TerminalThemeChoice::FollowChrome => Some(paired(chrome).theme()),
             TerminalThemeChoice::Named(id) => Some(match builtin(id) {
-                Some(builtin) => (builtin.theme)(),
+                Some(builtin) => builtin.theme(),
                 None => self.load(id)?,
             }),
         })
@@ -402,10 +303,7 @@ selection-foreground = #1e1e2e
 
     #[test]
     fn midnight_declares_the_navy_and_dark() {
-        assert_eq!(
-            args(&TerminalTheme::midnight()),
-            json!({"background":"#001528","scheme":"dark"})
-        );
+        assert_eq!(args(&TerminalTheme::midnight())["background"], "#001528");
         assert_eq!(
             args(&TerminalTheme::default()),
             json!({}),
@@ -492,7 +390,7 @@ selection-foreground = #1e1e2e
         assert!(dirs.load("../outside").is_err());
         assert!(dirs.load("missing").is_err());
         let named = |id: &str| TerminalThemeChoice::Named(id.into());
-        let dirs = |choice: &TerminalThemeChoice| dirs.resolve(choice, ChromeTheme::Midnight);
+        let dirs = |choice: &TerminalThemeChoice| dirs.resolve(choice, &ChromeTheme::Midnight);
         assert_eq!(
             dirs(&named("rex/midnight")).unwrap(),
             Some(TerminalTheme::midnight())
@@ -519,24 +417,29 @@ selection-foreground = #1e1e2e
             user: None,
             system: vec![],
         };
-        for chrome in ChromeTheme::ALL {
-            let builtin = paired(chrome);
+        for chrome in ChromeTheme::all() {
+            let builtin = paired(&chrome);
             assert_eq!(builtin.name, chrome.name());
             let theme = dirs
-                .resolve(&TerminalThemeChoice::FollowChrome, chrome)
+                .resolve(&TerminalThemeChoice::FollowChrome, &chrome)
                 .unwrap()
                 .unwrap();
-            assert_eq!(theme, (builtin.theme)());
+            assert_eq!(theme, builtin.theme());
+            assert_eq!(theme.palette.len(), 16);
+            assert!(theme.cursor.is_some() && theme.cursor_text.is_some());
+            assert!(theme.selection_foreground.is_some() && theme.selection_background.is_some());
+            assert_eq!(serde_json::to_value(&chrome).unwrap(), chrome.id());
+            assert_eq!(ChromeTheme::from_id(chrome.id()), chrome);
             assert_eq!(
                 dirs.resolve(
                     &TerminalThemeChoice::Named(format!("{BUILTIN_PREFIX}{}", builtin.id)),
-                    ChromeTheme::Midnight
+                    &ChromeTheme::Midnight
                 )
                 .unwrap(),
                 Some(theme.clone()),
                 "a paired theme can be named under any chrome"
             );
-            assert_eq!(args(&theme)["scheme"], "dark");
+            assert_eq!(args(&theme)["scheme"], builtin.scheme());
         }
         assert_eq!(
             args(&TerminalTheme::rose_pine()),
@@ -561,7 +464,11 @@ selection-foreground = #1e1e2e
             ),
             (Some(0x282828), Some(0xebdbb2), 16)
         );
-        assert_eq!(gruvbox.selection_background, None, "the chrome's selection");
+        assert_eq!(
+            gruvbox.selection_background,
+            Some(0x504945),
+            "the chrome's selection"
+        );
     }
 
     #[test]

@@ -133,7 +133,8 @@ fn metrics_card(s: &Workspace, inks: &Inks) -> El {
 /// One fallback font: its place in the order, its name, and Move up, Move down and Remove.
 /// The buttons are keyed by the family, so the keyboard stays on a font as it moves.
 fn fallback_row(s: &Workspace, index: usize, family: &str, count: usize) -> El {
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     type Act = fn(&mut Workspace, &str, &mut Tx);
     let action = |icon, label: &str, key: String, disabled: bool, act: Act| {
         let (name, again) = (family.to_owned(), family.to_owned());

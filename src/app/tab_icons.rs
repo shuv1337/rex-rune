@@ -83,7 +83,7 @@ fn each(
 ) -> El {
     for (index, icon) in icons.iter().enumerate() {
         let rest = if in_color(mode, active, index == 0) {
-            icon.icon.tint
+            glyph_tint(icon.icon.tint, palette().dark)
         } else if active {
             ink()
         } else {
@@ -107,6 +107,20 @@ fn each(
         parent = parent.child(cell);
     }
     parent
+}
+
+/// The catalog already pins dark-mode icon luminance to 0.65. Scale linear
+/// channels together to retain each hue against light chrome.
+pub fn glyph_tint(tint: u32, dark: bool) -> u32 {
+    if dark {
+        return tint;
+    }
+    use rex_rune::color::{luminance, srgb_decode, srgb_encode};
+    let scale = 0.14 / luminance(tint);
+    [16, 8, 0].into_iter().fold(0, |c, s| {
+        let v = srgb_decode(((tint >> s) & 255) as f32 / 255.);
+        c | (((srgb_encode(v * scale) * 255.).round() as u32) << s)
+    })
 }
 
 /// The first distinct glyph represents the focused pane, including empty/fallback
@@ -161,7 +175,7 @@ pub fn preview(s: &Workspace) -> El {
                 .center_y()
                 .radius(8.)
                 .continuous_corners()
-                .fill(white(if active { 0.11 } else { 0.05 })),
+                .fill(tint(if active { 0.11 } else { 0.05 })),
             key,
             &icons,
             active,

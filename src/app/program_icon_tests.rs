@@ -225,7 +225,7 @@ fn program_icons_sheet_draw() {
                         .gap(4.)
                         .center()
                         .radius(8.)
-                        .fill(white(0.04))
+                        .fill(tint(0.04))
                         .child(program_tile(icon, 36.))
                         .child(
                             rune::row()

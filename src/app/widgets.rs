@@ -69,8 +69,8 @@ pub fn chrome_button(
         .radius(9.)
         .continuous_corners()
         .cursor(Cursor::Pointer)
-        .hover(white(0.08))
-        .press(white(0.12))
+        .hover(tint(0.08))
+        .press(tint(0.12))
         .preserve_focus_on_press(true)
         .tab_index(-1)
         .help(help.to_owned())
@@ -105,17 +105,11 @@ pub fn pill(
         Pill::Primary => (
             rgb(on_accent()),
             row()
-                .linear_gradient(
-                    1.9,
-                    [
-                        (0., rgb(accent())),
-                        (1., rgb(mix(accent2(), accent(), 0.55))),
-                    ],
-                )
+                .linear_gradient(1.9, [(0., rgb(accent())), (1., rgb(palette().button_end))])
                 .box_shadow(shadow(0., 6., 18., rgb(accent()).alpha(0.25)))
-                .box_shadow(inset(1., white(0.35))),
+                .box_shadow(inset(1., tint(0.35))),
         ),
-        Pill::Neutral => (rgb(ink()), chip(row()).hover(white(0.09))),
+        Pill::Neutral => (rgb(ink()), chip(row()).hover(tint(0.09))),
         Pill::Danger => (
             rgb(danger()),
             row()
@@ -172,6 +166,7 @@ pub fn pill(
 }
 
 pub struct Row<'a> {
+    pub leading: Option<El>,
     pub activity: Option<&'a super::activity_list::Presentation>,
     /// A session's program, drawn as its tile before the label.
     pub program: Option<&'static ProgramIcon>,
@@ -223,7 +218,7 @@ pub fn separator() -> El {
         .h(SEPARATOR)
         .px(9.)
         .center_y()
-        .child(el().w_full().h(1.).fill(white(0.09)))
+        .child(el().w_full().h(1.).fill(tint(0.09)))
 }
 
 /// The sliding selection: a childless background that flies to the next selected row, with no
@@ -323,6 +318,7 @@ pub fn list_row(
     if let Some(activity) = r.activity {
         e = e.child(program_glyph(activity.icon, 15., rgb(muted())));
     }
+    e = e.children(r.leading);
     if let Some(row_icon) = r.icon {
         e = e.child(el().size(15., 15.).center().child(glyph(
             row_icon,
@@ -461,8 +457,8 @@ pub fn row_action(
         .size(22., 22.)
         .center()
         .radius(6.)
-        .hover(white(0.1))
-        .press(white(0.14))
+        .hover(tint(0.1))
+        .press(tint(0.14))
         .cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
         .tab_index(-1)
@@ -513,7 +509,7 @@ impl ScrollFx {
         el().absolute(0., 0.)
             .size(4., 16.)
             .radius(2.)
-            .fill(white(0.22))
+            .fill(tint(0.22))
             .live_rect(&self.thumb)
     }
 

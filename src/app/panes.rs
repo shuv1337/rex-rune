@@ -350,16 +350,16 @@ fn pane_card(
             CardState::Focused if outlined => c
                 .border_gradient(1., rgb(accent()).alpha(0.85), rgb(accent()).alpha(0.5))
                 .box_shadow(shadow(0., 0., 24., rgb(accent()).alpha(0.2)))
-                .box_shadow(shadow(0., 14., 40., black(0.55))),
+                .box_shadow(shadow(0., 14., 40., drop_shadow(0.55))),
             CardState::Target => c.border(1., rgb(accent()).alpha(0.85)).box_shadow(shadow(
                 0.,
                 10.,
                 30.,
-                black(0.45),
+                drop_shadow(0.45),
             )),
             CardState::Focused | CardState::Plain => c
-                .border_gradient(1., white(0.10), white(0.035))
-                .box_shadow(shadow(0., 10., 30., black(0.45))),
+                .border_gradient(1., tint(0.10), tint(0.035))
+                .box_shadow(shadow(0., 10., 30., drop_shadow(0.45))),
         };
     }
     let clear = if headed {
@@ -1091,7 +1091,7 @@ pub fn divider_handle(e: El, vertical_line: bool, dragging: bool, compact: bool)
     };
     let line = line.key("divider-line");
     let line = if compact {
-        line.fill(if dragging { rgb(accent()) } else { white(0.18) })
+        line.fill(if dragging { rgb(accent()) } else { tint(0.18) })
     } else if dragging {
         line.radius(1.).fill(rgb(accent())).box_shadow(shadow(
             0.,
@@ -1100,7 +1100,7 @@ pub fn divider_handle(e: El, vertical_line: bool, dragging: bool, compact: bool)
             rgb(accent()).alpha(0.5),
         ))
     } else {
-        line.radius(1.).fill(white(0.18)).group_opacity(0., 1.)
+        line.radius(1.).fill(tint(0.18)).group_opacity(0., 1.)
     };
     e.cursor(if vertical_line {
         Cursor::ResizeColumn

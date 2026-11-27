@@ -851,7 +851,7 @@ impl Workspace {
         );
         add(
             "Follow chrome",
-            paired(self.settings.chrome_theme).name,
+            paired(&self.settings.chrome_theme).name,
             "Built in",
             TerminalThemeChoice::FollowChrome,
         );
@@ -897,12 +897,20 @@ impl Workspace {
             return self.discovery_entries(&lower);
         }
         if matches!(panel.kind, PanelKind::Chromes) {
-            return ChromeTheme::ALL
-                .into_iter()
-                .map(|chrome| {
-                    let mut e = Entry::new(chrome.name(), "", "", Intent::Chrome(chrome));
-                    e.current = chrome == self.settings.chrome_theme;
-                    e
+            return ChromeTheme::all()
+                .filter_map(|chrome| {
+                    let preset = chrome.preset();
+                    let group = if preset.palette.dark { "Dark" } else { "Light" };
+                    if ![chrome.id(), preset.name, group]
+                        .iter()
+                        .any(|v| v.to_lowercase().contains(&lower))
+                    {
+                        return None;
+                    }
+                    let current = chrome == self.settings.chrome_theme;
+                    let mut entry = Entry::new(preset.name, "", group, Intent::Chrome(chrome));
+                    entry.current = current;
+                    Some(entry)
                 })
                 .collect();
         }

@@ -275,7 +275,7 @@ pub fn zoomed_chip(window: &Window, block: &str) -> Option<El> {
             .px(7.)
             .center()
             .radius(9.)
-            .fill(white(KEYCAP_FILL))
+            .fill(tint(KEYCAP_FILL))
             .help(help)
             .child(text("Zoomed").font(medium(10.5)).color(rgb(keycap_ink())))
     })
@@ -309,7 +309,7 @@ fn button(
     let (hover, press) = if destructive {
         (rgb(danger()).alpha(0.22), rgb(danger()).alpha(0.3))
     } else {
-        (white(0.09), white(0.13))
+        (tint(0.09), tint(0.13))
     };
     b.cursor(Cursor::Pointer)
         .hover(hover)
@@ -432,13 +432,13 @@ pub fn floating(header: El, carded: bool, top: f32) -> El {
         .corners([radius, radius, 0., 0.])
         .continuous_corners()
         .fill(rgb(popover()))
-        .box_shadow(shadow(0., 6., 16., black(0.35)))
+        .box_shadow(shadow(0., 6., 16., drop_shadow(0.35)))
         .transition(Transition::opacity().springs(SpringPair::new(SNAPPY, SNAPPY)))
         .child(header)
         .child(
             el().pin(Some(0.), None, Some(0.), Some(0.))
                 .h(1.)
-                .fill(white(0.09)),
+                .fill(tint(0.09)),
         )
 }
 

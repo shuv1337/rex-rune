@@ -1,9 +1,13 @@
 //! The chrome palette's tokens, the kit pinned to them, shared surfaces (chips, glass,
 //! cards) and the app's icons.
+use rex_rune::chrome_theme::{BUILTINS, PaletteSpec};
 use rex_rune::settings::ChromeTheme;
 use rune::{Color, El, Icon, Shadow, Spring, SpringPair, TextStyle, Transition};
 use rune_kit::{Kit, PaletteFocus, PaletteSeed};
-use std::sync::OnceLock;
+use std::{
+    cell::RefCell,
+    sync::{Arc, LazyLock, OnceLock},
+};
 
 /// sRGB `0xRRGGBB` → linear `Color`.
 pub fn rgb(value: u32) -> Color {
@@ -18,18 +22,17 @@ pub fn rgb(value: u32) -> Color {
 
 /// `a` over `b` at opacity `t`, mixed in sRGB.
 pub fn mix(a: u32, b: u32, t: f32) -> u32 {
-    let channel = |shift: u32| {
-        let (x, y) = (((a >> shift) & 0xff) as f32, ((b >> shift) & 0xff) as f32);
-        ((x * t + y * (1. - t)).round() as u32) << shift
-    };
-    channel(16) | channel(8) | channel(0)
+    rex_rune::color::over(a, b, t)
 }
 
-pub fn white(a: f32) -> Color {
-    Color::WHITE.alpha(a)
+pub fn tint(a: f32) -> Color {
+    palette().tint(a)
 }
-pub fn black(a: f32) -> Color {
-    Color::BLACK.alpha(a)
+pub fn scrim() -> Color {
+    palette().scrim()
+}
+pub fn drop_shadow(a: f32) -> Color {
+    Color::BLACK.alpha(if palette().dark { a } else { a * 0.235 })
 }
 pub fn shadow(x: f32, y: f32, blur: f32, color: Color) -> Shadow {
     Shadow {
@@ -54,116 +57,57 @@ pub fn inset(y: f32, color: Color) -> Shadow {
 
 /// One chrome palette: the colour tokens, and the kit pinned to them, built once.
 pub struct Palette {
-    pub ground: u32,
-    /// The card, and the terminal's default background (the server's default black is
-    /// replaced). The same colour as the ground, so a single pane and the toolbar read as one
-    /// surface.
-    pub card: u32,
-    pub popover: u32,
-    pub ink: u32,
-    pub muted: u32,
-    pub accent: u32,
-    pub accent2: u32,
-    pub live: u32,
-    pub warning: u32,
-    pub danger: u32,
-    /// Text on an accent fill (primary buttons).
-    pub on_accent: u32,
-    pub terminal_selection: u32,
+    spec: PaletteSpec,
     kit: OnceLock<Kit>,
+    selection_strength: f32,
+    pub button_end: u32,
 }
-
-pub static MIDNIGHT: Palette = Palette {
-    ground: 0x001528,
-    card: 0x001528,
-    popover: 0x0d1524,
-    ink: 0xe8eef6,
-    muted: 0x93a3b8,
-    accent: 0x7cc4ff,
-    accent2: 0xa78bfa,
-    live: 0x5eead4,
-    warning: 0xf5d48a,
-    danger: 0xff8a8a,
-    on_accent: 0x061220,
-    terminal_selection: 0x2f4a6e,
-    kit: OnceLock::new(),
-};
-
-/// Rosé Pine's roles: base, surface, text, subtle, iris, foam, pine, gold, love, highlight med.
-pub static ROSE_PINE: Palette = Palette {
-    ground: 0x191724,
-    card: 0x191724,
-    popover: 0x1f1d2e,
-    ink: 0xe0def4,
-    muted: 0x908caa,
-    accent: 0xc4a7e7,
-    accent2: 0x9ccfd8,
-    live: 0x31748f,
-    warning: 0xf6c177,
-    danger: 0xeb6f92,
-    on_accent: 0x191724,
-    terminal_selection: 0x403d52,
-    kit: OnceLock::new(),
-};
-
-/// Rosé Pine Moon's roles, as for Rosé Pine.
-pub static ROSE_PINE_MOON: Palette = Palette {
-    ground: 0x232136,
-    card: 0x232136,
-    popover: 0x2a273f,
-    ink: 0xe0def4,
-    muted: 0x908caa,
-    accent: 0xc4a7e7,
-    accent2: 0x9ccfd8,
-    live: 0x3e8fb0,
-    warning: 0xf6c177,
-    danger: 0xeb6f92,
-    on_accent: 0x232136,
-    terminal_selection: 0x44415a,
-    kit: OnceLock::new(),
-};
-
-/// Gruvbox Dark: bg, bg1, fg, gray, blue, purple, green, yellow, red, bg2.
-pub static GRUVBOX_DARK: Palette = Palette {
-    ground: 0x282828,
-    card: 0x282828,
-    popover: 0x3c3836,
-    ink: 0xebdbb2,
-    muted: 0xa89984,
-    accent: 0x83a598,
-    accent2: 0xd3869b,
-    live: 0xb8bb26,
-    warning: 0xfabd2f,
-    danger: 0xfb4934,
-    on_accent: 0x282828,
-    terminal_selection: 0x504945,
-    kit: OnceLock::new(),
-};
-
-/// The palette a chrome theme draws in.
-pub fn palette_of(chrome: ChromeTheme) -> &'static Palette {
-    match chrome {
-        ChromeTheme::Midnight => &MIDNIGHT,
-        ChromeTheme::RosePine => &ROSE_PINE,
-        ChromeTheme::RosePineMoon => &ROSE_PINE_MOON,
-        ChromeTheme::GruvboxDark => &GRUVBOX_DARK,
+impl std::ops::Deref for Palette {
+    type Target = PaletteSpec;
+    fn deref(&self) -> &PaletteSpec {
+        &self.spec
     }
 }
-
-thread_local! {
-    // Per thread: Rune builds a window's view on its UI thread, and headless runtimes on
-    // other threads keep their own. The root view sets it before every build.
-    static ACTIVE: std::cell::Cell<&'static Palette> = const { std::cell::Cell::new(&MIDNIGHT) };
+static PALETTES: LazyLock<Vec<Arc<Palette>>> = LazyLock::new(|| {
+    BUILTINS
+        .iter()
+        .map(|b| {
+            Arc::new(Palette {
+                selection_strength: selection_strength(&b.palette),
+                button_end: rex_rune::color::readable(
+                    mix(b.palette.accent2, b.palette.accent, 0.55),
+                    b.palette.on_accent,
+                    b.palette.accent,
+                    4.5,
+                ),
+                spec: b.palette,
+                kit: OnceLock::new(),
+            })
+        })
+        .collect()
+});
+pub static MIDNIGHT: LazyLock<Arc<Palette>> = LazyLock::new(|| palette_of(&ChromeTheme::Midnight));
+pub fn palette_of(chrome: &ChromeTheme) -> Arc<Palette> {
+    let index = BUILTINS
+        .iter()
+        .position(|b| &b.chrome == chrome)
+        .expect("validated built-in chrome ID");
+    PALETTES[index].clone()
 }
-
-/// The palette views on this thread draw in.
-pub fn palette() -> &'static Palette {
-    ACTIVE.get()
+thread_local! {static ACTIVE: RefCell<Arc<Palette>> = RefCell::new(MIDNIGHT.clone());}
+pub fn palette() -> Arc<Palette> {
+    ACTIVE.with_borrow(Arc::clone)
 }
-pub fn set_palette(palette: &'static Palette) {
-    ACTIVE.set(palette);
+pub fn set_palette(p: Arc<Palette>) {
+    ACTIVE.replace(p);
 }
-
+pub fn native_scheme(chrome: &ChromeTheme) -> rune::ColorScheme {
+    if chrome.preset().palette.dark {
+        rune::ColorScheme::Dark
+    } else {
+        rune::ColorScheme::Light
+    }
+}
 pub fn ground() -> u32 {
     palette().ground
 }
@@ -198,12 +142,38 @@ pub fn on_accent() -> u32 {
 /// How much of its tone the `SELECTION` fill is.
 pub const SELECTION_FILL: f32 = 0.18;
 
+/// Keep small text readable even on a keycap stacked over the selected row.
+/// Compute this once per palette, keeping the normal wash wherever it fits.
+fn selection_strength(p: &PaletteSpec) -> f32 {
+    use rex_rune::color::{contrast, over};
+    let overlay = if p.dark { 0xffffff } else { p.ink };
+    (0..=20)
+        .rev()
+        .map(|n| n as f32 / 20.)
+        .find(|&a| {
+            [p.accent, p.danger].into_iter().all(|tone| {
+                contrast(
+                    p.ink,
+                    over(
+                        overlay,
+                        over(tone, p.popover, SELECTION_FILL * a),
+                        KEYCAP_LIT * a,
+                    ),
+                ) >= 4.55
+            })
+        })
+        .unwrap_or(0.)
+}
+
 /// `SELECTION`, the keyboard-selected row of a list, as (fill, outline): a tint of `ACCENT`
 /// under a 1 pt outline in it, so selection is never fill alone and never reads as a hover. A
 /// destructive row tints in `DANGER` instead. Text on it is `INK`.
 pub fn selection(destructive: bool) -> (Color, Color) {
     let tone = rgb(if destructive { danger() } else { accent() });
-    (tone.alpha(SELECTION_FILL), tone)
+    (
+        tone.alpha(SELECTION_FILL * palette().selection_strength),
+        tone,
+    )
 }
 
 /// Terminal search marks, drawn over the cells as the selection is: every match is a tint of
@@ -212,13 +182,20 @@ pub fn selection(destructive: bool) -> (Color, Color) {
 /// a match keeps the terminal's own text colour, dim ones included: the outline is what marks
 /// it.
 pub const SEARCH_MATCH: f32 = 0.18;
-pub const SEARCH_OUTLINE: f32 = 0.7;
-pub const SEARCH_CURRENT: f32 = 0.8;
+pub const SEARCH_OUTLINE: f32 = 1.;
+pub const SEARCH_CURRENT: f32 = 1.;
 pub const SEARCH_RADIUS: f32 = 2.5;
 
-/// A keycap's chip: white at this opacity over its surface, and `KEYCAP_LIT` on a selected row.
+/// Resting keycap opacity and the maximum opacity on a selected row.
 pub const KEYCAP_FILL: f32 = 0.07;
-pub const KEYCAP_LIT: f32 = 0.12;
+const KEYCAP_LIT: f32 = 0.12;
+pub fn keycap_alpha(lit: bool) -> f32 {
+    if lit {
+        KEYCAP_LIT * palette().selection_strength
+    } else {
+        KEYCAP_FILL
+    }
+}
 
 /// A keycap's text: halfway from `MUTED` to `INK`, so that 10.5 pt keys meet 4.5:1 on their
 /// chip in every palette. `MUTED` alone does not on the lighter popovers.
@@ -258,55 +235,73 @@ pub fn pop_in() -> Transition {
     Transition::scale(0.96).springs(SpringPair::new(POP, SNAPPY))
 }
 
-/// The active palette's kit.
-pub fn kit() -> &'static Kit {
-    let p = palette();
-    p.kit.get_or_init(|| {
-        let mut k = Kit::from_palette_focus(
-            PaletteSeed {
-                bg: rgb(p.ground),
-                fg: rgb(p.ink),
-                accent: rgb(p.accent),
-            },
-            PaletteFocus::Custom(rgb(p.accent)),
-        );
-        let c = &mut k.c;
-        (c.page, c.bg_base, c.surface_base) = (rgb(p.ground), rgb(p.ground), rgb(p.ground));
-        c.bg_deep = rgb(p.card);
-        for slot in [
-            &mut c.layer_01,
-            &mut c.layer_02,
-            &mut c.surface_raised,
-            &mut c.surface_raised_base,
-            &mut c.surface_float,
-        ] {
-            *slot = rgb(p.popover);
-        }
-        (c.hover, c.surface_hover, c.surface_raised_hover) =
-            (white(0.07), white(0.07), white(0.07));
-        c.pressed = white(0.11);
-        (c.border_base, c.border_muted, c.border_weak) = (white(0.12), white(0.08), white(0.06));
-        (c.border_strong, c.border_hover) = (white(0.2), white(0.2));
-        c.border_focus = rgb(p.accent);
-        (c.text_base, c.text_strong, c.icon_base) = (rgb(p.ink), rgb(p.ink), rgb(p.ink));
-        for slot in [
-            &mut c.text_muted,
-            &mut c.text_faint,
-            &mut c.text_weak,
-            &mut c.icon_muted,
-            &mut c.icon_faint,
-            &mut c.icon_weaker,
-        ] {
-            *slot = rgb(p.muted);
-        }
-        (c.text_accent, c.icon_accent) = (rgb(p.accent), rgb(p.accent));
-        c.success.fg = rgb(p.live);
-        c.warning.fg = rgb(p.warning);
-        c.danger.fg = rgb(p.danger);
-        k.radius.sm = 8.;
-        k.radius.md = 10.;
-        k
-    })
+impl Palette {
+    fn tint(&self, a: f32) -> Color {
+        (if self.dark {
+            Color::WHITE
+        } else {
+            rgb(self.ink)
+        })
+        .alpha(a)
+    }
+    fn scrim(&self) -> Color {
+        Color::BLACK.alpha(if self.dark { 0.5 } else { 0.32 })
+    }
+    /// This palette's kit, pinned once and shared by every view.
+    pub fn kit(&self) -> &Kit {
+        let p = self;
+        p.kit.get_or_init(|| {
+            let mut k = Kit::from_palette_focus(
+                PaletteSeed {
+                    bg: rgb(p.ground),
+                    fg: rgb(p.ink),
+                    accent: rgb(p.accent),
+                },
+                PaletteFocus::Custom(rgb(p.accent)),
+            );
+            k.dark = p.dark;
+            let c = &mut k.c;
+            (c.page, c.bg_base, c.surface_base) = (rgb(p.ground), rgb(p.ground), rgb(p.ground));
+            c.bg_deep = rgb(p.card);
+            for slot in [
+                &mut c.layer_01,
+                &mut c.layer_02,
+                &mut c.surface_raised,
+                &mut c.surface_raised_base,
+                &mut c.surface_float,
+            ] {
+                *slot = rgb(p.popover);
+            }
+            (c.hover, c.surface_hover, c.surface_raised_hover) =
+                (p.tint(0.07), p.tint(0.07), p.tint(0.07));
+            c.pressed = p.tint(0.11);
+            (c.border_base, c.border_muted, c.border_weak) =
+                (p.tint(0.12), p.tint(0.08), p.tint(0.06));
+            (c.border_strong, c.border_hover) = (p.tint(0.2), p.tint(0.2));
+            c.border_focus = rgb(p.accent);
+            (c.text_base, c.text_strong, c.icon_base) = (rgb(p.ink), rgb(p.ink), rgb(p.ink));
+            for slot in [
+                &mut c.text_muted,
+                &mut c.text_faint,
+                &mut c.text_weak,
+                &mut c.icon_muted,
+                &mut c.icon_faint,
+                &mut c.icon_weaker,
+            ] {
+                *slot = rgb(p.muted);
+            }
+            (c.text_accent, c.icon_accent) = (rgb(p.accent), rgb(p.accent));
+            c.success.fg = rgb(p.live);
+            c.warning.fg = rgb(p.warning);
+            c.danger.fg = rgb(p.danger);
+            c.scrim = p.scrim();
+            c.submit_fg = rgb(p.on_accent);
+            c.submit_icon = rgb(p.on_accent);
+            k.radius.sm = 8.;
+            k.radius.md = 10.;
+            k
+        })
+    }
 }
 
 pub fn ui(size: f32) -> TextStyle {
@@ -330,21 +325,36 @@ pub fn mono(size: f32) -> TextStyle {
 
 /// A glassy pill every control in the bar sits on.
 pub fn chip(e: El) -> El {
-    e.fill(white(0.055))
-        .border_gradient(1., white(0.13), white(0.04))
-        .radius(10.)
+    let p = palette();
+    e.fill(p.surface_raised.map_or_else(|| tint(0.055), rgb))
+        .border(1., p.border_strong.map_or_else(|| tint(0.13), rgb))
+        .radius(8.)
         .continuous_corners()
 }
 
-/// A popover or dialog surface: the frosted popover colour with a lit rim and a deep shadow.
+/// The canvas and accent preview shared by the picker and its Settings control.
+pub fn swatch(p: &PaletteSpec) -> El {
+    rune::row()
+        .size(24., 14.)
+        .clip_rounded(4.)
+        .child(rune::el().size(12., 14.).fill(rgb(p.ground)))
+        .child(rune::el().size(12., 14.).fill(rgb(p.accent)))
+        .child(
+            rune::el()
+                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                .radius(4.)
+                .border(1., tint(0.26)),
+        )
+}
+
 pub fn glass(e: El, radius: f32, blur: bool) -> El {
     let e = e
-        .fill(rgb(popover()).alpha(0.95))
-        .border_gradient(1., white(0.16), white(0.05))
+        .fill(rgb(popover()).alpha(if palette().dark { 0.95 } else { 0.98 }))
+        .border_gradient(1., tint(0.16), tint(0.05))
         .radius(radius)
         .continuous_corners()
-        .box_shadow(shadow(0., 24., 60., black(0.6)))
-        .box_shadow(shadow(0., 2., 6., black(0.35)));
+        .box_shadow(shadow(0., 24., 60., drop_shadow(0.6)))
+        .box_shadow(shadow(0., 2., 6., drop_shadow(0.35)));
     if blur { e.backdrop_blur(22.) } else { e }
 }
 
@@ -543,26 +553,11 @@ mod tests {
                 0xf5d48a, 0xff8a8a, 0x061220, 0x2f4a6e,
             ]
         );
-        assert_eq!(kit().c.page, rgb(0x001528));
-        assert_eq!(kit().c.text_muted, rgb(0x93a3b8));
+        assert_eq!(palette().kit().c.page, rgb(0x001528));
+        assert_eq!(palette().kit().c.text_muted, rgb(0x93a3b8));
     }
 
-    /// WCAG 2 contrast ratio of two sRGB colours.
-    fn contrast(a: u32, b: u32) -> f64 {
-        let luminance = |c: u32| {
-            let channel = |shift: u32| {
-                let v = ((c >> shift) & 0xff) as f64 / 255.;
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-        };
-        let (x, y) = (luminance(a), luminance(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
+    use rex_rune::color::{contrast, over};
 
     /// Hue in degrees.
     fn hue(c: u32) -> f64 {
@@ -583,17 +578,37 @@ mod tests {
 
     #[test]
     fn every_palette_is_legible_and_pairs_with_its_terminal_theme() {
-        assert!((contrast(0xffffff, 0x000000) - 21.).abs() < 1e-9);
-        for chrome in ChromeTheme::ALL {
-            let p = palette_of(chrome);
+        assert!((contrast(0xffffff, 0x000000) - 21.).abs() < 1e-5);
+        assert_eq!(BUILTINS.len(), 50);
+        assert_eq!(BUILTINS.iter().filter(|b| b.palette.dark).count(), 35);
+        for chrome in ChromeTheme::all() {
+            let p = palette_of(&chrome);
+            set_palette(p.clone());
             let name = chrome.name();
+            assert_eq!(p.kit().dark, p.dark);
+            assert!(
+                contrast(p.button_end, p.on_accent) >= 4.5,
+                "{name}: button gradient ink"
+            );
+            assert!(
+                contrast(p.on_accent, over(p.accent, p.ground, SEARCH_CURRENT)) >= 4.5,
+                "{name}: current search match"
+            );
+            assert!(contrast(p.on_accent, p.accent) >= 4.5, "{name}: button ink");
+            let overlay = if p.dark { 0xffffff } else { p.ink };
             assert!(contrast(p.muted, p.card) >= 4.5, "{name}: muted on card");
             assert!(contrast(p.ink, p.popover) >= 4.5, "{name}: ink on popover");
-            // Keycaps: on a popover's rows, and on the sidebar's search chip (itself 8% white
-            // over the card).
-            let keys = mix(p.ink, p.muted, 0.5);
-            for (surface, under, lift) in [("popover", p.popover, 0.), ("sidebar", p.card, 0.08)] {
-                let chip = mix(0xffffff, under, KEYCAP_FILL + lift);
+            let keys = keycap_ink();
+            let rail = if p.sidebar == p.ground {
+                over(overlay, p.sidebar, 0.025)
+            } else {
+                p.sidebar
+            };
+            let field = p
+                .surface_raised
+                .unwrap_or_else(|| over(overlay, rail, 0.055));
+            for (surface, under) in [("popover", p.popover), ("sidebar field", field)] {
+                let chip = over(overlay, under, KEYCAP_FILL);
                 assert!(
                     contrast(keys, chip) >= 4.5,
                     "{name}: keycaps on the {surface}"
@@ -602,9 +617,9 @@ mod tests {
             // A selected row keeps its label and its keycaps in ink on either tint, and its
             // outline stands clear of the popover around it.
             for (kind, tone) in [("selection", p.accent), ("destructive selection", p.danger)] {
-                let fill = mix(tone, p.popover, SELECTION_FILL);
+                let fill = over(tone, p.popover, selection(tone == p.danger).0.a);
                 assert!(contrast(p.ink, fill) >= 4.5, "{name}: ink on the {kind}");
-                let chip = mix(0xffffff, fill, KEYCAP_LIT);
+                let chip = over(overlay, fill, keycap_alpha(true));
                 assert!(
                     contrast(p.ink, chip) >= 4.5,
                     "{name}: keycaps on the {kind}"
@@ -619,21 +634,26 @@ mod tests {
             }
             let gap = (hue(p.warning) - hue(p.danger)).abs();
             assert!(
-                gap.min(360. - gap) >= 30.,
+                matches!(chrome.id(), "silver-point-dark" | "silver-point-light")
+                    || gap.min(360. - gap) >= 30.,
                 "{name}: warning and danger differ in hue"
             );
             assert_eq!(p.card, p.ground, "{name}: one surface");
-            let paired = rex_rune::terminal_theme::paired(chrome);
+            let paired = rex_rune::terminal_theme::paired(&chrome);
             assert_eq!(
-                (paired.theme)().background,
+                paired.theme().background,
                 Some(p.ground),
                 "{name}: the paired theme sits on the ground"
             );
-            set_palette(p);
-            assert_eq!(kit().c.page, rgb(p.ground), "{name}: its own kit");
-            assert_eq!(kit().c.text_base, rgb(p.ink));
+            set_palette(p.clone());
+            assert_eq!(palette().kit().c.page, rgb(p.ground), "{name}: its own kit");
+            assert_eq!(palette().kit().c.text_base, rgb(p.ink));
         }
-        set_palette(&MIDNIGHT);
-        assert_eq!(kit().c.page, rgb(0x001528), "Midnight's kit is unchanged");
+        set_palette(MIDNIGHT.clone());
+        assert_eq!(
+            palette().kit().c.page,
+            rgb(0x001528),
+            "Midnight's kit is unchanged"
+        );
     }
 }

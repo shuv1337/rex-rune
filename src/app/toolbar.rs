@@ -108,7 +108,7 @@ fn identity(s: &Workspace) -> El {
             .pr(8.)
             .gap(9.)
             .center_y()
-            .hover(white(0.08))
+            .hover(tint(0.08))
             .help(format!(
                 "{session} · {host} · {}",
                 s.shortcut_help("Switch session", "session.switch")
@@ -227,15 +227,14 @@ pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
                     el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
                         .radius(8.)
                         .continuous_corners()
-                        .fill(white(0.11))
-                        .box_shadow(shadow(0., 1., 3., black(0.35)))
-                        .box_shadow(inset(1., white(0.09)))
+                        .fill(tint(0.11))
+                        .border(1., palette().border_strong.map_or_else(|| tint(0.13), rgb))
                         .matched(format!("tab-pill:{session}"))
                         .transition(no_presence())
                         .motion(SNAPPY),
                 );
             } else {
-                tab_el = tab_el.radius(8.).hover(white(0.05));
+                tab_el = tab_el.radius(8.).hover(tint(0.05));
             }
             tab_el = tab_icons::append(
                 tab_el,
@@ -358,7 +357,7 @@ fn bar_button(
     let hover = if destructive {
         rgb(danger()).alpha(0.22)
     } else {
-        white(0.09)
+        tint(0.09)
     };
     row()
         .key(key.to_owned())
@@ -407,7 +406,7 @@ pub(super) fn activity_chip(s: &Workspace) -> Option<El> {
             .h(28.)
             .px(8.)
             .center_y()
-            .hover(white(0.08))
+            .hover(tint(0.08))
             .help(format!(
                 "{label} · {}",
                 s.shortcut_help("Show activity", super::activity_list::ACTION)
@@ -447,7 +446,7 @@ pub(super) fn download_chip(s: &Workspace) -> El {
             .px(8.)
             .gap(5.)
             .center_y()
-            .hover(white(0.08))
+            .hover(tint(0.08))
             .help(format!("{spoken} · click for the list"))
             .on_layout(|s: &mut Workspace, r| s.downloads.chip = r)
             .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
@@ -649,7 +648,7 @@ pub fn toolbar(s: &Workspace) -> El {
                         .w(1.)
                         .h(16.)
                         .mx(6.)
-                        .fill(white(0.1))
+                        .fill(tint(0.1))
                 }))
                 .children(s.own_frame.then(|| {
                     bar_button(

@@ -5,7 +5,7 @@ use super::{
     notify::{Note, Notifier},
     panel::*,
     term::{Term, TermColors},
-    theme::{palette_of, set_palette},
+    theme::{native_scheme, palette_of, set_palette},
     widgets::ScrollFx,
 };
 use rex_rune::{
@@ -307,9 +307,9 @@ impl Workspace {
         // A theme that can't be read leaves the setting alone: it applies again once its
         // file is back.
         let theme_dirs = ThemeDirs::from_env();
-        set_palette(palette_of(settings.chrome_theme));
+        set_palette(palette_of(&settings.chrome_theme));
         let (term_theme, theme_error) =
-            match theme_dirs.resolve(&settings.terminal_theme, settings.chrome_theme) {
+            match theme_dirs.resolve(&settings.terminal_theme, &settings.chrome_theme) {
                 Ok(theme) => (theme, None),
                 Err(error) => (None, Some(error)),
             };
@@ -1513,7 +1513,7 @@ impl Workspace {
     pub fn term_colors(&self) -> TermColors {
         TermColors::of(
             self.term_theme.as_ref(),
-            palette_of(self.settings.chrome_theme),
+            &palette_of(&self.settings.chrome_theme),
         )
         .with_selection(super::term::SelectionLook::of(&self.settings.terminal))
         .with_program_background(self.settings.terminal.keep_program_background)
@@ -1525,7 +1525,7 @@ impl Workspace {
     pub fn apply_theme(&mut self, choice: TerminalThemeChoice) -> anyhow::Result<()> {
         self.term_theme = self
             .theme_dirs
-            .resolve(&choice, self.settings.chrome_theme)?;
+            .resolve(&choice, &self.settings.chrome_theme)?;
         self.settings.terminal_theme = choice;
         self.settings.terminal_theme_chosen = true;
         self.save();
@@ -1541,15 +1541,16 @@ impl Workspace {
         if self.settings.chrome_theme == chrome {
             return;
         }
-        self.settings.chrome_theme = chrome;
-        set_palette(palette_of(chrome));
+        self.settings.chrome_theme = chrome.clone();
+        set_palette(palette_of(&chrome));
+        self.handle.set_color_scheme(native_scheme(&chrome));
         if !self.settings.terminal_theme_chosen
             && self.settings.terminal_theme == TerminalThemeChoice::FollowServer
         {
             self.settings.terminal_theme = TerminalThemeChoice::FollowChrome;
         }
         if self.settings.terminal_theme == TerminalThemeChoice::FollowChrome {
-            self.term_theme = Some((paired(chrome).theme)());
+            self.term_theme = Some(paired(&chrome).theme());
             self.declare_theme();
         }
         self.save();
@@ -1746,9 +1747,11 @@ impl Workspace {
                 }
             }
             Intent::ChooseChrome => {
-                self.open_panel(PanelKind::Chromes, "Theme", &[]);
+                self.open_panel(PanelKind::Chromes, "Theme", &[("", "Filter themes…", "")]);
                 if let Some(current) = self.entries().iter().position(|e| e.current) {
-                    self.panel.as_mut().unwrap().selected = current;
+                    let panel=self.panel.as_mut().unwrap();
+                    panel.selected=current;
+                    panel.reveal=true;
                 }
             }
             Intent::ChooseSshAgent => self.open_ssh_agents(),

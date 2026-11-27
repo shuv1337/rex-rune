@@ -11,6 +11,8 @@ pub fn format_version(version: &str) -> String {
     version.trim().trim_start_matches(['v', 'V']).to_owned()
 }
 
+pub mod chrome_theme;
+pub mod color;
 pub mod connection;
 pub mod download;
 pub mod hosts;

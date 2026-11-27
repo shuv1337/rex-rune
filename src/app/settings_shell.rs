@@ -131,9 +131,9 @@ fn section_icon(section: SettingsSection) -> &'static Icon {
 /// screen.
 fn tile(section: SettingsSection, on: bool) -> El {
     let (fill, ink_color) = if on {
-        (rgb(accent()).alpha(SELECTION_FILL), rgb(accent()))
+        selection(false)
     } else {
-        (white(0.07), rgb(muted()))
+        (tint(0.07), rgb(muted()))
     };
     el().size(22., 22.)
         .radius(6.)
@@ -175,7 +175,7 @@ fn search_field(s: &Workspace) -> El {
     search_box(
         "settings-search-box",
         30.,
-        input.build(kit()).key("settings-search"),
+        input.build(palette().kit()).key("settings-search"),
     )
 }
 
@@ -219,9 +219,9 @@ fn sections(s: &Workspace) -> El {
             item = item.mt(12.);
         }
         item = if selected {
-            item.fill(white(0.09))
+            item.fill(tint(0.09))
         } else {
-            item.hover(white(0.05))
+            item.hover(tint(0.05))
         };
         list = list.child(item);
     }
@@ -363,8 +363,8 @@ fn history_button(s: &Workspace, direction: isize) -> El {
     on_return(
         button
             .cursor(Cursor::Pointer)
-            .hover(white(0.08))
-            .press(white(0.12))
+            .hover(tint(0.08))
+            .press(tint(0.12))
             .focusable(true)
             .focus_ring(2., 0., rgb(accent()))
             .help(format!("{label} · {keys}"))
@@ -404,7 +404,7 @@ pub fn header(s: &Workspace, page: super::settings_nav::Page) -> El {
                 .h(28.)
                 .center_y()
                 .child(history_button(s, -1))
-                .child(el().w(1.).h(14.).fill(white(0.09)))
+                .child(el().w(1.).h(14.).fill(tint(0.09)))
                 .child(history_button(s, 1)),
         )
         .child(title(page))
@@ -412,7 +412,7 @@ pub fn header(s: &Workspace, page: super::settings_nav::Page) -> El {
             IconButton::new(&CLOSE)
                 .label("Close")
                 .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.close_panel(tx))
-                .build(kit())
+                .build(palette().kit())
                 .key("close-settings"),
         )
 }

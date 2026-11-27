@@ -669,10 +669,10 @@ fn slot(key: String, label: String, help: &str) -> El {
         .center()
         .radius(8.)
         .continuous_corners()
-        .border(1., white(0.07))
+        .border(1., tint(0.07))
         .cursor(Cursor::Pointer)
-        .hover(white(0.07))
-        .press(white(0.11))
+        .hover(tint(0.07))
+        .press(tint(0.11))
         .focusable(true)
         .focus_ring(2., 2., rgb(accent()))
 }
@@ -743,7 +743,7 @@ fn icon_button(
     destructive: bool,
     action: impl Fn(&mut Workspace, &mut Tx) + 'static,
 ) -> El {
-    let tint = if destructive { danger() } else { muted() };
+    let tone = if destructive { danger() } else { muted() };
     row()
         .key(key.to_owned())
         .role("button")
@@ -756,13 +756,13 @@ fn icon_button(
         .hover(if destructive {
             rgb(danger()).alpha(0.16)
         } else {
-            white(0.08)
+            tint(0.08)
         })
-        .press(white(0.12))
+        .press(tint(0.12))
         .focusable(false)
         .preserve_focus_on_press(true)
         .on_press_tx(action)
-        .child(glyph(icon, 15., rgb(tint)))
+        .child(glyph(icon, 15., rgb(tone)))
 }
 
 /// The recorder, in the row's trailing slot: the field that shows what is typed, Save once
@@ -786,7 +786,7 @@ pub fn control(recorder: &Recorder) -> El {
         .center_y()
         .radius(8.)
         .continuous_corners()
-        .fill(white(0.05))
+        .fill(tint(0.05))
         .border(1.5, rgb(accent()))
         .focusable(true)
         .autofocus()
@@ -855,9 +855,9 @@ pub fn menu_button() -> El {
             .size(32., 32.)
             .center()
             .radius(16.)
-            .fill(white(0.05))
-            .hover(white(0.09))
-            .press(white(0.12))
+            .fill(tint(0.05))
+            .hover(tint(0.09))
+            .press(tint(0.12))
             .cursor(Cursor::Pointer)
             .focusable(true)
             .focus_ring(2., 2., rgb(accent()))

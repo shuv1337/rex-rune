@@ -560,7 +560,7 @@ fn the_page_draws_a_row_for_every_action_with_its_keys_or_not_set() {
     let keys = rect(&rt, "shortcut-keys:client.tab.next");
     assert!(close(title[0], frame[0] + 12.) && title[0] + title[2] < keys[0]);
     // The keys are the keycaps menus and Commands draw: 17 pt chips on a 7% white fill.
-    let chip = crate::app::theme::white(crate::app::theme::KEYCAP_FILL);
+    let chip = crate::app::theme::tint(crate::app::theme::KEYCAP_FILL);
     let caps = rt
         .elements()
         .iter()

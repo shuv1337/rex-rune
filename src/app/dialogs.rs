@@ -69,7 +69,7 @@ fn modal_layer_with(s: &Workspace, surface: El, under: bool, top: f32, scrim_dis
         .pin(Some(0.), Some(0.), Some(0.), Some(0.))
         // No blur: it would hide the pane a confirmation names, and re-blur every
         // frame while terminals stream behind it.
-        .fill(black(0.5));
+        .fill(scrim());
     scrim = if scrim_dismiss {
         scrim.on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.cancel_panel(tx))
     } else {
@@ -90,7 +90,8 @@ pub(super) fn title(t: &str) -> El {
 
 fn form(s: &Workspace, form: &Form) -> El {
     let panel = s.panel.as_ref().expect("form panel");
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     let mut body = col().gap(12.).child(title(&panel.title));
     for (i, edit) in panel.inputs.iter().enumerate() {
         let (label, placeholder) = &panel.fields[i];
@@ -406,7 +407,7 @@ fn toast(key: String, message: String, close: impl Fn(&mut Workspace) + 'static)
             .size(24., 24.)
             .center()
             .radius(8.)
-            .hover(white(0.08))
+            .hover(tint(0.08))
             .cursor(Cursor::Pointer)
             .preserve_focus_on_press(true)
             .on_press(close)

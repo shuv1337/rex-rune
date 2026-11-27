@@ -50,12 +50,13 @@ fn header_fade_switch(
             *value = !*value;
             s.save();
         })
-        .build(kit())
+        .build(palette().kit())
         .key(key.to_owned())
 }
 
 fn interface(s: &Workspace) -> El {
-    let k = kit();
+    let palette = palette();
+    let k = palette.kit();
     let percent = (s.settings.ui_scale * 100.).round() as i32;
     let corner = match s.settings.notice_position {
         NoticePosition::TopRight => 0,
@@ -346,7 +347,7 @@ fn notify_switch(key: &str, label: &str, on: bool, disabled: bool, field: Field)
             }
             s.save();
         })
-        .build(kit())
+        .build(palette().kit())
         .key(key.to_owned())
 }
 
@@ -630,7 +631,7 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
             .label(format!("Remote control for {}", host.label))
             .hide_label()
             .on_toggle(move |s: &mut Workspace| s.toggle_remote_control(i))
-            .build(kit())
+            .build(palette().kit())
             .key(format!("remote-control:{i}")),
     ));
     rows.push(setting(
@@ -640,7 +641,7 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
             .label(format!("Allow script prompts for {}", host.label))
             .hide_label()
             .on_toggle_tx(move |s: &mut Workspace, tx: &mut Tx| s.toggle_host_prompts(i, Some(tx)))
-            .build(kit())
+            .build(palette().kit())
             .key(format!("host-prompts:{i}")),
     ));
     card(rows)
@@ -783,7 +784,7 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
             s.settings_history(direction, tx);
         })
         .child(super::settings_shell::sidebar(s, nav_width))
-        .child(el().w(1.).h_full().fill(white(0.06)))
+        .child(el().w(1.).h_full().fill(tint(0.06)))
         .child(content);
     row()
         .w(width)

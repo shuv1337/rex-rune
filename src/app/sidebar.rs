@@ -37,8 +37,8 @@ fn host_header(s: &Workspace, index: usize) -> El {
             .size(22., 22.)
             .center()
             .radius(6.)
-            .hover(white(0.06))
-            .press(white(0.1))
+            .hover(tint(0.06))
+            .press(tint(0.1))
             .cursor(Cursor::Pointer)
             .preserve_focus_on_press(true)
             .tab_index(-1)
@@ -71,7 +71,7 @@ fn host_header(s: &Workspace, index: usize) -> El {
                 .size(18., 22.)
                 .center()
                 .radius(6.)
-                .hover(white(0.06))
+                .hover(tint(0.06))
                 .cursor(Cursor::Pointer)
                 .preserve_focus_on_press(true)
                 .help(if config.collapsed {
@@ -156,7 +156,7 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
         .px(10.)
         .gap(10.)
         .center_y()
-        .radius(9.)
+        .radius(8.)
         .continuous_corners()
         .cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
@@ -170,17 +170,20 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
     if selected && !s.settings.vertical_tabs {
         e = e.child(
             el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
-                .radius(9.)
+                .radius(8.)
                 .continuous_corners()
-                .fill(white(0.1))
-                .box_shadow(inset(1., white(0.07)))
-                .box_shadow(shadow(0., 1., 3., black(0.3)))
+                .fill(
+                    palette()
+                        .surface_raised
+                        .map_or_else(|| tint(0.1), |c| rgb(mix(accent(), c, 0.045))),
+                )
+                .border(1., palette().border_strong.map_or_else(|| tint(0.12), rgb))
                 .matched("sb-current")
                 .transition(no_presence())
                 .motion(SNAPPY),
         );
     } else {
-        e = e.hover(white(0.05));
+        e = e.hover(tint(0.05));
     }
     e = e
         .child(if s.settings.vertical_tabs {
@@ -238,7 +241,7 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
         e = e.child(
             el().key(format!("session-target:{index}:{id}"))
                 .pin(Some(0.), Some(0.), Some(0.), Some(0.))
-                .radius(9.)
+                .radius(8.)
                 .continuous_corners()
                 .border(1.5, rgb(accent())),
         );
@@ -327,10 +330,10 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
     );
     if active {
         row = row
-            .fill(white(0.11))
-            .border_gradient(1., white(0.15), white(0.04));
+            .fill(tint(0.11))
+            .border_gradient(1., tint(0.15), tint(0.04));
     } else {
-        row = row.hover(white(0.05));
+        row = row.hover(tint(0.05));
     }
     if shown
         && let Some((word, tone)) =
@@ -369,12 +372,12 @@ fn new_session(s: &Workspace, index: usize) -> El {
         .px(10.)
         .gap(10.)
         .center_y()
-        .radius(9.)
+        .radius(8.)
         .continuous_corners()
-        .fill(white(0.04))
-        .box_shadow(inset(1., white(0.06)))
-        .hover(white(0.08))
-        .press(white(0.12))
+        .fill(tint(0.04))
+        .box_shadow(inset(1., tint(0.06)))
+        .hover(tint(0.08))
+        .press(tint(0.12))
         .cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
         .tab_index(-1)
@@ -435,8 +438,8 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                     note("Retry connection", accent())
                         .key(format!("retry-host:{index}"))
                         .role("button")
-                        .radius(9.)
-                        .hover(white(0.05))
+                        .radius(8.)
+                        .hover(tint(0.05))
                         .cursor(Cursor::Pointer)
                         .preserve_focus_on_press(true)
                         .help(status)
@@ -489,7 +492,7 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             .px(10.)
             .gap(8.)
             .center_y()
-            .hover(white(0.08))
+            .hover(tint(0.08))
             .cursor(Cursor::Pointer)
             .preserve_focus_on_press(true)
             .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
@@ -514,14 +517,20 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                 .key("session-search-keys"),
             ),
     );
+    let p = palette();
+    let classic_rail = p.sidebar == p.ground;
     let mut panel = col()
         .w_full()
         .grow(1.)
         .min_h(0.)
         .radius(CARD_RADIUS)
         .continuous_corners()
-        .fill(white(0.025))
-        .border_gradient(1., white(0.07), white(0.02))
+        .fill(if classic_rail {
+            tint(0.025)
+        } else {
+            rgb(p.sidebar)
+        })
+        .border(if classic_rail { 1. } else { 0. }, tint(0.07))
         .pt(8.)
         .gap(8.)
         .child(
@@ -565,7 +574,7 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                     .gap(6.)
                     .center_y()
                     .radius(8.)
-                    .hover(white(0.06))
+                    .hover(tint(0.06))
                     .cursor(Cursor::Pointer)
                     .preserve_focus_on_press(true)
                     .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.perform(Intent::AddHost, tx))
@@ -582,6 +591,7 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     );
     col()
         .key("sidebar")
+        .fill(rgb(p.sidebar))
         .w(width)
         .h_full()
         .pb(MARGIN)
@@ -592,6 +602,12 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                 .springs(SpringPair::new(SNAPPY, SNAPPY)),
         )
         .child(panel)
+        .children((!classic_rail).then(|| {
+            el().pin(None, Some(0.), Some(0.), Some(0.))
+                .w(1.)
+                .fill(p.border_subtle.map_or_else(|| tint(0.10), rgb))
+                .inert()
+        }))
 }
 
 /// The sidebar's resize edge, in the gutter beside it.

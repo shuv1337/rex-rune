@@ -99,7 +99,7 @@ fn resize_band(e: ResizeEdge) -> El {
 }
 
 pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
-    set_palette(palette_of(s.settings.chrome_theme));
+    set_palette(palette_of(&s.settings.chrome_theme));
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
     let maximized = cx.is_maximized();
@@ -413,6 +413,7 @@ pub fn run(
         ..AppSpec::new("Rex", size, placeholder, view)
     });
     let handle = app.handle();
+    handle.set_color_scheme(native_scheme(&settings.chrome_theme));
     let terminal = fonts.terminal;
     let stand_in = fonts.stand_in;
     let restart = std::sync::Arc::new(std::sync::Mutex::new(None));

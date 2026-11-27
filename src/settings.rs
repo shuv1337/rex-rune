@@ -144,33 +144,7 @@ pub struct DownloadsConfig {
     pub directory: Option<String>,
 }
 
-/// The palette the chrome is drawn in. A value this version doesn't know reads as Midnight.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChromeTheme {
-    RosePine,
-    RosePineMoon,
-    GruvboxDark,
-    #[default]
-    #[serde(other)]
-    Midnight,
-}
-impl ChromeTheme {
-    pub const ALL: [ChromeTheme; 4] = [
-        ChromeTheme::Midnight,
-        ChromeTheme::RosePine,
-        ChromeTheme::RosePineMoon,
-        ChromeTheme::GruvboxDark,
-    ];
-    pub fn name(self) -> &'static str {
-        match self {
-            ChromeTheme::Midnight => "Midnight",
-            ChromeTheme::RosePine => "Rosé Pine",
-            ChromeTheme::RosePineMoon => "Rosé Pine Moon",
-            ChromeTheme::GruvboxDark => "Gruvbox Dark",
-        }
-    }
-}
+pub use crate::chrome_theme::ChromeTheme;
 
 /// The terminal theme this client declares to the server, saved as `follow_server`,
 /// `builtin_default`, `follow_chrome` or `named:<id>`. An id is a Ghostty theme's file name,
@@ -885,7 +859,7 @@ mod tests {
             (ChromeTheme::GruvboxDark, "gruvbox_dark"),
         ] {
             let s = Settings {
-                chrome_theme: chrome,
+                chrome_theme: chrome.clone(),
                 terminal_theme_chosen: true,
                 ..Settings::default()
             };

@@ -279,8 +279,8 @@ fn button(key: String, icon: &'static Icon, label: &str, help: String, run: Opti
         return b.child(glyph(icon, ICON, rgb(muted())).opacity(UNAVAILABLE));
     };
     b.cursor(Cursor::Pointer)
-        .hover(white(0.09))
-        .press(white(0.13))
+        .hover(tint(0.09))
+        .press(tint(0.13))
         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| run(s, tx))
         .child(glyph(icon, ICON, rgb(muted())).group_color(rgb(ink())))
 }
@@ -381,8 +381,8 @@ pub fn bar(
         .radius(8.)
         .continuous_corners()
         .fill(rgb(popover()))
-        .border(1., white(0.12))
-        .box_shadow(shadow(0., 4., 16., black(0.45)))
+        .border(1., tint(0.12))
+        .box_shadow(shadow(0., 4., 16., drop_shadow(0.45)))
         // The bar is chrome: it springs to another corner. It comes and goes at once.
         .animated_changes()
         .motion(SNAPPY)
@@ -409,12 +409,12 @@ pub fn bar(
                     search_key(s, &k3, ev, tx)
                 })
                 .width(None)
-                .build(kit())
+                .build(palette().kit())
                 .key(format!("search-field:{block}"))
                 .grow(1.)
                 .min_w(0.),
         )
-        .child(el().w(1.).h(16.).mx(4.).fill(white(0.09)))
+        .child(el().w(1.).h(16.).mx(4.).fill(tint(0.09)))
         .child(button(
             format!("find-next:{block}"),
             &STEP_UP,
