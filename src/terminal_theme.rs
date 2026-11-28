@@ -17,6 +17,7 @@ use rexrs::api::terminal::SetTheme;
 use std::{
     collections::HashSet,
     ffi::OsString,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -70,7 +71,6 @@ impl TerminalTheme {
     /// stays Rex's built-in one.
     pub fn parse(name: &str, text: &str) -> Result<Self> {
         let mut theme = Self::default();
-        let mut known = false;
         for line in text.lines().map(str::trim) {
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -85,7 +85,6 @@ impl TerminalTheme {
                 .unwrap_or(value);
             let slot = match key.trim() {
                 "palette" => {
-                    known = true;
                     if let Some((index, color)) = value.split_once('=')
                         && let (Ok(index), Some(color)) =
                             (index.trim().parse::<u8>(), parse_hex(color.trim()))
@@ -103,12 +102,11 @@ impl TerminalTheme {
                 "selection-foreground" => &mut theme.selection_foreground,
                 _ => continue,
             };
-            known = true;
             if let Some(color) = parse_hex(value) {
                 *slot = Some(color);
             }
         }
-        ensure!(known, "“{name}” is not a Ghostty theme");
+        ensure!(theme != Self::default(), "“{name}” has no Ghostty colours");
         theme.palette.sort_unstable_by_key(|&(i, _)| i);
         Ok(theme)
     }
@@ -186,6 +184,10 @@ impl ThemeDirs {
     /// Every readable theme, a name found twice taking the first directory's file, sorted
     /// by name regardless of case.
     pub fn list(&self) -> Vec<ThemeInfo> {
+        self.read_all().into_iter().map(|(info, _)| info).collect()
+    }
+
+    pub(crate) fn read_all(&self) -> Vec<(ThemeInfo, TerminalTheme)> {
         let mut seen = HashSet::new();
         let mut themes = Vec::new();
         for (dir, custom) in self.all() {
@@ -199,20 +201,20 @@ impl ThemeDirs {
                 if !valid_name(&name) || seen.contains(&name) {
                     continue;
                 }
-                let Ok(text) = std::fs::read_to_string(entry.path()) else {
-                    continue;
-                };
-                if let Ok(theme) = TerminalTheme::parse(&name, &text) {
+                if let Some(theme) = read_theme_file(&entry.path())
+                    .and_then(|text| TerminalTheme::parse(&name, &text).ok())
+                {
                     seen.insert(name.clone());
-                    themes.push(ThemeInfo {
+                    let info = ThemeInfo {
                         light: theme.background.is_some_and(is_light),
                         name,
                         custom,
-                    });
+                    };
+                    themes.push((info, theme));
                 }
             }
         }
-        themes.sort_by_cached_key(|t| t.name.to_lowercase());
+        themes.sort_by_cached_key(|(t, _)| (t.name.to_lowercase(), t.name.clone()));
         themes
     }
 
@@ -220,8 +222,10 @@ impl ThemeDirs {
     pub fn load(&self, name: &str) -> Result<TerminalTheme> {
         ensure!(valid_name(name), "“{name}” is not a theme name");
         for (dir, _) in self.all() {
-            if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
-                return TerminalTheme::parse(name, &text);
+            if let Some(text) = read_theme_file(&dir.join(name))
+                && let Ok(theme) = TerminalTheme::parse(name, &text)
+            {
+                return Ok(theme);
             }
         }
         bail!("Theme “{name}” not found")
@@ -232,12 +236,12 @@ impl ThemeDirs {
     pub fn resolve(
         &self,
         choice: &TerminalThemeChoice,
-        chrome: &ChromeTheme,
+        paired: &TerminalTheme,
     ) -> Result<Option<TerminalTheme>> {
         Ok(match choice {
             TerminalThemeChoice::FollowServer => None,
             TerminalThemeChoice::RexDefault => Some(TerminalTheme::default()),
-            TerminalThemeChoice::FollowChrome => Some(paired(chrome).theme()),
+            TerminalThemeChoice::FollowChrome => Some(paired.clone()),
             TerminalThemeChoice::Named(id) => Some(match builtin(id) {
                 Some(builtin) => builtin.theme(),
                 None => self.load(id)?,
@@ -256,11 +260,35 @@ pub struct ThemeInfo {
 }
 
 /// A file name in a theme directory: never a path that leaves it.
-fn valid_name(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
+pub(crate) fn valid_name(name: &str) -> bool {
+    !name.starts_with('.')
+        && !name.contains(['/', '\\', ':'])
+        && !name.contains("..")
+        && !name.chars().any(char::is_control)
+        && matches!(
+            Path::new(name).components().next(),
+            Some(std::path::Component::Normal(_))
+        )
 }
 
-fn parse_hex(value: &str) -> Option<u32> {
+pub(crate) const MAX_THEME_BYTES: u64 = 256 * 1024;
+
+pub(crate) fn read_theme_file(path: &Path) -> Option<String> {
+    // Follow symlinks to regular files, not directories, devices or pipes.
+    let meta = path.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_THEME_BYTES {
+        return None;
+    }
+    let mut text = String::new();
+    let size = std::fs::File::open(path)
+        .ok()?
+        .take(MAX_THEME_BYTES + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (size as u64 <= MAX_THEME_BYTES).then_some(text)
+}
+
+pub(crate) fn parse_hex(value: &str) -> Option<u32> {
     let digits = value.strip_prefix('#').unwrap_or(value);
     if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -360,7 +388,8 @@ selection-foreground = #1e1e2e
 
     #[test]
     fn a_users_theme_overrides_ghosttys_and_names_never_leave_the_directory() {
-        let root = std::env::temp_dir().join(format!("rex-rune-themes-{}", std::process::id()));
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
         let (user, system) = (root.join("user"), root.join("system"));
         std::fs::create_dir_all(&user).unwrap();
         std::fs::create_dir_all(&system).unwrap();
@@ -393,7 +422,7 @@ selection-foreground = #1e1e2e
         assert!(dirs.load("../outside").is_err());
         assert!(dirs.load("missing").is_err());
         let named = |id: &str| TerminalThemeChoice::Named(id.into());
-        let dirs = |choice: &TerminalThemeChoice| dirs.resolve(choice, &ChromeTheme::Midnight);
+        let dirs = |choice: &TerminalThemeChoice| dirs.resolve(choice, &TerminalTheme::midnight());
         assert_eq!(
             dirs(&named("rex/midnight")).unwrap(),
             Some(TerminalTheme::midnight())
@@ -411,7 +440,6 @@ selection-foreground = #1e1e2e
             dirs(&TerminalThemeChoice::RexDefault).unwrap(),
             Some(TerminalTheme::default())
         );
-        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -424,7 +452,7 @@ selection-foreground = #1e1e2e
             let builtin = paired(&chrome);
             assert_eq!(builtin.name, chrome.name());
             let theme = dirs
-                .resolve(&TerminalThemeChoice::FollowChrome, &chrome)
+                .resolve(&TerminalThemeChoice::FollowChrome, &builtin.theme())
                 .unwrap()
                 .unwrap();
             assert_eq!(theme, builtin.theme());
@@ -441,7 +469,7 @@ selection-foreground = #1e1e2e
             assert_eq!(
                 dirs.resolve(
                     &TerminalThemeChoice::Named(format!("{BUILTIN_PREFIX}{}", builtin.id)),
-                    &ChromeTheme::Midnight
+                    &TerminalTheme::midnight()
                 )
                 .unwrap(),
                 Some(theme.clone()),

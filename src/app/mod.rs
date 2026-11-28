@@ -4,6 +4,7 @@ mod actions;
 mod activity;
 mod activity_chip;
 mod activity_list;
+mod appearance;
 mod bindings;
 mod commands;
 mod compatibility;
@@ -99,7 +100,7 @@ fn resize_band(e: ResizeEdge) -> El {
 }
 
 pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
-    set_palette(palette_of(&s.settings.chrome_theme));
+    set_palette(s.chrome.palette.clone());
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
     let maximized = cx.is_maximized();
@@ -252,6 +253,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
 }
 
 fn poll(s: &mut Workspace, clock: f64, tx: &mut Tx) -> bool {
+    let appearance_changed = s.system_appearance(tx);
     let now = std::time::Instant::now();
     s.sync_option_layout();
     if s.option_choice && s.panel.is_none() && tx.focused().is_none() {
@@ -282,7 +284,8 @@ fn poll(s: &mut Workspace, clock: f64, tx: &mut Tx) -> bool {
         || focus_history_changed
         || toolbar_changed
         || activity_changed
-        || server_changed;
+        || server_changed
+        || appearance_changed;
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {
@@ -413,7 +416,6 @@ pub fn run(
         ..AppSpec::new("Rex", size, placeholder, view)
     });
     let handle = app.handle();
-    handle.set_color_scheme(native_scheme(&settings.chrome_theme));
     let terminal = fonts.terminal;
     let stand_in = fonts.stand_in;
     let restart = std::sync::Arc::new(std::sync::Mutex::new(None));

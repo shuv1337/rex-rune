@@ -1,6 +1,6 @@
 //! The chrome palette's tokens, the kit pinned to them, shared surfaces (chips, glass,
 //! cards) and the app's icons.
-use rex_rune::chrome_theme::{BUILTINS, PaletteSpec};
+use rex_rune::chrome_theme::{BUILTINS, PaletteSpec, ResolvedTheme};
 use rex_rune::settings::ChromeTheme;
 use rune::{Color, El, Icon, Shadow, Spring, SpringPair, TextStyle, Transition};
 use rune_kit::{Kit, PaletteFocus, PaletteSeed};
@@ -71,28 +71,39 @@ impl std::ops::Deref for Palette {
 static PALETTES: LazyLock<Vec<Arc<Palette>>> = LazyLock::new(|| {
     BUILTINS
         .iter()
-        .map(|b| {
-            Arc::new(Palette {
-                selection_strength: selection_strength(&b.palette),
-                button_end: rex_rune::color::readable(
-                    mix(b.palette.accent2, b.palette.accent, 0.55),
-                    b.palette.on_accent,
-                    b.palette.accent,
-                    4.5,
-                ),
-                spec: b.palette,
-                kit: OnceLock::new(),
-            })
-        })
+        .map(|b| Arc::new(Palette::new(b.palette)))
         .collect()
 });
 pub static MIDNIGHT: LazyLock<Arc<Palette>> = LazyLock::new(|| palette_of(&ChromeTheme::Midnight));
-pub fn palette_of(chrome: &ChromeTheme) -> Arc<Palette> {
+pub(super) fn palette_of(chrome: &ChromeTheme) -> Arc<Palette> {
     let index = BUILTINS
         .iter()
         .position(|b| &b.chrome == chrome)
         .expect("validated built-in chrome ID");
     PALETTES[index].clone()
+}
+pub fn resolved_palette(id: &ChromeTheme, theme: &ResolvedTheme) -> Arc<Palette> {
+    if id.builtin_preset().is_some() {
+        palette_of(id)
+    } else {
+        Arc::new(Palette::new(theme.palette))
+    }
+}
+
+impl Palette {
+    fn new(spec: PaletteSpec) -> Self {
+        Self {
+            selection_strength: selection_strength(&spec),
+            button_end: rex_rune::color::readable(
+                mix(spec.accent2, spec.accent, 0.55),
+                spec.on_accent,
+                spec.accent,
+                4.5,
+            ),
+            spec,
+            kit: OnceLock::new(),
+        }
+    }
 }
 thread_local! {
     static ACTIVE: RefCell<Arc<Palette>> = RefCell::new(MIDNIGHT.clone());
@@ -103,8 +114,10 @@ pub fn palette() -> Arc<Palette> {
 pub fn set_palette(p: Arc<Palette>) {
     ACTIVE.replace(p);
 }
-pub fn native_scheme(chrome: &ChromeTheme) -> rune::ColorScheme {
-    if chrome.preset().palette.dark {
+pub fn native_scheme(follow_system: bool, palette: &PaletteSpec) -> rune::ColorScheme {
+    if follow_system {
+        rune::ColorScheme::System
+    } else if palette.dark {
         rune::ColorScheme::Dark
     } else {
         rune::ColorScheme::Light

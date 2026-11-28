@@ -483,6 +483,7 @@ fn tab_icon_colours_draw() {
         for (mode_id, mode) in MODES.into_iter().enumerate() {
             rt.update(|s, _| {
                 s.settings.chrome_theme = chrome.clone();
+                s.sync_chrome(&mut rune::Tx::default());
                 s.settings.interface.tab_icon_color = mode;
             });
             settle(&mut rt);

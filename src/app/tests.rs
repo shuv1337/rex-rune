@@ -121,6 +121,9 @@ use rex_rune::{
 };
 use rune::{AppSpec, Env, Key, KeyEvent, Mods, Runtime};
 
+#[path = "appearance_tests.rs"]
+mod appearance_tests;
+
 fn workspace() -> Workspace {
     workspace_hosts(1)
 }
@@ -3984,6 +3987,8 @@ fn declared(host: &flume::Receiver<HostCommand>) -> Vec<Option<rexrs::api::termi
 fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_chosen() {
     use rex_rune::{settings::ChromeTheme, terminal_theme::TerminalTheme};
     let mut ws = workspace_hosts(2);
+    ws.theme_dirs.user = None;
+    ws.theme_dirs.system.clear();
     let hosts = [capture_host(&mut ws, 0), capture_host(&mut ws, 1)];
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
@@ -3993,7 +3998,7 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
     click(&mut rt, "chrome-theme");
     assert!(matches!(
         rt.state.panel.as_ref().map(|p| &p.kind),
-        Some(PanelKind::Chromes)
+        Some(PanelKind::Chromes(super::appearance::ChromeSlot::Manual))
     ));
     let rows: Vec<_> = rt
         .state
@@ -5835,6 +5840,7 @@ fn chrome_palette_gallery_draw() {
         }
         m.programs.insert("block:a".into(), "zsh".into());
         ws.settings.chrome_theme = chrome.clone();
+        ws.sync_chrome(&mut rune::Tx::default());
         ws.term_theme = Some(chrome.preset().theme());
         ws.settings.interface.tab_icon_color = TabIconColor::Always;
         ws.sidebar.toggle();

@@ -802,7 +802,7 @@ fn the_theme_pickers_open_from_commands_and_close_without_settings() {
     choose(&mut ws, "view.interface_theme");
     assert!(matches!(
         ws.panel.as_ref().unwrap().kind,
-        PanelKind::Chromes
+        PanelKind::Chromes(crate::app::appearance::ChromeSlot::Manual)
     ));
     ws.cancel_panel(&mut tx);
     assert!(ws.panel.is_none(), "Escape leaves, not back to Settings");

@@ -6,7 +6,7 @@ use super::workspace::{HostId, Workspace};
 use rex_rune::{
     layers,
     settings::{ChromeTheme, TerminalThemeChoice},
-    terminal_theme::{BUILTIN_PREFIX, BUILTINS, paired},
+    terminal_theme::{BUILTIN_PREFIX, BUILTINS},
 };
 use rune::TextEdit;
 use serde_json::Value;
@@ -76,6 +76,7 @@ pub enum Intent {
     Theme(TerminalThemeChoice),
     /// The chrome palette picker, from Settings.
     ChooseChrome,
+    ChooseChromeSlot(super::appearance::ChromeSlot),
     /// Draw the chrome in this palette from now on, then return to Settings.
     Chrome(ChromeTheme),
     /// The SSH agent picker, from Settings → Remote Hosts.
@@ -197,6 +198,7 @@ impl Intent {
                 | Intent::ClientLabel
                 | Intent::ChooseTheme
                 | Intent::ChooseChrome
+                | Intent::ChooseChromeSlot(_)
                 | Intent::ChooseSshAgent
                 | Intent::SshAgentCustom
                 | Intent::AddHost
@@ -440,7 +442,7 @@ pub enum PanelKind {
     Themes,
     Fonts(super::font_picker::FontPick),
     /// The chrome palettes.
-    Chromes,
+    Chromes(super::appearance::ChromeSlot),
     /// The SSH agent choices (System default, detected agents, Custom socket…).
     SshAgents,
     /// The values of one setting, from a Settings `select_row`.
@@ -575,7 +577,7 @@ impl Panel {
                 | PanelKind::Window
                 | PanelKind::Themes
                 | PanelKind::Fonts(_)
-                | PanelKind::Chromes
+                | PanelKind::Chromes(_)
                 | PanelKind::SshAgents
                 | PanelKind::Choice(_)
                 | PanelKind::Discover
@@ -851,7 +853,7 @@ impl Workspace {
         );
         add(
             "Follow chrome",
-            paired(&self.settings.chrome_theme).name,
+            &self.chrome.active_theme(&self.settings).name,
             "Built in",
             TerminalThemeChoice::FollowChrome,
         );
@@ -896,21 +898,26 @@ impl Workspace {
         if matches!(panel.kind, PanelKind::Discover) {
             return self.discovery_entries(&lower);
         }
-        if matches!(panel.kind, PanelKind::Chromes) {
-            return ChromeTheme::all()
-                .filter_map(|chrome| {
-                    let preset = chrome.preset();
-                    let group = if preset.palette.dark { "Dark" } else { "Light" };
-                    if ![chrome.id(), preset.name, group]
-                        .iter()
-                        .any(|v| v.to_lowercase().contains(&lower))
-                    {
-                        return None;
-                    }
-                    let current = chrome == self.settings.chrome_theme;
-                    let mut entry = Entry::new(preset.name, "", group, Intent::Chrome(chrome));
-                    entry.current = current;
-                    Some(entry)
+        if let PanelKind::Chromes(slot) = panel.kind {
+            let (current, _) = self.chrome_choice(slot);
+            return self
+                .chrome
+                .library
+                .entries()
+                .filter(|(group, id, theme)| {
+                    let search = format!(
+                        "{} {} {group} {}",
+                        id.id(),
+                        theme.name,
+                        theme.palette.scheme()
+                    )
+                    .to_lowercase();
+                    lower.split_whitespace().all(|word| search.contains(word))
+                })
+                .map(|(group, id, theme)| {
+                    let mut entry = Entry::new(&theme.name, "", group, Intent::Chrome(id.clone()));
+                    entry.current = id == current;
+                    entry
                 })
                 .collect();
         }

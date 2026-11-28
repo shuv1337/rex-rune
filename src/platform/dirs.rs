@@ -45,7 +45,20 @@ fn windows_home(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
 
 /// Where the settings files live.
 pub fn config() -> PathBuf {
-    config_base().join(APP)
+    std::env::var_os("REX_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| config_base().join(APP), PathBuf::from)
+}
+
+pub fn themes_dir() -> PathBuf {
+    config().join("themes")
+}
+
+/// The theme folder sits beside the settings file, including with `--config`.
+pub fn themes_dir_for(settings: &std::path::Path) -> PathBuf {
+    settings
+        .parent()
+        .map_or_else(themes_dir, |config| config.join("themes"))
 }
 
 /// Where update and download records live.
@@ -225,10 +238,24 @@ mod tests {
 
     #[test]
     fn settings_and_state_are_named_for_the_client_under_the_platforms_folder() {
-        assert!(config().ends_with(APP) && state().ends_with(APP));
+        let override_dir = std::env::var_os("REX_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        if let Some(dir) = &override_dir {
+            assert_eq!(config(), *dir);
+        } else {
+            assert!(config().ends_with(APP));
+        }
+        assert!(state().ends_with(APP));
+        assert_eq!(
+            themes_dir_for(&crate::settings::Settings::path()),
+            themes_dir()
+        );
         if cfg!(target_os = "macos") {
             let support = home().join("Library/Application Support").join(APP);
-            assert_eq!(config(), support);
+            if override_dir.is_none() {
+                assert_eq!(config(), support);
+            }
             assert_eq!(state(), support);
             assert!(legacy_bases().is_empty(), "rex-linux never ran on macOS");
         }
@@ -257,10 +284,12 @@ mod tests {
                 home(),
                 PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default())
             );
-            assert_eq!(
-                config(),
-                windows_base(std::env::var_os("APPDATA"), "Roaming").join(APP)
-            );
+            if override_dir.is_none() {
+                assert_eq!(
+                    config(),
+                    windows_base(std::env::var_os("APPDATA"), "Roaming").join(APP)
+                );
+            }
             assert_eq!(
                 state(),
                 windows_base(std::env::var_os("LOCALAPPDATA"), "Local").join(APP)
@@ -290,6 +319,24 @@ mod tests {
     #[cfg(unix)]
     mod unix {
         use super::*;
+
+        #[test]
+        fn theme_files_follow_links_to_regular_files_only() {
+            use crate::terminal_theme::read_theme_file;
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("theme");
+            let link = temp.path().join("theme-link");
+            std::fs::write(&target, "background = #123456\n").unwrap();
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            assert_eq!(
+                read_theme_file(&link).as_deref(),
+                Some("background = #123456\n")
+            );
+            let dir_link = temp.path().join("dir-link");
+            std::os::unix::fs::symlink(temp.path(), &dir_link).unwrap();
+            assert!(read_theme_file(&dir_link).is_none());
+        }
+
         #[test]
         fn a_private_folder_is_made_closed_and_an_open_or_foreign_one_is_not_trusted() {
             use std::os::unix::fs::PermissionsExt;

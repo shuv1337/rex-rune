@@ -52,9 +52,11 @@ Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json`
   vertical padding (`interface.pane_padding_vertical`; absent follows the legacy
   horizontal value on all four sides);
 - terminal font family (`font_family`), ordered fallback families
-  (`font_fallbacks`), font size, the chrome palette (`chrome_theme`: one of the
-  50 [built-in palette IDs](#themes), such as `"s2-dark"` or `"catppuccin_latte"`;
-  the default and fallback for unknown IDs is `"midnight"`), the terminal theme
+  (`font_fallbacks`), font size, the manual chrome palette (`chrome_theme`:
+  a [built-in, custom or Ghostty palette ID](#themes), with `"midnight"` as the
+  default and fallback), and the optional system appearance switch
+  (`match_system_appearance`) and `light_chrome_theme` and `dark_chrome_theme`
+  slots. The terminal theme
   (`terminal_theme`: `"follow_server"`,
   `"builtin_default"` for Rex's own colours, `"follow_chrome"`, or
   `"named:rex/<id>"` for a paired terminal theme, or `"named:<name>"` for a
@@ -275,17 +277,75 @@ limits](parity-2026-11/M2.8-tab-fill.md).
 
 ## Themes
 
-Settings → Interface → Theme offers **35 dark and 15 light** chrome palettes:
+Settings → Interface → Appearance offers **35 dark and 15 light** built-in chrome palettes:
 **S2Code Dark** (`s2-dark`), the four classics (Midnight, Rosé Pine, Rosé Pine Moon
 and Gruvbox Dark), all four Catppuccin flavours and 41 Rex macOS palettes. Search
-by name or ID; the swatches show the canvas and accent. The
+by name, ID, appearance (`dark` or `light`), or source (`custom` or `ghostty`).
+The swatches show the canvas and accent. The
 [built-in catalogue](../src/chrome_theme/catalog.rs) lists each chrome ID,
 terminal ID and display name in that order. Midnight is the default.
-Choosing a palette applies it immediately. Each pairs with a terminal theme whose
-background is the chrome's ground. Until you pick a terminal theme yourself,
-choosing a palette moves the terminal theme from Follow server to **Follow
+Choosing a palette applies it immediately. Each built-in pairs with a terminal
+theme whose background is the chrome's ground. Until you pick a terminal theme yourself,
+choosing a palette for the active appearance moves the terminal theme from Follow server to **Follow
 chrome**, which declares the palette's paired theme to the server as below; a
 terminal theme you picked is left alone.
+
+**Match system appearance** is off by default. Turn it on to choose separate
+**Light theme** and **Dark theme** palettes. The first time, your current theme
+is copied into the matching slot; the defaults are Merino Light and Midnight.
+The app switches to the corresponding slot when the operating system changes
+appearance, including the paired terminal colours if you use **Follow chrome**.
+Turning the switch off returns to your manual **Theme** without forgetting either slot.
+
+**Custom themes.** Put files in `themes/` beside your `workspace.json`, usually
+`~/.config/rex-rune/themes/` on Linux. `REX_CONFIG_DIR` changes the default
+configuration folder; `--config <path>` uses the `themes/` folder beside that
+specific settings file. Reopen the picker after adding or editing files. It
+shows custom files first and installed Ghostty themes last. Ghostty files
+listed in the **Ghostty** group do not need to be copied to the custom folder.
+
+For example, save `after-hours.toml`:
+
+```toml
+name = "After Hours"
+appearance = "dark"
+ground = "#161d28"
+ink = "#e6ebf2"
+accent = "#97baff"
+
+[terminal]
+cursor = "#97baff"
+palette.4 = "#97baff"
+```
+
+- `.toml` supports quoted strings, `#` comments, and optional `[terminal]`
+  colours. Set `ansi = ["#000000", "#ff8080"]` (which can span several lines)
+  or use indexed `palette.0 = "#000000"` entries.
+- `.json` uses the same chrome keys and an optional `"terminal"` object. That
+  object can contain `"ansi": ["#000000", "#ff8080"]` or
+  `"palette": {"4": "#97baff"}`. Indexed entries take precedence over the array.
+- Ghostty `key = value` files, including extensionless files, `.ghostty` and
+  `.conf`, derive chrome from their existing terminal colours.
+- `.itermcolors` reads iTerm2 XML plists with RGB background, foreground, cursor,
+  selection and ANSI colours.
+
+The chrome keys are optional. `appearance` is `light` or `dark`; without it,
+the background determines the appearance. In addition to `ground`, `ink` and
+`accent`, you can set `card`, `sidebar`, `popover`, `muted`, `accent2`, `live`,
+`warning`, `danger`, `on_accent`, `terminal_selection`, `border_subtle`,
+`border_strong` and `surface_raised`. Unset colours are derived in OKLab,
+and chrome colours are adjusted as needed for contrast. The optional terminal
+keys are `background`, `foreground`, `cursor`, `cursor_text`,
+`selection_background`, `selection_foreground`, `ansi` and `palette`. The
+paired terminal keeps its supplied colours; a custom file without terminal
+background or foreground uses the derived `ground` and `ink`.
+
+A custom file is saved as `custom:<filename-stem>` (for example,
+`custom:after-hours`) and uses `name` as its label if supplied. If two readable
+themes have the same stem, the first filename in sort order wins. Invalid
+files and files over 256 KiB are skipped; symlinks to readable regular files
+are allowed. A direct Ghostty choice is saved as `ghostty:<filename>`.
+Missing imports fall back to Midnight without erasing the saved ID.
 
 Terminal themes (Settings → Terminal → Theme). **Follow server**, the default,
 declares nothing and shows whatever colours the server has, as long as this client
@@ -298,10 +358,11 @@ terminal IDs use hyphens instead of underscores. Themes are sent to the server
 with Rex's `set_theme`, which the server applies to panes this client owns or
 nobody owns; while another client owns a pane, the server keeps that client's
 colours and applies ours when this client takes the pane. New tabs and splits are
-created with the theme. Ghostty themes are read from
+created with the theme. Both pickers read Ghostty themes from
 `$XDG_CONFIG_HOME/ghostty/themes` (default `~/.config/ghostty/themes`), then
 `$GHOSTTY_RESOURCES_DIR/themes`, then `ghostty/themes` under each
-`$XDG_DATA_DIRS` entry; the first file with a name wins. Selection and cursor-text
+`$XDG_DATA_DIRS` entry, and on macOS also from `/Applications/Ghostty.app`.
+The first readable theme with a name wins. Selection and cursor-text
 colours from a theme are drawn by this client. Rex keeps this client's last theme
 for each pane across launches and applies it whenever this client owns the pane,
 so once this client has declared any theme (remembered as

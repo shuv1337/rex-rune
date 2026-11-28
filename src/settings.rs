@@ -249,6 +249,15 @@ pub struct Settings {
     /// Passed to `rex skill setup` as `--session-naming`, always explicitly.
     pub agent_session_naming: bool,
     pub chrome_theme: ChromeTheme,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub match_system_appearance: bool,
+    #[serde(skip_serializing_if = "ChromeTheme::is_default")]
+    pub dark_chrome_theme: ChromeTheme,
+    #[serde(skip_serializing_if = "ChromeTheme::is_light_default")]
+    pub light_chrome_theme: ChromeTheme,
+    /// Seed from the manual theme only once, even when both slots are still defaults.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub appearance_slots_seeded: bool,
     pub terminal_theme: TerminalThemeChoice,
     /// The user picked a terminal theme themselves at least once, so choosing a chrome
     /// palette leaves it alone. Until then a palette brings its paired theme (Follow chrome).
@@ -309,6 +318,10 @@ impl Default for Settings {
             ssh: ssh::SshConfig::default(),
             agent_session_naming: false,
             chrome_theme: ChromeTheme::default(),
+            match_system_appearance: false,
+            dark_chrome_theme: ChromeTheme::Midnight,
+            light_chrome_theme: ChromeTheme::light_default(),
+            appearance_slots_seeded: false,
             terminal_theme: TerminalThemeChoice::default(),
             terminal_theme_chosen: false,
             terminal_theme_declared: false,

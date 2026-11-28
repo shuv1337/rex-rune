@@ -77,8 +77,10 @@ client, launcher and icons, never the `rex` server.
   2670 with restore enabled, the server resumes trusted chosen programs after
   restart. Rex Rune shows metadata and trust reasons, never launch arguments.
   [Scope and limits](docs/parity-2026-11/program-resume.md).
-- **Fonts and themes.** Chrome palettes, terminal themes declared to the server
-  including Ghostty files, installed fonts with a picker and ordered fallbacks,
+- **Fonts and themes.** 50 built-in chrome palettes, custom TOML, JSON, Ghostty
+  and `.itermcolors` themes, and optional **Match system appearance** with
+  separate light and dark choices. Optional terminal themes are declared to the server.
+  Installed fonts have a picker and ordered fallbacks, alongside
   bundled IBM Plex Mono and Symbols Nerd Font, font size and live metrics.
 - **Layout and interface.** Zoom, independent padding, density, pane outline,
   header fading, tab icon count and colour, tab fill, toolbar visibility, full
@@ -160,6 +162,9 @@ The full option table is in [Configuration and settings](docs/configuration.md#c
 Preferences live in `$XDG_CONFIG_HOME/rex-rune/workspace.json` (on macOS,
 `~/Library/Application Support/rex-rune/workspace.json`); shortcut overrides live
 in `shortcuts.json` beside it. Use `--config <path>` for a separate workspace.
+Put custom palettes in `themes/` beside the settings file, such as
+`~/.config/rex-rune/themes/` on Linux. The Chrome picker also finds installed
+Ghostty themes without copying them. See [theme formats and an example](docs/configuration.md#themes).
 Paths, keys and per-page behaviour are in [Configuration and
 settings](docs/configuration.md) and [Shortcuts](docs/shortcuts.md).
 
@@ -183,7 +188,7 @@ for the Linux fixes Rex Rune still carries and the release tooling features it e
 
 ## Documentation
 
-- [Docs index](docs/README.md) — every document and verification record.
+- [Docs index](docs/README.md) with every document and verification record.
 - [Installing](docs/install.md), [building and development](docs/building.md), [configuration](docs/configuration.md) and [shortcuts](docs/shortcuts.md).
 - [Hosts and connections](docs/hosts.md), [terminal and clipboard](docs/terminal.md) and [downloading files](docs/downloads.md).
 - [Accessibility](docs/accessibility.md), [renamed from Rex Linux](docs/legacy-rex-linux.md), [Nix](docs/nix.md), [self-updates](docs/self-updates.md) and [server compatibility](docs/README.md#server-compatibility).

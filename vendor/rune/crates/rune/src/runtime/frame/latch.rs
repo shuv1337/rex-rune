@@ -179,7 +179,7 @@ impl RuntimeCore {
 
     pub(in crate::runtime) fn transaction(&self, app: &dyn ViewDriver) -> Tx {
         let focused_link = self.focused_index().and_then(|i| self.edit.focused_link_id(&self.tree.nodes[i]));
-        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.kbd.held_mods, selection: self.selection_snapshot(app),
+        Tx { system_dark: Some(self.env.system_dark), trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.kbd.held_mods, selection: self.selection_snapshot(app),
             input_time: crate::input::time::current(), clock: self.polled_at(), scale: self.env.scale, focus_visible: self.kbd.focus.keyboard(),
             focused: self.focused_key(), focused_path: self.kbd.focus.owned(), focused_link, hover: self.hover_snapshot(),
             assistive: self.host.a11y.is_some() || cfg!(target_arch = "wasm32"), window_hidden: !self.live_visible(), ..Tx::default() }

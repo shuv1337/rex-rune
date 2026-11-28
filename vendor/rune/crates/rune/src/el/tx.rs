@@ -22,6 +22,7 @@ mod tests;
 /// What a handler may say about the commit it causes.
 #[derive(Clone, Debug, Default)]
 pub struct Tx {
+    pub(crate) system_dark: Option<bool>,
     pub(crate) shortcut_activation_token: Option<String>,
     pub(crate) key_repeat: bool,
     /// `Tx::key_direction`.
@@ -199,6 +200,14 @@ pub struct Tx {
     pub(crate) clock: f64,
     /// `Tx::scale` (0 when unset on `Tx::default()`, which reads as 1.0).
     pub(crate) scale: f32,
+}
+
+impl Tx {
+    /// The appearance for this turn, as in [`crate::Cx::system_dark`]. None for a
+    /// transaction not created by a runtime.
+    pub fn system_dark(&self) -> Option<bool> {
+        self.system_dark
+    }
 }
 
 /// What a handler asked of the window's full-screen state ([`Tx::toggle_full_screen`],

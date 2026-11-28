@@ -94,6 +94,17 @@ fn keywords(page: Page, ssh_available: bool) -> &'static str {
     }
 }
 
+fn match_system_control(label: &str, follow: bool) -> bool {
+    use super::appearance::ChromeSlot;
+    if follow {
+        label == ChromeSlot::Manual.label()
+    } else {
+        [ChromeSlot::Light, ChromeSlot::Dark]
+            .into_iter()
+            .any(|slot| label == slot.label())
+    }
+}
+
 /// A page Back can return to, and how far down it was left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Stop {
@@ -284,6 +295,15 @@ pub fn row(label: &str, helper: &str, frame: El) -> El {
         }
         Pass::Draw(_) => frame,
     })
+}
+
+/// A conditional row is searchable even when its mode is off.
+pub fn index_row(label: &str, helper: &str) {
+    PASS.with_borrow_mut(|pass| {
+        if let Pass::Read(rows, _) = pass {
+            rows.push((String::new(), label.to_owned(), helper.to_owned()));
+        }
+    });
 }
 
 /// A section's heading, told once its rows are built: the rows since the last one are under it.
@@ -540,9 +560,16 @@ impl Workspace {
         };
         self.settings_nav.selected = index;
         self.navigate(hit.page);
+        let label = if hit.page == Page::Section(SettingsSection::Interface)
+            && match_system_control(&hit.label, self.settings.match_system_appearance)
+        {
+            "Match system appearance".to_owned()
+        } else {
+            hit.label
+        };
         self.settings_nav.found = hit.row.then(|| Found {
             page: hit.page,
-            label: hit.label,
+            label,
             until: Instant::now() + MARKED_FOR,
         });
         if hit.row {

@@ -242,7 +242,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         .map(|target| s.program_resume_coverage(target));
     let inspector = ports.is_some() || resume.is_some();
     // The values of one setting: a short list with the current one checked.
-    let values = matches!(panel.kind, PanelKind::Choice(_) | PanelKind::Chromes);
+    let values = matches!(panel.kind, PanelKind::Choice(_) | PanelKind::Chromes(_));
     // Lists that mark the current value keep the check's column on every row, so names align.
     let checks = values || matches!(panel.kind, PanelKind::Themes | PanelKind::SshAgents);
     let [vw, vh] = viewport;
@@ -260,7 +260,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     });
     // Add host: machines in columns, each name whole.
     let discover = matches!(panel.kind, PanelKind::Discover);
-    let width = (if matches!(panel.kind, PanelKind::Chromes) {
+    let width = (if matches!(panel.kind, PanelKind::Chromes(_)) {
         272.
     } else if values {
         220.
@@ -366,7 +366,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         PanelKind::Picker(false) => "commands",
         PanelKind::Hosts(_) => "hosts",
         PanelKind::Themes => "themes",
-        PanelKind::Chromes => "chromes",
+        PanelKind::Chromes(_) => "chromes",
         PanelKind::SshAgents => "ssh-agents",
         PanelKind::Choice(_) => "choice",
         PanelKind::Discover => "discover",
@@ -494,7 +494,9 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                     program: entry.program,
                     icon: None,
                     leading: match &entry.action {
-                        Intent::Chrome(chrome) => Some(swatch(&chrome.preset().palette)),
+                        Intent::Chrome(chrome) => {
+                            Some(swatch(&s.chrome.library.resolve(chrome).1.palette))
+                        }
                         _ => None,
                     },
                     subtitle: None,
@@ -575,7 +577,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 .error
                 .clone()
                 .unwrap_or_else(|| "Reading folder…".into()),
-            PanelKind::Themes | PanelKind::Chromes => "No matching themes.".to_owned(),
+            PanelKind::Themes | PanelKind::Chromes(_) => "No matching themes.".to_owned(),
             PanelKind::Discover => s.discovery_empty_message(),
             _ => "No matches. Try another name or create a session.".to_owned(),
         };

@@ -1387,6 +1387,7 @@ fn capture_scene(
 ) -> Runtime<Workspace> {
     let (mut ws, _host_rx) = tabbed_workspace("single");
     ws.settings.chrome_theme = theme;
+    ws.sync_chrome(&mut rune::Tx::default());
     ws.settings.hosts[0].label = "workstation".into();
     ws.settings.hosts[0].endpoint = "ssh://dev@workstation.ts.net".into();
     ws.hosts[0].connection.model.lock().unwrap().connected = true;

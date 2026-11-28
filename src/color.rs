@@ -65,13 +65,15 @@ pub fn contrast(a: u32, b: u32) -> f32 {
 pub fn is_light(color: u32) -> bool {
     luminance(color) > srgb_decode(0.5)
 }
+/// Packed sRGB to OKLab.
+pub(crate) fn oklab(color: u32) -> [f32; 3] {
+    let [r, g, b] = channels(color).map(srgb_decode);
+    linear_to_oklab(r, g, b)
+}
+
 /// Perceptual interpolation, gamut-clamped at the output.
 pub fn blend(a: u32, b: u32, t: f32) -> u32 {
-    let lab = |c| {
-        let [r, g, b] = channels(c).map(srgb_decode);
-        linear_to_oklab(r, g, b)
-    };
-    let (a, b) = (lab(a), lab(b));
+    let (a, b) = (oklab(a), oklab(b));
     pack(
         oklab_to_linear(std::array::from_fn(|i| {
             a[i] + (b[i] - a[i]) * t.clamp(0., 1.)

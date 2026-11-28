@@ -15,6 +15,10 @@ both Linux and wasm at this revision.
 
 ## Local patches
 
+- **System appearance in `Tx`:** native host events already update `Cx::system_dark`
+  and wake the frame. `Tx::system_dark` gives the same snapshot to `AppSpec::poll`
+  so Rex Rune can change its workspace palette and terminal declaration before
+  the view commits, without starting a second platform listener.
 - **Wayland presentation:** prefer Mailbox on top-level Wayland windows when
   the adapter advertises it, otherwise keep AutoVsync. Winit already paces
   these windows with frame callbacks; FIFO can block a second time on KWin

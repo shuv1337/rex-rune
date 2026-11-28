@@ -431,7 +431,23 @@ pub fn segmented_fixed(
 /// this control, and focus comes back here when it closes. `key` names the control and is
 /// what the list is placed by.
 pub fn value_popup(key: &str, value: &str, open: Intent) -> El {
-    let sample = matches!(open, Intent::ChooseChrome).then(|| swatch(&palette()));
+    value_popup_with(key, value, open, None)
+}
+
+pub fn theme_popup(
+    key: &str,
+    theme: &rex_rune::chrome_theme::ResolvedTheme,
+    slot: super::appearance::ChromeSlot,
+) -> El {
+    value_popup_with(
+        key,
+        &theme.name,
+        Intent::ChooseChromeSlot(slot),
+        Some(swatch(&theme.palette)),
+    )
+}
+
+fn value_popup_with(key: &str, value: &str, open: Intent, sample: Option<El>) -> El {
     let control = key.to_owned();
     let press = move |s: &mut Workspace, tx: &mut Tx| s.open_anchored(&control, open.clone(), tx);
     popup_button(key, value, sample, press)
@@ -443,6 +459,8 @@ fn popup_button(
     leading: Option<El>,
     press: impl Fn(&mut Workspace, &mut Tx) + Clone + 'static,
 ) -> El {
+    // Keep room for the setting's label at the layout floor, even with a long theme name.
+    let value_width = if leading.is_some() { 150. } else { 240. };
     on_return(
         row()
             .key(key.to_owned())
@@ -467,7 +485,8 @@ fn popup_button(
                     .font(medium(13.))
                     .color(rgb(ink()))
                     .truncate()
-                    .max_w(240.),
+                    .help_when_truncated(value.to_owned())
+                    .max_w(value_width),
             )
             .child(
                 el().size(20., 20.)

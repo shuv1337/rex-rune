@@ -2,11 +2,13 @@
 //! built from `settings_kit` (sections, cards, rows and their controls).
 use super::settings_nav::{HEADER, PAGE_INSET};
 use super::{
+    appearance::ChromeSlot,
     dialogs::modal_layer,
     panel::{Intent, SettingsSection},
     settings_kit::{
-        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote, page,
-        row_frame, section, segmented, select_row, setting, stepper, unavailable, value_popup,
+        INSET, NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote,
+        page, row_frame, section, segmented, select_row, setting, stepper, theme_popup,
+        unavailable,
     },
     theme::*,
     widgets::{Pill, glyph},
@@ -54,6 +56,78 @@ fn header_fade_switch(
         .key(key.to_owned())
 }
 
+fn appearance(s: &Workspace, percent: i32) -> El {
+    const MATCH_SYSTEM: &str = "Match system appearance";
+    const CUSTOM: &str = "Custom themes";
+    let follow = s.settings.match_system_appearance;
+    let picker = |slot, key, helper| {
+        let (_, theme) = s.chrome_choice(slot);
+        setting(slot.label(), helper, theme_popup(key, theme, slot))
+    };
+    let mut rows = vec![setting(
+        MATCH_SYSTEM,
+        "Switch between light and dark themes with the system.",
+        Switch::new(follow)
+            .label(MATCH_SYSTEM)
+            .hide_label()
+            .on_toggle_tx(Workspace::toggle_system_appearance)
+            .build(palette().kit())
+            .key("match-system-appearance"),
+    )];
+    if follow {
+        super::settings_nav::index_row(
+            ChromeSlot::Manual.label(),
+            "Used when not matching the system.",
+        );
+        rows.push(picker(ChromeSlot::Light, "light-chrome-theme", ""));
+        rows.push(picker(ChromeSlot::Dark, "dark-chrome-theme", ""));
+    } else {
+        for slot in [ChromeSlot::Light, ChromeSlot::Dark] {
+            super::settings_nav::index_row(slot.label(), "Available when matching the system.");
+        }
+        rows.push(picker(
+            ChromeSlot::Manual,
+            "chrome-theme",
+            "Terminals take the matching theme until you choose one.",
+        ));
+    }
+    rows.push(setting(
+        "Interface zoom",
+        "Chrome and terminals together, from 70% to 150%.",
+        row()
+            .gap(8.)
+            .center_y()
+            .child(stepper(
+                "zoom",
+                format!("{percent}%"),
+                |s, tx| s.change_ui_scale(-1, tx),
+                |s, tx| s.change_ui_scale(1, tx),
+            ))
+            .child(button("zoom-reset", "Reset", Pill::Neutral, |s, tx| {
+                s.change_ui_scale(0, tx)
+            })),
+    ));
+    let dirs = rex_rune::platform::dirs::themes_dir_for(&s.settings_path);
+    let folder = super::downloads::tilde_in(&dirs, Some(&rex_rune::platform::dirs::home()));
+    let colour = rgb(if super::settings_nav::will_mark(CUSTOM) {
+        ink()
+    } else {
+        muted()
+    });
+    let note = super::settings_nav::row(CUSTOM, &folder, row().w_full().px(INSET).gap(5.))
+        .child(text("Custom themes:").font(ui(11.5)).color(colour))
+        .child(
+            text(folder)
+                .font(mono(11.))
+                .color(colour)
+                .grow(1.)
+                .min_w(0.)
+                .wrap_anywhere()
+                .selectable(true),
+        );
+    section("Appearance", [card(rows), note])
+}
+
 fn interface(s: &Workspace) -> El {
     let palette = palette();
     let k = palette.kit();
@@ -63,36 +137,7 @@ fn interface(s: &Workspace) -> El {
         NoticePosition::BottomRight => 1,
     };
     page([
-        section(
-            "Appearance",
-            [card([
-                setting(
-                    "Theme",
-                    "Terminals take the matching theme until you choose one.",
-                    value_popup(
-                        "chrome-theme",
-                        s.settings.chrome_theme.name(),
-                        Intent::ChooseChrome,
-                    ),
-                ),
-                setting(
-                    "Interface zoom",
-                    "Chrome and terminals together, from 70% to 150%.",
-                    row()
-                        .gap(8.)
-                        .center_y()
-                        .child(stepper(
-                            "zoom",
-                            format!("{percent}%"),
-                            |s, tx| s.change_ui_scale(-1, tx),
-                            |s, tx| s.change_ui_scale(1, tx),
-                        ))
-                        .child(button("zoom-reset", "Reset", Pill::Neutral, |s, tx| {
-                            s.change_ui_scale(0, tx)
-                        })),
-                ),
-            ])],
-        ),
+        appearance(s, percent),
         section(
             "Toolbar",
             [

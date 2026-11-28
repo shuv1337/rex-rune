@@ -219,7 +219,7 @@ pub fn debug_info(s: &Workspace) -> String {
     }
     info.push_str(&format!(
         "Interface: {}, {}% zoom\n",
-        s.settings.chrome_theme.name(),
+        s.chrome.active_theme(&s.settings).name,
         (s.settings.ui_scale * 100.).round()
     ));
     let (family, fallbacks) = s.options.fonts(&s.settings);
