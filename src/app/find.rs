@@ -223,6 +223,7 @@ impl Workspace {
             None if term.find.last.is_empty() => self.open_search(),
             None => {
                 self.cancel_layer_drag();
+                self.cancel_rearrange();
                 let Some(term) = self.active_terminal_mut() else {
                     return;
                 };

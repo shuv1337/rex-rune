@@ -456,7 +456,8 @@ pub(super) fn attach(e: El, item: Item) -> El {
                 let Some(g) = &mut s.rearrange.gesture else {
                     return;
                 };
-                if g.item != item || (g.point.is_none() && d.dx.hypot(d.dy) <= SLOP) {
+                // Match Rune's per-axis click slop, so a release can't be both a click and a drop.
+                if g.item != item || (g.point.is_none() && d.dx.abs().max(d.dy.abs()) <= SLOP) {
                     return;
                 }
                 g.point = Some(d.window_point());
@@ -464,15 +465,18 @@ pub(super) fn attach(e: El, item: Item) -> El {
                 tx.instant();
             }
             Phase::Up => {
-                if s.rearrange.gesture.as_ref().is_none_or(|g| g.item != item) {
+                let Some(g) = s.rearrange.gesture.as_ref().filter(|g| g.item == item) else {
                     return;
-                }
+                };
+                let was_armed = g.point.is_some();
                 if d.cancelled() {
                     s.cancel_rearrange();
                 } else {
                     s.finish_rearrange(d.window_point());
                 }
-                tx.instant();
+                if was_armed {
+                    tx.instant();
+                }
             }
         }
     })

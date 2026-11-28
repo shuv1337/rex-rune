@@ -1,7 +1,7 @@
 //! Real Rune pointer dispatch with captured host commands, never a real Rex server.
 use super::{pane_verb_tests::framed_terminal, *};
 use crate::app::{
-    drag::{Cue, Rail, insertion},
+    drag::{Cue, Item, Rail, insertion},
     scratch::Folder,
 };
 use rex_rune::{
@@ -190,8 +190,15 @@ fn short_tab_clicks_keep_select_rename_middle_close_and_right_menu() {
     settle(&mut rt);
     let p = at(&rt, "tab:single", 0.5, 0.5);
     down(&mut rt, p);
-    let short = (p.0 + 4., p.1);
+    let short = (p.0 + 4., p.1 + 4.);
     motion(&mut rt, short);
+    assert!(!rt.state.rearrange.dimmed(&Item::Tab(
+        Rail::Toolbar,
+        rt.state.hosts[0].id,
+        "s".into(),
+        "single".into(),
+    )));
+    assert!(rt.state.rearrange.cue.is_none());
     assert!(!has(&rt, "drag-insertion"));
     up(&mut rt, short);
     let sent = rx.try_iter().collect::<Vec<_>>();
@@ -564,6 +571,46 @@ fn saved_downloads_offer_drag_out_at_gesture_start_without_capturing_the_folder_
     click(&mut rt, "download-show:1");
     assert_eq!(rt.state.downloads.shown, [path]);
     assert_eq!(starts(&rt), 1);
+}
+
+#[test]
+fn leaving_downloads_mid_drag_clears_the_source_before_reopening() {
+    let dir = Folder::new("download-drag-close");
+    let (mut s, _rx) = workspace_for_drag(false, false);
+    let host = s.hosts[0].id;
+    let mut transfer = Transfer::new(
+        1,
+        "s".into(),
+        "block:b".into(),
+        "saved.txt".into(),
+        dir.path().to_owned(),
+        EPOCH,
+    );
+    transfer.state = State::Saved {
+        path: dir.join("saved.txt"),
+        bytes: 5,
+        short_of: None,
+    };
+    s.hosts[0].model.downloads.push(transfer);
+    s.open_panel(PanelKind::Downloads, "Downloads", &[]);
+    let mut rt = runtime(s);
+    let leave: [fn(&mut Workspace, &mut rune::Tx); 4] = [
+        Workspace::close_panel,
+        Workspace::cancel_panel,
+        |s, _| s.cancel_panel_quiet(),
+        |s, _| s.picker(false),
+    ];
+    for leave in leave {
+        // Stand in for an OS drag whose end callback won't reach the unmounted row.
+        rt.update(|s, _| s.downloads.dragging = Some((host, 1)));
+        settle(&mut rt);
+        assert!((element(&rt, "download:1").opacity - 0.55).abs() < 0.001);
+        rt.update(leave);
+        assert!(rt.state.downloads.dragging.is_none());
+        rt.update(|s, _| s.open_panel(PanelKind::Downloads, "Downloads", &[]));
+        settle(&mut rt);
+        assert!((element(&rt, "download:1").opacity - 1.).abs() < 0.001);
+    }
 }
 
 /// Run by itself with REX_TEST_SNAP_DIR to check the cues in the rendered app at 640 pt.

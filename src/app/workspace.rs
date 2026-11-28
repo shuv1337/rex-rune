@@ -553,6 +553,9 @@ impl Workspace {
     /// Forget a host's terminals and claims; dropping its `HostState` shuts its worker down.
     pub(super) fn forget_host(&mut self, state: HostState) {
         let id = state.id;
+        if self.downloads.dragging.is_some_and(|(host, _)| host == id) {
+            self.downloads.dragging = None;
+        }
         if self.copy_mode.as_ref().is_some_and(|s| s.key.0 == id) {
             self.copy_mode = None;
         }
@@ -598,7 +601,7 @@ impl Workspace {
         self.settings.sessions.remove(&host.endpoint);
         self.settings.recent_paths.remove(&host.endpoint);
         // Menus and drags name hosts by position, which just shifted.
-        self.panel = None;
+        drop(self.take_panel());
         self.drag = None;
         self.layer_drag = None;
         if self.active == index {
@@ -1883,7 +1886,7 @@ impl Workspace {
                 self.shortcut_filter = TextEdit::new("");
                 self.settings_nav.opened();
                 self.recorder = None;
-                let back = self.panel.take();
+                let back = self.take_panel();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
                 self.refresh_session_inspector_watches();
@@ -2435,8 +2438,7 @@ impl Workspace {
         panel.target = target;
         // Asked from the switcher: cancelling goes back to it.
         panel.back = self
-            .panel
-            .take()
+            .take_panel()
             .filter(|p| {
                 matches!(p.kind, PanelKind::Picker(true))
                     || method == "server.stop" && matches!(p.kind, PanelKind::Settings)
@@ -2487,7 +2489,7 @@ impl Workspace {
             term.clear_local_echo();
             term.end_selection();
         }
-        let previous = self.panel.take();
+        let previous = self.take_panel();
         let target = previous.as_ref().and_then(|p| p.target.clone());
         // Forms and confirmations opened from Settings go back to it; the Add host list
         // does too, and its own forms go back to the list.
@@ -2583,12 +2585,21 @@ impl Workspace {
         }
     }
 
+    pub(super) fn take_panel(&mut self) -> Option<Panel> {
+        let panel = self.panel.take();
+        // Rune can no longer deliver DragEnd to a row once its popover unmounts.
+        if matches!(panel.as_ref().map(|p| &p.kind), Some(PanelKind::Downloads)) {
+            self.downloads.dragging = None;
+        }
+        panel
+    }
+
     pub fn close_panel(&mut self, tx: &mut Tx) {
         self.leave_install_dialog();
         self.recorder = None;
         self.leave_download_dialog();
         self.bindings.sequence.clear();
-        self.panel = None;
+        drop(self.take_panel());
         self.refresh_session_inspector_watches();
         self.reconcile_prompts();
         tx.blur();
@@ -2605,13 +2616,11 @@ impl Workspace {
         }
         self.leave_download_dialog();
         self.leave_install_dialog();
-        if let Some(mut back) = self.panel.as_mut().and_then(|p| p.back.take()) {
+        if let Some(mut back) = self.take_panel().and_then(|p| p.back) {
             if let Some(input) = back.inputs.first_mut() {
                 input.focused = true;
             }
             self.panel = Some(*back);
-        } else {
-            self.panel = None;
         }
         self.refresh_session_inspector_watches();
         self.reconcile_prompts();
@@ -2627,7 +2636,7 @@ impl Workspace {
         }
         self.leave_download_dialog();
         self.leave_install_dialog();
-        if let Some(mut back) = self.panel.as_mut().and_then(|p| p.back.take()) {
+        if let Some(mut back) = self.take_panel().and_then(|p| p.back) {
             if let Some(input) = back.inputs.first_mut() {
                 input.focused = true;
             }

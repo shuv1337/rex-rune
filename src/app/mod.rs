@@ -196,7 +196,11 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .on_physical_input(input::on_physical_input)
         .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward])
         .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
-            if s.panel.is_some() || s.drag.is_some() || s.layer_drag.is_some() {
+            if s.panel.is_some()
+                || s.drag.is_some()
+                || s.layer_drag.is_some()
+                || s.rearrange.gesture.is_some()
+            {
                 return;
             }
             let action = match tx.button() {

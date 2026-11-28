@@ -82,6 +82,7 @@ impl Workspace {
         }
         self.exit_copy_mode();
         self.cancel_layer_drag();
+        self.cancel_rearrange();
         self.navigation.cancel();
 
         let host_id = self.hosts[self.active].id;

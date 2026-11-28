@@ -666,7 +666,7 @@ impl Workspace {
             .as_ref()
             .is_some_and(|p| !matches!(p.kind, PanelKind::Settings))
         {
-            self.panel = None;
+            drop(self.take_panel());
         }
         self.drag = None;
         self.layer_drag = None;

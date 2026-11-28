@@ -625,11 +625,12 @@ impl Workspace {
     pub fn open_updates_settings(&mut self) {
         self.exit_copy_mode();
         self.cancel_layer_drag();
+        self.cancel_rearrange();
         self.leave_install_dialog();
         self.settings_nav.opened();
         self.bindings.sequence.clear();
         self.reload_shortcuts();
-        let back = self.panel.take();
+        let back = self.take_panel();
         self.settings_section = SettingsSection::Updates;
         self.panel = Some(super::panel::Panel::new(
             PanelKind::Settings,
