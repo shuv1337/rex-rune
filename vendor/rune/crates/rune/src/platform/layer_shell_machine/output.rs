@@ -93,7 +93,7 @@ impl SurfaceOutput {
     }
 
     /// The output global name this surface is currently associated with, if known.
-    #[cfg(test)]
+    #[cfg_attr(not(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))), allow(dead_code))]
     pub(crate) fn current(&self) -> Option<u32> {
         match self {
             Self::Pinned(id) => Some(*id),

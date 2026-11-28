@@ -59,19 +59,37 @@ pub(in crate::runtime) fn navigates(ev: &KeyEvent) -> bool {
         && matches!(ev.key, Key::Tab | Key::Up | Key::Down | Key::Left | Key::Right | Key::Home | Key::End | Key::PageUp | Key::PageDown)
 }
 
+/// Whether the app-owned `TextEdit` differs from what [`sync_input_focus`] would write for this
+/// field at focus state `focused`, checked against `input.model_flags` so an idle focused field
+/// does not mutably borrow (and dirty) a `Tracked<TextEdit>` on unrelated commits.
+fn input_needs_sync(input: &crate::el::InputSpec, focused: bool, sync_single_line: bool) -> bool {
+    let m = input.model_flags;
+    m.focused != focused
+        || input.edit.focused != focused
+        || (!focused && m.composing)
+        || (input.edit.is_secure() && !m.secure)
+        || input.revealed_override.is_some_and(|r| m.revealed != r)
+        || input.line_home_end_override.is_some_and(|l| m.line_home_end != l)
+        || (sync_single_line && m.single_line != input.single_line)
+}
+
 /// Pushes focus (and a secure flag) into an input's app-owned editor and mirrors it back.
 fn sync_input_focus(input: &mut crate::el::InputSpec, states: crate::states::States<'_>, focused: bool) -> bool {
     let Some(access) = &input.access else {
         input.edit.focused = focused;
+        input.model_flags.focused = focused;
         return false;
     };
     let edit = access(states);
     let mut changed = false;
-    edit.set_single_line(input.single_line);
     if input.edit.is_secure() && !edit.is_secure() {
         edit.set_secure(true);
         changed = true;
     }
+    if edit.is_single_line() != input.single_line {
+        changed = true;
+    }
+    edit.set_single_line(input.single_line);
     if let Some(revealed) = input.revealed_override
         && edit.is_revealed() != revealed
     {
@@ -90,6 +108,7 @@ fn sync_input_focus(input: &mut crate::el::InputSpec, states: crate::states::Sta
         edit.break_history_group();
         changed = true;
     }
+    input.model_flags = crate::el::InputModelFlags::of(edit);
     if edit.is_secure() {
         // Drop the previous copy whole so `TextEdit::drop` wipes its buffer instead of freeing
         // old bytes unwiped on growth or leaving them in spare capacity on shrink/clear.
@@ -517,15 +536,47 @@ impl RuntimeCore {
         let mut changed = moved && self.physical_focus_lost(app);
         let prev = self.kbd.focus.path();
         let next = path.as_deref();
-        let needs_sync = |p: &str, input: &crate::el::InputSpec, focused: bool| {
-            prev == Some(p)
-                || next == Some(p)
-                || (sync_all
-                    && (input.edit.focused != focused
-                        || (!focused && input.edit.is_composing())
-                        || input.edit.is_secure()
-                        || input.revealed_override.is_some()
-                        || input.line_home_end_override.is_some()))
+        if sync_all {
+            self.kbd.synced_inputs_gen = self.kbd.synced_inputs_gen.wrapping_add(1);
+        }
+        let synced_gen = self.kbd.synced_inputs_gen;
+        let synced_inputs = &mut self.kbd.synced_inputs;
+        let mut sync_one = |p: &str, input: &mut crate::el::InputSpec, focused: bool| -> bool {
+            let endpoint = prev == Some(p) || next == Some(p);
+            let desired = focus_machine::SyncedInputFlags::of(input, focused);
+            let mut flags_need_sync = false;
+            if input.access.is_some() {
+                if let Some((last, seen_gen)) = synced_inputs.get_mut(p) {
+                    if sync_all {
+                        *seen_gen = synced_gen;
+                    }
+                    flags_need_sync = *last != desired;
+                } else {
+                    flags_need_sync = desired.has_syncable();
+                }
+            }
+            if !sync_all && !endpoint {
+                return false;
+            }
+            let do_sync = (moved && !sync_all && endpoint)
+                || flags_need_sync
+                || input_needs_sync(input, focused, focused || input.edit.is_secure());
+            if !do_sync {
+                return false;
+            }
+            let did = sync_input_focus(input, app.states(), focused);
+            if input.access.is_some() {
+                if let Some((last, seen_gen)) = synced_inputs.get_mut(p) {
+                    *last = desired;
+                    *seen_gen = synced_gen;
+                } else {
+                    synced_inputs.insert(p.to_owned(), (desired, synced_gen));
+                }
+            }
+            // Calling the mutable accessor bumps a `Tracked<TextEdit>` even when the flags already
+            // matched; re-measure within this commit so any enclosing `region` records the new
+            // version instead of rebuilding once on the next unrelated commit.
+            did || (sync_all && flags_need_sync)
         };
         let mut reveal_caret = false;
         for n in &mut self.tree.nodes {
@@ -534,9 +585,7 @@ impl RuntimeCore {
                 if moved && focused && input.reveal_caret_on_focus {
                     reveal_caret = true;
                 }
-                if needs_sync(n.path.as_str(), input, focused) {
-                    changed |= sync_input_focus(input, app.states(), focused);
-                }
+                changed |= sync_one(n.path.as_str(), input, focused);
             }
         }
         for (p, input) in &mut self.commit.virtual_inputs {
@@ -544,9 +593,10 @@ impl RuntimeCore {
             if moved && focused && input.reveal_caret_on_focus {
                 reveal_caret = true;
             }
-            if needs_sync(p.as_str(), input, focused) {
-                changed |= sync_input_focus(input, app.states(), focused);
-            }
+            changed |= sync_one(p.as_str(), input, focused);
+        }
+        if sync_all && !synced_inputs.is_empty() {
+            synced_inputs.retain(|_, (_, g)| *g == synced_gen);
         }
         if reveal_caret {
             self.edit.caret_follow = true;
@@ -1129,3 +1179,7 @@ mod key_tests;
 #[cfg(test)]
 #[path = "focus_change_tests.rs"]
 mod change_tests;
+
+#[cfg(test)]
+#[path = "focus_tracked_tests.rs"]
+mod tracked_tests;

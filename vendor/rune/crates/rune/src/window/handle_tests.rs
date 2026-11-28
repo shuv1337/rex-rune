@@ -54,6 +54,24 @@ fn handle_queues_color_scheme_requests_in_order() {
 }
 
 #[test]
+fn handle_queues_resize_anchor_requests_in_order() {
+    use crate::ResizeAnchor;
+    let handle = WindowHandle::new("launcher");
+    handle.set_resize_anchor(ResizeAnchor::Bottom);
+    handle.set_resize_anchor(ResizeAnchor::BottomRight);
+    handle.set_resize_anchor(ResizeAnchor::TopLeft);
+    let taken = handle.take_headless();
+    assert!(matches!(
+        taken[..],
+        [
+            WakeEvent::ResizeAnchor(0, ResizeAnchor::Bottom),
+            WakeEvent::ResizeAnchor(0, ResizeAnchor::BottomRight),
+            WakeEvent::ResizeAnchor(0, ResizeAnchor::TopLeft),
+        ]
+    ));
+}
+
+#[test]
 fn with_raw_handle_and_with_raw_display_handle_return_closed_when_unbound() {
     let handle = WindowHandle::new("display");
     let mut window_called = false;
@@ -84,4 +102,47 @@ fn activate_queues_open_with_token_and_drops_empty_tokens() {
     assert!(matches!(&taken[1], WakeEvent::Window(0, WindowRequest::Open(Some(t))) if t == "xdg-token-1"));
     assert!(matches!(&taken[2], WakeEvent::Window(0, WindowRequest::Open(None))));
     assert!(matches!(&taken[3], WakeEvent::Window(0, WindowRequest::Open(Some(t))) if t == "xdg-token-2"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn callback_route_drains_pre_bind_requests_and_forwards_live_requests_and_readiness() {
+    let handle = WindowHandle::new("prefs");
+    assert!(!handle.is_ready());
+    assert_eq!(handle.scale(), None);
+
+    // Requests queued before binding wait until bind_callback drains them in order.
+    handle.open();
+    handle.focus();
+
+    let received: Arc<Mutex<Vec<(usize, &'static str)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&received);
+    handle.bind_callback(
+        Arc::new(move |ev| {
+            let tag = match ev {
+                WakeEvent::Window(slot, WindowRequest::Open(_)) => (slot, "open"),
+                WakeEvent::Window(slot, WindowRequest::Close) => (slot, "close"),
+                WakeEvent::Focus(slot) => (slot, "focus"),
+                _ => (usize::MAX, "other"),
+            };
+            sink.lock().unwrap().push(tag);
+        }),
+        7,
+    );
+
+    // Subsequent requests forward immediately with the bound slot.
+    handle.close();
+    assert!(!handle.headless_pending());
+    assert!(handle.take_headless().is_empty());
+    assert_eq!(*received.lock().unwrap(), vec![(7, "open"), (7, "focus"), (7, "close")]);
+
+    // Non-winit readiness and scale publish without a winit::window::Window.
+    handle.set_ready(true);
+    handle.set_non_winit_scale(Some(2.5));
+    assert!(handle.is_ready());
+    assert_eq!(handle.scale(), Some(2.5));
+    handle.set_ready(false);
+    handle.set_non_winit_scale(None);
+    assert!(!handle.is_ready());
+    assert_eq!(handle.scale(), None);
 }

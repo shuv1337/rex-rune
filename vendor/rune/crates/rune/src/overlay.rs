@@ -729,6 +729,9 @@ struct Live {
     /// Hardware media keys (`NSEventTypeSystemDefined`), while the overlay opts into `media_keys`.
     #[cfg(target_os = "macos")]
     media_keys: Option<crate::input::media_keys::MediaKeys>,
+    /// Whether the layer's `drawableSize` was shrunk to `1×1` while hidden.
+    #[cfg(target_os = "macos")]
+    hidden_drawable: crate::window::HiddenDrawable,
     /// Opt-in Windows 11 `El::system_material` visuals behind the swap chain.
     #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
     materials: crate::system_material::windows::Materials,
@@ -740,8 +743,8 @@ struct Live {
     /// (`window::slot`). Before the surface so an outstanding wait goes first.
     #[cfg(target_os = "windows")]
     slot: Slot,
-    /// Paces sub-frame `poll` wakes onto the display's vblank grid (`window::poll_pace`).
-    #[cfg(target_os = "windows")]
+    /// Paces sub-frame `poll` wakes onto the display's refresh grid (`window::poll_pace`).
+    #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
     poll_pace: crate::window::poll_pace::PollPace,
     alpha: Option<crate::render::surface_alpha::AlphaSurface>,
     surface: wgpu::Surface<'static>,
@@ -846,6 +849,8 @@ pub(in crate::overlay) struct OverlayCore {
     frame_teardown: crate::render::loss_latch::FrameTeardownState,
     /// `ConfiguredOverlay::frame_latency`, read when the surface is made.
     pub(in crate::overlay) frame_latency: Option<u32>,
+    /// `ConfiguredOverlay::wide_color`, read when the surface is made.
+    pub(in crate::overlay) wide_color: bool,
     /// `ConfiguredOverlay::keyboard_dispatch`.
     pub(in crate::overlay) keyboard_dispatch: crate::KeyboardDispatch,
     /// `ConfiguredOverlay::on_materials`, called before each present.
@@ -982,6 +987,7 @@ impl OverlayCore {
             terminal_gpu_entered: false,
             frame_teardown: crate::render::loss_latch::FrameTeardownState::Idle,
             frame_latency: None,
+            wide_color: false,
             keyboard_dispatch: crate::KeyboardDispatch::Batched,
             on_materials: None,
             requested_renderer: crate::RendererKind::Gpu,

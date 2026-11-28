@@ -7,30 +7,23 @@ use super::*;
 pub(in crate::runtime) struct CaretFollowCheck {
     path: String,
     text: crate::edit::Wiped,
-    anchor: usize,
-    focus: usize,
+    carets: Vec<crate::Caret>,
     affinity: parley::Affinity,
 }
 
 impl CaretFollowCheck {
     pub(in crate::runtime) fn new(path: String, edit: &crate::TextEdit) -> Self {
-        let (a, b) = edit.range();
-        let (anchor, focus) = if edit.anchor <= edit.focus { (a, b) } else { (b, a) };
         Self {
             path,
             text: crate::edit::Wiped(edit.text.clone()),
-            anchor,
-            focus,
+            carets: edit.carets(),
             affinity: edit.affinity,
         }
     }
 
     pub(in crate::runtime) fn changed(&self, path: &str, edit: &crate::TextEdit) -> bool {
         if self.path != path { return false; }
-        let (a, b) = edit.range();
-        let (anchor, focus) = if edit.anchor <= edit.focus { (a, b) } else { (b, a) };
-        self.anchor != anchor
-            || self.focus != focus
+        self.carets != edit.carets()
             || self.affinity != edit.affinity
             || self.text.as_str() != edit.text.as_str()
     }
@@ -48,6 +41,11 @@ pub(crate) struct TextInputState {
     pub(super) links: links::LinkState,
     /// Multi-click and drag selection state for `text_input`.
     pub(in crate::runtime) input_click: input_click::InputClick,
+    /// Native touch selection handle drag state (`touch_ui`).
+    pub(in crate::runtime) handle_drag: super::touch_ui::HandleDrag,
+    /// Monotonic counter bumped on touch taps / field-menu opens / caret-handle releases so the
+    /// touch selection host knows when to show the 4-second caret handle.
+    pub(in crate::runtime) touch_selection_rev: u64,
     /// Sideways scroll of focused single-line fields, in points, keyed by node path.
     pub(crate) input_scroll: HashMap<String, f32>,
     /// The focused field's caret (path, window rect) the next view sees through `Cx::caret`.
@@ -66,6 +64,9 @@ pub(crate) struct TextInputState {
     pub(crate) ime_option_as_alt: crate::OptionAsAlt,
     /// The shell cancels native composition before enabling the new text focus.
     pub(crate) ime_reset: bool,
+    /// A finger tap landed on an editable text field since the host last polled it, so mobile
+    /// hosts can re-show a soft keyboard hidden by Back while the field kept focus.
+    pub(crate) field_tap: bool,
     /// The focused spellchecked field's word at the caret (`spell::pause`).
     pub(in crate::runtime) spell_watch: Option<crate::spell::pause::Watch>,
     /// Linux's primary selection (`runtime/input/primary_selection.rs`).
@@ -99,6 +100,8 @@ impl TextInputState {
             sel_heard: Default::default(),
             links: Default::default(),
             input_click: Default::default(),
+            handle_drag: Default::default(),
+            touch_selection_rev: 0,
             input_scroll: HashMap::default(),
             caret: None,
             caret_watch: false,
@@ -107,6 +110,7 @@ impl TextInputState {
             app_ime_comp: Default::default(),
             ime_option_as_alt: crate::OptionAsAlt::None,
             ime_reset: false,
+            field_tap: false,
             spell_watch: None,
             #[cfg(any(target_os = "linux", test))]
             primary: Default::default(),
@@ -194,6 +198,11 @@ impl TextInputState {
     #[inline]
     pub(in crate::runtime) fn set_shift(&mut self, shift: bool) {
         self.selectable.shift = shift;
+    }
+
+    #[inline]
+    pub(in crate::runtime) fn bump_touch_selection_rev(&mut self) {
+        self.touch_selection_rev = self.touch_selection_rev.wrapping_add(1);
     }
 }
 
@@ -305,7 +314,11 @@ impl RuntimeCore {
                 let a = usize::from(!horizontal);
                 let mut start = scroll_offsets(&self.scroll.scrolls, &self.tree.nodes, v).fold(self.tree.nodes[v].target[a], |p, o| p - o[a]);
                 let mut end = start + (self.tree.nodes[v].target[a + 2] - self.tree.nodes[v].target[a]);
-                if !horizontal && let Some((vis_top, vis_bottom)) = self.host.visual_viewport_y {
+                let visible_y = self.host.visual_viewport_y.or_else(|| {
+                    let kb = self.host.keyboard_inset();
+                    (kb > 0.0).then(|| (0.0, (self.viewport.1 - kb).max(0.0)))
+                });
+                if !horizontal && let Some((vis_top, vis_bottom)) = visible_y {
                     let zoom = self.host.zoom().max(1e-3);
                     let clipped_start = start.max(vis_top / zoom);
                     let clipped_end = end.min(vis_bottom / zoom);

@@ -11,6 +11,8 @@ mod flight;
 mod frame;
 mod haptics;
 mod input;
+#[cfg(test)]
+mod labels_tests;
 mod native_menu;
 mod open_path;
 mod open_url;
@@ -78,13 +80,16 @@ pub use audio::SampleFormat;
 pub use clipboard::ClipboardContent;
 pub use clipboard::ClipboardImage;
 pub use clipboard::ClipboardWrite;
+pub use clipboard::CopyError;
 pub use clipboard::CopyImageError;
 pub use clipboard::SecretCopy;
 pub use clipboard::SecretState;
 pub use clipboard::WebFile;
 pub use color::Color;
 pub use color::oklch;
+pub use color::oklch_wide;
 pub use color::oklcha;
+pub use color::oklcha_wide;
 pub use compose::Compositor;
 pub use compose::EffectSlot;
 pub use compose::Frame;
@@ -94,6 +99,7 @@ pub use drag_out::DragOperation;
 pub use drag_out::DragOperations;
 pub use drag_out::DragOutcome;
 pub use edit::Block;
+pub use edit::Caret;
 pub use edit::Clause;
 pub use edit::Ime;
 pub use edit::Key;
@@ -153,6 +159,7 @@ pub use el::anchor_rect;
 pub use el::anchor_rect_in;
 pub use el::auto_grow;
 pub use el::canvas;
+pub use el::canvas_with;
 pub use el::col;
 pub use el::edit_access;
 pub use el::effect;
@@ -283,6 +290,9 @@ pub use overlay::sizing::ContentSizing;
 pub use pixels::Pixels;
 pub use platform::accent::SystemAccent;
 pub use platform::accent::system_accent;
+#[cfg(target_os = "android")]
+#[doc(hidden)]
+pub use platform::android as __android;
 pub use platform::app_icon::AppIcon;
 pub use platform::app_icon::set_app_icon;
 pub use platform::app_icon::set_app_icon_choice;
@@ -291,7 +301,7 @@ pub use platform::app_icon::set_app_icon_resource;
 pub use platform::desktop_settings::DesktopSetting;
 pub use platform::desktop_settings::DesktopSettingWatch;
 pub use platform::desktop_settings::desktop_setting;
-#[cfg(target_vendor = "apple")]
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
 pub use platform::embed;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
@@ -317,6 +327,7 @@ pub use playground::Playground;
 pub use playground::Stage;
 pub use playground::Step;
 pub use playground::Story;
+pub use popup_menu::FieldMenuContext;
 pub use popup_menu::FieldMenuRequest;
 pub use popup_menu::PopupAnchor;
 pub use popup_menu::PopupEntry;
@@ -527,6 +538,7 @@ pub use windows::ConfiguredWindowOptions;
 pub use windows::Display;
 pub use windows::MacColorSpace;
 pub use windows::MacWindowOptions;
+pub use windows::ResizeAnchor;
 pub use windows::ResizeEdge;
 pub use windows::RunOptions;
 pub use windows::WindowOptions;
@@ -535,6 +547,32 @@ pub use windows::WindowSpec;
 pub use windows::WindowsWindowOptions;
 pub use windows::open_window;
 pub use winit::raw_window_handle;
+
+/// Exports the Android JNI entry point (`JNI_OnLoad`) for a Rune app compiled as a `cdylib`.
+///
+/// Pass your app's entry function (typically `main`). When `dev.rune.RuneView` loads your shared
+/// library via `System.loadLibrary`, `JNI_OnLoad` installs logcat forwarding, binds `RuneView`'s
+/// native methods with `RegisterNatives`, and registers `entry` to run when `RuneView` initializes.
+///
+/// Expands to nothing on non-Android targets so the same source compiles on desktop, web and iOS.
+/// Safe to invoke from crates with `#![forbid(unsafe_code)]`.
+#[macro_export]
+macro_rules! android_main {
+    ($entry:path) => {
+        #[cfg(target_os = "android")]
+        const _: () = {
+            #[unsafe(no_mangle)]
+            pub unsafe extern "system" fn JNI_OnLoad(
+                vm: *mut ::std::ffi::c_void,
+                _reserved: *mut ::std::ffi::c_void,
+            ) -> i32 {
+                let entry: fn() = $entry;
+                // SAFETY: ART passes a valid `JavaVM*` to `JNI_OnLoad` when loading this library.
+                unsafe { $crate::__android::jni_on_load(vm, entry) }
+            }
+        };
+    };
+}
 
 /// The logical clock a scene fn (`AppSpec::scenes`) builds its state against. `--scene` starts
 /// at time zero.

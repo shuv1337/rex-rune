@@ -262,6 +262,11 @@ impl Frames {
         true
     }
 
+    pub(super) fn commit(&self) {
+        self.surface.commit();
+        self.conn.flush().ok();
+    }
+
     pub(super) fn forget(&mut self) {
         if let Some(pool) = &mut self.pool { pool.slots.forget(); }
     }

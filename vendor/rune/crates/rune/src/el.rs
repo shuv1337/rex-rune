@@ -71,12 +71,13 @@ pub use handlers::{Drag, Phase, PointerEvent, PointerPress, SwipeEdge};
 pub(crate) use handlers::{A11yActionFn, AnyPressFn, DragEndFn, DragFn, DragOutFn, InputKeyFn, PointerFn, PointerMotionFn, PressFn, SetValueFn, StepFn, StepLimitFn, WindowDrag};
 pub(crate) use help::{HELP_KEY, HELP_ROW, help_words};
 pub use input::{Autofill, InputMode, InputSpec, auto_grow, edit_access, text_input};
+pub(crate) use input::InputModelFlags;
 pub use items::VirtualItems;
 #[doc(hidden)]
 pub use layout::PathBind;
 pub use pills::{InlineIcon, InlineImage};
 pub use rare::OptionAsAlt;
-pub(crate) use rare::{ElCold, ElFlags, RoleTag};
+pub(crate) use rare::{ElCold, ElFlags, RoleTag, VirtualFlat};
 pub use rune_motion::Cycle;
 pub(crate) use scroll::FadeStyle;
 pub use scroll::ScrollFade;
@@ -300,6 +301,8 @@ impl PillStyle {
 }
 pub(crate) type InputPasteFn = Rc<dyn Fn(crate::states::States<'_>, &crate::ClipboardContent, &mut Tx) -> bool>;
 pub(crate) type InputCopyFn = Rc<dyn Fn(crate::states::States<'_>, bool, &mut Tx) -> Option<crate::ClipboardContent>>;
+pub(crate) type FieldMenuBuildFn = Rc<dyn Fn(crate::states::States<'_>, &crate::FieldMenuContext, crate::PopupMenu) -> crate::PopupMenu>;
+pub(crate) type FieldMenuPickFn = Rc<dyn Fn(crate::states::States<'_>, &str, &crate::FieldMenuContext, &mut Tx)>;
 pub(crate) type PickFn = Box<dyn FnOnce(crate::states::States<'_>, Option<crate::Picked>, &mut Tx)>;
 pub(crate) type TextOffsetFn = Box<dyn FnOnce(crate::states::States<'_>, Option<usize>, &mut Tx)>;
 pub(crate) type TextLineFn = Box<dyn FnOnce(crate::states::States<'_>, Option<crate::TextLine>, &mut Tx)>;
@@ -482,6 +485,14 @@ pub fn icon(i: &'static Icon, size: f32) -> El {
 /// An element that paints `shape`; size it like any element.
 pub fn canvas(shape: Shape) -> El {
     let mut e = base(FlexDirection::Row).shape(shape);
+    e.role = RoleTag::IMAGE;
+    e
+}
+
+/// An element whose [`Shape`] is built from its laid-out size `[width, height]` (in points)
+/// and the window's device `scale` on the frame it paints; size it like any element.
+pub fn canvas_with(build: impl Fn([f32; 2], f32) -> Shape + 'static) -> El {
+    let mut e = base(FlexDirection::Row).shape_with(build);
     e.role = RoleTag::IMAGE;
     e
 }

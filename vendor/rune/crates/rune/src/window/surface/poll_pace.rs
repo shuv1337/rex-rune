@@ -1,20 +1,32 @@
-//! Windows: paces a shown, uncovered window's or overlay's poll-driven frames
-//! (`Tx::wake_after(Duration::ZERO)`) onto the display's vblank grid instead of holding them to
-//! the 60 Hz `TIMER_FRAME` floor.
+//! Desktop (Windows, Linux/BSD): paces a shown, uncovered window's or overlay's poll-driven
+//! frames (`Tx::wake_after(Duration::ZERO)`) onto the display's refresh grid instead of holding
+//! them to the 60 Hz `TIMER_FRAME` floor.
 //!
 //! Follows Chromium's `VSyncProviderWin` (`ui/gl/vsync_provider_win.cc`) and
 //! `DelayBasedTimeSource` (`components/viz/common/frame_sinks/delay_based_time_source.cc`):
 //! - While no poll timer is armed (idle), stays `Idle` / `Cached` with no deadline and asks for
 //!   zero frames.
 //! - When a poll asks sooner than `TIMER_FRAME`, aligns sub-refresh asks onto the display's
-//!   vblank grid (`next_tick`, with Chromium's 500 us judder guard so early timer wakes or
-//!   vblank-timestamp jitter never double-tick).
+//!   refresh grid (`next_tick`, with Chromium's 500 us judder guard so early timer wakes or
+//!   vblank-timestamp jitter never double-tick, and per-frame build time never accumulates).
 //! - Once armed for a poll, keeps its deadline fixed until that poll fires, the runtime's wake
 //!   changes, or the window hides/covers/moves - so `wake_deadline` and `new_events` always agree.
 //! - On Windows 11 22H2+ (SV3+), `DwmGetCompositionTimingInfo` tracks the fastest active display
 //!   rather than necessarily the window's monitor, so `resolve_grid` uses DWM's hardware grid when
 //!   it agrees with the window's monitor refresh rate and falls back to the window's monitor
 //!   period on mixed-rate displays.
+//! - On Linux/BSD (Wayland and X11), `monitor_grid` builds a phase-locked grid from the monitor's
+//!   reported refresh rate (`wl_output.mode` or XRandR via winit / layer-shell), preserving phase
+//!   across `REFRESH_TTL` re-samples and falling back to `TIMER_FRAME` (60 Hz) when unknown.
+
+#![cfg_attr(
+    not(any(
+        test,
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    )),
+    allow(dead_code)
+)]
 
 use std::time::Duration;
 
@@ -206,20 +218,22 @@ impl PollPace {
     }
 
     /// Syncs with `rt`'s current poll wake at `now`, invoking `sample` only when the machine
-    /// emits [`PollPaceEffect::SampleGrid`].
+    /// emits [`PollPaceEffect::SampleGrid`]. Passes the last sampled grid (so monitor-only grids
+    /// keep phase across `REFRESH_TTL`) and the poll's wall timestamp (so a fresh synthetic grid
+    /// anchors to the poll rather than firing early after a frame build).
     pub(crate) fn sync_with(
         &mut self,
         rt: &RuntimeCore,
         now: Instant,
         active: bool,
-        mut sample: impl FnMut(Option<VSyncGrid>) -> Option<VSyncGrid>,
+        mut sample: impl FnMut(Option<VSyncGrid>, Instant) -> Option<VSyncGrid>,
     ) {
         let poll = poll_wake_wall_core(rt).and_then(|(polled, due)| Some((polled?, due)));
         let previous = self.previous_grid();
         for effect in self.step(PollPaceEvent::Sync { now, active, poll }) {
             match effect {
                 PollPaceEffect::SampleGrid { polled, due } => {
-                    let grid = sample(previous);
+                    let grid = sample(previous, polled);
                     let _ = self.step(PollPaceEvent::Grid { now, polled, due, grid });
                 }
             }
@@ -264,6 +278,7 @@ fn periods_match(a: Duration, b: Duration) -> bool {
 
 /// Validates raw `DWM_TIMING_INFO` + QPC values and converts them to a [`VSyncGrid`] on `now`'s
 /// clock, matching Chromium's `TryGetVSyncParamsFromDwmCompInfo` (`ui/gl/vsync_provider_win.cc`).
+#[cfg(any(test, target_os = "windows"))]
 pub(crate) fn dwm_grid_from_raw(
     now: Instant,
     qpc_now: i64,
@@ -308,7 +323,7 @@ pub(crate) fn resolve_grid(
     dwm: Option<VSyncGrid>,
     monitor_mhz: Option<u32>,
     previous: Option<VSyncGrid>,
-    now: Instant,
+    anchor: Instant,
 ) -> Option<VSyncGrid> {
     let dwm = dwm.filter(|g| valid_period(g.interval));
     let monitor = monitor_mhz
@@ -320,11 +335,65 @@ pub(crate) fn resolve_grid(
         (_, Some(mon)) => {
             let timebase = previous
                 .filter(|prev| periods_match(prev.interval, mon))
-                .map_or(now, |prev| prev.timebase);
+                .map_or(anchor, |prev| prev.timebase);
             Some(VSyncGrid { timebase, interval: mon })
         }
         (Some(dwm), None) => Some(dwm),
         (None, None) => None,
+    }
+}
+
+/// Resolves a phase-locked display refresh grid from the monitor's refresh rate in millihertz
+/// (Linux/BSD Wayland `wl_output.mode` or X11 XRandR), preserving the previous grid's phase
+/// across re-samples on the same monitor and returning `None` (60 Hz `TIMER_FRAME` fallback) when
+/// unknown or invalid.
+#[cfg_attr(
+    not(any(
+        test,
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn monitor_grid(
+    monitor_mhz: Option<u32>,
+    previous: Option<VSyncGrid>,
+    anchor: Instant,
+) -> Option<VSyncGrid> {
+    resolve_grid(None, monitor_mhz, previous, anchor)
+}
+
+/// Picks the monitor refresh rate in millihertz from `current` (if the window's monitor is
+/// known), or from the sole monitor in `available` when `current` is `None` (such as Wayland
+/// before `wl_surface.enter` arrives). On multi-monitor setups with unknown placement, returns
+/// `None` rather than guessing the wrong display.
+#[cfg_attr(
+    not(any(
+        test,
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn pick_refresh_mhz(
+    current: Option<Option<u32>>,
+    available: impl IntoIterator<Item = Option<u32>>,
+) -> Option<u32> {
+    match current {
+        Some(mhz) => mhz,
+        None => {
+            let mut iter = available.into_iter();
+            let only = iter.next()?;
+            iter.next().is_none().then_some(only).flatten()
+        }
+    }
+}
+
+/// Reads the refresh rate in millihertz of `window`'s current monitor without querying
+/// `available_monitors` unless `current_monitor` is `None`.
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+pub(crate) fn window_refresh_mhz(window: &winit::window::Window) -> Option<u32> {
+    match window.current_monitor() {
+        Some(monitor) => monitor.refresh_rate_millihertz(),
+        None => pick_refresh_mhz(None, window.available_monitors().map(|m| m.refresh_rate_millihertz())),
     }
 }
 

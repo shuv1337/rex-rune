@@ -1,5 +1,15 @@
 use super::*;
 
+fn encode_multi_sz(entries: &[&str]) -> Vec<u16> {
+    let mut buf = Vec::new();
+    for entry in entries {
+        buf.extend(entry.encode_utf16());
+        buf.push(0);
+    }
+    buf.push(0);
+    buf
+}
+
 #[test]
 fn posix_languages_follows_priority_normalizes_and_deduplicates() {
     let vars = |name: &str| match name {
@@ -32,10 +42,56 @@ fn normalize_trims_skips_empty_and_preserves_first_occurrence() {
 }
 
 #[test]
+fn parse_wide_multi_sz_reads_double_nul_buffer_and_stops_at_sentinel() {
+    let mut buf = encode_multi_sz(&["zh-Hans-CN", "  en-US ", "zh-Hans-CN", "it-IT"]);
+    // Trailing units past the double-NUL terminator must be ignored.
+    buf.extend("fr-FR".encode_utf16());
+    buf.push(0);
+    buf.push(0);
+    assert_eq!(parse_wide_multi_sz(&buf), vec!["zh-Hans-CN", "en-US", "it-IT"]);
+
+    assert!(parse_wide_multi_sz(&[]).is_empty());
+    assert!(parse_wide_multi_sz(&[0, 0]).is_empty());
+    assert!(parse_wide_multi_sz(&[0, b'e' as u16, b'n' as u16, 0, 0]).is_empty());
+}
+
+#[test]
+fn locale_setting_change_area_matches_intl_case_insensitively() {
+    assert!(is_locale_setting_change_area(Some("intl")));
+    assert!(is_locale_setting_change_area(Some("Intl")));
+    assert!(is_locale_setting_change_area(Some("INTL")));
+    assert!(!is_locale_setting_change_area(None));
+    assert!(!is_locale_setting_change_area(Some("")));
+    assert!(!is_locale_setting_change_area(Some("ImmersiveColorSet")));
+    assert!(!is_locale_setting_change_area(Some("ConvertibleSlateMode")));
+}
+
+#[test]
 fn cached_platform_languages_contains_only_non_empty_trimmed_tags() {
     let langs = cached();
     for tag in langs {
         assert!(!tag.is_empty());
         assert_eq!(tag.trim(), tag);
     }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_preferred_languages_queries_profile_and_ui_apis() {
+    let ui = windows_ui_languages();
+    assert!(!ui.is_empty(), "GetUserPreferredUILanguages must return at least one language on Windows");
+
+    let profile = windows_profile_languages();
+    if let Some(ref langs) = profile {
+        assert!(!langs.is_empty());
+        for tag in langs {
+            assert!(!tag.is_empty());
+            assert_eq!(tag.trim(), tag);
+        }
+    }
+    let worker = std::thread::spawn(windows_profile_languages).join().unwrap();
+    assert_eq!(worker, profile);
+    let expected = profile.unwrap_or(ui);
+    assert_eq!(current(), expected);
+    assert_eq!(cached(), expected.as_slice());
 }

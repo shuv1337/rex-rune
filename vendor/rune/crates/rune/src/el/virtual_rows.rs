@@ -157,6 +157,10 @@ impl El {
     /// (viewport rows only); otherwise `edge` is clamped to `0.0..=(overscan - 0.05).min(overscan * 0.95).max(0.0)`
     /// so consecutive frames never oscillate. Non-finite inputs (`NaN`, `±∞`) are ignored.
     ///
+    /// Setting `virtual_overscan` also disables the default 32-row minimum mounted floor when the
+    /// list is pinned to its end inside a `stick_bottom` viewport, so small viewports mount only
+    /// what the viewport and `overscan` ask for.
+    ///
     /// ```
     /// # use rune::{GrowthSpec, ScrollSpec, col, text};
     /// # struct App { rows: Vec<String> }
@@ -204,8 +208,11 @@ impl El {
 pub(crate) type KeyFn = dyn for<'a> Fn(crate::states::StatesRef<'a>, usize) -> Cow<'a, str>;
 pub(crate) type BuildFn = dyn Fn(crate::states::StatesRef<'_>, usize) -> El;
 
+static NEXT_ROW_SOURCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// The rows of an index-built list, built at layout time from the window's state.
 pub(crate) struct RowSource {
+    pub(crate) id: std::num::NonZeroU64,
     pub(crate) count: usize,
     pub(crate) key: Box<KeyFn>,
     pub(crate) build: Box<BuildFn>,
@@ -225,7 +232,12 @@ impl RowSource {
         key: impl for<'a> Fn(&'a S, usize) -> Cow<'a, str> + 'static,
         build: impl Fn(&S, usize) -> El + 'static,
     ) -> Self {
+        let id = std::num::NonZeroU64::new(
+            NEXT_ROW_SOURCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+        .expect("row source id counter");
         RowSource {
+            id,
             count,
             key: Box::new(key_fn(move |s, i| key(state::<S>(s), i))),
             build: Box::new(move |s, i| build(state::<S>(s), i)),

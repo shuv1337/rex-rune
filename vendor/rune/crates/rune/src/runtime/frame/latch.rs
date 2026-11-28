@@ -44,6 +44,9 @@ impl RuntimeCore {
         self.cancel_timer_frame();
         merge(&mut self.frame.pending, one);
         self.commit.dirty |= changed;
+        if changed && !self.live_visible() {
+            self.drop_images();
+        }
         (stale, minimize)
     }
 
@@ -161,6 +164,7 @@ impl RuntimeCore {
         if let Some(title) = tx.title.take() { self.host.window_title.set(title); }
         if let Some(scheme) = tx.color_scheme.take() { self.host.window_color_scheme = Some(scheme); }
         if let Some(backdrop) = tx.window_backdrop.take() { self.host.window_backdrop_request = Some(backdrop); }
+        if let Some(anchor) = tx.resize_anchor.take() { self.host.window_resize_anchor = Some(anchor); }
         if let Some(path) = tx.represented_file.take() { self.host.represented_file.set(crate::window::spec::normalize_represented_file(path)); }
         if let Some(edited) = tx.document_edited.take() { self.host.document_edited.set(edited); }
         if let Some((text, how)) = tx.announce.take() { self.host.announcement.say(text, how); }

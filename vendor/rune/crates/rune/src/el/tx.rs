@@ -124,6 +124,7 @@ pub struct Tx {
     pub(crate) title: Option<String>,
     pub(crate) color_scheme: Option<crate::ColorScheme>,
     pub(crate) window_backdrop: Option<crate::WindowBackdrop>,
+    pub(crate) resize_anchor: Option<crate::ResizeAnchor>,
     /// `Tx::set_represented_file`: `Some(Some(path))` sets, `Some(None)` clears.
     pub(crate) represented_file: Option<Option<std::path::PathBuf>>,
     /// `Tx::set_document_edited`.
@@ -446,7 +447,7 @@ impl Tx {
     /// `wake_after(Duration::ZERO)` from the poll asks for the next frame: a poll that steps
     /// its own animation from the frame clock keeps a shown window or overlay drawing at the
     /// display's rate this way, until it stops asking. That uses the display link on macOS and
-    /// display vblank pacing on Windows; hidden, covered, faded out or unpaced, a wake due sooner
+    /// display refresh pacing on Windows and Linux; hidden, covered, faded out or unpaced, a wake due sooner
     /// than a frame waits about a frame (60 Hz), so a poll that keeps asking never spins the loop.
     #[cfg_attr(feature = "frame-profile", track_caller)]
     pub fn wake_after(&mut self, duration: std::time::Duration) {
@@ -736,8 +737,28 @@ impl Tx {
         Ok(())
     }
 
+    /// Sets which edge or corner of this window stays fixed when Rune resizes it
+    /// ([`App::fit_content_height`](crate::App::fit_content_height),
+    /// [`Self::resize_window`], [`Self::resize_window_instant`],
+    /// [`WindowHandle::resize`](crate::WindowHandle::resize)). Retained across native window
+    /// recreation; last call in a turn wins. Applies before any resize queued in the same turn.
+    ///
+    /// ```no_run
+    /// use rune::{El, ResizeAnchor, el};
+    ///
+    /// let button: El = el().on_press_tx(|_: &mut (), tx| {
+    ///     tx.set_resize_anchor(ResizeAnchor::Bottom);
+    /// });
+    /// let _ = button;
+    /// ```
+    pub fn set_resize_anchor(&mut self, anchor: crate::ResizeAnchor) {
+        self.resize_anchor = Some(anchor);
+    }
+
     /// Resize this window's content to `size` points, as an onboarding window changes height
-    /// per step. The top edge stays put and the window stays on its screen. The frame moves
+    /// per step. The edge selected by [`App::resize_anchor`](crate::App::resize_anchor)
+    /// (default [`ResizeAnchor::TopLeft`](crate::ResizeAnchor::TopLeft)) stays put and the
+    /// window stays on its screen. The frame moves
     /// on this change's spring (`Tx::motion`, else `tok::motion::DEFAULT`), so content laid
     /// out against the window's edges follows it frame by frame; `Tx::instant` or reduced
     /// motion jumps. On macOS it animates; Windows and Linux resize at once, and Wayland

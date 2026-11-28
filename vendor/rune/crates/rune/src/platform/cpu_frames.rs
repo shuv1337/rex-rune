@@ -134,6 +134,14 @@ impl Frames {
         }
     }
 
+    /// Commits pending double-buffered surface state (such as `xdg_toplevel` size limits)
+    /// without attaching a new buffer (Wayland); no-op elsewhere.
+    pub(crate) fn commit(&self) {
+        if let Frames::Wayland(frames) = self {
+            frames.commit();
+        }
+    }
+
     /// The buffers' pixels no longer count as any frame's: the next `begin` isn't `kept`.
     pub(crate) fn forget(&mut self) {
         match self {

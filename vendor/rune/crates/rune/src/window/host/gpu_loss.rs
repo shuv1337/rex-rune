@@ -20,7 +20,7 @@ use crate::window::file_drop::FileDrop;
 use crate::window::keys::map_key_event;
 use crate::window::state::MinimizeEvent;
 use crate::window::surface::{
-    BackoffEvent, configure_checked, drawable_size, max_surface_dim, surface_config,
+    BackoffEvent, configure_checked, drawable_size, is_wide_color_config, max_surface_dim, surface_config_with,
 };
 
 /// Per-window terminal GPU-loss state owned by [`Host`].
@@ -273,6 +273,8 @@ impl Host {
                 w.native.slot.reset();
                 let _ = w.native.poll_pace.step(crate::window::poll_pace::PollPaceEvent::Reset);
             }
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            let _ = w.native.poll_pace.step(crate::window::poll_pace::PollPaceEvent::Reset);
             drop(w.surface.take());
         }
         self.reset_frame_presented();
@@ -428,7 +430,9 @@ impl Host {
         let raw_size = window.inner_size();
         let prev = self.win.as_ref().map(|w| (w.config.width, w.config.height));
         let srgb_blend = self.app.rt().srgb_blend();
+        let wide_color = self.wide_color;
         let frame_latency = crate::window::frame_latency(self.frame_latency);
+        let frame_callback_paced = self.wayland;
         let transparent = self.options.transparent;
         let client_frame = self.client_frame(&window);
         let setup = || -> Result<wgpu::SurfaceConfiguration, SurfaceSetupError> {
@@ -436,12 +440,17 @@ impl Host {
                 return Err(SurfaceSetupError::unsupported("the GPU device is gone"));
             };
             let size = drawable_size(prev, (raw_size.width, raw_size.height), max_surface_dim(Some(gpu)));
-            let (mut config, translucent) = surface_config(&surface, &gpu.adapter, size, srgb_blend)
+            let (mut config, translucent) = surface_config_with(&surface, &gpu.adapter, size, srgb_blend, frame_callback_paced, wide_color, true)
                 .ok_or_else(|| SurfaceSetupError::unsupported("the GPU adapter can't present to this window"))?;
-            crate::window::present::apply(&mut config, &surface, &gpu.adapter, self.wayland);
             config.desired_maximum_frame_latency = frame_latency;
             if transparent || client_frame {
                 config.alpha_mode = alpha_mode(transparent, client_frame, translucent);
+            }
+            #[cfg(target_os = "windows")]
+            if !transparent && !client_frame
+                && let Some(mode) = crate::window::win32::handover::vrr_alpha_mode(gpu.adapter.get_info().vendor, translucent)
+            {
+                config.alpha_mode = mode;
             }
             configure_checked(&surface, gpu, &config)
                 .map_err(|error| SurfaceSetupError::from_configure("the window's GPU surface refused its configuration", error))?;
@@ -464,10 +473,18 @@ impl Host {
             drop(surface);
             return false;
         }
-        let target_format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
+        let wide_active = is_wide_color_config(&config);
+        if wide_active {
+            self.app.rt_mut().set_srgb_blend(false);
+            if let Some((_, renderer)) = self.gpu.as_mut() {
+                renderer.set_srgb_blend(false);
+            }
+        }
+        let effective_srgb_blend = if wide_active { false } else { srgb_blend };
+        let target_format = if effective_srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
         let alpha = self.gpu.as_ref().and_then(|(gpu, _)| alpha_pass(gpu, transparent, &config, target_format));
         #[cfg(target_os = "macos")]
-        crate::platform::macos::pin_contents_top_left(&surface, self.macos_window.color_space);
+        crate::platform::macos::pin_contents(&surface, self.macos_window.color_space, wide_active, self.resize_anchor);
         #[cfg(target_os = "macos")]
         let present = self.win.as_ref()
             .and_then(|w| w.native.present_log.clone())
@@ -480,9 +497,19 @@ impl Host {
         w.backoff_step(BackoffEvent::Lapsed);
         w.damage.reset();
         #[cfg(target_os = "windows")]
-        { w.native.slot.reset(); w.native.dxgi_present.reset(); w.native.mode.rebind(); }
+        {
+            let nvidia = self.gpu.as_ref().is_some_and(|(gpu, _)| {
+                crate::window::win32::handover::vrr_guard(gpu.adapter.get_info().vendor)
+            });
+            w.native.video_layers.hold_premultiplied(
+                !transparent && nvidia && w.config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+            );
+            w.native.slot.reset();
+            w.native.dxgi_present.reset();
+            w.native.mode.rebind();
+        }
         #[cfg(target_os = "macos")]
-        { w.native.present = present; w.native.prime.stop(); }
+        { w.native.present = present; w.native.prime.stop(); w.note_surface_configured(); }
         self.sync_window_backdrop(true);
         true
     }
@@ -566,7 +593,8 @@ pub(in crate::window) fn classify_latched_wake_event(event: &crate::window::Wake
         | WakeEvent::Place(_, _)
         | WakeEvent::Level(_, _)
         | WakeEvent::ExcludeFromCapture(_, _)
-        | WakeEvent::ColorScheme(_, _) => LatchedWakeAction::NonGpuShell,
+        | WakeEvent::ColorScheme(_, _)
+        | WakeEvent::ResizeAnchor(_, _) => LatchedWakeAction::NonGpuShell,
         _ => LatchedWakeAction::Drop,
     }
 }

@@ -364,9 +364,11 @@ Three dependencies are vendored with small, documented patches and wired in
 through `[patch]` in [`Cargo.toml`](../Cargo.toml):
 
 - [`vendor/rune/`](../vendor/rune/README.md): just the `rune` crate from
-  `anomalyco/rune` at `f1b079cc` (MIT), with local Linux window and GSettings
-  fixes. The other Rune crates and upstream registry patches stay at the same
-  pinned git revision.
+  `anomalyco/rune` at `e9233e3881e2eb7e6de2e6f54c9b84bc637bf68b` (MIT).
+  Upstream chooses Mailbox for frame-callback-paced Wayland surfaces. Rex keeps
+  its top-level presentation override, `Tx::system_dark`, GSettings bus handling
+  and 3 pt native titlebar drag threshold. The other Rune crates and eight
+  upstream registry patches use the same revision.
 - [`vendor/rexrs/`](../vendor/rexrs/REX-RUNE.md): `a10y/rexrs` at `780be3f` (MIT
   OR Apache-2.0), plus revision-24 generated types, explicit API-revision range
   negotiation and preservation of an empty `attach_session_ids`.

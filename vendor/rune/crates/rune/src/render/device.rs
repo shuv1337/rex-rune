@@ -64,7 +64,32 @@ impl Gpu {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn try_picked(mut instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features, translucent: bool, presented: bool) -> Result<Gpu, String> {
+    fn try_picked(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features, translucent: bool, presented: bool) -> Result<Gpu, String> {
+        let fallback = surface.is_none() && crate::gpu::backend::native_instance(&instance);
+        Self::try_picked_with_fallback(instance, surface, wanted, translucent, presented, fallback, Self::fallback_from_native_metal)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn try_picked_with_fallback(
+        instance: wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        wanted: wgpu::Features,
+        translucent: bool,
+        presented: bool,
+        can_switch_backend: bool,
+        switch_backend: impl FnOnce(&str) -> wgpu::Instance,
+    ) -> Result<Gpu, String> {
+        match Self::try_picked_once(instance, surface, wanted, translucent, presented) {
+            Ok(gpu) => Ok(gpu),
+            Err(error) if can_switch_backend => {
+                Self::try_picked_once(switch_backend(&error), None, wanted, translucent, presented)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_picked_once(mut instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features, translucent: bool, presented: bool) -> Result<Gpu, String> {
         use crate::gpu::fallback::{self, Candidate, Effect, Event, Failure, Policy, State};
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         // D3D12 keeps one device per adapter in a process: while a removed one is still held, a
@@ -94,72 +119,47 @@ impl Gpu {
         let mut adapters: Vec<wgpu::Adapter> = Vec::new();
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut widened = false;
+        let enumerate = |inst: &wgpu::Instance, tried: &[Candidate]| {
+            let list = pollster::block_on(inst.enumerate_adapters(wgpu::Backends::all()));
+            let cands: Vec<_> = list.iter().enumerate().map(|(i, o)| Self::candidate_info(i, o, surface)).collect();
+            let ordered = fallback::order_fallbacks(tried, &cands, &crate::gpu::pick::display_devices(), compositor.as_deref(), translucent);
+            (list, cands, ordered)
+        };
         loop {
             let mut next_event = None;
             for effect in fallback::step(&mut state, event) {
                 match effect {
                     Effect::EnumerateFallbacks => {
-                        adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-                        candidates = adapters
-                            .iter()
-                            .enumerate()
-                            .map(|(i, other)| Self::candidate_info(i, other, surface))
-                            .collect();
-                        let ordered = fallback::order_fallbacks(
-                            &tried,
-                            &candidates,
-                            &crate::gpu::pick::display_devices(),
-                            compositor.as_deref(),
-                            translucent,
-                        );
+                        let ordered;
+                        (adapters, candidates, ordered) = enumerate(&instance, &tried);
                         next_event = Some(Event::Candidates(ordered));
                     }
-                    Effect::TryCandidate(index) => {
-                        let other = &adapters[index];
-                        match Self::device_on(other, wanted) {
-                            Ok((device, queue)) => {
-                                let info = other.get_info();
-                                let first_error = state.first_error().unwrap_or("");
-                                eprintln!(
-                                    "rune: {} ({:?}) made no device ({first_error}); falling back to {} ({:?}, {:?})",
-                                    first_info.name, first_info.backend, info.name, info.backend, info.device_type
-                                );
-                                crate::native_surface::note_device(&device, draws_surfaces);
-                                return Ok(Gpu::made(instance, other.clone(), device, queue, draws_surfaces));
-                            }
-                            Err(error) => {
-                                tried.push(candidates[index].clone());
-                                next_event = Some(Event::Failed { kind: Failure::DeviceCreate, error });
-                            }
+                    Effect::TryCandidate(index) => match Self::device_on(&adapters[index], wanted) {
+                        Ok((device, queue)) => {
+                            let info = adapters[index].get_info();
+                            let first_error = state.first_error().unwrap_or("");
+                            eprintln!(
+                                "rune: {} ({:?}) made no device ({first_error}); falling back to {} ({:?}, {:?})",
+                                first_info.name, first_info.backend, info.name, info.backend, info.device_type
+                            );
+                            crate::native_surface::note_device(&device, draws_surfaces);
+                            return Ok(Gpu::made(instance, adapters[index].clone(), device, queue, draws_surfaces));
                         }
-                    }
+                        Err(error) => {
+                            tried.push(candidates[index].clone());
+                            next_event = Some(Event::Failed { kind: Failure::DeviceCreate, error });
+                        }
+                    },
                     Effect::FinishOk { .. } => unreachable!("unexpected fallback effect in try_picked"),
                     Effect::FinishErr(error) => {
-                        if surface.is_none()
-                            && !widened
-                            && policy == Policy::Automatic
-                            && Self::is_direct_driver_instance(&instance)
-                        {
+                        if surface.is_none() && !widened && policy == Policy::Automatic && Self::is_direct_driver_instance(&instance) {
                             widened = true;
                             Self::mark_direct_vulkan_bypassed();
-                            eprintln!(
-                                "rune: direct Vulkan driver made no device ({error}); retrying with all installed Vulkan drivers"
-                            );
+                            eprintln!("rune: direct Vulkan driver made no device ({error}); retrying with all installed Vulkan drivers");
                             // Already holding `GPU_INIT`; build/fetch the unlimited instance directly.
                             instance = Self::wgpu_instance_on(wgpu::Backends::all(), true);
-                            adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-                            candidates = adapters
-                                .iter()
-                                .enumerate()
-                                .map(|(i, other)| Self::candidate_info(i, other, surface))
-                                .collect();
-                            let ordered = fallback::order_fallbacks(
-                                &tried,
-                                &candidates,
-                                &crate::gpu::pick::display_devices(),
-                                compositor.as_deref(),
-                                translucent,
-                            );
+                            let ordered;
+                            (adapters, candidates, ordered) = enumerate(&instance, &tried);
                             state = State::need_fallbacks(error);
                             next_event = Some(Event::Candidates(ordered));
                             continue;
@@ -191,6 +191,9 @@ impl Gpu {
         wgpu::Dx12SwapchainKind::DxgiFromVisual.with_env()
     }
 
+    /// Active DX12 shader compiler: full-path `dxcompiler.dll` beside the executable, else FXC.
+    pub(crate) fn dx12_compiler() -> wgpu::Dx12Compiler { crate::gpu::dx12_compiler::pick() }
+
     /// Whether this process has fallen back from direct Linux Vulkan driver loading to an
     /// unlimited instance with all installed drivers.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -220,6 +223,36 @@ impl Gpu {
         }
     }
 
+    /// Chooses the `wgpu::Limits` to request for `adapter_limits`: full `Limits::default()` on
+    /// desktop GPUs, falling back to `Limits::downlevel_defaults()` when the adapter falls short
+    /// on inter-stage variables, color attachments, compute workgroup storage, or uniform buffer
+    /// binding size (16 KiB on Android GLES drivers).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn required_device_limits(adapter_limits: &wgpu::Limits, max_immediate_size: u32) -> wgpu::Limits {
+        let defaults = wgpu::Limits::default();
+        // Views and buffers bound at once (D3D12's shader-visible descriptor heap, which wgpu sizes from
+        // this limit when it makes the device). wgpu's default, a million, is a 32-64 MB heap on
+        // Windows; 65,536 is far more than Rune binds and keeps it to a few MB (a bare wgpu window:
+        // 82.0 MB private bytes with a million, 24.8 MB with 65,536; a bare D3D12 window, 14.1 MB).
+        let views = MAX_VIEWS.min(adapter_limits.max_non_sampler_bindings);
+        let base = if adapter_limits.max_inter_stage_shader_variables < defaults.max_inter_stage_shader_variables
+            || adapter_limits.max_color_attachments < defaults.max_color_attachments
+            || adapter_limits.max_compute_workgroup_storage_size < defaults.max_compute_workgroup_storage_size
+            || adapter_limits.max_uniform_buffer_binding_size < defaults.max_uniform_buffer_binding_size
+        {
+            wgpu::Limits::downlevel_defaults()
+        } else {
+            defaults
+        };
+        wgpu::Limits {
+            max_immediate_size,
+            max_non_sampler_bindings: views,
+            ..base
+                .using_resolution(adapter_limits.clone())
+                .using_alignment(adapter_limits.clone())
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn device_on(adapter: &wgpu::Adapter, wanted: wgpu::Features) -> Result<(wgpu::Device, wgpu::Queue), String> {
         // Dual-source blending is for subpixel text (`FontSmoothing::WindfoilRgb`, `ClearType`).
@@ -231,31 +264,7 @@ impl Gpu {
         // A compositor that asks for immediates (`Compositor::features`) gets all the adapter has.
         let max_immediate_size = if required_features.contains(wgpu::Features::IMMEDIATES) { adapter.limits().max_immediate_size } else { 0 };
         let adapter_limits = adapter.limits();
-        // Views and buffers bound at once (D3D12's shader-visible descriptor heap, which wgpu sizes from
-        // this limit when it makes the device). wgpu's default, a million, is a 32-64 MB heap on
-        // Windows; 65,536 is far more than Rune binds and keeps it to a few MB (a bare wgpu window:
-        // 82.0 MB private bytes with a million, 24.8 MB with 65,536; a bare D3D12 window, 14.1 MB).
-        let views = MAX_VIEWS.min(adapter_limits.max_non_sampler_bindings);
-        let required_limits = if adapter_limits.max_inter_stage_shader_variables < wgpu::Limits::default().max_inter_stage_shader_variables
-            || adapter_limits.max_color_attachments < wgpu::Limits::default().max_color_attachments
-            || adapter_limits.max_compute_workgroup_storage_size < wgpu::Limits::default().max_compute_workgroup_storage_size
-        {
-            wgpu::Limits {
-                max_immediate_size,
-                max_non_sampler_bindings: views,
-                ..wgpu::Limits::downlevel_defaults()
-                    .using_resolution(adapter_limits.clone())
-                    .using_alignment(adapter_limits)
-            }
-        } else {
-            wgpu::Limits {
-                max_immediate_size,
-                max_non_sampler_bindings: views,
-                ..wgpu::Limits::default()
-                    .using_resolution(adapter_limits.clone())
-                    .using_alignment(adapter_limits)
-            }
-        };
+        let required_limits = Self::required_device_limits(&adapter_limits, max_immediate_size);
         let made = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
             required_features,
@@ -522,10 +531,8 @@ impl Gpu {
         // A window waits for room in its swap chain itself, in the loop rather than in
         // `acquire` (`window::slot`).
         descriptor.backend_options.dx12.latency_waitable_object = wgpu::Dx12UseFrameLatencyWaitableObject::DontWait;
-        // FXC ships with Windows (d3dcompiler_47.dll in System32). wgpu's default looks for
-        // dxcompiler.dll on PATH, where another app's incompatible copy crashes the first
-        // shader compile (Hex #587).
-        descriptor.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
+        // Shipped `dxcompiler.dll` beside the executable by full path, else FXC (`d3dcompiler_47.dll`).
+        descriptor.backend_options.dx12.shader_compiler = Self::dx12_compiler();
         descriptor
     }
 

@@ -72,8 +72,13 @@ pub(in crate::window) struct Host {
     /// Requested whole-window system backdrop (`App::window_backdrop`, `Tx::set_window_backdrop`,
     /// `WindowHandle::set_window_backdrop`), retained across native window recreation.
     pub(in crate::window) window_backdrop: crate::WindowBackdrop,
+    /// Fixed edge or corner for programmatic/content resizes (`App::resize_anchor`,
+    /// `Tx::set_resize_anchor`, `WindowHandle::set_resize_anchor`), retained across recreation.
+    pub(in crate::window) resize_anchor: crate::ResizeAnchor,
     /// Optional macOS swap-chain frame latency (`App::frame_latency`).
     pub(in crate::window) frame_latency: Option<u32>,
+    /// Opt-in wide-color extended-range linear sRGB surface (`App::wide_color`).
+    pub(in crate::window) wide_color: bool,
     /// Last winit theme applied to the live `self.win`, avoiding redundant `set_theme` calls.
     pub(in crate::window) applied_theme: Option<winit::window::Theme>,
     pub(in crate::window) native_handle: WindowHandle,
@@ -84,7 +89,7 @@ pub(in crate::window) struct Host {
     pub(in crate::window) observability: crate::frame::stage::HostObservability,
     pub(in crate::window) frame_presented: crate::frame::presented::FramePresentReports,
     #[cfg(target_os = "macos")]
-    pub(in crate::window) ambient_period: Option<std::time::Duration>,
+    pub(in crate::window) pacing_config: PacingConfig,
     /// Shown, hidden or closed for good; `win` holds the window while it has one.
     pub(in crate::window) life: Life,
     /// False for windows `App::window` added: they live as long as the loop, never keep it.
@@ -235,7 +240,9 @@ struct HostInit {
     exclude_from_capture: Option<bool>,
     color_scheme: crate::ColorScheme,
     window_backdrop: crate::WindowBackdrop,
+    resize_anchor: crate::ResizeAnchor,
     frame_latency: Option<u32>,
+    wide_color: bool,
     native_handle: WindowHandle,
     on_created: Option<Box<dyn FnOnce(WindowHandle)>>,
     on_window: Option<crate::app::OnWindow>,
@@ -245,6 +252,8 @@ struct HostInit {
     on_frame_presented: Option<crate::frame::presented::OnFramePresented>,
     #[cfg(target_os = "macos")]
     ambient_period: Option<std::time::Duration>,
+    #[cfg(target_os = "macos")]
+    unfocused_period: Option<std::time::Duration>,
     geometry: SpecGeometry,
     args: Args,
     keep_running: bool,
@@ -288,6 +297,10 @@ impl Host {
         if let Some(hook) = app.on_displays.take() {
             cx.on_displays.push(hook);
         }
+        if let Some(mode) = args.font_smoothing {
+            app = app.font_smoothing(mode);
+            app.runtime.respect_user_font_smoothing = false;
+        }
         let (prepared, native_handle, slot, gpu_pool, wayland) =
             HostWaker::prepare(&key, handle, &mut app.overlays, cx, app.standard_menus);
         let (on_window, on_ready, on_frame_encoded, on_frame_drawn) = (
@@ -303,12 +316,16 @@ impl Host {
         let on_frame_presented = app.on_frame_presented.take();
         #[cfg(target_os = "macos")]
         let ambient_period = app.ambient_period;
+        #[cfg(target_os = "macos")]
+        let unfocused_period = app.unfocused_period;
         let macos_window = std::mem::take(&mut app.macos_window);
         let windows_window = std::mem::take(&mut app.windows_window);
         let exclude_from_capture = app.exclude_from_capture;
         let color_scheme = app.color_scheme;
         let window_backdrop = app.window_backdrop;
+        let resize_anchor = app.resize_anchor;
         let frame_latency = app.frame_latency;
+        let wide_color = app.wide_color;
         let gpu_loss_policy = app.gpu_loss_policy;
         let gpu_loss_latch = app.gpu_loss_latch.take();
         #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -377,7 +394,9 @@ impl Host {
             exclude_from_capture,
             color_scheme,
             window_backdrop,
+            resize_anchor,
             frame_latency,
+            wide_color,
             native_handle,
             on_created,
             on_window,
@@ -387,6 +406,8 @@ impl Host {
             on_frame_presented,
             #[cfg(target_os = "macos")]
             ambient_period,
+            #[cfg(target_os = "macos")]
+            unfocused_period,
             geometry,
             args,
             keep_running,
@@ -436,7 +457,9 @@ impl Host {
             exclude_from_capture,
             color_scheme,
             window_backdrop,
+            resize_anchor,
             frame_latency,
+            wide_color,
             native_handle,
             on_created,
             on_window,
@@ -446,6 +469,8 @@ impl Host {
             on_frame_presented,
             #[cfg(target_os = "macos")]
             ambient_period,
+            #[cfg(target_os = "macos")]
+            unfocused_period,
             mut geometry,
             mut args,
             keep_running,
@@ -520,11 +545,15 @@ impl Host {
             rt.set_system_scroll_bars_state(crate::platform::scroll_bars::current().with_override(args.scroll_bars));
             rt.frame.enable_trace_channels(args.trace.is_some());
             rt.set_live_waker(Arc::new(move || { live_proxy.send_event(WakeEvent::Live(slot)).ok(); }));
+            let interactive = args.script.is_none() && args.window_script.is_none() && args.trace.is_none() && args.frames.is_none();
+            if interactive {
+                rt.enable_async_system_fallbacks();
+            }
             rt.set_os_drag(crate::drag_out::supported(wayland));
             rt.transparent = options.transparent;
             rt.track_marks = has_comp;
             rt.wall_start = Some(crate::time::now());
-            rt.host.open_urls_natively = args.script.is_none() && args.window_script.is_none() && args.trace.is_none() && args.frames.is_none();
+            rt.host.open_urls_natively = interactive;
             rt.frame.set_record_events(false);
             rt.host.surface_stats = Some(meter.shared());
             rt.host.represented_file.seed(macos_window.represented_file.clone());
@@ -566,7 +595,9 @@ impl Host {
             exclude_from_capture,
             color_scheme,
             window_backdrop,
+            resize_anchor,
             frame_latency,
+            wide_color,
             applied_theme: None,
             native_handle,
             on_created,
@@ -576,7 +607,7 @@ impl Host {
             observability,
             frame_presented,
             #[cfg(target_os = "macos")]
-            ambient_period,
+            pacing_config: PacingConfig { ambient_period, unfocused_period, focused: true },
             life: Life::Unopened,
             keeps_loop,
             geometry,
@@ -640,8 +671,8 @@ impl Host {
         }
     }
 
-    /// Notes live user input reaching this window so an opt-in `App::ambient_fps` cap lifts
-    /// immediately on the next display refresh.
+    /// Notes live user input reaching this window so an opt-in `App::ambient_fps` or
+    /// `App::unfocused_fps` cap lifts immediately on the next display refresh.
     pub(in crate::window) fn note_input(&mut self, at: Instant) {
         #[cfg(target_os = "macos")]
         if let Some(w) = &mut self.win
@@ -696,6 +727,28 @@ impl Host {
     pub(in crate::window) fn publish(&self) {
         let visible = self.life.shown() && self.win.is_some();
         self.shared.set_visible(visible);
+    }
+}
+
+/// Per-window macOS `DisplayLink` pacing configuration carried across link creation and retry.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub(in crate::window) struct PacingConfig {
+    pub(in crate::window) ambient_period: Option<std::time::Duration>,
+    pub(in crate::window) unfocused_period: Option<std::time::Duration>,
+    pub(in crate::window) focused: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl PacingConfig {
+    pub(in crate::window) fn apply(
+        self,
+        pacing: crate::platform::display_link::DisplayLink,
+    ) -> crate::platform::display_link::DisplayLink {
+        pacing
+            .with_ambient_period(self.ambient_period)
+            .with_unfocused_period(self.unfocused_period)
+            .with_focused(self.focused)
     }
 }
 

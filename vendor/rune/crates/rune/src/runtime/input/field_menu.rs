@@ -19,6 +19,8 @@ pub(crate) struct FieldMenu {
     toggle: Option<(bool, crate::el::WindowFocusFn)>,
     /// The dictionaries checking text when the menu opened, and what keeps a new choice.
     languages: Option<(Vec<String>, crate::el::LanguagesFn)>,
+    /// App customization hook (`El::field_menu`) for non-built-in item picks.
+    custom_pick: Option<(crate::el::FieldMenuPickFn, crate::FieldMenuContext)>,
 }
 
 impl FieldMenu {
@@ -37,6 +39,9 @@ impl RuntimeCore {
     /// Opens field `path`'s menu at window point `at`, pressed at window point `hit_at`, or from
     /// the keyboard (`None`).
     fn field_menu_fallback_active(&self) -> bool {
+        if self.host.text_menus {
+            return false;
+        }
         #[cfg(test)]
         if self.host.force_field_menu_fallback {
             return true;
@@ -44,60 +49,65 @@ impl RuntimeCore {
         !crate::popup_menu_supported()
     }
 
-    pub(in crate::runtime) fn field_menu(&mut self, app: &mut dyn AppDriver, path: String, at: (f32, f32), hit_at: Option<(f32, f32)>, one: &mut Tx) -> bool {
-        let Some(i) = self.live(&path) else { return false };
-        if self.node_disabled(i) { return false; }
-        let field_key = self.tree.nodes[i].key.clone();
-        let Some(input) = self.tree.nodes[i].input.as_deref() else { return false };
-        if let (Some(f), Some((hx, hy))) = (input.on_pill_secondary.clone(), hit_at)
-            && let Some(pill_id) = self.input_pill_at(i, hx, hy)
-            && f(app.states(), &pill_id, crate::PointerPress { x: at.0, y: at.1 }, one)
-        {
-            return true;
+    /// Word byte range when `(tx, ty)` lands directly on a non-whitespace word box in `e` (not
+    /// in the blank space beside or below a field's text).
+    fn field_word_hit(
+        e: &crate::edit::TextEdit,
+        l: TextFlow<'_>,
+        h: input_click::Hit,
+        tx: f32,
+        ty: f32,
+        s: f32,
+        single: bool,
+    ) -> Option<(usize, usize)> {
+        if e.is_secure() || e.text.is_empty() {
+            return None;
         }
-        let selection_change = input.selection_change.clone();
-        let Some(access) = input.access.clone() else { return false };
-        let (single, secure) = (input.single_line, input.edit.is_secure());
+        let (wa, wb) = input_click::unit_at(e, h, super::selectable::Unit::Word);
+        if wa >= wb || e.text[wa..wb].trim().is_empty() {
+            return None;
+        }
+        let (da, db) = e.display_selection_range(wa, wb);
+        if da >= db {
+            return None;
+        }
+        let px = tx * s;
+        let max_y = (l.height() - 1e-3).max(0.0);
+        let py = if single || tx < 0.0 { (ty * s).clamp(0.0, max_y) } else { (ty * s).max(0.0) };
+        l.range_boxes(da, db, true)
+            .into_iter()
+            .any(|(bb, _)| px >= bb.x0 as f32 && px <= bb.x1 as f32 && py >= bb.y0 as f32 && py <= bb.y1 as f32)
+            .then_some((wa, wb))
+    }
+
+    pub(in crate::runtime) fn build_field_menu(
+        &self,
+        app: &mut dyn AppDriver,
+        i: usize,
+        path: String,
+        at: (f32, f32),
+        hit_offset: Option<usize>,
+    ) -> Option<(PopupMenu, FieldMenu)> {
+        let input = self.tree.nodes[i].input.as_deref()?;
+        let access = input.access.clone()?;
+        let custom_hook = input.field_menu.clone();
+        let secure = input.edit.is_secure();
         let read_only = self.is_node_read_only(i);
         let spell = input.spellcheck && !secure && !read_only;
-        let layout = self.tree.nodes[i].text_layout.clone();
-        let point = hit_at.and_then(|(x, y)| self.input_text_point(i, x, y));
-        let s = self.env.scale;
-        let toggle = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent).find_map(|j| self.tree.nodes[j].handlers.on_spellcheck.clone());
-        let keep = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent).find_map(|j| self.tree.nodes[j].handlers.on_spellcheck_languages.clone());
-        if self.kbd.focus.path() != Some(path.as_str()) {
-            self.set_focus(app, Some(path.clone()), false);
-        }
-        let changed_sel = {
+        let toggle = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent)
+            .find_map(|j| self.tree.nodes[j].handlers.on_spellcheck.clone());
+        let keep = std::iter::successors(Some(i), |&j| self.tree.nodes[j].parent)
+            .find_map(|j| self.tree.nodes[j].handlers.on_spellcheck_languages.clone());
+        let (a, b, caret, word, suggestions, has_selection) = {
             let e = access(app.states());
-            e.set_single_line(single);
-            let before = (e.anchor, e.focus);
-            if let (Some([tx, ty]), Some(l)) = (point, layout.as_ref().map(TextLayout::view))
-                && e.preedit().is_none()
-            {
-                let caret = hit(e, l, tx, ty, s, single).caret;
-                let (a, b) = e.range();
-                // A press in the selection keeps it for Cut and Copy. Elsewhere it moves the caret
-                // there, and on a misspelled word selects the word, as Chromium does.
-                if a == b || caret < a || caret > b {
-                    match spell.then(|| crate::spell::misspelled_at(&e.text, caret)).flatten() {
-                        Some((wa, wb)) => e.set_selection(wa, wb),
-                        None => e.set_caret(caret),
-                    }
-                }
-            }
-            (e.anchor, e.focus) != before
+            let (a, b) = e.range();
+            let word = spell
+                .then(|| crate::spell::misspelled(&e.text, None))
+                .filter(|found| found.contains(&(a, b)))
+                .map(|_| (a, b, e.text[a..b].to_owned()));
+            let suggestions = word.as_ref().map(|w| crate::spell::suggest(&w.2)).unwrap_or_default();
+            (a, b, e.focus, word, suggestions, e.has_any_selection())
         };
-        if changed_sel && let Some(selection_change) = selection_change {
-            selection_change(app.states(), one);
-        }
-        let e = access(app.states());
-        let (a, b) = e.range();
-        let word = spell
-            .then(|| crate::spell::misspelled(&e.text, None))
-            .filter(|found| found.contains(&(a, b)))
-            .map(|_| (a, b, e.text[a..b].to_owned()));
-        let suggestions = word.as_ref().map(|w| crate::spell::suggest(&w.2)).unwrap_or_default();
         let mut menu = PopupMenu::new();
         if word.is_some() {
             if suggestions.is_empty() {
@@ -106,7 +116,7 @@ impl RuntimeCore {
             menu = menu.items(suggestions.iter().enumerate().map(|(n, s)| PopupItem::new(format!("suggestion-{n}"), s.clone())));
             menu = menu.separator().item(PopupItem::new("learn-spelling", label(Label::LearnSpelling))).separator();
         }
-        let selected = a != b && !secure;
+        let selected = has_selection && !secure;
         menu = menu
             .item(PopupItem::new("cut", label(Label::Cut)).enabled(selected && !read_only))
             .item(PopupItem::new("copy", label(Label::Copy)).enabled(selected))
@@ -141,9 +151,86 @@ impl RuntimeCore {
                 languages = Some((current, keep));
             }
         }
+        let custom_pick = if let Some((build, on_pick)) = custom_hook {
+            let ctx = crate::FieldMenuContext::new(
+                crate::PointerPress { x: at.0, y: at.1 },
+                hit_offset,
+                caret,
+                (a, b),
+                word.as_ref().map(|(wa, wb, _)| (*wa, *wb)),
+            );
+            menu = build(app.states(), &ctx, menu);
+            Some((on_pick, ctx))
+        } else {
+            None
+        };
+        Some((menu, FieldMenu { path, word, suggestions, toggle, languages, custom_pick }))
+    }
+
+    pub(in crate::runtime) fn field_menu(&mut self, app: &mut dyn AppDriver, path: String, at: (f32, f32), hit_at: Option<(f32, f32)>, one: &mut Tx) -> bool {
+        let Some(i) = self.live(&path) else { return false };
+        if self.node_disabled(i) { return false; }
+        let field_key = self.tree.nodes[i].key.clone();
+        let Some(input) = self.tree.nodes[i].input.as_deref() else { return false };
+        if let (Some(f), Some((hx, hy))) = (input.on_pill_secondary.clone(), hit_at)
+            && let Some(pill_id) = self.input_pill_at(i, hx, hy)
+            && f(app.states(), &pill_id, crate::PointerPress { x: at.0, y: at.1 }, one)
+        {
+            return true;
+        }
+        let selection_change = input.selection_change.clone();
+        let Some(access) = input.access.clone() else { return false };
+        let (single, secure) = (input.single_line, input.edit.is_secure());
+        let read_only = self.is_node_read_only(i);
+        let spell = input.spellcheck && !secure && !read_only;
+        let layout = self.tree.nodes[i].text_layout.clone();
+        let point = hit_at.and_then(|(x, y)| self.input_text_point(i, x, y));
+        let s = self.env.scale;
+        let select_word = self.host.text_menus;
+        if self.kbd.focus.path() != Some(path.as_str()) {
+            self.set_focus(app, Some(path.clone()), false);
+        }
+        let (changed_sel, hit_offset) = {
+            let e = access(app.states());
+            e.set_single_line(single);
+            let before = (e.anchor, e.focus);
+            let mut hit_offset = None;
+            if let (Some([tx, ty]), Some(l)) = (point, layout.as_ref().map(TextLayout::view))
+                && e.preedit().is_none()
+            {
+                let h = hit(e, l, tx, ty, s, single);
+                let caret = h.caret;
+                hit_offset = Some(caret);
+                let (a, b) = e.range();
+                // A press in the selection keeps it for Cut and Copy. Elsewhere it moves the caret
+                // there, selecting a misspelled word as Chromium does — and on a `host.text_menus`
+                // touch host, selecting the word under the finger while leaving blank space beside
+                // the text as a caret so the toolbar offers Paste.
+                if a == b || caret < a || caret > b {
+                    let word = spell
+                        .then(|| crate::spell::misspelled_at(&e.text, caret))
+                        .flatten()
+                        .or_else(|| select_word.then(|| Self::field_word_hit(e, l, h, tx, ty, s, single)).flatten());
+                    match word {
+                        Some((wa, wb)) => e.set_selection(wa, wb),
+                        None => {
+                            e.set_caret(caret);
+                            e.affinity = h.side;
+                        }
+                    }
+                }
+            }
+            ((e.anchor, e.focus) != before, hit_offset)
+        };
+        if changed_sel && let Some(selection_change) = selection_change {
+            selection_change(app.states(), one);
+        }
+        let Some((menu, field)) = self.build_field_menu(app, i, path.clone(), at, hit_offset) else { return false };
+        if self.host.text_menus {
+            self.edit.bump_touch_selection_rev();
+        }
         one.commit = one.commit.instant();
         log_event!(self, "field menu {path}");
-        let field = FieldMenu { path: path.clone(), word, suggestions, toggle, languages };
         if self.field_menu_fallback_active() && app.has_on_field_menu() {
             self.host.field_menu_seq = self.host.field_menu_seq.wrapping_add(1);
             let token = self.host.field_menu_seq;
@@ -160,6 +247,7 @@ impl RuntimeCore {
             anchor: PopupAnchor::Point(at.0, at.1),
             on_pick: Box::new(|_, _, _| {}),
             field: Some(Box::new(field)),
+            text_menu: true,
         });
         true
     }
@@ -302,7 +390,8 @@ impl RuntimeCore {
                     self.commit.dirty = true;
                 }
             }
-            id => {
+            "no-guesses" => {}
+            id if id.starts_with("suggestion-") => {
                 let n = id.strip_prefix("suggestion-").and_then(|n| n.parse::<usize>().ok());
                 if !self.focused_input_read_only()
                     && let (Some((a, b, _)), Some(suggestion)) = (menu.word, n.and_then(|n| menu.suggestions.get(n).cloned()))
@@ -315,6 +404,11 @@ impl RuntimeCore {
                         },
                         one,
                     );
+                }
+            }
+            id => {
+                if let Some((on_pick, ctx)) = menu.custom_pick {
+                    on_pick(app.states(), id, &ctx, one);
                 }
             }
         }

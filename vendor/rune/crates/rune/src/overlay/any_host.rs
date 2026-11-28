@@ -13,27 +13,47 @@ impl OverlayCore {
         false
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    ))]
     fn poll_pace_active(&self) -> bool {
         self.presence.shown() && !self.frameless() && !self.waits_for_slot()
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    ))]
     pub(super) fn sync_poll_pace(&mut self, rt: &RuntimeCore, now: Instant) {
         let active = self.poll_pace_active();
+        #[cfg(target_os = "windows")]
         if let Some(cpu) = self.cpu.as_mut() {
             let window = cpu.window.clone();
-            cpu.poll_pace.sync_with(rt, now, active, |previous| {
+            cpu.poll_pace.sync_with(rt, now, active, |previous, _polled| {
                 let mhz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz());
                 crate::platform::win32::vsync_grid(now, mhz, previous)
             });
             return;
         }
         let Some(live) = self.surface.live_mut() else { return };
-        let window = live.backing.window().cloned();
-        live.poll_pace.sync_with(rt, now, active, |previous| {
-            let mhz = window.as_ref().and_then(|w| w.current_monitor()).and_then(|m| m.refresh_rate_millihertz());
-            crate::platform::win32::vsync_grid(now, mhz, previous)
+        let Live { poll_pace, backing, .. } = live;
+        poll_pace.sync_with(rt, now, active, |previous, polled| {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = polled;
+                let mhz = backing.window().and_then(|w| w.current_monitor()).and_then(|m| m.refresh_rate_millihertz());
+                crate::platform::win32::vsync_grid(now, mhz, previous)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mhz = match backing {
+                    Backing::Window(w) => crate::window::poll_pace::window_refresh_mhz(w),
+                    Backing::Layer(layer) => layer.refresh_rate_millihertz(),
+                    Backing::Xwayland(_) => None,
+                };
+                crate::window::poll_pace::monitor_grid(mhz, previous, polled)
+            }
         });
     }
 
@@ -42,9 +62,14 @@ impl OverlayCore {
         if let Some(cpu) = &self.cpu {
             return cpu.poll_pace.deadline_for(rt, self.poll_pace_active());
         }
-        #[cfg(target_os = "windows")]
-        if let Some(live) = self.surface.live() {
-            return live.poll_pace.deadline_for(rt, self.poll_pace_active());
+        #[cfg(any(
+            target_os = "windows",
+            all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+        ))]
+        if self.poll_pace_active()
+            && let Some(live) = self.surface.live()
+        {
+            return live.poll_pace.deadline_for(rt, true);
         }
         frame::timer_deadline(rt, self.awaiting_layer_frame())
     }
@@ -106,6 +131,7 @@ impl OverlayCore {
         {
             let rt = app.rt_mut();
             rt.set_live_waker(wake.clone());
+            rt.enable_async_system_fallbacks();
             rt.host.open_urls_natively = true;
             rt.frame.set_record_events(false);
         }
@@ -182,7 +208,10 @@ impl AnyHost for OverlayHost {
         self.core.wake_deadline(self.app.rt())
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    ))]
     fn turn_ends(&mut self, _event_loop: &ActiveEventLoop, now: Instant) {
         self.core.sync_poll_pace(self.app.rt(), now);
     }
@@ -194,6 +223,17 @@ impl AnyHost for OverlayHost {
     fn vanish(&mut self) {
         self.core.cancel_after_hidden(&mut *self.app);
         self.core.hide(&mut *self.app);
+    }
+
+    #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    fn release_wayland_surface(&mut self) {
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        {
+            self.core.after_hidden.sync = None;
+            let _ = self.core.surface.take_live();
+            let _ = self.core.surface.take_parked();
+            self.core.wayland_globals = None;
+        }
     }
 
     fn terminate(&mut self) {
@@ -287,11 +327,15 @@ impl AnyHost for OverlayHost {
         let app = &mut *self.app;
         if core.closed || core.poll_terminal_gpu_loss(app) { return; }
         if !matches!(event, WindowEvent::RedrawRequested) { core.meter.waited(); }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(
+            target_os = "windows",
+            all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+        ))]
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }) {
             if let Some(live) = core.surface.live_mut() {
                 let _ = live.poll_pace.step(crate::window::poll_pace::PollPaceEvent::DisplayChanged);
             }
+            #[cfg(target_os = "windows")]
             if let Some(cpu) = core.cpu.as_mut() {
                 let _ = cpu.poll_pace.step(crate::window::poll_pace::PollPaceEvent::DisplayChanged);
                 cpu.pace_grid = None;
@@ -411,7 +455,11 @@ impl AnyHost for OverlayHost {
                 core.scroll_bars_changed(app.rt_mut(), crate::platform::scroll_bars::current());
                 app.rt_mut().set_system_text_scale(crate::platform::text_scale::cached());
                 #[cfg(target_os = "windows")]
-                app.rt_mut().sync_windows_tablet_mode_if_changed();
+                {
+                    let rt = app.rt_mut();
+                    rt.sync_windows_tablet_mode_if_changed();
+                    rt.sync_windows_languages_if_changed();
+                }
                 #[cfg(target_os = "linux")]
                 {
                     let rt = app.rt_mut();

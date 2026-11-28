@@ -31,6 +31,8 @@ pub(in crate::window) struct Native {
     /// The new window's first frames, which may draw before AppKit reports it on screen.
     pub(in crate::window) prime: Prime,
     pub(in crate::window) launch_drawables: super::LaunchDrawables,
+    /// Whether the layer's `drawableSize` was shrunk to `1×1` while hidden.
+    pub(in crate::window) hidden_drawable: super::HiddenDrawable,
     /// Forgets the window's traffic-light spot.
     pub(in crate::window) _spot: crate::platform::macos::traffic_lights::Spot,
     /// Forgets the window's drag-destination state.
@@ -89,6 +91,11 @@ pub(in crate::window) struct Native {
     pub(in crate::window) wayland_backdrop: Option<crate::platform::wayland::backdrop::SurfaceBlur>,
     /// Per-surface Wayland `wp_presentation` feedback handle, dropped strictly before `wl_surface`.
     pub(in crate::window) wayland_present: Option<crate::platform::wayland::presentation::SurfacePresentation>,
+    /// Paces sub-frame `poll` wakes onto the display's refresh grid (`poll_pace`).
+    pub(in crate::window) poll_pace: crate::window::poll_pace::PollPace,
+    /// `App::float_on_open`: holds fixed size limits until the first paint after the first
+    /// frame's compositor callback (`chrome::float_on_open`).
+    pub(in crate::window) float_on_open: crate::window::chrome::float_on_open::State,
 }
 
 #[cfg(target_os = "windows")]
@@ -110,7 +117,7 @@ pub(in crate::window) struct Native {
     /// DXGI swap-chain presentation timestamp tracker for `App::on_frame_presented`.
     pub(in crate::window) dxgi_present: crate::window::win32::present_time::DxgiPresentTracker,
     /// Paces sub-frame `poll` wakes onto the display's vblank grid (`poll_pace`).
-    pub(in crate::window) poll_pace: crate::window::win32::poll_pace::PollPace,
+    pub(in crate::window) poll_pace: crate::window::poll_pace::PollPace,
     /// Opt-in Windows 11 `El::system_material` visuals behind the swap chain. Declared before
     /// `mode` so `DesktopWindowTarget` closes before `Handover` drops.
     #[cfg(feature = "windows-system-material")]

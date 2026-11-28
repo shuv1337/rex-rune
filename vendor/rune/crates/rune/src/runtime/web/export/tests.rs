@@ -60,7 +60,7 @@ fn folds_widths_into_media_rules_and_hides_what_a_width_lacks() {
     assert!(media.contains("flex-direction:row"), "{media}");
     assert!(!body.contains("Wide only"), "the body is the narrowest tree: {body}");
     assert!(wide.iter().any(|n| n.inner == "Wide only"));
-    assert!(css.contains(".t>*{display:inline"), "a text element's runs stay inline: {css}");
+    assert!(css.contains(".t *{display:inline;position:static}"), "a text element's inline runs and nested spans stay inline: {css}");
     assert!(body.contains("<p class=\"t"), "{body}");
     let opened = body.matches('<').count() - body.matches("</").count();
     assert_eq!(opened, body.matches("</").count(), "every element closes: {body}");
@@ -380,4 +380,170 @@ fn exports_grid_template_columns_for_auto_fit_auto_fill_and_equal_columns() {
     assert!(fit.decls.contains(&("grid-template-columns", "repeat(auto-fit,minmax(240px,1fr))".into())), "{:?}", fit.decls);
     assert!(fill.decls.contains(&("grid-template-columns", "repeat(auto-fill,minmax(180.5px,1fr))".into())), "{:?}", fill.decls);
     assert!(eq.decls.contains(&("grid-template-columns", "1fr 1fr 1fr".into())), "{:?}", eq.decls);
+}
+
+#[test]
+fn html_export_keeps_numeric_leading_and_punctuation_anchor_ids_and_styles_them_via_classes() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        crate::col().key("root").w_full().role("main")
+            .child(
+                crate::col().key("100-overview").role("region").label("Overview")
+                    .child(
+                        crate::text("3D Device View")
+                            .key("3d-device-view")
+                            .role("heading")
+                            .level(2)
+                            .font(crate::tok::type_::TITLE)
+                            .color(crate::Color::WHITE),
+                    )
+                    .child(
+                        crate::row()
+                            .key("42-jump")
+                            .href("#3d-device-view")
+                            .child(crate::text("Jump to 3D")),
+                    )
+                    .child(crate::text("Zero").key("0").role("heading").level(3))
+                    .child(crate::text("Dash").key("--html").role("heading").level(3))
+                    .child(crate::text("Under").key("_intro").role("heading").level(3))
+                    .child(crate::text("Bad space").key("3d view").role("heading").level(3))
+                    .child(crate::text("Bad quote").key("3d\"view").role("heading").level(3))
+                    .child(crate::text("Bad dup").key("3d#dup1").role("heading").level(3))
+                    .child(crate::text("Empty key").key("").role("heading").level(3)),
+            )
+    }
+    let mut rt = Runtime::new((), view, (480.0, 600.0), Env::default());
+    rt.page_mode();
+    let nodes = taken(&mut rt, 480.0);
+    let (body, css) = page(&[(480.0, nodes.clone())]);
+
+    for expected in [
+        "id=\"100-overview\"",
+        "id=\"3d-device-view\"",
+        "id=\"42-jump\" href=\"#3d-device-view\"",
+        "id=\"0\"",
+        "id=\"--html\"",
+        "id=\"_intro\"",
+    ] {
+        assert!(body.contains(expected), "missing {expected} in exported HTML: {body}");
+    }
+    // The <h2> with numeric-leading id is styled via generated class selector (not unescaped `#3d-device-view`).
+    let h2_open = body
+        .split("<h2 ")
+        .nth(1)
+        .and_then(|s| s.split('>').next())
+        .expect("exported <h2>");
+    assert!(h2_open.contains("id=\"3d-device-view\""), "<h2> attrs: {h2_open}");
+    let h2_classes = h2_open
+        .split("class=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("<h2> class attribute");
+    let style_class = h2_classes
+        .split_whitespace()
+        .find(|c| *c != "t")
+        .expect("generated style class for <h2>");
+    assert!(
+        css.contains(&format!(".{style_class}{{")),
+        "stylesheet must target <h2> via class .{style_class}: {css}",
+    );
+    assert!(!css.contains("#3d-device-view"), "stylesheet must not emit unescaped numeric #id selectors: {css}");
+
+    // Unsafe, whitespace, duplicate-suffix, and empty keys still emit no `id` attribute.
+    for (label, key) in [
+        ("Bad space", "3d view"),
+        ("Bad quote", "3d\"view"),
+        ("Bad dup", "3d#dup1"),
+        ("Empty key", ""),
+    ] {
+        let node = nodes
+            .iter()
+            .find(|n| n.inner == label)
+            .unwrap_or_else(|| panic!("missing exported node for {label} ({key:?})"));
+        assert!(!node.attrs.contains(" id="), "invalid key {key:?} must not emit id: {}", node.attrs);
+    }
+}
+
+#[test]
+fn styled_links_inside_paragraphs_and_headings_stay_inline_while_link_containers_keep_flex() {
+    let mut rt = Runtime::new(
+        (),
+        |_, _| {
+            let accent = crate::color::hex("#009fff").unwrap();
+            crate::col().key("root").w_full().role("main")
+                .child(
+                    crate::rich(
+                        "See the setup guide and rune_export docs for details.",
+                        vec![
+                            crate::Span::new(8, 19).color(accent).underline(accent),
+                            crate::Span::new(24, 35).mono(),
+                            crate::Span::new(36, 40).weight(700.0),
+                        ],
+                    )
+                    .key("prose")
+                    .font(crate::tok::type_::BODY)
+                    .link(crate::Link::new(8..19, "https://example.com/setup"))
+                    .link(crate::Link::new(24..40, "https://example.com/export")),
+                )
+                .child(
+                    crate::rich("Read the API", vec![crate::Span::new(9, 12).color(accent)])
+                        .key("heading")
+                        .role("heading")
+                        .level(2)
+                        .font(crate::tok::type_::TITLE)
+                        .link(crate::Link::new(9..12, "/api")),
+                )
+                .child(
+                    crate::col()
+                        .key("card")
+                        .href("/guide")
+                        .gap(8.0)
+                        .child(crate::text("Guide").font(crate::tok::type_::BODY))
+                        .child(
+                            crate::rich("With bold copy", vec![crate::Span::new(5, 9).weight(700.0)])
+                                .font(crate::tok::type_::BODY),
+                        ),
+                )
+        },
+        (600.0, 400.0),
+        Env::default(),
+    );
+    rt.page_mode();
+    let nodes = taken(&mut rt, 600.0);
+    let (body, css) = page(&[(600.0, nodes.clone())]);
+
+    // Paragraph wraps styled spans inside <a>, all under .t.
+    let prose = nodes.iter().find(|n| n.path.ends_with("prose")).expect("prose");
+    assert!(prose.text, "paragraph exports with class t");
+    assert_eq!(
+        prose.inner,
+        "See the <a href=\"https://example.com/setup\"><span style=\"color:#009fff;text-decoration:underline #009fff\">setup guide</span></a> and <a href=\"https://example.com/export\"><span style=\"font-family:var(--rune-mono)\">rune_export</span> <span style=\"font-weight:700\">docs</span></a> for details.",
+    );
+
+    // Heading also exports with class t and nested <a><span>.
+    let heading = nodes.iter().find(|n| n.path.ends_with("heading")).expect("heading");
+    assert_eq!(heading.tag, "h2");
+    assert!(heading.text, "heading exports with class t");
+    assert_eq!(heading.inner, "Read the <a href=\"/api\"><span style=\"color:#009fff\">API</span></a>");
+
+    // BASE_CSS uses a descendant selector under .t after the global flex rule so grandchildren
+    // like `.t a span` get `display:inline;position:static` instead of `display:flex`.
+    let base_flex = css.find("[data-rune-static] *{box-sizing:border-box;display:flex;position:relative").expect("base flex rule");
+    let inline_rule = css.find("[data-rune-static] .t *{display:inline;position:static}").expect("descendant inline rule");
+    assert!(inline_rule > base_flex, "inline rule must follow base flex rule: {css}");
+    assert!(!css.contains(".t>*"), "direct-child selector would leave `.t a span` as display:flex: {css}");
+
+    // Standalone link container stays outside `.t` and keeps its flex column layout; its inner
+    // text children remain `.t` elements so their own styled spans stay inline.
+    let card = nodes.iter().find(|n| n.path.ends_with("card")).expect("card link container");
+    assert_eq!(card.tag, "a");
+    assert!(!card.text, "standalone link container must not carry class t");
+    assert!(card.decls.contains(&("flex-direction", "column".into())), "{:?}", card.decls);
+    assert!(card.decls.contains(&("row-gap", "8px".into())), "{:?}", card.decls);
+    let card_open = body.split("<a ").find(|s| s.contains("id=\"card\"")).expect("card tag");
+    let card_tag = card_open.split('>').next().unwrap();
+    assert!(!card_tag.contains("class=\"t ") && !card_tag.contains("class=\"t\""), "card <a> must not have class t: <a {card_tag}>");
+    assert!(
+        body.contains("<span class=\"t ") && body.contains("With <span style=\"font-weight:700\">bold</span> copy"),
+        "rich text inside standalone link container keeps its own .t scope: {body}",
+    );
 }

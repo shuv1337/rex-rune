@@ -146,6 +146,8 @@ pub struct App<S: 'static> {
     pub(crate) observability: crate::frame::stage::WindowObservability,
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub(crate) ambient_period: Option<std::time::Duration>,
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) unfocused_period: Option<std::time::Duration>,
     /// `App::layout_seed`'s seed and keeper; only desktop windows use them.
     #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", target_os = "android"), allow(dead_code))]
     pub(crate) layout_seed: Option<crate::LayoutSeed>,
@@ -162,11 +164,14 @@ pub struct App<S: 'static> {
     pub(crate) window_backdrop: crate::WindowBackdrop,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) frame_latency: Option<u32>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) wide_color: bool,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
     pub(crate) canvas_id: Option<String>,
     pub(crate) full_viewport: bool,
     pub(crate) fit_content_height: bool,
+    pub(crate) resize_anchor: crate::ResizeAnchor,
     pub(crate) web_document: bool,
     /// `App::font_url`'s fonts, which a web app fetches before its first frame.
     #[cfg(target_arch = "wasm32")]
@@ -238,6 +243,7 @@ impl<S: 'static> App<S> {
             on_frame_drawn: None,
             observability: crate::frame::stage::WindowObservability::default(),
             ambient_period: None,
+            unfocused_period: None,
             layout_seed: None,
             keep_layout: None,
             same_tab_router: None,
@@ -248,11 +254,13 @@ impl<S: 'static> App<S> {
             color_scheme: crate::ColorScheme::System,
             window_backdrop: crate::WindowBackdrop::None,
             frame_latency: None,
+            wide_color: false,
             compositor: None,
             window_options: crate::WindowOptions::default(),
             canvas_id: None,
             full_viewport: false,
             fit_content_height: false,
+            resize_anchor: crate::ResizeAnchor::TopLeft,
             web_document: false,
             #[cfg(target_arch = "wasm32")]
             font_urls: Vec::new(),
@@ -1141,6 +1149,29 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// Cap frame pacing (Hz) for unsteered motion while the window is visible but unfocused
+    /// (`0.0`, default = no extra unfocused cap beyond [`Self::ambient_fps`], macOS Low Power
+    /// Mode, and macOS thermal pressure; positive finite values clamp to `>= 1.0` Hz, and
+    /// zero, negative, or non-finite values clear the cap).
+    ///
+    /// Keeps streaming updates live on secondary displays without pausing them (occluded and
+    /// minimized windows still stop their display link completely). Losing focus drops any
+    /// prior steered window immediately so this cap applies on the next tick; live input over
+    /// the unfocused window (such as trackpad scrolling) lifts the cap immediately. Composes
+    /// monotonically with `ambient_fps`, Low Power Mode, and thermal pressure (lowest rate
+    /// wins). Enforced on macOS `DisplayLink` windows today.
+    ///
+    /// ```no_run
+    /// use rune::{App, AppSpec, text};
+    ///
+    /// let spec = AppSpec::new("Chat", (720.0, 540.0), String::new, |s, _| text(s.as_str()).wrap());
+    /// App::new(spec).ambient_fps(60.0).unfocused_fps(30.0).run();
+    /// ```
+    pub fn unfocused_fps(mut self, fps: f32) -> Self {
+        self.unfocused_period = ambient_period_from_fps(fps);
+        self
+    }
+
     /// Cap the swap chain's frame latency on macOS (`1` = 2 drawables, `2` = 3 drawables;
     /// clamped to `1..=2`, default `2`). Ignored on Windows, Linux, and the web.
     ///
@@ -1159,6 +1190,19 @@ impl<S: 'static> App<S> {
     /// ```
     pub fn frame_latency(mut self, frames: u32) -> Self {
         self.frame_latency = Some(frames.clamp(1, 2));
+        self
+    }
+
+    /// Opt into wide-color extended-range linear sRGB output (`Rgba16Float` with
+    /// `kCGColorSpaceExtendedLinearSRGB` and EDR enabled on macOS) so Display P3 colours
+    /// ([`Color::p3`](crate::Color::p3), [`oklch_wide`](crate::oklch_wide)) render outside the
+    /// sRGB gamut without clamping. Off by default (standard 8-bit sRGB).
+    ///
+    /// Wide-color surfaces blend in linear light (`srgb_blend = false`) and supersede
+    /// [`MacColorSpace`](crate::MacColorSpace) on macOS. Platforms without extended-range sRGB
+    /// support keep their standard sRGB surface.
+    pub fn wide_color(mut self, enabled: bool) -> Self {
+        self.wide_color = enabled;
         self
     }
 
@@ -1226,7 +1270,11 @@ impl<S: 'static> App<S> {
     pub fn run(self) {
         #[cfg(target_arch = "wasm32")]
         crate::tooling::started(self.try_run());
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(target_os = "android")]
+        if let Err(err) = self.try_run() {
+            eprintln!("rune: android host failed to start: {err}");
+        }
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         crate::tooling::finish_start(self.try_run_start());
     }
 
@@ -1240,12 +1288,17 @@ impl<S: 'static> App<S> {
         crate::platform::web::run(self)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_os = "android")]
+    pub fn try_run(self) -> Result<(), String> {
+        crate::platform::android::run(self)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     pub fn try_run(self) -> Result<(), String> {
         self.try_run_start().map_err(crate::tooling::StartError::message)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     fn try_run_start(mut self) -> Result<(), crate::tooling::StartError> {
         // Windows' word dictionaries start loading now, on their own thread (`rune_text::segmenter`).
         #[cfg(all(target_os = "windows", not(feature = "segmenter-dictionaries")))]

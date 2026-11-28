@@ -487,8 +487,9 @@ policy changes are applied in the same mutation phase.
   `.virtual_overscan(0.5, 0.25)` for long fixed-height tables): smaller values mount fewer
   offscreen rows and cut per-frame scroll work at the cost of more frequent window-move commits,
   while larger values commit less often at the cost of more mounted nodes (`overscan` clamps to
-  `0.0..=8.0`, `edge` clamps strictly below `overscan` when `overscan > 0.0`, and non-finite
-  values are ignored).
+  `0.0..=8.0`, `edge` clamps strictly below `overscan` when `overscan > 0.0`, non-finite
+  values are ignored, and setting `virtual_overscan` disables the default 32-row pinned-end floor
+  in `stick_bottom` viewports so small lists mount only their viewport plus overscan).
   `tx.scroll_into_view(key)` reveals a row, including one outside the realized window.
   `tx.scroll_page(key, pages)` pages the viewport keyed `key` (or containing it) by `pages` × 90%
   of its height, as Page Up and Page Down do; a `stick_bottom` viewport that lands on its end
@@ -1247,10 +1248,12 @@ Staying fast afterwards is "Fast apps" (`site/src/FastApps.tsx`) and "Smooth scr
   apps with allocating latency-sensitive threads can turn it off with
   `App::trim_heap_at_rest(false)` or `RUNE_MALLOC_TRIM=0` (Rune's own `AudioOutput` worker
   allocates nothing while playing). Apps using a custom `#[global_allocator]` (such as mimalloc
-  or jemalloc) or an `LD_PRELOAD` allocator see a no-op: a once-per-process runtime probe checks
-  whether Rust allocations move glibc's `mallinfo2`/`mallinfo` counters and skips trimming
-  otherwise, and non-glibc targets (macOS, Windows, musl, Android, iOS, and `wasm32`) compile it
-  out completely.
+  or jemalloc) or an `LD_PRELOAD` allocator see a no-op by default: a once-per-process runtime
+  probe checks whether Rust allocations move glibc's `mallinfo2`/`mallinfo` counters and skips
+  trimming otherwise. Apps with a custom Rust allocator that load glibc-allocating C libraries
+  (Mesa/Vulkan, GLib/GIO, fontconfig) can opt in with `App::trim_c_heap_at_rest(true)`, sharing
+  the same 30 s cooldown and `trim_heap_at_rest(false)` / `RUNE_MALLOC_TRIM=0` opt-outs.
+  Non-glibc targets (macOS, Windows, musl, Android, iOS, and `wasm32`) compile it out completely.
 - **Opt-in effect pipeline warming, per effect (`App::prewarm_effects(PrewarmEffects::BACKDROP_BLUR)`,
   `WindowSpec::prewarm_effects`, `Renderer::set_prewarm_effects`).** Off by default, so apps pay
   no background compilation CPU, driver memory, or worker thread for effects they never draw, and
@@ -1570,10 +1573,21 @@ For an app's own perf log, with nothing changed about how its windows draw:
   gesture, or file drag-and-drop event lifts the cap on the very next display refresh; motion stays steered at the
   display's full rate for 600 ms after input and up to 2 s while an unbroken run of frames that started within
   100 ms of input keeps presenting with gaps of at most 100 ms (drags, scrolls, typing, and springs following a
-  finger never cap). When multiple caps apply, the lower rate wins: Low Power Mode (60 Hz on built-in ProMotion
-  panels) bounds both steered and ambient frames, and combining `ambient_fps` with `App::reveal_fps` paces
-  reveal-only tails on the `reveal_fps` timer while concurrent unsteered motion paces at `ambient_fps`. Enforced
+  finger never cap). Losing focus drops any prior steered window immediately so ambient and unfocused caps engage
+  on the next tick. When multiple caps apply, the lower rate wins: macOS Low Power Mode (60 Hz across both built-in
+  and external high-refresh displays) and automatic macOS thermal-pressure pacing (`NSProcessInfo.thermalState`,
+  re-polled once a second during active streams: `Fair` caps unsteered frames at 60 Hz while keeping steered input
+  at full rate; `Serious` caps steered at 60 Hz and unsteered at 30 Hz; `Critical` caps steered at 30 Hz and
+  unsteered at 20 Hz) compose monotonically with `ambient_fps`, `unfocused_fps`, and `App::reveal_fps`. Enforced
   on macOS `DisplayLink` windows today; Windows, Linux, web, overlays, and headless runs ignore it.
+- **`App::unfocused_fps(fps)`** (also on `WindowSpec::unfocused_fps`) opts a visible unfocused window into a
+  separate unsteered frame-rate cap (`0.0`, default = no extra unfocused cap) without pausing it—useful for
+  streaming transcripts on a secondary display while working in another app. Occluded and minimized windows still
+  stop their display link completely, and live input over an unfocused window (such as trackpad scrolling) lifts the
+  cap immediately. Because full-window GPU fill scales with drawable pixel area × refresh rate (for example, a
+  3840×2160 HiDPI external display at 100 Hz shades ~829 Mpixels/s when scrolling or streaming), streaming apps
+  targeting fanless laptops should pair `ambient_fps(60.0)` (or `30.0`), `unfocused_fps(30.0)`, and
+  `reveal_fps(30.0)`.
 - **`App::frame_latency(frames)`** (also on `WindowSpec::frame_latency` and
   `ConfiguredOverlay::frame_latency`) caps a macOS surface's swap-chain latency at creation time
   (`1` = 2 `CAMetalLayer` drawables, `2` = 3 drawables; clamped to `1..=2`, default `2`). Ignored
@@ -1969,6 +1983,16 @@ without walking font directories, caches the result in a `OnceLock` on first cal
 cost), and returns `&[]` on web/Android. Pass any family's `name()` straight to
 `tx.set_font_families`, `AppSpec::families`, or `Family::Named`.
 
+`rune::text::prewarm_system_fonts()` starts building Linux/Unix's shared process-wide fontconfig
+collection and preloading the common fallback families (symbols, colour emoji, CJK, and system
+monospace) into a bounded memory-mapped blob cache on a background thread (returning immediately
+and doing nothing if already started, on platforms without a fontconfig build, or while
+`RUNE_SYSTEM_FONTS=off` / `set_system_fonts(false)`). Warmed apps register those pre-mapped
+fallbacks on frame 0 with zero fontconfig or file I/O; live windows and overlays also dispatch
+any uncached fallback family (or lookups arriving before warm-up completes) to a background
+worker and relayout cleanly once the faces arrive, while headless runs and `rune::text::measure`
+stay synchronous and deterministic.
+
 `rune::text::add_font(bytes)`, `tx.add_font(bytes)`, and `rt.add_font(bytes)` register font
 bytes (TTF, OTF, TTC, or variable fonts) into the process-wide font collection while the app
 runs, returning the registered family names in registration order so they can be selected with
@@ -2043,9 +2067,10 @@ its fill.
 
 `cx.system_languages()` returns the user's preferred BCP 47 language tags in
 preference order and `cx.locale()` returns the primary tag (`Option<&str>`). Both
-query the platform lazily on first call (`GetUserPreferredUILanguages` on Windows,
-`NSLocale.preferredLanguages` on macOS/iOS, `navigator.languages` on web with
-`languagechange` updates, and POSIX `LANGUAGE`/`LC_ALL`/`LC_MESSAGES`/`LANG`
+query the platform lazily on first call (`HKCU\Control Panel\International\User Profile\Languages` with
+`GetUserPreferredUILanguages` fallback and live `WM_SETTINGCHANGE` `"Intl"` updates
+on Windows, `NSLocale.preferredLanguages` on macOS/iOS, `navigator.languages` on web
+with `languagechange` updates, and POSIX `LANGUAGE`/`LC_ALL`/`LC_MESSAGES`/`LANG`
 elsewhere), doing no work before the first frame. Tests and hosts can override the
 list with `rt.set_languages(["ar-EG", "en-US"])`, which re-runs the view and its
 memos when the normalized list changes.

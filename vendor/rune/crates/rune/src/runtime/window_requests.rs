@@ -33,10 +33,15 @@ pub(crate) struct HostState {
     /// What [`Cx::system_reduced_transparency`] reports.
     pub(in crate::runtime) system_reduced_transparency: bool,
     pub(in crate::runtime) scroll_bars: system_settings::ScrollBarHost,
-    /// Preferred languages set via `Runtime::set_languages` or browser `languagechange` (`None`: lazy OS query).
+    /// Preferred languages set via `Runtime::set_languages`, browser `languagechange`, or Windows `WM_SETTINGCHANGE` (`None`: lazy OS query).
     pub(in crate::runtime) system_languages: Option<Rc<[String]>>,
+    /// True when `Runtime::set_languages` explicitly overrode OS language detection.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub(in crate::runtime) system_languages_override: bool,
     /// Incremented whenever `system_languages` changes, so memos rebuild without querying the OS.
     pub(in crate::runtime) languages_gen: u64,
+    #[cfg(target_os = "windows")]
+    pub(in crate::runtime) languages_setting_gen: u64,
     pub(crate) native_overlay: bool,
     /// The window or overlay surface's frame counts, published by its host.
     pub(crate) surface_stats: Option<std::sync::Arc<std::sync::Mutex<crate::SurfaceStats>>>,
@@ -57,6 +62,8 @@ pub(crate) struct HostState {
     pub(crate) window_color_scheme: Option<crate::ColorScheme>,
     /// Per-window system backdrop requested via `Tx::set_window_backdrop`, taken by the host.
     pub(crate) window_backdrop_request: Option<crate::WindowBackdrop>,
+    /// Per-window resize anchor requested via `Tx::set_resize_anchor`, taken by the host.
+    pub(crate) window_resize_anchor: Option<crate::ResizeAnchor>,
     /// macOS document path (`MacWindowOptions::represented_file`, `Tx::set_represented_file`).
     pub(crate) represented_file: Latched<Option<std::path::PathBuf>>,
     /// macOS document edited dot (`MacWindowOptions::document_edited`, `Tx::set_document_edited`).
@@ -107,8 +114,13 @@ pub(crate) struct HostState {
     /// Test-only seam forcing `App::on_field_menu` even where `popup_menu_supported()` is true.
     #[cfg(test)]
     pub(crate) force_field_menu_fallback: bool,
+    /// True when the embedding host presents text-selection menus natively (e.g. Android's
+    /// floating `ActionMode`): text menus (a field's, selected text's Copy) stay in `popups` for
+    /// `take_text_menu`, `App::on_field_menu` yields to the native toolbar, and long presses
+    /// select the word under the finger.
+    pub(crate) text_menus: bool,
     /// True when the embedding host presents file dialogs itself rather than refusing them.
-    #[cfg_attr(not(any(test, target_vendor = "apple")), allow(dead_code))]
+    #[cfg_attr(not(any(test, target_vendor = "apple", target_os = "android")), allow(dead_code))]
     pub(crate) file_dialogs: bool,
     /// The file dialog asked for (`Tx::open_file`, `Tx::pick_file`, `Tx::save_file`) and not yet answered.
     pub(in crate::runtime) file_dialog: crate::file_dialog::DialogState,
@@ -139,6 +151,10 @@ pub(crate) struct HostState {
     /// Host-supplied safe-area insets `[top, right, bottom, left]` in logical points
     /// (`Runtime::set_safe_area`); `None` falls back to browser insets on wasm32 or `[0.0; 4]`.
     pub(in crate::runtime) safe_area: Option<[f32; 4]>,
+    /// Bottom overlap of an on-screen software keyboard in logical points
+    /// (`Runtime::set_keyboard_inset`), kept separate from `safe_area` so edge-drag bands stay
+    /// bound to hardware bars and cutouts.
+    pub(in crate::runtime) keyboard_inset: f32,
     /// Visible vertical band `(top, bottom)` of the host's visual viewport in window points when
     /// smaller than the layout viewport (e.g. an on-screen keyboard under `resizes-visual`), or
     /// `None` when the full layout viewport is visible.
@@ -168,7 +184,10 @@ impl HostState {
             system_reduced_transparency: false,
             scroll_bars: Default::default(),
             system_languages: None,
+            system_languages_override: false,
             languages_gen: 0,
+            #[cfg(target_os = "windows")]
+            languages_setting_gen: 0,
             native_overlay: false,
             surface_stats: None,
             app_stats: None,
@@ -180,6 +199,7 @@ impl HostState {
             window_title: Default::default(),
             window_color_scheme: None,
             window_backdrop_request: None,
+            window_resize_anchor: None,
             represented_file: Default::default(),
             document_edited: Default::default(),
             content_sizing: crate::ContentSizing::Fixed,
@@ -203,6 +223,7 @@ impl HostState {
             deferred_field_menu_pick: None,
             #[cfg(test)]
             force_field_menu_fallback: false,
+            text_menus: false,
             file_dialogs: false,
             file_dialog: Default::default(),
             file_dialog_answers: Vec::new(),
@@ -219,6 +240,7 @@ impl HostState {
             #[cfg(target_os = "windows")]
             tablet_setting_gen: 0,
             safe_area: None,
+            keyboard_inset: 0.0,
             visual_viewport_y: None,
         }
     }
