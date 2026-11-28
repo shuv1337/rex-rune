@@ -960,10 +960,10 @@ fn mute_tab_schema_local_targeting_and_shortcuts_titles() {
 #[test]
 fn muted_limit_is_enforced_per_host_endpoint_without_cross_host_eviction() {
     let mut ws = workspace_hosts(2);
-    for i in 0..2 {
-        ws.hosts[i].model.connected = true;
-        ws.hosts[i].model.sessions = vec![session("s")];
-        ws.hosts[i].model.selected = Some("s".into());
+    for host in &mut ws.hosts {
+        host.model.connected = true;
+        host.model.sessions = vec![session("s")];
+        host.model.selected = Some("s".into());
     }
     let host0_tabs: Vec<Value> = (0..5)
         .map(|i| tab(&format!("h0-{i}"), &format!("h0-{i}")))

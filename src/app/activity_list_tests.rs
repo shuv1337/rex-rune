@@ -1074,10 +1074,10 @@ fn draw(case: &str) {
         // Three sessions on two hosts; equal session names remain separate, and a
         // long name must give way without displacing the row's trailing words/time.
         ws.hosts[1].model.connected = true;
-        for h in 0..2 {
-            ws.hosts[h].model.activity_reading = false;
-            ws.hosts[h].model.sessions[0].label = "Orchard".into();
-            ws.hosts[h].model.activity.retain(|id, _| {
+        for (h, host) in ws.hosts.iter_mut().enumerate() {
+            host.model.activity_reading = false;
+            host.model.sessions[0].label = "Orchard".into();
+            host.model.activity.retain(|id, _| {
                 if h == 0 {
                     matches!(id.as_str(), "front" | "blocked")
                 } else {
