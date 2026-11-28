@@ -224,6 +224,7 @@ impl Workspace {
         // mode (such as Ctrl/Shift from Ctrl+Shift+X on kitty key-release clients) still drain.
         self.exit_copy_mode();
         self.cancel_layer_drag();
+        self.cancel_rearrange();
         self.drop_hover = None;
         self.bindings.clear_modes();
         self.bindings.sequence.clear();

@@ -122,6 +122,7 @@ fn host_header(s: &Workspace, index: usize) -> El {
 }
 
 fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
+    use super::drag::{self, Cue, Item};
     let host = &s.hosts[index];
     let selected = index == s.active && host.model.selected.as_deref() == Some(id);
     // A count earns its place only when it says something: a session has one tab unless
@@ -236,20 +237,29 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                 .color(rgb(muted())),
         );
     }
-    if targeted {
+    let transfer = matches!(&s.rearrange.cue, Some(Cue::Transfer { host: to, session })
+        if *to == host.id && session == id);
+    if targeted || transfer {
         // An overlay, so the outline never shifts the row; above the selected fill.
         e = e.child(
             el().key(format!("session-target:{index}:{id}"))
                 .pin(Some(0.), Some(0.), Some(0.), Some(0.))
                 .radius(8.)
                 .continuous_corners()
-                .border(1.5, rgb(accent())),
+                .border(1.5, rgb(accent()))
+                .inert()
+                .motion(STILL),
         );
     }
-    e
+    let item = Item::Session(host.id, id.to_owned());
+    if s.rearrange.dimmed(&item) {
+        e = e.opacity(drag::DIM);
+    }
+    drag::attach(s.rearrange.measure_item(e, item.clone()), item)
 }
 
 fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::session::Window) -> El {
+    use super::drag::{self, Item, Rail};
     let Some(id) = tab.window_id.as_deref() else {
         return el();
     };
@@ -350,7 +360,16 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
     if s.tab_targeted(index, id) {
         row = row.child(target_ring(id, 10.));
     }
-    row
+    let item = Item::Tab(
+        Rail::Sidebar,
+        s.hosts[index].id,
+        session.to_owned(),
+        id.to_owned(),
+    );
+    if s.rearrange.dimmed(&item) {
+        row = row.opacity(drag::DIM);
+    }
+    drag::attach(s.rearrange.measure_item(row, item.clone()), item)
 }
 
 fn note(text_: &str, color: u32) -> El {
@@ -468,6 +487,9 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         })
         .scroll_edge_fade(12.)
         .child(list);
+    scroller = s
+        .rearrange
+        .measure_rail(scroller, super::drag::Rail::Sidebar);
     if overflow {
         scroller = scroller.on_scroll_offset(fx.watch(width, viewport, |offset, max| {
             if offset < max - 1. {

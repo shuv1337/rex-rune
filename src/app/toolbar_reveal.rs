@@ -56,7 +56,11 @@ pub fn placement(s: &Workspace) -> Placement {
     let reveal = &s.toolbar_reveal;
     match s.settings.interface.toolbar {
         ToolbarBehavior::Always => Placement::Row,
-        ToolbarBehavior::OnHover if reveal.hover || reveal.pinned => Placement::Floating,
+        ToolbarBehavior::OnHover
+            if reveal.hover || reveal.pinned || s.rearrange.holding_toolbar() =>
+        {
+            Placement::Floating
+        }
         ToolbarBehavior::Hidden if reveal.pinned => Placement::Floating,
         ToolbarBehavior::OnHover | ToolbarBehavior::Hidden => Placement::None,
     }

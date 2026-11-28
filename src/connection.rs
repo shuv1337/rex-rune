@@ -658,6 +658,28 @@ const BOOTSTRAP_DATA_TICKETS_MIN_API_REVISION: u32 = 8;
 pub const UNDO_CLOSE_MIN_API_REVISION: u32 = 20;
 pub const UNDO_CLOSE_REQUIRES_API: &str = "Requires Rex Server API 20 or later";
 pub const UNDO_CLOSE_DISCONNECTED: &str = "Connect to the host to undo a close";
+pub const TRANSFER_WINDOW_MIN_API_REVISION: u32 = 22;
+
+/// Server-owned layout changes from a single, completed pointer gesture.
+#[derive(Debug)]
+pub enum LayoutDrop {
+    MoveSession(session::Move),
+    MoveWindow(session::MoveWindow),
+    TransferWindow(session::TransferWindow),
+    SwapBlocks(session::SwapBlocks),
+}
+
+impl LayoutDrop {
+    pub fn wire(&self) -> (&'static str, Value) {
+        use rexrs::api::Method;
+        match self {
+            Self::MoveSession(p) => (session::Move::NAME, json!(p)),
+            Self::MoveWindow(p) => (session::MoveWindow::NAME, json!(p)),
+            Self::TransferWindow(p) => (session::TransferWindow::NAME, json!(p)),
+            Self::SwapBlocks(p) => (session::SwapBlocks::NAME, json!(p)),
+        }
+    }
+}
 
 fn translate_request_for_revision(revision: u32, method: &str, payload: &mut Value) {
     if revision < SPLIT_ANCHOR_ID_MIN_API_REVISION
@@ -813,6 +835,11 @@ pub enum HostCommand {
     Request {
         method: String,
         payload: Value,
+    },
+    /// A drop is never replayed on a different connection.
+    LayoutDrop {
+        epoch: u64,
+        operation: LayoutDrop,
     },
     /// Move or resize a floating layer on this connection epoch only (API revision 13).
     /// Checked against the live epoch and negotiated API revision right before sending; never
@@ -3641,6 +3668,44 @@ async fn handle_command(
                 control, shared, state, sweep, epoch, id, scope, cursor, deadline,
             )
             .await?
+        }
+        HostCommand::LayoutDrop { epoch, operation } => {
+            if epoch != shared.model.lock().expect("host model").connection_epoch
+                || matches!(operation, LayoutDrop::TransferWindow(_))
+                    && control.welcome().api_revision < TRANSFER_WINDOW_MIN_API_REVISION
+            {
+                return Ok(CommandEffect::None);
+            }
+            let (method, payload) = operation.wire();
+            let session = payload["session_id"].as_str().map(str::to_owned);
+            request(control, method, payload).await?;
+            if matches!(operation, LayoutDrop::MoveSession(_)) {
+                shared.update(|m| m.notice = None);
+                list(control, shared, state, sweep).await?;
+            } else {
+                after_request(control, shared, workers, state, sweep, session.as_deref()).await?;
+                // The destination need not be attached. Refresh it if this client lists
+                // its tabs already; otherwise normal view loading will see the transfer.
+                if let LayoutDrop::TransferWindow(p) = &operation {
+                    let cached = shared
+                        .model
+                        .lock()
+                        .expect("host model")
+                        .views
+                        .contains_key(&p.to_session_id);
+                    if cached {
+                        after_request(
+                            control,
+                            shared,
+                            workers,
+                            state,
+                            sweep,
+                            Some(&p.to_session_id),
+                        )
+                        .await?;
+                    }
+                }
+            }
         }
         HostCommand::Close { .. } | HostCommand::Request { .. } => {
             let (method, mut payload) = match command {

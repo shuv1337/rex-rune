@@ -17,6 +17,8 @@ mod hosts_tests;
 mod input_tests;
 #[path = "keymap_tests.rs"]
 mod keymap_tests;
+#[path = "layout_drop_tests.rs"]
+mod layout_drop_tests;
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
 #[path = "perform_tests.rs"]

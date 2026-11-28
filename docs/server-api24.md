@@ -12,7 +12,7 @@ version metadata changed and the generated SDK types stayed the same.
 
 | Revision | Wire addition | Rex Rune |
 | --- | --- | --- |
-| 22 | `session.transfer_window` moves a live window across sessions and reuses block IDs. | Negotiates the revision. No transfer action. |
+| 22 | `session.transfer_window` moves a live window across sessions and reuses block IDs. | Drag a tab onto another session in the same host's sidebar. |
 | 23 | `com.superlogical.fs` adds tar upload and download on filesystem blocks. | Negotiates the revision. No filesystem block or tar support. |
 | 24 | `com.superlogical.terminal.program_resume_records` and the `program_resume_changed` block event. | Read-only Program resume popup. No launch, approval or rule-edit action. |
 

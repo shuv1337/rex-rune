@@ -6,7 +6,7 @@
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
     activity::{PaneProgram, pane_activity, progress_bar, tab_progress, tab_word},
-    find, floating_drag,
+    drag, find, floating_drag,
     pane_header::{self, Placement, full_bleed},
     panel::{Form, Intent, PanelKind},
     tab_icons,
@@ -117,6 +117,20 @@ fn header(
         // `ResizeLayer` and never fire an accidental focus press on a horizontal move.
         floating_drag::attach_drag(h, host_id, layer_id, id, layers::Grip::Move)
     } else {
+        let h = if drag::tiled_split(window)
+            && layers::layer_of(window, block).is_some_and(|layer| layer.kind == "tiled")
+            && let Some(window) = &window.window_id
+        {
+            let item = drag::Item::Pane(s.hosts[s.active].id, window.clone(), id.clone());
+            let h = if s.rearrange.dimmed(&item) {
+                h.opacity(0.85)
+            } else {
+                h
+            };
+            drag::attach(h, item)
+        } else {
+            h
+        };
         h.on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
             s.clear_focus_history_walk();
             if s.focused_block().as_deref() != Some(id.as_str()) {
@@ -970,7 +984,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
         } else {
             CardState::Plain
         };
-        pane_card(
+        let card = pane_card(
             s,
             current,
             &placement.block,
@@ -979,7 +993,40 @@ pub fn area(s: &Workspace, px: f32) -> El {
             state,
             is_focus && s.panel.is_none(),
             card_bleed,
-        )
+        );
+        let card = if drag::tiled_split(current)
+            && let Some(window) = &current.window_id
+        {
+            s.rearrange.measure_item(
+                card,
+                drag::Item::Pane(
+                    s.hosts[s.active].id,
+                    window.clone(),
+                    placement.block.clone(),
+                ),
+            )
+        } else {
+            card
+        };
+        if matches!(&s.rearrange.cue, Some(drag::Cue::Swap(block)) if block == &placement.block) {
+            let radius = if card_bleed || s.settings.pane_density == PaneDensity::Compact {
+                0.
+            } else {
+                CARD_RADIUS
+            };
+            card.child(
+                el().key(format!("pane-drop-target:{}", placement.block))
+                    .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                    .radius(radius)
+                    .continuous_corners()
+                    .border(2., rgb(accent()))
+                    .fill(rgb(accent()).alpha(0.10))
+                    .inert()
+                    .motion(STILL),
+            )
+        } else {
+            card
+        }
     };
 
     let emit_divider = |divider: &layout::Divider| {
@@ -1017,6 +1064,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
             };
             if g.phase == Phase::Down || s.drag.is_none() {
                 s.clear_focus_history_walk();
+                s.cancel_rearrange();
                 s.layer_drag = None;
                 s.drag = Some(DividerDrag {
                     host: s.active,

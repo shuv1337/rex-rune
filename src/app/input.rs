@@ -381,7 +381,19 @@ pub fn on_physical_input(s: &mut Workspace, event: &rune::PhysicalInput, _: &mut
     false
 }
 
+pub(super) fn cancel_rearrange_escape(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if ev.key != Key::Escape || s.rearrange.gesture.is_none() {
+        return false;
+    }
+    s.cancel_rearrange();
+    tx.cancel_pointer();
+    true
+}
+
 pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if cancel_rearrange_escape(s, ev, tx) {
+        return true;
+    }
     if s.recording().is_some() {
         return super::recorder::key(s, ev, tx);
     }

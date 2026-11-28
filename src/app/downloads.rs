@@ -39,6 +39,9 @@ pub struct Downloads {
     orphans: HashSet<(HostId, u64)>,
     /// Where the toolbar chip was laid out, for the popover that opens under it.
     pub chip: [f32; 4],
+    pub(super) dragging: Option<(HostId, u64)>,
+    #[cfg(test)]
+    pub(super) drag_starts: Vec<(HostId, u64)>,
     /// Tests: the files **Show in folder** was pressed for, instead of reaching a real file
     /// manager.
     #[cfg(test)]
@@ -51,6 +54,9 @@ impl Default for Downloads {
             announced: HashSet::new(),
             orphans: HashSet::new(),
             chip: [0.; 4],
+            dragging: None,
+            #[cfg(test)]
+            drag_starts: Vec::new(),
             #[cfg(test)]
             shown: Vec::new(),
         }

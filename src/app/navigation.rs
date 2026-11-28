@@ -231,6 +231,7 @@ impl Workspace {
     ) {
         self.clear_focus_history_walk();
         self.exit_copy_mode();
+        self.cancel_rearrange();
         self.navigation.serial += 1;
         let now = Instant::now();
         self.navigation.pending = Some(Pending {

@@ -14,6 +14,7 @@ mod directory;
 mod discover;
 mod downloads;
 mod downloads_view;
+mod drag;
 mod find;
 mod floating;
 mod floating_drag;
@@ -175,7 +176,10 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         Some(_) => dialogs::dialog(s, viewport),
         None => None,
     };
-    root = root.child(open.unwrap_or_else(popups::overlay));
+    s.rearrange.finish_view();
+    root = root
+        .children(s.rearrange.bar(scale))
+        .child(open.unwrap_or_else(popups::overlay));
     let mut window = el()
         .key(input::TERMINAL_FOCUS)
         // Rune delivers physical events only to the focused element. Keep this out of
@@ -183,6 +187,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .tab_index(-1)
         .focusable(s.option_choice && s.panel.is_none())
         .no_focus_ring()
+        .on_key_preview(input::cancel_rearrange_escape)
         // Take terminal keys before Rune's activation and traversal. This also
         // makes clicking the grid focus its keyboard-owning ancestor, not blur it.
         .on_key(|s: &mut Workspace, ev, tx| {
@@ -286,6 +291,7 @@ fn poll(s: &mut Workspace, clock: f64, tx: &mut Tx) -> bool {
         || activity_changed
         || server_changed
         || appearance_changed;
+    changed |= s.sync_rearrange();
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {

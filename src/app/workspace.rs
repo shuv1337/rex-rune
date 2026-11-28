@@ -90,6 +90,7 @@ pub struct Workspace {
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
     pub layer_drag: Option<super::floating_drag::LayerDrag>,
+    pub(super) rearrange: super::drag::State,
     pub copy_mode: Option<super::copy_mode::Session>,
     /// Keys whose press went to a terminal, and whether Option composed that press.
     pub forwarded: HashMap<super::bindings::Identity, bool>,
@@ -349,6 +350,7 @@ impl Workspace {
             zoom_notice: None,
             drag: None,
             layer_drag: None,
+            rearrange: Default::default(),
             copy_mode: None,
             forwarded: HashMap::new(),
             bindings: Default::default(),
@@ -909,6 +911,7 @@ impl Workspace {
         self.deliver_program_notices(index, notices);
         self.sync_layer_menu(tx);
         self.sync_layer_drag();
+        self.sync_rearrange();
         if self
             .panel
             .as_ref()
@@ -990,6 +993,7 @@ impl Workspace {
         }
         if !focused {
             self.cancel_layer_drag();
+            self.cancel_rearrange();
             for term in self.terminals.values_mut() {
                 term.end_selection();
                 term.clear_local_echo();
@@ -1418,6 +1422,7 @@ impl Workspace {
     pub fn open_search(&mut self) {
         self.clear_focus_history_walk();
         self.cancel_layer_drag();
+        self.cancel_rearrange();
         if self.in_copy_mode() {
             self.open_copy_mode_search(super::copy_mode::SearchDirection::Forward);
             return;
@@ -1470,6 +1475,7 @@ impl Workspace {
     pub fn request(&mut self, method: &str, mut payload: Value) {
         self.clear_focus_history_walk();
         if method.starts_with("session.focus") {
+            self.cancel_rearrange();
             self.exit_copy_mode();
             self.bindings.sequence.clear();
         }
@@ -1622,6 +1628,7 @@ impl Workspace {
     /// on, so it ends here rather than at the next key: switching away and back must not bring
     /// back a mode nobody entered again.
     pub fn update_visibility(&mut self) {
+        self.cancel_rearrange();
         self.revalidate_key_modes();
         if self.session_inspector_out_of_context() {
             self.cancel_panel_quiet();
@@ -1654,6 +1661,7 @@ impl Workspace {
     }
 
     pub fn set_vertical_tabs(&mut self, vertical: bool) {
+        self.cancel_rearrange();
         self.settings.vertical_tabs = vertical;
         if vertical {
             self.sidebar.set_open(true);
@@ -1663,6 +1671,7 @@ impl Workspace {
 
     pub fn toggle_sidebar(&mut self) {
         self.clear_focus_history_walk();
+        self.cancel_rearrange();
         self.sidebar.toggle();
         self.save();
     }
@@ -1867,6 +1876,7 @@ impl Workspace {
             Intent::Settings => {
                 self.exit_copy_mode();
                 self.cancel_layer_drag();
+                self.cancel_rearrange();
                 self.leave_install_dialog();
                 self.bindings.sequence.clear();
                 self.reload_shortcuts();
@@ -2411,6 +2421,7 @@ impl Workspace {
         self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.cancel_layer_drag();
+        self.cancel_rearrange();
         let target = self.panel.as_ref().and_then(|p| p.target.clone());
         let mut panel = Panel::new(
             PanelKind::Confirm {
@@ -2469,6 +2480,7 @@ impl Workspace {
         self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.cancel_layer_drag();
+        self.cancel_rearrange();
         self.leave_install_dialog();
         self.bindings.sequence.clear();
         for term in self.terminals.values_mut() {

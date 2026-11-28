@@ -123,6 +123,8 @@ use rune::{AppSpec, Env, Key, KeyEvent, Mods, Runtime};
 
 #[path = "appearance_tests.rs"]
 mod appearance_tests;
+#[path = "drag_tests.rs"]
+mod drag_tests;
 
 fn workspace() -> Workspace {
     workspace_hosts(1)

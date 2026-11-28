@@ -274,7 +274,17 @@ pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
             if s.tab_targeted(s.active, &id) {
                 tab_el = tab_el.child(target_ring(&id, 8.));
             }
-            names = names.child(tab_el);
+            let item = super::drag::Item::Tab(
+                super::drag::Rail::Toolbar,
+                s.hosts[s.active].id,
+                session.clone(),
+                id,
+            );
+            if s.rearrange.dimmed(&item) {
+                tab_el = tab_el.opacity(super::drag::DIM);
+            }
+            let tab_el = s.rearrange.measure_item(tab_el, item.clone());
+            names = names.child(super::drag::attach(tab_el, item));
         }
     }
     if fill {
@@ -300,6 +310,7 @@ pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
             });
         })
         .child(names);
+    strip = s.rearrange.measure_rail(strip, super::drag::Rail::Toolbar);
     let mut track = row()
         .key("tab-track")
         .h(track)

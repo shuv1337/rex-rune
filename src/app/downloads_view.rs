@@ -229,7 +229,7 @@ pub fn dialog(s: &Workspace, d: &Dialog) -> El {
 }
 
 /// One row of the popover: name, host and state, and the buttons that state allows.
-fn download_row(r: &Row<'_>) -> El {
+fn download_row(s: &Workspace, r: &Row<'_>) -> El {
     let t = r.transfer;
     let name = t.display_name();
     let id = t.id;
@@ -327,7 +327,7 @@ fn download_row(r: &Row<'_>) -> El {
             None => bar.fill(rgb(accent())).opacity(0.35),
         });
     }
-    row()
+    let row = row()
         .key(format!("download:{id}"))
         .role("listitem")
         .label(format!("{name}, {}, {state}", r.label))
@@ -337,7 +337,30 @@ fn download_row(r: &Row<'_>) -> El {
         .gap(10.)
         .center_y()
         .child(details)
-        .child(actions)
+        .child(actions);
+    let State::Saved { path, .. } = &t.state else {
+        return row;
+    };
+    let path = path.clone();
+    row.opacity(if s.downloads.dragging == Some((host, id)) {
+        super::drag::DIM
+    } else {
+        1.
+    })
+    .drag_out(move |_: &Workspace| {
+        // Only at gesture start, never when laying out or drawing the download list.
+        path.is_file().then(|| rune::DragItem::new().file(&path))
+    })
+    .on_drag_start(move |s: &mut Workspace, _| {
+        s.downloads.dragging = Some((host, id));
+        #[cfg(test)]
+        s.downloads.drag_starts.push((host, id));
+    })
+    .on_drag_end(move |s: &mut Workspace, _, _| {
+        if s.downloads.dragging == Some((host, id)) {
+            s.downloads.dragging = None;
+        }
+    })
 }
 
 /// The Downloads popover: every transfer of this launch, running first.
@@ -363,7 +386,7 @@ pub fn popover(s: &Workspace, viewport: [f32; 2]) -> El {
         );
     }
     for r in &rows {
-        list = list.child(download_row(r));
+        list = list.child(download_row(s, r));
     }
     let surface = glass(
         col()
