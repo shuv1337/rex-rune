@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.14.0 - 2026-11-27
+
+50 paired dark and light Chrome + terminal themes including `S2Code Dark` (#202), custom Chrome themes, Ghostty theme derivation, and Match system appearance (#203), closing verified-empty sessions without confirmation (#200), and an upstream Rune upgrade to `f1b079cc` (#201).
+
+### Added
+
+- **50 paired dark and light Chrome + terminal themes and `S2Code Dark` (#202, #199):** Full light and dark Chrome support (polarity-aware surfaces, borders, keycaps, shadows, native window appearance sync, and light-surface tab/header icon contrast), the new `S2Code Dark` (`s2-dark`) theme with sidebar, search input, and tab pill polish, Catppuccin (Latte, Frappé, Macchiato, Mocha), all 41 Rex macOS themes, and the 4 classic Rex Rune palettes (Midnight remains the default) in a searchable two-tone swatch picker in Settings -> Interface -> Theme. Thanks to @ukaiser (#199).
+
+- **Custom Chrome themes, Ghostty Chrome derivation, and Match system appearance (#203, #199):** Load custom Chrome themes from `<config_dir>/themes/` (`.toml`, `.json`, Ghostty `key = value`, and `.itermcolors` files, 256 KiB cap) or pick any installed Ghostty theme directly in the Chrome picker; omitted Chrome tokens are derived in OKLab with WCAG contrast checks and paired terminal themes follow automatically under Follow chrome. Added opt-in **Match system appearance** in Settings -> Interface to switch automatically between separate Light and Dark theme choices with the OS. Thanks to @ukaiser (#199).
+
+- **Close empty sessions without asking (#200, #198):** Closing a session with 0 tabs now verifies via fail-closed `session.list_blocks` that no detached or background blocks remain before skipping confirmation (preserving API 20+ undo-close and showing accurate copy instead of "0 tabs" when background programs remain), and adds a **Close session** button beside **New tab** on the empty-session card. Thanks to @aptinio (#198).
+
+### Changed
+
+- **Upgraded Rune to `f1b079cc` (#201):** Updated `rune`, `rune-kit`, `rune-theme-opencode`, and patched crates to upstream `f1b079ccad541008073e73d0987b876f4c99c322`, dropping upstreamed titlebar cancellation, double-click, and menu patches while keeping Wayland Mailbox presentation, GSettings bus-loss handling (#79), and the 3 pt native drag threshold cleanly rebased.
+
+- **Compatibility note:** Returning to an older Rex Rune version after saving a `custom:` or `ghostty:` Chrome theme falls back to Midnight on load.
+
 ## 0.13.1 - 2026-11-26
 
 Rex Server API revisions 0 through 24 compatibility (#192) and five community bug fixes (#188, #190, #191, #193, #194).
