@@ -212,11 +212,12 @@ impl A11yItem {
     }
 }
 
-/// An element id from a key, for anchors: letters, digits, `-` and `_`, starting with a letter.
+/// An element id from a key, for anchors: non-empty ASCII letters, digits, `-` and `_`.
+/// Leading digits are valid HTML5 ids (fragment links match verbatim; CSS selectors escape them).
 pub(crate) fn anchor_id(key: Option<&str>) -> Option<String> {
     let key = key?;
-    let ok = key.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let ok = !key.is_empty()
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
     ok.then(|| key.to_owned())
 }
 
@@ -307,19 +308,41 @@ pub(crate) fn round1(v: f32) -> f32 { (v * 10.0).round() / 10.0 }
 pub(crate) fn clean_slice(spec: &crate::el::TextSpec, a: usize, b: usize) -> String {
     let a = a.min(spec.content.len());
     let b = b.min(spec.content.len()).max(a);
-    if spec.cold.uncopied.is_empty() {
+    let has_labels = spec.cold.pills.iter().any(|p| p.bare.as_deref().is_some_and(|bare| bare.replace.is_some() && bare.label.is_some()));
+    if spec.cold.uncopied.is_empty() && !has_labels {
         return spec.content[a..b].to_owned();
     }
+    let push_clean = |out: &mut String, from: usize, to: usize| {
+        if spec.cold.uncopied.is_empty() {
+            if from < to { out.push_str(&spec.content[from..to]); }
+            return;
+        }
+        let mut cur = from;
+        for &(ua, ub) in &spec.cold.uncopied {
+            let (ua, ub) = (ua as usize, ub as usize);
+            if ub <= cur || ua >= to { continue; }
+            let stop = ua.max(cur).min(to);
+            if cur < stop { out.push_str(&spec.content[cur..stop]); }
+            cur = ub.min(to);
+        }
+        if cur < to { out.push_str(&spec.content[cur..to]); }
+    };
     let mut out = String::with_capacity(b - a);
-    let mut cur = a;
-    for &(ua, ub) in &spec.cold.uncopied {
-        let (ua, ub) = (ua as usize, ub as usize);
-        if ub <= cur || ua >= b { continue; }
-        let stop = ua.max(cur).min(b);
-        if cur < stop { out.push_str(&spec.content[cur..stop]); }
-        cur = ub.min(b);
+    if !has_labels {
+        push_clean(&mut out, a, b);
+        return out;
     }
-    if cur < b { out.push_str(&spec.content[cur..b]); }
+    let mut cur = a;
+    for p in &spec.cold.pills {
+        let Some(label) = p.bare.as_deref().filter(|bare| bare.replace.is_some()).and_then(|bare| bare.label.as_deref()) else { continue };
+        let (pa, pb) = (p.start as usize, p.end as usize);
+        if pb <= cur || pa >= b { continue; }
+        let stop = pa.max(cur).min(b);
+        if cur < stop { push_clean(&mut out, cur, stop); }
+        out.push_str(label);
+        cur = pb.min(b);
+    }
+    if cur < b { push_clean(&mut out, cur, b); }
     out
 }
 
@@ -1075,20 +1098,9 @@ impl RuntimeCore {
             || follow
     }
 
-    /// Whether any scroll viewport has ongoing scroll motion right now (active touch scroll,
-    /// pending direct scroll, momentum coast, glide, or wheel ease). Unlike [`Self::scrolling`],
-    /// this does not stay true from the one-step `hand.scrolling` latch after a scroll finishes
-    /// and no later frame steps it.
+    /// Whether any scroll viewport has ongoing scroll motion right now.
     pub(crate) fn web_a11y_scroll_active(&self) -> bool {
-        self.pointer.touch_scroll().is_some()
-            || self.scroll.scrolls.values().any(|st| {
-                st.direct()
-                    || st.coast().abs() > 1.0
-                    || st.glide().is_some()
-                    || st.mode.wheel().is_some()
-                    || st.x.coast().abs() > 1.0
-                    || st.x.carried()
-            })
+        self.a11y_scroll_active()
     }
 
     /// Builds the [`schedule::ScheduleEvent::Frame`] input for the web host and tests alike.

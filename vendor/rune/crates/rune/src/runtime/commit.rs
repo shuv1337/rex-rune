@@ -230,6 +230,11 @@ impl CommitState {
     }
 
     #[inline]
+    pub(in crate::runtime) fn memo_has_pixels(&self) -> bool {
+        self.memo.has_pixels()
+    }
+
+    #[inline]
     pub(crate) fn evict_memo_prefix(&mut self, prefix: &str) {
         self.memo.evict_prefix(prefix);
     }
@@ -434,6 +439,7 @@ pub(super) struct Measurement<'a> {
     pub(super) titlebar_inset: f32,
     pub(super) chrome: crate::ChromeInsets,
     pub(super) safe_area: [f32; 4],
+    pub(super) keyboard_inset: f32,
     pub(super) maximized: bool,
     pub(super) full_screen: bool,
     pub(super) window_backdrop: crate::WindowBackdrop,

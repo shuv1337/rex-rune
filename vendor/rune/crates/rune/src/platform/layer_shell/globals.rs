@@ -46,6 +46,8 @@ pub(super) struct OutputGlobal(pub(super) u32);
 #[derive(Default)]
 struct GlobalsState {
     outputs: HashMap<u32, WlOutput>,
+    /// Current `wl_output.mode` refresh rate in millihertz per bound `wl_output` global name.
+    output_refresh_mhz: HashMap<u32, u32>,
     /// Set once a surface created with no explicit output asks to follow `wl_surface.enter` /
     /// `wl_surface.leave`, so hot-plugged `wl_output` globals are bound automatically.
     bind_all_outputs: bool,
@@ -73,6 +75,7 @@ impl Dispatch<WlRegistry, GlobalListContents> for GlobalsState {
                 }
             }
             wl_registry::Event::GlobalRemove { name } => {
+                state.output_refresh_mhz.remove(&name);
                 if let Some(output) = state.outputs.remove(&name) {
                     release_output(conn, output);
                 }
@@ -118,7 +121,24 @@ impl Dispatch<XdgActivationV1, ()> for GlobalsState {
 }
 
 impl Dispatch<WlOutput, OutputGlobal> for GlobalsState {
-    fn event(_: &mut Self, _: &WlOutput, _: wl_output::Event, _: &OutputGlobal, _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        state: &mut Self,
+        _: &WlOutput,
+        event: wl_output::Event,
+        &OutputGlobal(name): &OutputGlobal,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Mode { flags, refresh, .. } = event {
+            let is_current = match flags {
+                wayland_client::WEnum::Value(bits) => bits.contains(wl_output::Mode::Current),
+                wayland_client::WEnum::Unknown(raw) => (raw & wl_output::Mode::Current.bits()) != 0,
+            };
+            if is_current && refresh > 0 {
+                state.output_refresh_mhz.insert(name, refresh as u32);
+            }
+        }
+    }
 }
 
 fn release_output(conn: &Connection, output: WlOutput) {
@@ -248,6 +268,13 @@ impl SharedGlobals {
 
     pub(super) fn shell(&self) -> &ZwlrLayerShellV1 {
         &self.shell
+    }
+
+    /// Current `wl_output.mode` refresh rate in millihertz for `id`, if reported.
+    pub(super) fn output_refresh_mhz(&self, id: u32) -> Option<u32> {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.drain_globals_queue(&mut inner);
+        inner.state.output_refresh_mhz.get(&id).copied()
     }
 
     /// True while `wl_output` global `id` is still advertised in the shared registry.

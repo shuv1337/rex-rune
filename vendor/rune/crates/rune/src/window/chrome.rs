@@ -11,7 +11,7 @@ use crate::runtime::RuntimeCore;
 use crate::tooling::Chrome;
 use crate::window::surface::Win;
 
-#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 pub(in crate::window) mod float_on_open;
 pub(in crate::window) mod full_screen;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]

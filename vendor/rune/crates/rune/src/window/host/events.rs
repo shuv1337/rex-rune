@@ -11,6 +11,8 @@ use super::stepping::FrameMove;
 use super::{Host, WindowApp};
 use crate::app::Shared;
 use crate::input::host_events;
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+use crate::window::chrome::float_on_open;
 use crate::window::chrome::{self, sync_chrome_core, sync_platform_core};
 #[cfg(target_os = "macos")]
 use crate::window::chrome::mac;
@@ -31,6 +33,7 @@ impl Host {
         self.app.drain_startup(&self.shortcuts, &mut self.menus);
         self.apply_tx_color_scheme();
         self.apply_tx_window_backdrop();
+        self.apply_tx_resize_anchor();
         if let Some(scheme) = self.shared.take_color_scheme() {
             self.set_app_color_scheme(scheme);
         }
@@ -88,6 +91,11 @@ impl Host {
                 (*done, *readback, *paused, *since) = (None, None, true, now);
             }
             if self.life.shown() {
+                let menu_scheme = match self.args.theme.as_deref() {
+                    Some("light") => crate::ColorScheme::Light,
+                    Some("dark") => crate::ColorScheme::Dark,
+                    _ => self.color_scheme.effective_for_window(crate::window::app_color_scheme()),
+                };
                 sync_platform_core(
                     l,
                     self.app.rt_mut(),
@@ -95,6 +103,7 @@ impl Host {
                     &mut self.ime,
                     self.ime_waits,
                     &self.clipboard,
+                    menu_scheme,
                 );
                 crate::haptics::flush_live(self.app.rt_mut(), self.life.uncovered() && !l.minimized());
                 if self.app.rt_mut().take_urgent_frame() && !l.backing_off(now) {
@@ -250,6 +259,7 @@ impl Host {
                     WakeEvent::Level(_, on) => self.set_always_on_top(event_loop, on),
                     WakeEvent::ExcludeFromCapture(_, exclude) => self.set_exclude_from_capture(exclude),
                     WakeEvent::ColorScheme(_, scheme) => self.set_color_scheme(scheme),
+                    WakeEvent::ResizeAnchor(_, anchor) => self.set_resize_anchor(anchor),
                     _ => {}
                 },
                 super::gpu_loss::LatchedWakeAction::Drop => {}
@@ -276,7 +286,9 @@ impl Host {
                 }
             }
             WakeEvent::Live(_) => {
-                if self.app.rt().live_pending() && let Some(w) = self.win.as_ref().filter(|_| self.life.uncovered()) {
+                if (self.app.rt().live_pending() || self.app.rt().text.async_fallbacks_ready())
+                    && let Some(w) = self.win.as_ref().filter(|_| self.life.uncovered())
+                {
                     w.request_redraw();
                 }
             }
@@ -292,6 +304,7 @@ impl Host {
             WakeEvent::ExcludeFromCapture(_, exclude) => self.set_exclude_from_capture(exclude),
             WakeEvent::ColorScheme(_, scheme) => self.set_color_scheme(scheme),
             WakeEvent::WindowBackdrop(_, backdrop) => self.set_window_backdrop(backdrop),
+            WakeEvent::ResizeAnchor(_, anchor) => self.set_resize_anchor(anchor),
             WakeEvent::Frame(_, mut request) => {
                 let rt = self.app.rt_mut();
                 request.spring = (request.animate && !rt.reduced_motion).then_some(crate::tok::motion::DEFAULT);
@@ -398,7 +411,7 @@ impl Host {
             w.timer_frame.no_longer_quiet();
             w.loop_frame.touched();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. })
             && let Some(w) = &mut self.win
         {
@@ -425,11 +438,22 @@ impl Host {
                 if stale { return; }
                 #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
                 if let Some(w) = &self.win { crate::file_dialog::window_focus(&w.window, focused && self.life.shown()); }
+                #[cfg(target_os = "macos")]
+                {
+                    self.pacing_config.focused = focused;
+                    if let Some(w) = &mut self.win
+                        && let Some(pacing) = &mut w.native.pacing
+                    {
+                        pacing.set_focused(focused);
+                    }
+                }
                 self.observability.report_focus(focused);
                 // Deliver independently of drawable availability, including hide/occlusion.
                 self.app.window_focus(focused);
                 // The key window's App takes the menu bar, so its items act in this window.
                 if focused { self.menus.claim(); }
+                #[cfg(target_os = "windows")]
+                if focused { self.sync_windows_menu_theme(); }
                 self.shell(event_loop);
                 if self.life.finished() || self.win.is_none() { return; }
             }
@@ -901,6 +925,7 @@ fn begin_host_drag_out(
     let image = gpu.filter(|_| start.item.drag_image().is_none()).and_then(|(gpu, renderer)| {
         crate::drag_out::snapshot(gpu, renderer, (l.config.width, l.config.height), scale, rt.clear_color(), start.rect)
     });
+    start.item.image_shown(image.as_ref());
     let (sink, path) = (rt.drag_end_sink(), start.path.clone());
     let handle = native_handle.clone();
     crate::drag_out::begin(&l.window, start, image, Box::new(move |outcome| {
@@ -966,6 +991,24 @@ impl Host {
         // AppKit paints off its own display link; elsewhere a paint holds what it asks for.
         #[cfg(not(target_os = "macos"))]
         if let Some(l) = &self.win { l.redraw_step(RedrawEvent::Paint); }
+        // `App::float_on_open`: release fixed min/max size limits on the first paint after the
+        // first frame completes (after winit receives the Wayland frame callback confirming the
+        // mapping commit was applied).
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if let Some(l) = &mut self.win {
+            for effect in float_on_open::step(&mut l.native.float_on_open, float_on_open::Event::Paint) {
+                match effect {
+                    float_on_open::Effect::Release => {
+                        float_on_open::release(&l.window, &self.options, self.geometry.min_size);
+                        #[cfg(target_os = "linux")]
+                        if self.wayland {
+                            l.native.mode.commit_surface();
+                        }
+                    }
+                    float_on_open::Effect::RequestRedraw => l.request_redraw(),
+                }
+            }
+        }
         #[cfg(target_os = "macos")]
         let satisfied = self.win.as_ref().is_some_and(Win::take_redraw_on_paint);
         // A new accent, scroller style, light/dark, contrast, reduced-motion or double-click
@@ -976,7 +1019,10 @@ impl Host {
             rt.set_system_scroll_bars_state(crate::platform::scroll_bars::current().with_override(self.args.scroll_bars));
             rt.set_system_text_scale(crate::platform::text_scale::cached());
             #[cfg(target_os = "windows")]
-            rt.sync_windows_tablet_mode_if_changed();
+            {
+                rt.sync_windows_tablet_mode_if_changed();
+                rt.sync_windows_languages_if_changed();
+            }
             #[cfg(target_os = "linux")]
             {
                 rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());

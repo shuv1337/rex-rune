@@ -25,7 +25,7 @@ use crate::time::Instant;
 pub(super) use crate::window::warm_frame::{warm_frame, warm_instances};
 use crate::window::WakeEvent;
 use crate::window::host::{CompositorFrame, Host};
-use crate::window::surface::{Win, acquire, configure_checked, drawable_size, max_surface_dim, reblend_core, rebuild_renderer_core, surface_config};
+use crate::window::surface::{Win, acquire, configure_checked, drawable_size, max_surface_dim, reblend_core, rebuild_renderer_core, surface_config_with};
 
 /// Where a window's frames go. Windows that need the GPU from their first frame (a compositor,
 /// a translucent window, an overlay) are `Gpu` from the start, as on every other platform.
@@ -417,8 +417,11 @@ impl Host {
         let SurfaceMode::Cpu { mut cpu, .. } = std::mem::replace(&mut w.native.mode, SurfaceMode::Gpu) else { unreachable!() };
         match handover {
             Some(handover) => {
-                cpu.half = HalfRounding::of_vendor(gpu.adapter.get_info().vendor);
-                w.native.video_layers.hold_premultiplied(vrr_guard(gpu.adapter.get_info().vendor));
+                let vendor = gpu.adapter.get_info().vendor;
+                cpu.half = HalfRounding::of_vendor(vendor);
+                w.native.video_layers.hold_premultiplied(
+                    vrr_guard(vendor) && config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+                );
                 w.native.mode = SurfaceMode::HandingOver { cpu, handover, done: None, readback: None, since: crate::time::now(), nudged: None, tries, paused: false };
             }
             None => {
@@ -433,7 +436,11 @@ impl Host {
                     crate::marks::mark("window.shown");
                 }
                 w.presented = None;
-                self.app.rt_mut().set_renderer_kind(crate::RendererKind::Gpu);
+                {
+                    let rt = self.app.rt_mut();
+                    rt.set_renderer_kind(crate::RendererKind::Gpu);
+                    rt.images.set_backing(crate::pixels::Backing::Gpu);
+                }
                 crate::marks::mark("gpu.window.handed");
             }
         }
@@ -485,7 +492,7 @@ impl Host {
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor { format: (target_format != l.config.format).then_some(target_format), ..Default::default() });
         {
             let rt = self.app.rt_mut();
-            renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+            renderer.upload_images_retaining_cpu(&gpu.device, &gpu.queue, &mut rt.images);
             renderer.build_surfaces(&gpu.device, &rt.surfaces, rt.live_notifier());
             renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (l.config.width, l.config.height));
             renderer.set_frame_wake(rt.live_wake());
@@ -605,7 +612,11 @@ impl Host {
                 w.presented = None;
                 // What was asked for while the GPU finished its frame draws now, on the GPU.
                 w.request_redraw();
-                self.app.rt_mut().set_renderer_kind(crate::RendererKind::Gpu);
+                {
+                    let rt = self.app.rt_mut();
+                    rt.set_renderer_kind(crate::RendererKind::Gpu);
+                    rt.images.set_backing(crate::pixels::Backing::Gpu);
+                }
                 self.sync_window_backdrop(false);
                 self.on_resize_sync_event(super::resize_sync::Event::Handover);
             }
@@ -768,9 +779,13 @@ fn prepare(hwnd: isize, size: (u32, u32), srgb: bool, features: wgpu::Features, 
                 return Ok(SetupOutcome::SoftwareDeferred);
             }
             let size = drawable_size(None, size, max_surface_dim(Some(gpu)));
-            let (mut config, _) = surface_config(surface, &gpu.adapter, size, srgb)
+            let (mut config, translucent) = surface_config_with(surface, &gpu.adapter, size, srgb, false, false, true)
                 .ok_or_else(|| SurfaceSetupError::unsupported("the GPU can't present to this window"))?;
-            crate::window::present::apply(&mut config, surface, &gpu.adapter, false);
+            if handover.is_some()
+                && let Some(mode) = vrr_alpha_mode(gpu.adapter.get_info().vendor, translucent)
+            {
+                config.alpha_mode = mode;
+            }
             configure_checked(surface, gpu, &config).map_err(|error| SurfaceSetupError::from_configure("", error))?;
             let target_format = if srgb { config.format.remove_srgb_suffix() } else { config.format };
             let mut renderer = match prewarmed {
@@ -854,7 +869,22 @@ fn lower_priority() {
 /// hardware, as reported there). It costs DWM a blend of the regions the window
 /// presents, and nothing while it rests. A fixed-rate display (blade's Iris panel) needs nothing:
 /// its refresh doesn't depend on who presents.
-fn vrr_guard(vendor: u32) -> bool { vendor == 0x10DE }
+pub(in crate::window) const fn vrr_guard(vendor: u32) -> bool { vendor == 0x10DE }
+
+/// Initial swap-chain alpha mode override for opaque Windows DirectComposition surfaces on NVIDIA
+/// adapters (`vrr_guard`): selects `PreMultiplied` at initial configuration whenever the surface
+/// supports it so the swap chain never starts opaque (`Auto`) and never requires a late rebind on
+/// the first redraw.
+pub(in crate::window) const fn vrr_alpha_mode(
+    vendor: u32,
+    translucent: Option<wgpu::CompositeAlphaMode>,
+) -> Option<wgpu::CompositeAlphaMode> {
+    if vrr_guard(vendor) && matches!(translucent, Some(wgpu::CompositeAlphaMode::PreMultiplied)) {
+        Some(wgpu::CompositeAlphaMode::PreMultiplied)
+    } else {
+        None
+    }
+}
 
 #[cfg(test)]
 #[path = "handover_tests.rs"]

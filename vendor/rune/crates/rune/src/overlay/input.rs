@@ -188,6 +188,7 @@ impl OverlayCore {
                 crate::drag_out::snapshot(gpu, renderer, (live.config.width, live.config.height), live.scale, rt.clear_color(), start.rect),
             _ => None,
         };
+        start.item.image_shown(image.as_ref());
         let wake = self.shared.wake.lock().unwrap().clone();
         crate::drag_out::begin(&window, start, image, Box::new(move |outcome| {
             sink.borrow_mut().push((path, outcome));
@@ -623,7 +624,11 @@ impl OverlayCore {
         self.presence_due(app, now);
         self.poll_activation_tokens(now);
         self.rest_step(app, crate::window::RestEvent::Woke { now }, now);
-        self.retire.poll_due(now);
+        if self.retire.poll_due(now) && self.rest == crate::window::Rest::Rested
+            && let Some(renderer) = &self.renderer
+        {
+            renderer.trim_uploads();
+        }
         // Paced to a frame interval: a hidden or covered overlay's poll that keeps asking for
         // the next frame runs once a frame, however often other events turn the loop.
         let deadline = self.poll_deadline(app.rt());

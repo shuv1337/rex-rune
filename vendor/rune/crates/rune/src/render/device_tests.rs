@@ -13,7 +13,7 @@ fn default_instance_descriptor_hides_noncompliant_adapters() {
         desc.backend_options.dx12.latency_waitable_object,
         wgpu::Dx12UseFrameLatencyWaitableObject::DontWait,
     ));
-    assert!(matches!(desc.backend_options.dx12.shader_compiler, wgpu::Dx12Compiler::Fxc));
+    assert_eq!(format!("{:?}", desc.backend_options.dx12.shader_compiler), format!("{:?}", Gpu::dx12_compiler()));
 }
 
 #[test]
@@ -21,6 +21,24 @@ fn fallback_instance_descriptor_allows_noncompliant_adapters() {
     let desc = Gpu::instance_descriptor(wgpu::Backends::all(), true);
     assert!(desc.flags.contains(wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER));
     assert!(!desc.flags.contains(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn required_device_limits_falls_back_to_downlevel_for_16k_uniform_buffer_adapters() {
+    let mut gles_like = wgpu::Limits::default();
+    gles_like.max_uniform_buffer_binding_size = 16_384;
+    let limits = Gpu::required_device_limits(&gles_like, 0);
+    assert_eq!(
+        limits.max_uniform_buffer_binding_size, 16_384,
+        "an adapter whose only shortfall is a 16 KiB UBO limit (Android GLES) must request downlevel limits",
+    );
+
+    let full = wgpu::Limits::default();
+    let desktop = Gpu::required_device_limits(&full, 128);
+    assert_eq!(desktop.max_uniform_buffer_binding_size, wgpu::Limits::default().max_uniform_buffer_binding_size);
+    assert_eq!(desktop.max_immediate_size, 128);
+    assert!(desktop.max_non_sampler_bindings <= 65_536);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -39,7 +57,7 @@ fn dx12_presentation_system_env_child() {
         desc.backend_options.dx12.latency_waitable_object,
         wgpu::Dx12UseFrameLatencyWaitableObject::DontWait,
     ));
-    assert!(matches!(desc.backend_options.dx12.shader_compiler, wgpu::Dx12Compiler::Fxc));
+    assert_eq!(format!("{:?}", desc.backend_options.dx12.shader_compiler), format!("{:?}", Gpu::dx12_compiler()));
     #[cfg(target_os = "windows")]
     {
         let instance = Gpu::instance();

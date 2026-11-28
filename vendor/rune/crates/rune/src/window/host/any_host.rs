@@ -129,6 +129,15 @@ impl AnyHost for Host {
     fn vanish(&mut self) {
         if let Some(w) = self.shown_win() { w.hide(); }
     }
+    #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    fn release_wayland_surface(&mut self) {
+        // Drop only `Win` (a11y, Wayland native helpers, `wgpu::Surface`, and `Arc<Window>`) in
+        // protocol order while leaving `self.gpu` and `self.app` untouched for fast exit.
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.wayland {
+            self.win = None;
+        }
+    }
     fn cancel_menus(&mut self) { self.in_turn(Self::cancel_menus_in_turn) }
     #[cfg(target_os = "macos")]
     fn stop_pacing(&mut self) {
@@ -245,36 +254,57 @@ impl Host {
         {
             w.request_redraw();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(
+            target_os = "windows",
+            all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+        ))]
         self.sync_poll_pace(now);
     }
 
-    /// Windows: whether the window is shown, uncovered, not minimized and not waiting on a
-    /// swap-chain slot, so poll-driven frames pace to the display's vblank grid.
-    #[cfg(target_os = "windows")]
+    /// Windows/Linux: whether the window is shown, uncovered, not minimized and not waiting on a
+    /// swap-chain slot, so poll-driven frames pace to the display's refresh grid.
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    ))]
     fn poll_pace_active(&self) -> bool {
         self.shown_win().is_some_and(|w| self.life.uncovered() && !w.minimized() && !w.waits_for_slot())
     }
 
-    /// Windows: syncs the window's poll pacer with the runtime's current poll wake before the
-    /// loop sleeps.
-    #[cfg(target_os = "windows")]
+    /// Windows/Linux: syncs the window's poll pacer with the runtime's current poll wake before
+    /// the loop sleeps.
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+    ))]
     fn sync_poll_pace(&mut self, now: Instant) {
         let active = self.poll_pace_active();
         let rt = self.app.rt();
         let Some(w) = self.win.as_mut() else { return };
         let window = &w.window;
-        w.native.poll_pace.sync_with(rt, now, active, |previous| {
-            let mhz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz());
-            crate::platform::win32::vsync_grid(now, mhz, previous)
+        w.native.poll_pace.sync_with(rt, now, active, |previous, polled| {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = polled;
+                let mhz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz());
+                crate::platform::win32::vsync_grid(now, mhz, previous)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mhz = crate::window::poll_pace::window_refresh_mhz(window);
+                crate::window::poll_pace::monitor_grid(mhz, previous, polled)
+            }
         });
     }
 
-    /// The runtime's next timer as the loop waits for it and checks it on wake. On Windows, a
-    /// shown uncovered window's sub-frame poll wake snaps to the display's vblank grid
+    /// The runtime's next timer as the loop waits for it and checks it on wake. On Windows and
+    /// Linux, a shown uncovered window's sub-frame poll wake snaps to the display's refresh grid
     /// (`poll_pace`) instead of the 60 Hz `TIMER_FRAME` floor.
     fn poll_deadline(&self) -> Option<Instant> {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(
+            target_os = "windows",
+            all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")),
+        ))]
         if let Some(w) = &self.win {
             return w.native.poll_pace.deadline_for(self.app.rt(), self.poll_pace_active());
         }

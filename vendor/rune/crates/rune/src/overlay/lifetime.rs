@@ -124,6 +124,8 @@ impl OverlayCore {
             else { self.sync_origin(app.rt_mut(), &window); }
             if let Some(gpu) = self.gpu.clone() { self.rescale(app, &gpu, crate::window::backing_scale(&window)); }
             if self.surface.live().is_none() { return; }
+            #[cfg(target_os = "macos")]
+            self.restore_hidden_drawable();
             // Retained alpha-zero hosts already have pixels. A hidden update must reach
             // the surface before exposing it, rather than flashing the old frame.
             if !fading { self.refresh_for_reveal_at(app, crate::time::now()); }
@@ -385,6 +387,10 @@ impl OverlayCore {
                 presence::Effect::HideWindow { fade } => {
                     let surface_destroyed = self.hide_window(app, fade);
                     if !self.presence.drawing() {
+                        #[cfg(target_os = "macos")]
+                        if crate::window::HiddenDrawable::should_shrink_overlay(false, self.release == Release::Now) {
+                            self.shrink_hidden_drawable();
+                        }
                         self.after_hidden_did_hide(app, surface_destroyed);
                     }
                 }
@@ -405,8 +411,11 @@ impl OverlayCore {
         self.quiet.step(frame::QuietEvent::Forget);
         if self.release == Release::Now {
             self.rest = crate::window::Rest::Rested;
+            app.rt_mut().drop_images();
+            app.rt_mut().rest();
         } else {
             self.rest_step(app, crate::window::RestEvent::Unseen, crate::time::now());
+            app.rt_mut().drop_images();
         }
     }
 
@@ -430,6 +439,9 @@ impl OverlayCore {
     }
 
     fn give_back(&mut self, app: &mut dyn OverlayApp, all: bool, now: Instant) {
+        if all {
+            app.rt_mut().drop_images();
+        }
         app.rt_mut().rest();
         let gpu = self.gpu.clone();
         if let (Some(gpu), Some(renderer)) = (gpu, &mut self.renderer) {
@@ -604,7 +616,11 @@ impl OverlayCore {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs = attrs.with_has_shadow(false);
         }
-        let window = match event_loop.create_window(attrs) {
+        #[cfg(target_os = "windows")]
+        let created = crate::platform::win32::dark_mode::with_system_theme_query(|| event_loop.create_window(attrs));
+        #[cfg(not(target_os = "windows"))]
+        let created = event_loop.create_window(attrs);
+        let window = match created {
             Ok(window) => Arc::new(window),
             Err(error) => {
                 self.fail(app, format!("could not create its window: {error}"));
@@ -629,7 +645,7 @@ impl OverlayCore {
         #[cfg(target_os = "macos")]
         {
             let wake = self.shared.wake.lock().unwrap().clone();
-            self.panel = Some(crate::platform::macos::Panel::adopt(&window, self.at, self.interactive, &self.options, self.macos_color_space, wake)?);
+            self.panel = Some(crate::platform::macos::Panel::adopt(&window, self.at, self.interactive, &self.options, self.macos_color_space, self.wide_color, wake)?);
             let panel = self.panel.as_ref().unwrap();
             if let Some(level) = self.macos_level { panel.set_level(level); }
             let native = (Some(panel.window_number()), crate::OverlayCapabilities::placed(

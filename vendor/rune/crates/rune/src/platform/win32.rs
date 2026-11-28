@@ -41,6 +41,7 @@ pub(crate) use dpi_drag::in_size_move;
 pub(crate) use dpi_drag::register_resize_sync;
 pub(crate) use dpi_drag::run_in_paint;
 pub(crate) use dpi_drag::set_resize_sync_active;
+pub(crate) use dpi_drag::set_resize_sync_tick;
 pub(crate) use dpi_drag::take_resize_sync_signal;
 pub(crate) use frame::CustomFrame;
 pub(crate) use frame::DragHitSync;
@@ -49,7 +50,7 @@ pub(crate) use frame::has_window_menu;
 pub(crate) use frame::request_inner_size;
 pub(crate) use frame::window_menu;
 pub(crate) use hide_now::hide_now;
-pub(crate) use placement::restore_frame;
+pub(crate) use placement::{apply_window_frame, restore_frame};
 pub(crate) use window_options::{
     apply_hwnd_styles, apply_window_styles, configure_window, set_exclude_from_capture,
     set_hwnd_exclude_from_capture,
@@ -98,6 +99,19 @@ pub(crate) fn set_window_rect(window: &winit::window::Window, origin: (i32, i32)
     // SAFETY: live window owned by this thread; `SWP_NOZORDER | SWP_NOACTIVATE` moves and resizes atomically.
     unsafe {
         SetWindowPos(hwnd, std::ptr::null_mut(), origin.0, origin.1, size.0.max(1) as i32, size.1.max(1) as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// DWM's monotonically increasing desktop composition count (`DWM_TIMING_INFO::cFrame`), or
+/// `None` when DWM timing is unavailable.
+#[allow(unsafe_code)]
+pub(crate) fn dwm_composed_frame() -> Option<u64> {
+    use windows_sys::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
+    // SAFETY: plain out-parameter with `cbSize` set; `hwnd` must be NULL on Windows 8.1+.
+    unsafe {
+        let mut t: DWM_TIMING_INFO = std::mem::zeroed();
+        t.cbSize = size_of::<DWM_TIMING_INFO>() as u32;
+        (DwmGetCompositionTimingInfo(std::ptr::null_mut(), &mut t) >= 0).then_some(t.cFrame)
     }
 }
 
@@ -371,17 +385,19 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wparam: WPARAM, lpa
             input.clicks.borrow_mut().push_back((down, point));
         }
         WM_CAPTURECHANGED => input.captured.set(false),
-        WM_SETTINGCHANGE if dark_mode::should_refresh_color_policy(lparam) => {
-            dark_mode::refresh_color_policy();
-        }
         _ => {}
     }
+    let refresh_theme = message == WM_SETTINGCHANGE && dark_mode::should_refresh_color_policy(lparam);
     #[cfg(feature = "windows-system-material")]
     if matches!(message, WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED) {
         crate::system_material::windows::notify_wm_setting_change();
     }
     // SAFETY: forwards the unhandled message to the next procedure in this window's subclass chain.
-    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    if refresh_theme {
+        dark_mode::with_system_theme_query_and_flush(|| unsafe { DefSubclassProc(hwnd, message, wparam, lparam) })
+    } else {
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
 }
 
 /// Per-window input owner; the shared low-level hook observes but never consumes events.

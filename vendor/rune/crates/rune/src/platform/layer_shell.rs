@@ -501,6 +501,8 @@ fn named_keysym(symbol: u32) -> Option<crate::Key> {
         0x1008_ff15 => crate::Key::Media(crate::MediaKey::Stop),
         0x1008_ff97 => crate::Key::Media(crate::MediaKey::FastForward),
         0x1008_ff3e => crate::Key::Media(crate::MediaKey::Rewind),
+        0x1008_ff26 => crate::Key::BrowserBack,
+        0x1008_ff27 => crate::Key::BrowserForward,
         _ => return None,
     })
 }
@@ -1001,6 +1003,11 @@ impl LayerSurface {
     /// acquiring and presenting will not block in Mesa's FIFO wait or draw to a closing surface.
     pub fn frame_ready(&self) -> bool {
         !self.state.readiness.closing() && self.state.frame.ready()
+    }
+
+    /// Refresh rate in millihertz of the `wl_output` this surface is currently on, if known.
+    pub fn refresh_rate_millihertz(&self) -> Option<u32> {
+        self.state.output.current().and_then(|id| self.globals.output_refresh_mhz(id))
     }
 
     /// Commit role state (placement) without a new buffer; wgpu's present commits buffers.

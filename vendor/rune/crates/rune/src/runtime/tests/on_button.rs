@@ -422,3 +422,68 @@ fn on_button_live_only_skips_view_rebuild() {
     assert_eq!(rt.state.live.get(), 0.5);
     assert_eq!(builds.get(), before, "live_only on_button skips view rebuild");
 }
+
+#[test]
+fn synthetic_back_forward_press_release_pair_reaches_on_button_and_pointer_buttons() {
+    #[derive(Default)]
+    struct NavState {
+        page: i32,
+        opt_in_log: Vec<PointerButton>,
+        any_press_log: Vec<PointerButton>,
+    }
+    fn view(_: &NavState, _: &mut Cx<NavState>) -> El {
+        col().key("root")
+            .size(300.0, 200.0)
+            .on_any_press(|s: &mut NavState, btn, _, _| s.any_press_log.push(btn))
+            .on_button(|s: &mut NavState, btn, _| match btn {
+                PointerButton::Back => { s.page -= 1; true }
+                PointerButton::Forward => { s.page += 1; true }
+                _ => false,
+            })
+            .child(
+                el().key("opt-nav")
+                    .size(120.0, 80.0)
+                    .pointer_buttons([PointerButton::Back, PointerButton::Forward])
+                    .on_press_tx(|s: &mut NavState, tx| s.opt_in_log.push(tx.button())),
+            )
+            .child(el().key("body").size(300.0, 120.0))
+    }
+
+    let mut rt = Runtime::new(NavState { page: 5, ..Default::default() }, view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+
+    // Mirrors macOS swipeWithEvent: queuing MouseInput(Pressed) + MouseInput(Released) for
+    // MouseButton::Back / MouseButton::Forward through window::pointer_button.
+    let back = crate::window::pointer_button(winit::event::MouseButton::Back);
+    let forward = crate::window::pointer_button(winit::event::MouseButton::Forward);
+    assert_eq!(back, PointerButton::Back);
+    assert_eq!(forward, PointerButton::Forward);
+
+    let (bx, by) = rt.find("body").unwrap();
+    rt.pointer_move(bx, by);
+    rt.button_down(bx, by, back);
+    rt.button_up(bx, by, back);
+    rt.frame(0.0);
+    assert_eq!(rt.state.page, 4, "swipe Back decrements page once via on_button");
+
+    rt.button_down(bx, by, forward);
+    rt.button_up(bx, by, forward);
+    rt.frame(0.0);
+    assert_eq!(rt.state.page, 5, "swipe Forward increments page once via on_button");
+
+    // Opt-in element with pointer_buttons([Back, Forward]) + on_press_tx receives both once and
+    // leaves no button held down so subsequent navigation still fires.
+    let (ox, oy) = rt.find("opt-nav").unwrap();
+    rt.pointer_move(ox, oy);
+    rt.button_down(ox, oy, back);
+    rt.button_up(ox, oy, back);
+    rt.button_down(ox, oy, forward);
+    rt.button_up(ox, oy, forward);
+    rt.frame(0.0);
+    assert_eq!(rt.state.opt_in_log, [PointerButton::Back, PointerButton::Forward]);
+    assert_eq!(rt.state.page, 5, "opt-in target consumes Back/Forward before root on_button");
+    assert_eq!(
+        rt.state.any_press_log,
+        [PointerButton::Back, PointerButton::Forward, PointerButton::Back, PointerButton::Forward],
+    );
+}

@@ -9,6 +9,15 @@ pub(in crate::runtime) struct LeafBox {
     /// containment's rounding in: Blink's text lays out from the exact place.
     pub exact_off: [f32; 2],
     pub raw_size: [f32; 2],
+    /// Exact window-point top-left of this element (with scroll/transforms applied), for snapping
+    /// `Shape::rect` / `Shape::rounded_rect` edges identically to child boxes.
+    pub origin_pt: [f32; 2],
+    /// Laid-out `[width, height]` in points (with growth-row height), passed to `El::shape_with`.
+    pub shape_size: [f32; 2],
+    /// Inherited rigid translation in device px (scrolls, sticky shifts, growth rows, containment).
+    pub rigid: [f32; 2],
+    /// Whether pixel snapping is active for this node.
+    pub snaps: bool,
     /// The paint containment's origin above (`El::paint_contained`), device px: what draws
     /// from its exact box's origin rounds against it, as Blink rounds inside it.
     pub contain: [f32; 2],
@@ -61,6 +70,10 @@ impl RuntimeCore {
             r_exact,
             exact_off,
             raw_size,
+            origin_pt,
+            shape_size,
+            rigid,
+            snaps,
             contain,
             radii,
             sc,
@@ -96,16 +109,20 @@ impl RuntimeCore {
         let n = &self.tree.nodes[i];
         let group = group_lit(&self.scene, n, group);
         let text_tint = |c: Color| paint_tracks::press_tint(paint_tracks::group_tint(n, c, group), press_to, pressed);
-        if let Some(shape) = &n.vis.shape {
-            // At rest a shape draws from its exact box's origin rounded to the device grid, at its
-            // exact scale, as Chromium draws a canvas or an inline SVG: what it holds keeps its
-            // geometry against the grid, so a sheet's 1 px header line covers the same device rows
-            // (one whole and half the next at 1.5x) wherever the sheet sits. Moving or scaled, it
-            // stays centred in its snapped box, sharing the centre fills, borders and icons use, so
-            // a glide or a swap to an icon doesn't wobble. A view-boxed shape stretches to the box.
+        if let Some(shape) = n.vis.resolve_shape(shape_size, s) {
+            // At rest a shape draws from its exact box's origin rounded to the device grid against
+            // its rigid translation (paint containment and scroll), at its exact scale, as Chromium
+            // draws a canvas or an inline SVG: what it holds keeps its geometry against the grid,
+            // so a sheet's 1 px header line covers the same device rows (one whole and half the
+            // next at 1.5x) wherever the sheet sits, and scrolled shapes move with their box's
+            // rounded scroll shift. Moving or scaled, it stays centred in its snapped box, sharing
+            // the centre fills, borders and icons use, so a glide or a swap to an icon doesn't
+            // wobble. A view-boxed shape stretches to the box. `Shape::rect` / `rounded_rect` ops
+            // snap all four edges independently in window space like box fills when at rest and
+            // unscaled with pixel snapping enabled.
             let still = cover.is_none() && scale_motion == ScaleMotion::Still && !gliding && (sc - 1.0).abs() < 1e-5;
             let at = if still {
-                [on_grid(r_exact[0], contain[0]), on_grid(r_exact[1], contain[1])]
+                [on_grid(r_exact[0], rigid[0]), on_grid(r_exact[1], rigid[1])]
             } else {
                 [r[0] + (w - w_exact) * 0.5, r[1] + (h - h_exact) * 0.5]
             };
@@ -113,14 +130,28 @@ impl RuntimeCore {
                 Some([vw, vh]) => ([r[0], r[1]], [w / vw, h / vh]),
                 None => (at, [k_px, k_px]),
             };
+            let rect_snap = if snaps && still {
+                paint::shape::RectSnap::Window {
+                    origin_pt: shape.view_box.is_none().then_some(origin_pt),
+                    s,
+                    rigid,
+                }
+            } else {
+                let exact_origin = match shape.view_box {
+                    Some(_) => [r[0], r[1]],
+                    None if still => [r_exact[0], r_exact[1]],
+                    None => at,
+                };
+                paint::shape::RectSnap::Exact { origin: exact_origin }
+            };
             if let Some(t) = self.scene.get(node_id, P_TRIM) {
                 // A presence draw traces the trimmed span on from its start.
                 let end = t.x + (t.y - t.x) * draw;
-                push_shape(&mut self.instances, &shape.trimmed(t.x, end), origin, k, k_px, o, srgb, clip, fade);
+                push_shape(&mut self.instances, &shape.trimmed(t.x, end), origin, k, k_px, rect_snap, o, srgb, clip, fade);
             } else if draw < 1.0 {
-                push_shape(&mut self.instances, &shape.drawn(draw), origin, k, k_px, o, srgb, clip, fade);
+                push_shape(&mut self.instances, &shape.drawn(draw), origin, k, k_px, rect_snap, o, srgb, clip, fade);
             } else {
-                push_shape(&mut self.instances, shape, origin, k, k_px, o, srgb, clip, fade);
+                push_shape(&mut self.instances, &shape, origin, k, k_px, rect_snap, o, srgb, clip, fade);
             }
         }
         if w > 0.0 && h > 0.0 && let Some(pixels) = &n.vis.pixels {
@@ -415,6 +446,7 @@ impl RuntimeCore {
             }
             // Text fields: selection under the text, placeholder, caret over it.
             let mut caret = None;
+            let mut extra_carets: Vec<[f32; 4]> = Vec::new();
             // The selected display bytes and the ink their `El::selection_style` gives them.
             let mut selected_ink: Option<(usize, usize, [f32; 4])> = None;
             if let Some(inp) = &n.input {
@@ -479,17 +511,38 @@ impl RuntimeCore {
                 }
                 if e.focused && !departing {
                     let (a, b) = e.range();
+                    let (highlight, ink) = inp.selection_style.map_or((inp.selection, None), |st| st.pick(self.host.window_focused != Some(false)));
+                    let hl_premul = premul(highlight, o, srgb);
                     if a != b && e.preedit().is_none() {
                         let (da, db) = e.display_selection_range(a, b);
                         // An inactive window paints a field's selection in its inactive pair, as a browser does.
-                        let (highlight, ink) = inp.selection_style.map_or((inp.selection, None), |st| st.pick(self.host.window_focused != Some(false)));
                         selectable::push_field_selection(&mut self.instances, flow, da.max(shown_a), db.min(shown_b),
-                            origin, tk, premul(highlight, o, srgb), s, clip, fade);
+                            origin, tk, hl_premul, s, clip, fade);
                         selected_ink = ink.map(|c| (da, db, premul(c, o, srgb)));
                     }
                     // A range selection hides the caret, as a browser's field and a native one do.
                     if a == b || e.is_composing() {
                         caret = input_caret;
+                    }
+                    if e.has_extra_carets() && e.preedit().is_none() {
+                        for (sa, sf, aff) in e.secondary_carets() {
+                            if sa != sf {
+                                let (da, db) = e.display_selection_range(sa.min(sf), sa.max(sf));
+                                selectable::push_field_selection(&mut self.instances, flow, da.max(shown_a), db.min(shown_b),
+                                    origin, tk, hl_premul, s, clip, fade);
+                            } else if input_caret.is_some() {
+                                let bb = flow.caret(e.display_index(sf).min(spec.content.len()), aff, 1.5 * s);
+                                let (cx, cy) = (origin[0] + bb.x0 as f32 * tk, origin[1] + bb.y0 as f32 * tk);
+                                let ch = (if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { spec.style.line_px() * s }) * tk;
+                                let (caret_x, caret_w) = if (tk - 1.0).abs() <= 1e-5 {
+                                    let gx = if gliding { pixel_snap::text_glide(r[0]) } else { 0.0 };
+                                    ((cx - gx).round() + gx, (1.5 * s).round().max(1.0))
+                                } else {
+                                    (cx, (1.5 * s * tk).max(1.0))
+                                };
+                                extra_carets.push([caret_x, cy + ch * 0.1, caret_w, ch * 0.8]);
+                            }
+                        }
                     }
                     // The composition's underline: thin under what's composed, thick under the
                     // clause being converted, each clause a point short at both ends so clauses
@@ -977,16 +1030,24 @@ impl RuntimeCore {
                     self.paint.text_quads.insert(node, piece_index, layout_id, d);
                 }
             }
-            if let Some(c) = caret
-                && c[2] > 0.0 && c[3] > 0.0
-                && c[0] + c[2] > clip[0] && c[0] < clip[2]
-                && c[1] + c[3] > clip[1] && c[1] < clip[3]
-            {
-                let caret_color = match &n.input {
+            let caret_color = if caret.is_some() || !extra_carets.is_empty() {
+                let c = match &n.input {
                     Some(inp) => if inp.caret_inked { inp.caret } else { color },
                     None => spec.cold.caret.unwrap_or(color),
                 };
-                self.instances.push(rect_inst(c, premul(caret_color, o, srgb), 0.0, clip, fade));
+                Some(premul(c, o, srgb))
+            } else {
+                None
+            };
+            if let Some(cc) = caret_color {
+                for c in caret.into_iter().chain(extra_carets) {
+                    if c[2] > 0.0 && c[3] > 0.0
+                        && c[0] + c[2] > clip[0] && c[0] < clip[2]
+                        && c[1] + c[3] > clip[1] && c[1] < clip[3]
+                    {
+                        self.instances.push(rect_inst(c, cc, 0.0, clip, fade));
+                    }
+                }
             }
             if let Some(at) = inline_image_wake {
                 arm_image_wake(&mut self.paint, &mut self.motion, self.frame.live.visible(), self.clock, self.time_scale, now, at);

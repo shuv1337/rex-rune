@@ -1,19 +1,6 @@
-//! Present-mode selection for native top-level windows.
-//!
-//! Top-level Wayland windows are already paced by winit's `wl_surface.frame` callback through
-//! `Window::pre_present_notify()`. Pairing that wait with Vulkan FIFO can double-block on some
-//! compositors/drivers (for example KWin + Mesa RADV), dropping throughput to ~19 fps on a 60 Hz
-//! display. Preferring `Mailbox` when the surface advertises it keeps frames tear-free without
-//! blocking acquire/present on a second vertical blank, while falling back to `AutoVsync` when
-//! `Mailbox` is unavailable.
-//!
-//! X11, macOS, Windows, embedded surfaces, and Wayland layer-shell overlays keep `AutoVsync` by
-//! default (`Overlay::attach` relies on FIFO vsync under `ControlFlow::Poll`).
-//!
-//! `RUNE_PRESENT_MODE` overrides the choice for top-level windows (`auto`, `fifo`,
-//! `fifo-relaxed` / `fifo_relaxed`, `mailbox`, `immediate`), validated against the surface's
-//! reported capabilities.
+//! Optional top-level window override for Rune's automatic presentation mode.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Once, OnceLock};
 
 /// Present modes exposed as a Rune-owned enum so callers and tests need not depend on `wgpu`.
@@ -99,11 +86,20 @@ pub fn choose_present(
     offered: &[PresentChoice],
     asked: Option<&str>,
 ) -> (PresentChoice, Option<String>) {
-    let default = if prefer_mailbox && offered.contains(&PresentChoice::Mailbox) {
-        PresentChoice::Mailbox
-    } else {
-        PresentChoice::Vsync
-    };
+    let modes: Vec<_> = offered.iter().map(|choice| choice.to_wgpu()).collect();
+    let default = super::surface::present_mode(&modes, prefer_mailbox);
+    choose_override(
+        PresentChoice::from_wgpu(default).unwrap_or(PresentChoice::Vsync),
+        offered,
+        asked,
+    )
+}
+
+fn choose_override(
+    default: PresentChoice,
+    offered: &[PresentChoice],
+    asked: Option<&str>,
+) -> (PresentChoice, Option<String>) {
     let Some(raw) = asked else {
         return (default, None);
     };
@@ -146,66 +142,46 @@ pub fn choose_present(
     }
 }
 
-enum EnvOverride {
-    Unset,
-    Utf8(String),
-    NonUtf8,
-}
-
-fn env_override() -> &'static EnvOverride {
-    static OVERRIDE: OnceLock<EnvOverride> = OnceLock::new();
-    OVERRIDE.get_or_init(|| match std::env::var_os("RUNE_PRESENT_MODE") {
-        None => EnvOverride::Unset,
-        Some(value) => match value.into_string() {
-            Ok(text) => EnvOverride::Utf8(text),
-            Err(_) => EnvOverride::NonUtf8,
-        },
-    })
-}
-
-/// Applies the platform default or `RUNE_PRESENT_MODE` override to a top-level window's
-/// `SurfaceConfiguration`, validated against `surface.get_capabilities(adapter).present_modes`.
-pub(super) fn apply(
-    config: &mut wgpu::SurfaceConfiguration,
-    surface: &wgpu::Surface,
-    adapter: &wgpu::Adapter,
+/// Uses the capabilities already queried by `surface_config_with`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn override_mode(
+    default: wgpu::PresentMode,
+    modes: &[wgpu::PresentMode],
     wayland: bool,
-) {
-    let caps = surface.get_capabilities(adapter);
-    let offered: Vec<PresentChoice> = caps
-        .present_modes
-        .iter()
-        .copied()
-        .filter_map(PresentChoice::from_wgpu)
-        .collect();
-    let (choice, warning) = match env_override() {
-        EnvOverride::Unset => choose_present(wayland, &offered, None),
-        EnvOverride::Utf8(value) => choose_present(wayland, &offered, Some(value.as_str())),
-        EnvOverride::NonUtf8 => {
-            let (default, _) = choose_present(wayland, &offered, None);
-            (
-                default,
-                Some(format!(
-                    "rune: ignoring non-UTF-8 RUNE_PRESENT_MODE (expected {EXPECTED_MODES}); using {}",
-                    default.label()
-                )),
-            )
+) -> wgpu::PresentMode {
+    use std::env::VarError;
+    static OVERRIDE: OnceLock<Result<String, VarError>> = OnceLock::new();
+    let fallback = PresentChoice::from_wgpu(default).unwrap_or(PresentChoice::Vsync);
+    let (selected, warning) = match OVERRIDE.get_or_init(|| std::env::var("RUNE_PRESENT_MODE")) {
+        Err(VarError::NotPresent) => (default, None),
+        Ok(value) => {
+            let offered: Vec<_> = modes
+                .iter()
+                .copied()
+                .filter_map(PresentChoice::from_wgpu)
+                .collect();
+            let (choice, warning) = choose_override(fallback, &offered, Some(value));
+            (choice.to_wgpu(), warning)
         }
+        Err(VarError::NotUnicode(_)) => (
+            default,
+            Some(format!(
+                "rune: ignoring non-UTF-8 RUNE_PRESENT_MODE (expected {EXPECTED_MODES}); using {}",
+                fallback.label()
+            )),
+        ),
     };
     if let Some(warning) = warning {
         static WARN_ONCE: Once = Once::new();
         WARN_ONCE.call_once(|| eprintln!("{warning}"));
     }
-    config.present_mode = choice.to_wgpu();
     if std::env::var_os("RUNE_GPU_LOG").is_some_and(|v| v != "0") {
         static LOG_ONCE: Once = Once::new();
         LOG_ONCE.call_once(|| {
-            eprintln!(
-                "rune: present mode {:?} (wayland={wayland}, offered={:?})",
-                config.present_mode, caps.present_modes
-            );
+            eprintln!("rune: present mode {selected:?} (wayland={wayland}, offered={modes:?})")
         });
     }
+    selected
 }
 
 #[cfg(test)]
@@ -230,22 +206,6 @@ mod tests {
             None
         );
         assert_eq!(PresentChoice::Vsync.to_wgpu(), wgpu::PresentMode::AutoVsync);
-    }
-
-    #[test]
-    fn wayland_prefers_mailbox_when_offered_and_falls_back_to_vsync() {
-        assert_eq!(
-            choose_present(true, &[PresentChoice::Fifo, PresentChoice::Mailbox], None),
-            (PresentChoice::Mailbox, None)
-        );
-        assert_eq!(
-            choose_present(true, &[PresentChoice::Fifo, PresentChoice::Immediate], None),
-            (PresentChoice::Vsync, None)
-        );
-        assert_eq!(
-            choose_present(false, &[PresentChoice::Fifo, PresentChoice::Mailbox], None),
-            (PresentChoice::Vsync, None)
-        );
     }
 
     #[test]

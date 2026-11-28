@@ -195,6 +195,14 @@ impl Host {
         let _ = w;
     }
 
+    pub(in crate::window) fn set_resize_anchor(&mut self, anchor: crate::ResizeAnchor) {
+        self.resize_anchor = anchor;
+        #[cfg(target_os = "macos")]
+        if let Some(surface) = self.win.as_ref().and_then(|w| w.surface.as_ref()) {
+            crate::platform::macos::set_contents_gravity(surface, anchor);
+        }
+    }
+
     pub(in crate::window) fn set_color_scheme(&mut self, scheme: crate::ColorScheme) {
         self.color_scheme = scheme;
         self.apply_window_color_scheme();
@@ -217,6 +225,25 @@ impl Host {
         crate::window::window_theme_for_platform(self.color_scheme, app, platform)
     }
 
+    pub(in crate::window) fn effective_menu_scheme(&self) -> crate::ColorScheme {
+        match self.args.theme.as_deref() {
+            Some("light") => crate::ColorScheme::Light,
+            Some("dark") => crate::ColorScheme::Dark,
+            _ => self.color_scheme.effective_for_window(crate::window::app_color_scheme()),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(in crate::window) fn sync_windows_menu_theme(&self) {
+        let rt = self.app.rt();
+        let mode = crate::platform::win32::dark_mode::menu_theme_for_window(
+            self.effective_menu_scheme(),
+            rt.backdrop_dark(),
+            rt.env.system_dark,
+        );
+        crate::platform::win32::dark_mode::set_menu_theme(mode);
+    }
+
     pub(in crate::window) fn apply_window_color_scheme(&mut self) {
         let target = self.window_theme();
         let Some(w) = &self.win else { return };
@@ -224,8 +251,11 @@ impl Host {
         let changed = crate::window::sync_window_theme(&mut self.applied_theme, target, |theme| {
             #[cfg(target_os = "windows")]
             if theme.is_none() {
-                crate::platform::win32::dark_mode::refresh_color_policy();
+                crate::platform::win32::dark_mode::with_system_theme_query(|| w.window.set_theme(theme));
+            } else {
+                w.window.set_theme(theme);
             }
+            #[cfg(not(target_os = "windows"))]
             w.window.set_theme(theme);
             #[cfg(target_os = "macos")]
             if let Some(panel) = &w.native.panel {
@@ -234,6 +264,10 @@ impl Host {
             #[cfg(not(target_os = "macos"))]
             let _ = color_scheme;
         });
+        #[cfg(target_os = "windows")]
+        if self.win.as_ref().is_some_and(|w| w.window.has_focus()) {
+            self.sync_windows_menu_theme();
+        }
         if changed {
             self.sync_window_backdrop(true);
         }
@@ -705,6 +739,7 @@ impl Host {
         self.apply_tx_macos_document();
         self.show_title();
         self.apply_tx_color_scheme();
+        self.apply_tx_resize_anchor();
         if !self.gpu_loss_failed() { self.apply_tx_window_backdrop(); }
         if self.app.rt_mut().take_toggle_maximized() && let Some(w) = self.shown_win() {
             w.toggle_maximized();
@@ -943,6 +978,9 @@ impl Host {
         self.stop_showing();
         self.wind_down();
         let launcher = self.launcher();
+        if !launcher {
+            self.app.rt_mut().drop_images();
+        }
         if self.release_gpu && !launcher {
             self.release();
         } else if is_wayland(event_loop) {
@@ -961,12 +999,16 @@ impl Host {
             }
         } else if let Some(w) = self.win.as_mut() {
             w.stop_pacing();
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
             let _ = w.native.poll_pace.step(crate::window::poll_pace::PollPaceEvent::Reset);
             w.backoff_step(BackoffEvent::Lapsed);
             w.presented = None;
             // Its hidden frame delivers the focus loss.
             if launcher { w.request_redraw(); }
+            #[cfg(target_os = "macos")]
+            if crate::window::HiddenDrawable::should_shrink_window(launcher, self.release_gpu) {
+                w.shrink_hidden_drawable();
+            }
             self.reset_frame_presented();
         }
     }
@@ -1052,7 +1094,7 @@ impl Host {
             rt.set_backdrop_opaque_fallback(false);
         }
         rt.text.atlas.invalidate();
-        rt.images.invalidate();
+        rt.drop_images();
     }
 
     /// Creates the window. When the first window can't be created and the app didn't ask to stay
@@ -1098,12 +1140,15 @@ impl Host {
         if self.life.covered() {
             self.secure_input.set(false);
             l.stop_pacing();
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
             let _ = l.native.poll_pace.step(crate::window::poll_pace::PollPaceEvent::Reset);
             self.idle = true;
             self.app.set_live_visible(live);
             self.app.rt_mut().cancel_timer_frame();
             self.rest_step(RestEvent::Unseen);
+            if !self.launcher() {
+                self.app.rt_mut().drop_images();
+            }
             return;
         }
         // Its first frame uncovered draws what a covered one owed.
@@ -1116,7 +1161,7 @@ impl Host {
         #[cfg(target_os = "macos")]
         if l.native.pacing.is_none() {
             l.native.pacing = crate::platform::display_link::DisplayLink::new(&l.window, self.frame_wake.clone())
-                .map(|p| p.with_ambient_period(self.ambient_period));
+                .map(|p| self.pacing_config.apply(p));
         }
         if was {
             self.app.rt_mut().settle_all();
@@ -1136,6 +1181,9 @@ impl Host {
     }
 
     fn give_back(&mut self, all: bool) {
+        if all && !self.launcher() {
+            self.app.rt_mut().drop_images();
+        }
         self.app.rt_mut().rest();
         self.app.run_on_rest();
         if let Some((gpu, renderer)) = &mut self.gpu {

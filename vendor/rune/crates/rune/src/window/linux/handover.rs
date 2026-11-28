@@ -211,6 +211,14 @@ impl SurfaceMode {
     /// Whether the CPU renderer draws this window's frames now.
     pub(in crate::window) fn cpu_draws(&self) -> bool { matches!(self, SurfaceMode::Cpu { .. }) }
 
+    /// Commits pending double-buffered surface state (such as `xdg_toplevel` size limits) on a
+    /// Wayland CPU-first window without attaching a new buffer; no-op once the GPU owns it.
+    pub(in crate::window) fn commit_surface(&self) {
+        if let SurfaceMode::Cpu { cpu, .. } = self {
+            cpu.frames.commit();
+        }
+    }
+
     /// The CPU's side of the window, while the window is the CPU's: the only way to its frames.
     pub(super) fn cpu(&mut self) -> Option<&mut Cpu> {
         match self {
@@ -381,7 +389,11 @@ impl Host {
         if let Err(error) = self.reattach(crate::gpu::fallback::GpuMode::Hardware) { return self.fail_surface(error.message, tries); }
         let on_software = self.gpu.as_ref().is_some_and(|(gpu, _)| gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu);
         if on_software && let Some(w) = self.win.as_mut() { w.surface_retries.note_software(); }
-        self.app.rt_mut().set_renderer_kind(crate::RendererKind::Gpu);
+        {
+            let rt = self.app.rt_mut();
+            rt.set_renderer_kind(crate::RendererKind::Gpu);
+            rt.images.set_backing(crate::pixels::Backing::Gpu);
+        }
         crate::marks::mark("gpu.window.attached");
         if let Some(w) = self.win.as_ref() { w.request_redraw(); }
     }
@@ -437,7 +449,11 @@ impl Host {
         w.surface = None;
         self.gpu = None;
         self.app.release_compositor_gpu();
-        self.app.rt_mut().set_renderer_kind(crate::RendererKind::Cpu);
+        {
+            let rt = self.app.rt_mut();
+            rt.set_renderer_kind(crate::RendererKind::Cpu);
+            rt.images.set_backing(crate::pixels::Backing::Cpu);
+        }
         w.request_redraw();
     }
 

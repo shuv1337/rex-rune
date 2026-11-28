@@ -432,7 +432,7 @@ impl super::OverlayCore {
         if let Some(p) = super::placement::position(event_loop, self.at, &self.options) {
             attrs = attrs.with_position(p);
         }
-        let window = match event_loop.create_window(attrs) {
+        let window = match crate::platform::win32::dark_mode::with_system_theme_query(|| event_loop.create_window(attrs)) {
             Ok(window) => std::sync::Arc::new(window),
             Err(error) => {
                 self.fail(app, format!("could not create its window: {error}"));
@@ -539,7 +539,9 @@ impl super::OverlayCore {
         );
         self.cpu_layered_failed = true;
         self.release_cpu();
-        app.rt_mut().set_renderer_kind(RendererKind::Gpu);
+        let rt = app.rt_mut();
+        rt.set_renderer_kind(RendererKind::Gpu);
+        rt.images.set_backing(crate::pixels::Backing::Gpu);
         self.prepare(app, event_loop, showing);
     }
 

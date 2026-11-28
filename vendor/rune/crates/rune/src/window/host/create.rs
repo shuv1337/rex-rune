@@ -28,7 +28,7 @@ use crate::window::surface::configure;
 use crate::window::surface::{
     Backoff, BackoffEvent, HiddenPace, LoopFrame, Native, Redraw, SurfaceRetries, SurfaceStep,
     SURFACE_TRIES, TimerFrame, Win, configure_checked, drawable_size, max_surface_dim,
-    rebuild_renderer_core, surface_config,
+    is_wide_color_config, rebuild_renderer_core, surface_config_with,
 };
 #[cfg(target_os = "windows")]
 use crate::window::win32::{covered_draw::CoveredDraw, cpu_frame, handover};
@@ -103,7 +103,15 @@ impl Host {
         let focus = focus && !self.no_activate();
         #[cfg(target_os = "windows")]
         let attrs = self.windows_window.apply_attributes(crate::platform::app_icon::with_icon(winit::platform::windows::WindowAttributesExtWindows::with_drag_and_drop(attrs.with_visible(false).with_active(false), false)));
-        let window = Arc::new(event_loop.create_window(attrs).map_err(|e| e.to_string())?);
+        #[cfg(target_os = "windows")]
+        let created = if effective_theme.is_none() {
+            crate::platform::win32::dark_mode::with_system_theme_query(|| event_loop.create_window(attrs))
+        } else {
+            event_loop.create_window(attrs)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let created = event_loop.create_window(attrs);
+        let window = Arc::new(created.map_err(|e| e.to_string())?);
         crate::window::displays::track(&window);
         self.applied_theme = effective_theme;
         crate::marks::mark("window.native");
@@ -164,7 +172,7 @@ impl Host {
             );
         #[cfg(target_os = "macos")]
         let panel = if mac_opts.nonactivating_panel {
-            Some(crate::platform::macos::Panel::adopt_window(&window, size, &mac_opts).ok_or("could not create nonactivating panel")?)
+            Some(crate::platform::macos::Panel::adopt_window(&window, size, &mac_opts, self.wide_color).ok_or("could not create nonactivating panel")?)
         } else { None };
         #[cfg(target_os = "macos")]
         if let Some(panel) = &panel {
@@ -172,7 +180,7 @@ impl Host {
                 panel.set_color_scheme(self.color_scheme);
             }
         } else {
-            crate::platform::macos::configure_window(&window, &mac_opts);
+            crate::platform::macos::configure_window(&window, &mac_opts, self.wide_color);
         }
         #[cfg(target_os = "macos")]
         {
@@ -235,8 +243,10 @@ impl Host {
         crate::marks::mark("gpu.begin");
         let phys = window.inner_size();
         let srgb_blend = self.app.rt().srgb_blend();
+        let wide_color = self.wide_color;
         let prewarm_effects = self.prewarm_effects;
         let frame_latency = crate::window::frame_latency(self.frame_latency);
+        let frame_callback_paced = self.wayland;
         let features = self.app.compositor_features();
         let transparent = self.options.transparent;
         // A window with a client-side frame keeps its pixels' alpha for the frame's corner arcs;
@@ -268,14 +278,19 @@ impl Host {
         };
         let setup_surface = |gpu: &Gpu, surface: &wgpu::Surface<'_>, prewarmed: Option<Renderer>| -> Result<_, SurfaceSetupError> {
             let initial = drawable_size(None, (phys.width, phys.height), max_surface_dim(Some(gpu)));
-            let (mut config, translucent) = surface_config(surface, &gpu.adapter, initial, srgb_blend)
+            let (mut config, translucent) = surface_config_with(surface, &gpu.adapter, initial, srgb_blend, frame_callback_paced, wide_color, true)
                 .ok_or_else(|| SurfaceSetupError::unsupported("the GPU adapter can't present to this window"))?;
             config.desired_maximum_frame_latency = frame_latency;
-            crate::window::present::apply(&mut config, surface, &gpu.adapter, self.wayland);
             #[cfg(target_os = "macos")]
             let launch_drawables = LaunchDrawables::cap(&mut config);
             if transparent || client_frame {
                 config.alpha_mode = alpha_mode(transparent, client_frame, translucent);
+            }
+            #[cfg(target_os = "windows")]
+            if !transparent && !client_frame
+                && let Some(mode) = handover::vrr_alpha_mode(gpu.adapter.get_info().vendor, translucent)
+            {
+                config.alpha_mode = mode;
             }
             // A refused configuration (the driver's, or a device that is gone) leaves a surface
             // wgpu panics on its next drawable; on a live device with an automatic pick, the
@@ -283,7 +298,8 @@ impl Host {
             configure_checked(surface, gpu, &config)
                 .map_err(|error| SurfaceSetupError::from_configure("the window's GPU surface refused its configuration", error))?;
             crate::marks::mark("gpu.surface");
-            let target_format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
+            let effective_srgb_blend = if is_wide_color_config(&config) { false } else { srgb_blend };
+            let target_format = if effective_srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
             crate::marks::mark("renderer.begin");
             let mut renderer = match prewarmed {
                 Some(mut renderer) => {
@@ -295,7 +311,7 @@ impl Host {
             crate::marks::note("uber", renderer.uber_shader());
             crate::marks::mark("renderer.ready");
             renderer.attach_gpu(gpu);
-            renderer.set_srgb_blend(srgb_blend);
+            renderer.set_srgb_blend(effective_srgb_blend);
             renderer.set_prewarm_effects(prewarm_effects);
             #[cfg(target_os = "macos")]
             return Ok((config, launch_drawables, renderer));
@@ -441,13 +457,18 @@ impl Host {
             }
             self.app.rt_mut().transparent = config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
         }
-        let target_format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
+        let wide_active = is_wide_color_config(&config);
+        if wide_active {
+            self.app.rt_mut().set_srgb_blend(false);
+        }
+        let effective_srgb_blend = if wide_active { false } else { srgb_blend };
+        let target_format = if effective_srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
         self.terminal_loss.attach_gpu(&gpu);
         self.gpu = Some((gpu, renderer));
         let (gpu, renderer) = self.gpu.as_mut().unwrap();
         rebuild_renderer_core(&gpu.device, renderer, target_format, self.app.rt_mut());
         #[cfg(target_os = "macos")]
-        crate::platform::macos::pin_contents_top_left(&surface, self.macos_window.color_space);
+        crate::platform::macos::pin_contents(&surface, self.macos_window.color_space, wide_active, self.resize_anchor);
         #[cfg(target_os = "macos")]
         crate::platform::macos::window_shape::apply_corners(&window, &self.macos_window, self.options.transparent, self.options.borderless);
         // Metal's PostMultiplied mode only makes CAMetalLayer non-opaque; Core Animation
@@ -498,7 +519,7 @@ impl Host {
         let native = Native {
             // A window whose first frame is drawn here, at once (`prime`), gets its display link
             // after that frame. `RUNE_PACING_BEFORE_FRAME` keeps the old order.
-            pacing: if prime.presumes() && std::env::var_os("RUNE_PACING_BEFORE_FRAME").is_none() { None } else { crate::platform::display_link::DisplayLink::new(&window, self.frame_wake.clone()).map(|p| p.with_ambient_period(self.ambient_period)) },
+            pacing: if prime.presumes() && std::env::var_os("RUNE_PACING_BEFORE_FRAME").is_none() { None } else { crate::platform::display_link::DisplayLink::new(&window, self.frame_wake.clone()).map(|p| self.pacing_config.apply(p)) },
             present,
             present_log: hook_log,
             shadow,
@@ -510,6 +531,7 @@ impl Host {
             media_keys,
             prime,
             launch_drawables,
+            hidden_drawable: crate::window::HiddenDrawable::Full,
             _spot: crate::platform::macos::traffic_lights::Spot::new(&window),
             _drop: drop_target,
         };
@@ -523,13 +545,20 @@ impl Host {
                 None => handover::SurfaceMode::Gpu,
             };
             let last_maximized = window.is_maximized();
-            Native { cloak, frame, mode, a11y_start, last_maximized, ..Default::default() }
+            let mut video_layers = crate::window::win32::video_layer::VideoLayers::default();
+            video_layers.hold_premultiplied(
+                !self.options.transparent
+                    && handover::vrr_guard(gpu.adapter.get_info().vendor)
+                    && config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+            );
+            Native { cloak, frame, mode, a11y_start, last_maximized, video_layers, ..Default::default() }
         };
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         let native = Native {
             wayland_present: (self.wayland && self.frame_presented.wanted())
                 .then(|| crate::platform::wayland::presentation::SurfacePresentation::for_window(&window))
                 .flatten(),
+            float_on_open: float_on_open::State::new(self.float_on_open),
             ..Default::default()
         };
         #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(target_os = "ios"), not(target_os = "android")))))]
@@ -562,7 +591,11 @@ impl Host {
             redraw: std::cell::Cell::new(Redraw::Idle),
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(crate::time::now()); }
-        self.app.rt_mut().set_renderer_kind(crate::RendererKind::Gpu);
+        {
+            let rt = self.app.rt_mut();
+            rt.set_renderer_kind(crate::RendererKind::Gpu);
+            rt.images.set_backing(crate::pixels::Backing::Gpu);
+        }
         #[cfg(target_os = "linux")]
         self.apply_window_color_scheme();
         self.sync_window_backdrop(false);
@@ -581,7 +614,15 @@ impl Host {
             }
             sync_chrome_core(self.app.rt_mut(), w, self.chrome, self.titlebar);
             sync_screen_origin_core(self.app.rt_mut(), &w.window);
-            if w.window.has_focus() {
+            let focused = w.window.has_focus();
+            #[cfg(target_os = "macos")]
+            {
+                self.pacing_config.focused = focused;
+                if let Some(pacing) = &mut w.native.pacing {
+                    pacing.set_focused(focused);
+                }
+            }
+            if focused {
                 self.app.window_focus(true);
             }
         }
@@ -641,7 +682,7 @@ impl Host {
             // The display link that waited for the first frame, or for a window not drawn here.
             if let Some(w) = self.win.as_mut() && w.native.pacing.is_none() {
                 w.native.pacing = crate::platform::display_link::DisplayLink::new(&w.window, self.frame_wake.clone())
-                    .map(|p| p.with_ambient_period(self.ambient_period));
+                    .map(|p| self.pacing_config.apply(p));
             }
         }
         if !drew && (visible || launcher) && let Some(w) = &self.win {
@@ -739,8 +780,10 @@ impl Host {
         let raw_size = window.inner_size();
         let prev = self.win.as_ref().map(|w| (w.config.width, w.config.height));
         let srgb_blend = self.app.rt().srgb_blend();
+        let wide_color = self.wide_color;
         let prewarm_effects = self.prewarm_effects;
         let frame_latency = crate::window::frame_latency(self.frame_latency);
+        let frame_callback_paced = self.wayland;
         let client_frame = self.client_frame(&window);
         let make_surface = |instance: &wgpu::Instance| {
             #[cfg(target_os = "windows")]
@@ -752,16 +795,22 @@ impl Host {
         };
         let setup_surface = |gpu: &Gpu, surface: &wgpu::Surface<'_>, prewarmed: Option<Renderer>| {
             let size = drawable_size(prev, (raw_size.width, raw_size.height), max_surface_dim(Some(gpu)));
-            let (mut config, translucent) = surface_config(surface, &gpu.adapter, size, srgb_blend)
+            let (mut config, translucent) = surface_config_with(surface, &gpu.adapter, size, srgb_blend, frame_callback_paced, wide_color, true)
                 .ok_or_else(|| SurfaceSetupError::unsupported("the GPU adapter can't present to this window"))?;
             config.desired_maximum_frame_latency = frame_latency;
-            crate::window::present::apply(&mut config, surface, &gpu.adapter, self.wayland);
             if transparent || client_frame {
                 config.alpha_mode = alpha_mode(transparent, client_frame, translucent);
             }
+            #[cfg(target_os = "windows")]
+            if !transparent && !client_frame
+                && let Some(mode) = handover::vrr_alpha_mode(gpu.adapter.get_info().vendor, translucent)
+            {
+                config.alpha_mode = mode;
+            }
             configure_checked(surface, gpu, &config)
                 .map_err(|error| SurfaceSetupError::from_configure("the new GPU surface refused its configuration", error))?;
-            let target_format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
+            let effective_srgb_blend = if is_wide_color_config(&config) { false } else { srgb_blend };
+            let target_format = if effective_srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
             let mut renderer = match prewarmed {
                 Some(mut renderer) => {
                     renderer.try_set_format(&gpu.device, target_format).map_err(SurfaceSetupError::from_shader)?;
@@ -770,7 +819,7 @@ impl Host {
                 None => Renderer::try_new_classified(&gpu.device, target_format).map_err(SurfaceSetupError::from_shader)?,
             };
             renderer.attach_gpu(gpu);
-            renderer.set_srgb_blend(srgb_blend);
+            renderer.set_srgb_blend(effective_srgb_blend);
             renderer.set_prewarm_effects(prewarm_effects);
             Ok((config, renderer))
         };
@@ -795,11 +844,16 @@ impl Host {
         let gpu = Arc::new(gpu);
         // A surface that fell back to opaque draws an opaque window, as the first one did.
         self.app.rt_mut().transparent = transparent && config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
-        let target_format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
+        let wide_active = is_wide_color_config(&config);
+        if wide_active {
+            self.app.rt_mut().set_srgb_blend(false);
+        }
+        let effective_srgb_blend = if wide_active { false } else { srgb_blend };
+        let target_format = if effective_srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
         rebuild_renderer_core(&gpu.device, &mut renderer, target_format, self.app.rt_mut());
         let alpha = alpha_pass(&gpu, transparent, &config, target_format);
         #[cfg(target_os = "macos")]
-        crate::platform::macos::pin_contents_top_left(&surface, self.macos_window.color_space);
+        crate::platform::macos::pin_contents(&surface, self.macos_window.color_space, wide_active, self.resize_anchor);
         // The new surface reports presents where the old one did, to the log the window kept
         // (`try_create`): the shadow built on that log keeps re-sampling.
         #[cfg(target_os = "macos")]
@@ -813,13 +867,21 @@ impl Host {
         w.alpha = alpha;
         w.damage.reset();
         #[cfg(target_os = "windows")]
-        { w.native.slot.reset(); w.native.dxgi_present.reset(); }
-        #[cfg(target_os = "windows")]
-        w.native.mode.rebind();
+        {
+            w.native.video_layers.hold_premultiplied(
+                !transparent
+                    && handover::vrr_guard(gpu.adapter.get_info().vendor)
+                    && w.config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+            );
+            w.native.slot.reset();
+            w.native.dxgi_present.reset();
+            w.native.mode.rebind();
+        }
         #[cfg(target_os = "macos")]
         {
             w.native.present = present;
             w.native.prime.stop();
+            w.note_surface_configured();
         }
         *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
         crate::render::surface_gpu(&gpu);

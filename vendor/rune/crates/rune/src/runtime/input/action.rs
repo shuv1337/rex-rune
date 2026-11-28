@@ -64,8 +64,9 @@ pub(in crate::runtime) enum Action {
     WheelRepost(WheelRepost),
     Gesture(Vec<String>, gesture_dispatch::Gesture),
     Ime(Ime),
-    /// The window went inactive: an open composition becomes text (`Runtime::finish_composition`).
-    FinishIme,
+    /// An open composition becomes text. `reset_ime` tells the platform IME to drop its copy
+    /// (true when the host ended composition; false when the IME itself called `finishComposingText`).
+    FinishIme { reset_ime: bool },
     Paste(crate::ClipboardContent, Option<Option<String>>),
     /// A `Tx::read_clipboard` callback's id and what the clipboard held.
     ClipboardRead(u64, crate::ClipboardContent),
@@ -80,6 +81,8 @@ pub(in crate::runtime) enum Action {
     /// A text field's menu: the field, the window point it opens at, and the window point where a
     /// press asked for it (none from the keyboard).
     FieldMenu(String, (f32, f32), Option<(f32, f32)>),
+    /// A native touch selection handle drag step queued by edge scroll for a focused text field.
+    HandleDrag(f32, f32),
     Blur,
     /// What assistive technology asked of an element (`a11y/actions.rs`).
     A11y(String, crate::a11y::actions::A11yAct),
@@ -115,7 +118,7 @@ impl ActionQueue {
         let at = crate::input::time::current();
         let input = !matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(..)
             | Action::Visible(..) | Action::VisibleRows(..) | Action::AtBottom(..) | Action::FarFromBottom(..)
-            | Action::WindowFocus(_) | Action::Physical(crate::PhysicalInput::FocusLost, _) | Action::FinishIme
+            | Action::WindowFocus(_) | Action::Physical(crate::PhysicalInput::FocusLost, _) | Action::FinishIme { reset_ime: true }
             | Action::ClipboardRead(..) | Action::CopyImageDone(..) | Action::UrlOpened(..) | Action::SelectionChange(..)) || at.is_some();
         self.0.push(Queued { action, at, input });
     }
@@ -236,7 +239,7 @@ fn handler_name(action: &Action) -> &'static str {
         Action::VisibleRows(..) => "on_visible_rows",
         Action::ScreenLayout(..) => "on_screen_layout",
         Action::Files(_) => "on_drop_files",
-        Action::Ime(_) | Action::FinishIme => "a text input's edit",
+        Action::Ime(_) | Action::FinishIme { .. } => "a text input's edit",
         Action::Paste(..) => "on_paste",
         Action::ClipboardRead(..) => "a `read_clipboard` callback",
         Action::CopyImageDone(..) => "a `copy_image_then` callback",
@@ -309,6 +312,7 @@ pub(crate) fn merge(tx: &mut Tx, one: Tx) {
     if one.title.is_some() { tx.title = one.title; }
     if one.color_scheme.is_some() { tx.color_scheme = one.color_scheme; }
     if one.window_backdrop.is_some() { tx.window_backdrop = one.window_backdrop; }
+    if one.resize_anchor.is_some() { tx.resize_anchor = one.resize_anchor; }
     if one.represented_file.is_some() { tx.represented_file = one.represented_file; }
     if one.document_edited.is_some() { tx.document_edited = one.document_edited; }
     if one.announce.is_some() { tx.announce = one.announce; }
@@ -639,7 +643,7 @@ impl RuntimeCore {
             Action::WheelRepost(repost) => self.run_wheel_repost(app, repost, &mut one),
             Action::Gesture(chain, gesture) => self.run_gesture(app, chain, gesture, &mut one),
             Action::Ime(ev) => self.run_ime(app, ev, &mut one),
-            Action::FinishIme => self.finish_ime(app, &mut one),
+            Action::FinishIme { reset_ime } => self.finish_ime(app, &mut one, reset_ime),
             Action::Paste(mut content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
                 let hook = self.focused_input().and_then(|i| i.paste.clone());
@@ -695,6 +699,7 @@ impl RuntimeCore {
             }
             Action::Focus(path, x, y) => self.focus_input(app, path, x, y, &mut one),
             Action::FieldMenu(path, at, local) => self.field_menu(app, path, at, local, &mut one),
+            Action::HandleDrag(x, y) => self.drag_field_handle_view(app, x, y),
             Action::Blur => {
                 if self.kbd.focus.path().is_none() { return false; }
                 self.set_focus(app, None, self.kbd.focus.keyboard());

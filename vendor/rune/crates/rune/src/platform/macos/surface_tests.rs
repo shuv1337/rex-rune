@@ -28,7 +28,7 @@ fn a_metal_layer_pins_its_contents_to_the_window_top_left() {
         let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
         // SAFETY: the layer outlives the surface.
         let surface = unsafe { crate::render::Gpu::instance().create_surface_unsafe(target) }.expect("a Metal layer surface");
-        pin_contents_top_left(&surface, crate::MacColorSpace::Srgb);
+        pin_contents_top_left(&surface, crate::MacColorSpace::Srgb, false);
         // SAFETY: `layer` is a live `CAMetalLayer`; `contentsGravity` returns a non-null `NSString`.
         let gravity: Retained<objc2_foundation::NSString> = unsafe { msg_send![&*layer, contentsGravity] };
         assert_eq!(gravity.to_string(), if flipped { "bottomLeft" } else { "topLeft" }, "flipped: {flipped}");
@@ -52,10 +52,10 @@ fn a_metal_layer_clears_colorspace_for_unmanaged() {
     // SAFETY: the layer outlives the surface.
     let surface = unsafe { crate::render::Gpu::instance().create_surface_unsafe(target) }.expect("a Metal layer surface");
 
-    pin_contents_top_left(&surface, crate::MacColorSpace::Srgb);
+    pin_contents_top_left(&surface, crate::MacColorSpace::Srgb, false);
     assert_eq!(layer_colorspace_name(&layer).as_deref(), Some("kCGColorSpaceSRGB"));
 
-    pin_contents_top_left(&surface, crate::MacColorSpace::Unmanaged);
+    pin_contents_top_left(&surface, crate::MacColorSpace::Unmanaged, false);
     assert_eq!(layer_colorspace_name(&layer), None, "Unmanaged clears CAMetalLayer.colorspace to nil");
     drop(surface);
 }
@@ -82,17 +82,25 @@ fn window_color_space_seam_sets_srgb_and_clears_unmanaged() {
     }
 
     let win = FakeWindow::default();
-    apply_window_color_space_to(&win, crate::MacColorSpace::Srgb);
+    apply_window_color_space_to(&win, crate::MacColorSpace::Srgb, false);
     assert_eq!(win.calls.get(), 1);
     assert_eq!(win.space.borrow().as_deref(), Some(&*NSColorSpace::sRGBColorSpace()));
 
-    apply_window_color_space_to(&win, crate::MacColorSpace::Unmanaged);
+    apply_window_color_space_to(&win, crate::MacColorSpace::Unmanaged, false);
     assert_eq!(win.calls.get(), 2);
     assert!(win.space.borrow().is_none(), "Unmanaged clears NSWindow.colorSpace to nil");
 
-    apply_window_color_space_to(&win, crate::MacColorSpace::Srgb);
+    apply_window_color_space_to(&win, crate::MacColorSpace::Srgb, false);
     assert_eq!(win.calls.get(), 3);
     assert_eq!(win.space.borrow().as_deref(), Some(&*NSColorSpace::sRGBColorSpace()));
+
+    apply_window_color_space_to(&win, crate::MacColorSpace::Srgb, true);
+    assert_eq!(win.calls.get(), 4);
+    assert_eq!(win.space.borrow().as_deref(), Some(&*NSColorSpace::extendedSRGBColorSpace()));
+
+    apply_window_color_space_to(&win, crate::MacColorSpace::Unmanaged, true);
+    assert_eq!(win.calls.get(), 5);
+    assert_eq!(win.space.borrow().as_deref(), Some(&*NSColorSpace::extendedSRGBColorSpace()));
 }
 
 /// Native Metal surface reconfiguration (as on resize or sRGB-blend pixel-format switches)
@@ -126,7 +134,7 @@ fn native_metal_surface_reconfigure_preserves_srgb_and_unmanaged_tags() {
     };
     surface.configure(&device, &config);
 
-    pin_contents_top_left(&surface, crate::MacColorSpace::Srgb);
+    pin_contents_top_left(&surface, crate::MacColorSpace::Srgb, false);
     assert_eq!(layer_colorspace_name(&layer).as_deref(), Some("kCGColorSpaceSRGB"));
     config.width = 128;
     config.height = 64;
@@ -134,7 +142,7 @@ fn native_metal_surface_reconfigure_preserves_srgb_and_unmanaged_tags() {
     surface.configure(&device, &config);
     assert_eq!(layer_colorspace_name(&layer).as_deref(), Some("kCGColorSpaceSRGB"), "Srgb survives resize and format switch");
 
-    pin_contents_top_left(&surface, crate::MacColorSpace::Unmanaged);
+    pin_contents_top_left(&surface, crate::MacColorSpace::Unmanaged, false);
     assert_eq!(layer_colorspace_name(&layer), None);
     config.width = 96;
     config.height = 48;
@@ -167,7 +175,7 @@ fn a_metal_layer_disables_implicit_scale_and_geometry_animations() {
     let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
     // SAFETY: `layer` outlives `surface`.
     let surface = unsafe { crate::render::Gpu::instance().create_surface_unsafe(target) }.expect("a Metal layer surface");
-    pin_contents_top_left(&surface, crate::MacColorSpace::Srgb);
+    pin_contents_top_left(&surface, crate::MacColorSpace::Srgb, false);
 
     // SAFETY: `layer` is a live `CAMetalLayer` queried on this thread; `+[NSNull null]` returns the singleton.
     unsafe {
@@ -233,19 +241,27 @@ fn overlay_panel_color_space_options_drive_panel_seam_and_metal_layer() {
     assert_eq!(srgb_opts.shadow, Some(false));
     assert_eq!(srgb_opts.level, Some(25));
     assert_eq!(srgb_opts.color_space, crate::MacColorSpace::Srgb);
-    apply_window_color_space_to(&panel, srgb_opts.color_space);
+    apply_window_color_space_to(&panel, srgb_opts.color_space, false);
     assert_eq!(panel.space.borrow().as_deref(), Some(&*NSColorSpace::sRGBColorSpace()));
-    pin_contents_top_left(&surface, srgb_opts.color_space);
+    pin_contents_top_left(&surface, srgb_opts.color_space, false);
     assert_eq!(layer_colorspace_name(&layer).as_deref(), Some("kCGColorSpaceSRGB"));
 
     let unmanaged_opts = super::super::overlay_panel_native_options(crate::OverlayLevel::AboveOverlays, crate::MacColorSpace::Unmanaged);
     assert_eq!(unmanaged_opts.shadow, Some(false));
     assert_eq!(unmanaged_opts.level, Some(27));
     assert_eq!(unmanaged_opts.color_space, crate::MacColorSpace::Unmanaged);
-    apply_window_color_space_to(&panel, unmanaged_opts.color_space);
+    apply_window_color_space_to(&panel, unmanaged_opts.color_space, false);
     assert!(panel.space.borrow().is_none(), "Unmanaged overlay panel clears NSWindow.colorSpace to nil");
-    pin_contents_top_left(&surface, unmanaged_opts.color_space);
+    pin_contents_top_left(&surface, unmanaged_opts.color_space, false);
     assert_eq!(layer_colorspace_name(&layer), None, "Unmanaged overlay clears CAMetalLayer.colorspace to nil");
+
+    apply_window_color_space_to(&panel, srgb_opts.color_space, true);
+    assert_eq!(panel.space.borrow().as_deref(), Some(&*NSColorSpace::extendedSRGBColorSpace()));
+    pin_contents_top_left(&surface, srgb_opts.color_space, true);
+    assert_eq!(layer_colorspace_name(&layer).as_deref(), Some("kCGColorSpaceExtendedLinearSRGB"));
+    // SAFETY: `layer` is a live `CAMetalLayer` queried on this thread.
+    let edr: objc2::runtime::Bool = unsafe { msg_send![&*layer, wantsExtendedDynamicRangeContent] };
+    assert!(edr.as_bool(), "wide_color enables CAMetalLayer.wantsExtendedDynamicRangeContent");
     drop(surface);
 }
 /// Verifies on a standalone off-screen `CAMetalLayer` (never attached to any `NSWindow` or
@@ -330,8 +346,9 @@ fn metal_layer_maximum_drawable_count_follows_frame_latency_and_launch_drawables
 /// Driving a standalone detached `CAMetalLayer` (never attached to any `NSWindow` or `NSView`)
 /// and `Renderer` through 24 live-resize (`presentsWithTransaction`) size changes followed by
 /// macOS idle rest (`poll(Poll)` + `give_back(false)`) empties the Metal retire queue (releasing
-/// held `CAMetalDrawable` and command-buffer references) and returns live HAL texture, buffer,
-/// and bind-group counts to the single-size baseline.
+/// held `CAMetalDrawable` and command-buffer references), returns live HAL texture and bind-group
+/// counts to the single-size baseline, keeps HAL buffers within Metal `Store`'s 3x ring bound,
+/// and frees every resource on teardown.
 #[cfg(feature = "metal-backend")]
 #[test]
 fn detached_metal_layer_retires_presented_drawables_on_idle_poll_and_bounds_resize_textures() {
@@ -433,9 +450,112 @@ fn detached_metal_layer_retires_presented_drawables_on_idle_poll_and_bounds_resi
         #[cfg(feature = "test-gpu-counters")]
         {
             let c = device.get_internal_counters().hal;
-            assert_eq!((c.textures.read(), c.buffers.read(), c.bind_groups.read()), base, "HAL counters return to single-size baseline after 24 resizes + idle rest");
+            assert_eq!(
+                (c.textures.read(), c.bind_groups.read()),
+                (base.0, base.2),
+                "HAL texture and bind-group counters return to single-size baseline after 24 resizes + idle rest"
+            );
+            // Rapid back-to-back submits overlap with in-flight GPU work, so Metal's
+            // `Store` keeps up to `SPARES` (2) warm ring buffers per live written buffer.
+            let buffers = c.buffers.read();
+            assert!(
+                (base.1..=base.1 * 3).contains(&buffers),
+                "HAL buffer counter stays bounded by Metal Store ring depth (1..=3x baseline {}): got {}",
+                base.1,
+                buffers
+            );
         }
         drop(renderer);
         drop(surface);
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("teardown poll");
+        #[cfg(feature = "test-gpu-counters")]
+        {
+            let c = device.get_internal_counters().hal;
+            assert_eq!(
+                (c.textures.read(), c.buffers.read(), c.bind_groups.read()),
+                (0, 0, 0),
+                "dropping renderer and surface frees every Metal resource including Store spares"
+            );
+        }
     });
+}
+
+/// Shrinking a detached `CAMetalLayer`'s `drawableSize` to `1×1` while hidden and restoring its
+/// configured dimensions before the next show works on both Rune's native Metal backend and
+/// wgpu's Metal backend, and the next acquired drawable matches the restored full size.
+#[test]
+fn metal_layer_shrinks_drawable_size_while_hidden_and_restores_before_draw() {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_core_foundation::CGSize;
+
+    let check_instance = |instance: wgpu::Instance, label: &str| {
+        autoreleasepool(|_| {
+            // SAFETY: new detached off-screen layer, never added to any view or window.
+            let layer: Retained<AnyObject> = unsafe { msg_send![AnyClass::get(c"CAMetalLayer").expect("QuartzCore"), new] };
+            let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
+            // SAFETY: `layer` outlives `surface`.
+            let surface = unsafe { instance.create_surface_unsafe(target) }.expect("Metal surface");
+            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            }))
+            .expect("Metal adapter");
+            let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).expect("Metal device");
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                width: 320,
+                height: 200,
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                view_formats: vec![],
+                color_space: wgpu::SurfaceColorSpace::Auto,
+            };
+            surface.configure(&device, &config);
+            let drawable_size = || -> CGSize {
+                // SAFETY: `layer` is a live `CAMetalLayer`; `drawableSize` returns `CGSize`.
+                unsafe { msg_send![&*layer, drawableSize] }
+            };
+            let present_one = || -> wgpu::Extent3d {
+                autoreleasepool(|_| {
+                    let frame = match surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                        other => panic!("{label}: drawable: {other:?}"),
+                    };
+                    let size = frame.texture.size();
+                    let enc = device.create_command_encoder(&Default::default());
+                    queue.submit([enc.finish()]);
+                    queue.present(frame);
+                    size
+                })
+            };
+
+            assert_eq!(drawable_size(), CGSize::new(320.0, 200.0), "{label}: initial configured size");
+            assert_eq!(present_one(), wgpu::Extent3d { width: 320, height: 200, depth_or_array_layers: 1 });
+            assert_eq!(present_one(), wgpu::Extent3d { width: 320, height: 200, depth_or_array_layers: 1 });
+            device.poll(wgpu::PollType::wait_indefinitely()).expect("retire before hide");
+
+            // Hide: shrink to 1×1 (clamping 0 to 1 as well).
+            set_drawable_size(&surface, 0, 0);
+            assert_eq!(drawable_size(), CGSize::new(1.0, 1.0), "{label}: 0×0 clamps to 1×1");
+            set_drawable_size(&surface, 1, 1);
+            assert_eq!(drawable_size(), CGSize::new(1.0, 1.0), "{label}: shrunk while hidden");
+
+            // Show: restore full size before next acquire and verify full-size drawable.
+            set_drawable_size(&surface, config.width, config.height);
+            assert_eq!(drawable_size(), CGSize::new(320.0, 200.0), "{label}: restored before show");
+            assert_eq!(present_one(), wgpu::Extent3d { width: 320, height: 200, depth_or_array_layers: 1 });
+            device.poll(wgpu::PollType::wait_indefinitely()).expect("retire after wake");
+            drop(surface);
+        });
+    };
+
+    #[cfg(feature = "metal-backend")]
+    check_instance(crate::gpu::metal::instance(), "native-metal");
+
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::METAL;
+    check_instance(wgpu::Instance::new(desc), "wgpu-metal");
 }

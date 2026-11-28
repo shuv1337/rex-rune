@@ -449,6 +449,31 @@ fn app_and_window_spec_ambient_fps_default_and_normalize() {
 }
 
 #[test]
+fn app_and_window_spec_unfocused_fps_default_and_normalize() {
+    use std::time::Duration;
+
+    let spec = || AppSpec::new("chat", (720.0, 540.0), || (), |_, _| crate::el());
+    assert_eq!(App::new(spec()).unfocused_period, None);
+    assert_eq!(WindowSpec::new("chat", spec()).app.unfocused_period, None);
+
+    let p30 = Duration::from_secs_f64(1.0 / 30.0);
+    let p15 = Duration::from_secs_f64(1.0 / 15.0);
+    let p1 = Duration::from_secs(1);
+
+    let app = App::new(spec()).unfocused_fps(30.0);
+    assert_eq!(app.unfocused_period, Some(p30));
+    assert_eq!(WindowSpec::from_app("chat", app).app.unfocused_period, Some(p30));
+
+    assert_eq!(WindowSpec::new("chat", spec()).unfocused_fps(15.0).app.unfocused_period, Some(p15));
+    assert_eq!(WindowSpec::new("chat", spec()).unfocused_fps(0.25).app.unfocused_period, Some(p1));
+
+    for raw in [0.0, -0.0, -30.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+        let cleared = WindowSpec::new("chat", spec()).unfocused_fps(30.0).unfocused_fps(raw);
+        assert_eq!(cleared.app.unfocused_period, None, "raw={raw:?} must clear unfocused_period");
+    }
+}
+
+#[test]
 fn reveal_focus_skips_activation_for_no_activate_windows() {
     use crate::window::host::lifecycle::reveal_focus;
     use crate::window::state::Reveal;
@@ -820,4 +845,39 @@ fn app_and_window_spec_frame_latency_clamps_and_retains() {
     assert_eq!(via_spec.options(WindowOptions::default()).app.frame_latency, Some(1));
 
     assert_eq!(WindowSpec::new("panel", spec()).frame_latency(3).app.frame_latency, Some(2));
+}
+
+#[test]
+fn app_and_window_spec_wide_color_defaults_false_and_retains_opt_in() {
+    let spec = || AppSpec::new("picker", (480.0, 360.0), || (), |_, _| crate::el());
+    assert!(!App::new(spec()).wide_color);
+    assert!(App::new(spec()).wide_color(true).wide_color);
+    assert!(!App::new(spec()).wide_color(true).wide_color(false).wide_color);
+
+    let from_app = WindowSpec::from_app("picker", App::new(spec()).wide_color(true));
+    assert!(from_app.app.wide_color);
+
+    let via_spec = WindowSpec::new("picker", spec()).wide_color(true);
+    assert!(via_spec.app.wide_color);
+    assert!(via_spec.options(WindowOptions::default()).app.wide_color);
+    assert!(!WindowSpec::new("picker", spec()).wide_color(true).wide_color(false).app.wide_color);
+
+    let headless = Display { id: None, name: None, position: (0, 0), size: (1280, 800), scale: 2.0, primary: true };
+    assert!(!headless.wide_color(), "headless virtual display reports wide_color = false");
+}
+
+#[test]
+fn app_and_window_spec_resize_anchor_defaults_top_left_and_retains() {
+    use crate::ResizeAnchor;
+    let spec = || AppSpec::new("launcher", (600.0, 400.0), || (), |_, _| crate::el());
+    assert_eq!(App::new(spec()).resize_anchor, ResizeAnchor::TopLeft);
+    assert_eq!(App::new(spec()).resize_anchor(ResizeAnchor::Bottom).resize_anchor, ResizeAnchor::Bottom);
+
+    let from_app = WindowSpec::from_app("launcher", App::new(spec()).resize_anchor(ResizeAnchor::BottomRight));
+    assert_eq!(from_app.app.resize_anchor, ResizeAnchor::BottomRight);
+
+    let via_spec = WindowSpec::new("launcher", spec()).resize_anchor(ResizeAnchor::Bottom);
+    assert_eq!(via_spec.app.resize_anchor, ResizeAnchor::Bottom);
+    // Replacing WindowOptions keeps portable resize_anchor intact.
+    assert_eq!(via_spec.options(WindowOptions::default()).app.resize_anchor, ResizeAnchor::Bottom);
 }

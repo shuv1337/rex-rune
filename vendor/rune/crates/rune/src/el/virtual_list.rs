@@ -213,7 +213,7 @@ const EAGER_EDGE: f32 = 0.5;
 /// Rows past it mount over the next frames, so a jump or a prepended page doesn't shape it all
 /// in one frame.
 const INDEXED_BUDGET: f32 = 0.5;
-/// The fewest rows a list pinned to its end keeps mounted above the end, whatever its overscan.
+/// The fewest rows a list pinned to its end keeps mounted above the end when `El::virtual_overscan` is unset.
 const PINNED_ROWS: usize = 32;
 
 /// Clamps `(overscan, edge)` for `El::virtual_overscan`: returns `None` when either argument is
@@ -591,6 +591,11 @@ impl VirtualList {
         self.overscan_override.map_or(if self.indexed { INDEXED_EDGE } else { EAGER_EDGE }, |(_, e)| e)
     }
 
+    #[inline]
+    pub(crate) fn pinned_rows(&self) -> usize {
+        if self.overscan_override.is_some() { 0 } else { PINNED_ROWS }
+    }
+
     pub fn set_height(&mut self, key: &str, height: f32) {
         let Some(i) = self.index_of(key) else { return };
         self.measured[i] = Some(height);
@@ -659,7 +664,7 @@ impl VirtualList {
     pub fn first_visible(&self, offset: f32, keep: impl Fn(&str) -> bool) -> Option<(String, f32)> {
         if self.no_anchor { return None; }
         let sums = self.sums();
-        let first = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset);
+        let first = sums[1..].partition_point(|&s| self.pad_top + (s - self.gap) <= offset);
         (first..self.keys.len())
             .find(|&i| !self.is_row_no_anchor(i) && keep(&self.keys[i]))
             .map(|i| (self.keys[i].clone(), self.pad_top + sums[i]))
@@ -669,7 +674,7 @@ impl VirtualList {
     fn first_visible_in_viewport(&self, offset: f32, keep: impl Fn(&str) -> bool) -> Option<(String, f32)> {
         if self.no_anchor { return None; }
         let sums = self.sums();
-        let first = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset);
+        let first = sums[1..].partition_point(|&s| self.pad_top + (s - self.gap) <= offset);
         let limit = offset + self.viewport;
         (first..self.keys.len())
             .take_while(|&i| self.pad_top + sums[i] < limit)
@@ -680,7 +685,7 @@ impl VirtualList {
     /// Whether any visible row in the viewport satisfies `keep`, regardless of `no_anchor`.
     fn any_visible_in_viewport(&self, offset: f32, keep: impl Fn(&str) -> bool) -> bool {
         let sums = self.sums();
-        let first = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset);
+        let first = sums[1..].partition_point(|&s| self.pad_top + (s - self.gap) <= offset);
         let limit = offset + self.viewport;
         (first..self.keys.len())
             .take_while(|&i| self.pad_top + sums[i] < limit)
@@ -710,7 +715,7 @@ impl VirtualList {
         }
         let offset = if pinned { self.max_offset() } else { offset.clamp(0.0, self.max_offset()) };
         let sums = self.sums();
-        let start = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset);
+        let start = sums[1..].partition_point(|&s| self.pad_top + (s - self.gap) <= offset);
         let end = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < offset + self.viewport).max(start);
         start..end
     }
@@ -726,7 +731,7 @@ impl VirtualList {
             if let Some(shown) = budget.filter(|_| !pinned) {
                 let mounted = |k: &str| shown.contains(k);
                 // The viewport's own rows always mount; the overscan takes new rows up to a budget.
-                let first = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset).max(start);
+                let first = sums[1..].partition_point(|&s| self.pad_top + (s - self.gap) <= offset).max(start);
                 let last = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < offset + self.viewport).max(first);
                 let budget = self.viewport * INDEXED_BUDGET.min(self.overscan_vp());
                 let mut spent = 0.0;
@@ -767,7 +772,10 @@ impl VirtualList {
         let disable = pinned || self.passed || self.no_anchor;
         self.anchor_offset = (!disable).then_some(offset);
         self.anchor = if disable { None } else { self.anchor_at(offset) };
-        if pinned { start = start.min(end.saturating_sub(PINNED_ROWS)); }
+        if pinned {
+            let floor = self.pinned_rows();
+            if floor > 0 { start = start.min(end.saturating_sub(floor)); }
+        }
         end = end.max(start);
         self.place(start..end);
     }
@@ -807,7 +815,7 @@ impl VirtualList {
         let lo = offset - self.viewport * overscan;
         let hi = offset + self.viewport * (1.0 + overscan);
         let sums = self.sums();
-        let start = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= lo);
+        let start = sums[1..].partition_point(|&s| self.pad_top + (s - self.gap) <= lo);
         (start, sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < hi))
     }
 
@@ -831,24 +839,20 @@ impl VirtualList {
         if self.keys.is_empty() { return false; }
         if pinned { return self.range.end != self.keys.len(); }
         let edge = self.viewport * self.edge_vp();
-        let top = self.pad_top + self.before - self.gap;
+        let top = self.pad_top + self.row_end(self.range.start.min(self.keys.len()));
         (self.range.start > 0 && offset < top + edge)
             || (self.range.end < self.keys.len() && offset + self.viewport > self.pad_top + self.prefix(self.range.end) - edge)
     }
 
-    /// Whether the viewport at `offset` (or the end when `pinned`) reaches past the mounted rows,
-    /// leaving part of it blank.
+    /// Whether the viewport at `offset` (or the end when `pinned`) reaches an unmounted row,
+    /// leaving part of it blank. An edge inside the inter-row gap immediately before `range.start`
+    /// or after `range.end - 1` belongs to no row and is covered.
     pub fn viewport_uncovered(&self, offset: f32, pinned: bool) -> bool {
         if self.keys.is_empty() { return false; }
-        if pinned {
-            let end = self.row_end(self.range.end);
-            let mounted = (end - self.before).max(0.0);
-            self.range.end < self.keys.len() || (self.range.start > 0 && mounted < self.viewport)
-        } else {
-            let offset = offset.min(self.max_offset());
-            (self.range.start > 0 && offset < self.pad_top + self.before - self.gap)
-                || (self.range.end < self.keys.len() && offset + self.viewport > self.pad_top + self.prefix(self.range.end))
-        }
+        let offset = if pinned { self.max_offset() } else { offset.min(self.max_offset()) };
+        let prev_end = self.pad_top + self.row_end(self.range.start.min(self.keys.len()));
+        (self.range.start > 0 && offset < prev_end)
+            || (self.range.end < self.keys.len() && offset + self.viewport > self.pad_top + self.prefix(self.range.end))
     }
 
     /// How many rows of the overscan around `offset` are still unmounted: zero when the window
@@ -856,12 +860,13 @@ impl VirtualList {
     /// progress from one whose heights keep changing under it. Only the overscan's own rows
     /// count: after a jump the mounted window may lie wholly above or below it, and the rows
     /// between the two are wanted by neither. A pinned list wants the overscan at its end, and
-    /// at least [`PINNED_ROWS`] rows, as [`select`](Self::select) mounts them.
+    /// at least [`Self::pinned_rows`] rows, as [`select`](Self::select) mounts them.
     pub(crate) fn unfilled(&self, offset: f32, pinned: bool) -> usize {
         if self.keys.is_empty() { return 0; }
         let (start, end) = if pinned {
             let (start, end) = self.overscan(self.max_offset());
-            (start.min(end.saturating_sub(PINNED_ROWS)), end)
+            let floor = self.pinned_rows();
+            (if floor > 0 { start.min(end.saturating_sub(floor)) } else { start }, end)
         } else {
             self.overscan(offset.min(self.max_offset()))
         };

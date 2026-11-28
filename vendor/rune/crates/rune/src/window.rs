@@ -98,7 +98,7 @@ pub(crate) use keyboard_dispatch::should_redraw_after_polled_keys;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use keyboard_dispatch::step_immediate_core;
 pub use resize_sync::ResizeSync;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub use event_loop::run;
 #[cfg(test)]
 pub(crate) use event_loop::finish_run;
@@ -124,14 +124,18 @@ pub(crate) use state::{Life, Minimize, MinimizeEvent, Sight};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use surface::{
     Backoff, BackoffEffect, BackoffEvent, ConfigureError, HiddenPace, acquire_checked, configure,
-    configure_checked, frame_latency, reblend_core, poll_timer_deadline_core, surface_config,
+    configure_checked, frame_latency, is_wide_color_config, reblend_core, poll_timer_deadline_core, surface_config_with,
     timer_deadline_core, timer_wants_frame_core,
 };
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+pub(crate) use surface::surface_config;
 pub(crate) use surface::{Missed, Presented, TIMER_FRAME, rebuild_renderer_core};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use surface::{configure_then, damage};
 #[cfg(target_os = "macos")]
 pub(crate) use surface::native::Prime;
+#[cfg(target_os = "macos")]
+pub(crate) use surface::{HiddenDrawable, HiddenDrawableEffect, HiddenDrawableEvent};
 #[cfg(test)]
 pub(crate) use surface::{
     ConfigureErrorKind, classify_scope_error,
@@ -140,8 +144,8 @@ pub(crate) use surface::{
 };
 #[cfg(all(test, target_os = "linux", feature = "test-gpu-noop"))]
 use surface::acquire;
-#[cfg(target_os = "windows")]
-pub(crate) use win32::poll_pace;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use surface::poll_pace;
 #[cfg(target_os = "windows")]
 pub(crate) use win32::resize_sync::valid_rects as win32_valid_rects;
 #[cfg(target_os = "windows")]
@@ -196,6 +200,7 @@ pub(crate) enum WakeEvent {
     ColorScheme(usize, crate::ColorScheme),
     #[cfg(not(target_arch = "wasm32"))]
     WindowBackdrop(usize, crate::WindowBackdrop),
+    ResizeAnchor(usize, crate::ResizeAnchor),
     /// App-wide color scheme changed (`AppHandle::set_color_scheme`): every host syncs with
     /// `app_color_scheme()`.
     #[cfg(not(target_arch = "wasm32"))]
@@ -292,6 +297,11 @@ pub(crate) trait AnyHost {
     fn quit_hook(&mut self) {}
     /// The app quits: off the screen now, before any hook runs.
     fn vanish(&mut self) {}
+    /// Releases this host's native Wayland surfaces (window or layer surface and attached GPU
+    /// surface) without tearing down app state or the GPU device, so fast exit destroys every
+    /// `wl_surface` cleanly before `_exit`.
+    #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    fn release_wayland_surface(&mut self) {}
     /// The close about to come ends the app (`Host::close`).
     fn closing_ends_app(&mut self) {}
     /// Ends a tracking pop-up menu and answers waiting ones `None`, before the host drops or
@@ -622,8 +632,13 @@ impl ApplicationHandler<WakeEvent> for Windows {
                 let proxy = this.proxy.clone();
                 crate::platform::reopen::install(move || proxy.send_event(WakeEvent::Reopen).is_ok());
             }
+            // macOS: only a process outside a bundle takes later launches (`single_instance`).
+            #[cfg(target_os = "macos")]
+            let takes_launches = !crate::relaunch::bundled();
             #[cfg(any(target_os = "windows", target_os = "linux"))]
-            {
+            let takes_launches = true;
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            if takes_launches {
                 let proxy = this.proxy.clone();
                 crate::open_url::instance::on_relaunch(move || proxy.send_event(WakeEvent::Reopen).is_ok());
             }
@@ -646,7 +661,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
             let _handling = crate::quit::handling();
             let slot = match &event {
                 WakeEvent::DisplayTick(i) | WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
-                    | WakeEvent::Position(i, _) | WakeEvent::LogicalPosition(i, _) | WakeEvent::Level(i, _) | WakeEvent::ExcludeFromCapture(i, _) | WakeEvent::ColorScheme(i, _) | WakeEvent::WindowBackdrop(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _)
+                    | WakeEvent::Position(i, _) | WakeEvent::LogicalPosition(i, _) | WakeEvent::Level(i, _) | WakeEvent::ExcludeFromCapture(i, _) | WakeEvent::ColorScheme(i, _) | WakeEvent::WindowBackdrop(i, _) | WakeEvent::ResizeAnchor(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _)
                     | WakeEvent::A11y(i) | WakeEvent::FrameSlot(i) | WakeEvent::GpuReady(i) | WakeEvent::ResizeSync(i) => *i,
                 WakeEvent::Reopen => {
                     this.reopen(event_loop);
@@ -733,7 +748,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
             // Windows, Linux: a later launch handed to this loop (`single_instance`) is served once
             // the app goes on with a window shown. One that came as the app ended (its last window
             // already closing, the quit not started) isn't: the process starts the app again for it.
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             if crate::open_url::instance::launches_waiting() && !event_loop.exiting() {
                 let windows: Vec<_> = this.hosts.iter().map(|h| h.as_ref().map(|h| h.reopen_candidate()).unwrap_or_default()).collect();
                 if crate::platform::reopen::has_visible(&windows) {
@@ -839,6 +854,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
         );
         #[cfg(not(target_arch = "wasm32"))]
         if step == app_events::ExitStep::FastExit && let Some(last) = fast_hook {
+            app_events::prepare_fast_exit_wayland(&mut self.hosts, event_loop);
             crate::quit::end_fast(last);
         }
         let effects = wayland_wake::step(&mut self.wayland_wake, wayland_wake::Event::Exiting);
@@ -854,20 +870,13 @@ impl ApplicationHandler<WakeEvent> for Windows {
                 crate::tray::remove_all();
             },
             || {
-                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-                {
-                    crate::platform::wayland::primary_selection::wire::shutdown();
-                    crate::platform::wayland::drop::shutdown();
-                    crate::platform::wayland::backdrop::shutdown();
-                    crate::platform::wayland::presentation::shutdown();
-                    crate::platform::wayland::serial::wire::shutdown();
-                }
+                app_events::finish_wayland_teardown(event_loop, has_display_error);
                 crate::marks::mark("windows.dropped");
                 crate::clipboard::shutdown();
             },
             || crate::relaunch::spawn(),
             || {
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 crate::open_url::instance::exited();
             },
         );

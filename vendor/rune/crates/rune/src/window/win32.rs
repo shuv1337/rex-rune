@@ -6,7 +6,6 @@ pub(in crate::window) mod covered_draw;
 pub(in crate::window) mod cpu_frame;
 pub(in crate::window) mod handover;
 pub(in crate::window) mod look;
-pub(crate) mod poll_pace;
 pub(in crate::window) mod post_frame;
 pub(in crate::window) mod present_time;
 pub(in crate::window) mod resize_sync;

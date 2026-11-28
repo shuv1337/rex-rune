@@ -46,9 +46,19 @@ impl SteppedHost {
         let now = self.now();
         let active = self.active;
         let samples = &mut self.samples;
-        self.pace.sync_with(self.rt.core(), now, active, |_prev| {
+        self.pace.sync_with(self.rt.core(), now, active, |_prev, _polled| {
             *samples += 1;
             grid
+        });
+    }
+
+    fn sync_monitor_mhz(&mut self, monitor_mhz: Option<u32>) {
+        let now = self.now();
+        let active = self.active;
+        let samples = &mut self.samples;
+        self.pace.sync_with(self.rt.core(), now, active, |previous, polled| {
+            *samples += 1;
+            monitor_grid(monitor_mhz, previous, polled)
         });
     }
 
@@ -302,4 +312,138 @@ fn armed_deadline_stays_fixed_across_turns_and_wake_after_idle_fires_immediately
     rested.sync(Some(VSyncGrid { timebase: rested.wall_start, interval: period }));
     assert_eq!(rested.samples, 0, "overdue wake after idle needs no DWM query");
     assert!(rested.wake_deadline().expect("due") <= rested.now());
+}
+
+#[test]
+fn linux_monitor_grid_paces_high_refresh_without_build_time_drift() {
+    // Reproduces #2762: on Linux (Wayland/X11) with no DWM hardware grid, a 2.5 ms CPU build
+    // time must NOT accumulate onto the display period (which capped a naive 6.944 ms floor at
+    // ~100 fps on a 144 Hz display). Every high-refresh rate must hold full display cadence.
+    for (mhz, expected_min, expected_max) in [
+        (120_000u32, 119usize, 121usize),
+        (144_000, 143, 145),
+        (160_000, 159, 161),
+        (165_000, 164, 166),
+        (240_000, 239, 241),
+    ] {
+        let mut host = SteppedHost::new(keep_asking);
+        let period = Duration::from_nanos(1_000_000_000_000 / u64::from(mhz));
+        let build_time = Duration::from_micros(2_500);
+        // Simulate Frame 0 taking 2.5 ms before the very first turn_ends sync: anchoring the
+        // fresh synthetic grid to `polled` (t=0) schedules Frame 1 at t=period, NOT immediately
+        // at t=2.5 ms.
+        host.seek_to(host.wall_start + build_time);
+        host.sync_monitor_mhz(Some(mhz));
+        assert_eq!(
+            host.wake_deadline(),
+            Some(host.wall_start + period),
+            "{mhz} mHz: first paced wake must wait a full period after polled, not fire early at now"
+        );
+
+        let end = host.wall_start + Duration::from_secs(1);
+        let mut ticks = Vec::new();
+        while let Some(due) = host.wake_deadline() {
+            if due > end { break; }
+            host.seek_to(due);
+            ticks.push(host.now());
+            let stale = host.rt.resting_wake().unwrap_or(true);
+            let frame = stale || host.rt.stale();
+            host.rt.resting_wake_frame(frame);
+            if frame {
+                // Simulate Wayland holding RedrawRequested briefly before drawing, plus 2.5 ms build.
+                host.sync_monitor_mhz(Some(mhz));
+                host.seek_to(due + build_time);
+                host.rt.frame(0.0);
+                host.frames += 1;
+            }
+            host.sync_monitor_mhz(Some(mhz));
+        }
+        assert!(
+            (expected_min..=expected_max).contains(&ticks.len()),
+            "{mhz} mHz Linux monitor_grid: expected {expected_min}..={expected_max} ticks in 1 s, got {}",
+            ticks.len()
+        );
+        for pair in ticks.windows(2) {
+            let delta = pair[1].duration_since(pair[0]);
+            assert_eq!(delta, period, "{mhz} mHz tick spacing drifted: {delta:?} != {period:?}");
+        }
+        assert!(host.samples <= 2, "{mhz} mHz sampled monitor {} times in 1 s", host.samples);
+    }
+}
+
+#[test]
+fn linux_monitor_grid_falls_back_to_60hz_when_unknown_or_invalid_and_upgrades_on_change() {
+    let t0 = crate::time::now();
+    // Unknown, zero, sub-10 Hz, and >1000 Hz refresh rates return None -> 60 Hz TIMER_FRAME.
+    assert_eq!(monitor_grid(None, None, t0), None);
+    assert_eq!(monitor_grid(Some(0), None, t0), None);
+    assert_eq!(monitor_grid(Some(5_000), None, t0), None);
+    assert_eq!(monitor_grid(Some(2_000_000), None, t0), None);
+
+    // Unknown monitor falls back to 60 Hz TIMER_FRAME until DisplayChanged reports 144 Hz.
+    let mut host = SteppedHost::new(keep_asking);
+    host.sync_monitor_mhz(None);
+    assert!(matches!(host.pace, PollPace::Fallback { .. }));
+    assert_eq!(host.wake_deadline(), Some(host.wall_start + TIMER_FRAME));
+
+    let _ = host.pace.step(PollPaceEvent::DisplayChanged);
+    host.sync_monitor_mhz(Some(144_000));
+    let period_144 = Duration::from_nanos(1_000_000_000_000 / 144_000);
+    assert_eq!(host.wake_deadline(), Some(host.wall_start + period_144));
+
+    // Re-sampling after REFRESH_TTL on the same 144 Hz monitor preserves its phase anchor, while
+    // moving to a 240 Hz monitor switches interval cleanly.
+    let initial_grid = host.pace.previous_grid().expect("armed 144 Hz grid");
+    let same = monitor_grid(Some(144_000), Some(initial_grid), t0 + Duration::from_secs(2)).unwrap();
+    assert_eq!(same.timebase, initial_grid.timebase);
+    assert_eq!(same.interval, period_144);
+
+    let moved = monitor_grid(Some(240_000), Some(initial_grid), t0 + Duration::from_secs(2)).unwrap();
+    assert_eq!(moved.timebase, t0 + Duration::from_secs(2));
+    assert_eq!(moved.interval, Duration::from_nanos(1_000_000_000_000 / 240_000));
+}
+
+#[test]
+fn linux_pick_refresh_mhz_handles_wayland_pre_enter_and_multi_monitor() {
+    // Current monitor known with refresh rate -> uses it directly.
+    assert_eq!(pick_refresh_mhz(Some(Some(144_000)), [Some(60_000)]), Some(144_000));
+    // Current monitor known without refresh rate (e.g. headless Xvfb) -> None (60 Hz fallback).
+    assert_eq!(pick_refresh_mhz(Some(None), [Some(144_000)]), None);
+    // Wayland before wl_surface.enter with a single output -> unambiguous sole monitor.
+    assert_eq!(pick_refresh_mhz(None, [Some(144_000)]), Some(144_000));
+    // Wayland before wl_surface.enter with multiple outputs -> None (never guess wrong display).
+    assert_eq!(pick_refresh_mhz(None, [Some(144_000), Some(60_000)]), None);
+    // No monitors -> None.
+    assert_eq!(pick_refresh_mhz(None, []), None);
+}
+
+#[test]
+fn linux_wayland_idle_and_stop_leave_no_timer_armed() {
+    let mut idle = SteppedHost::new(idle_poll);
+    idle.sync_monitor_mhz(Some(144_000));
+    assert_eq!(idle.wake_deadline(), None);
+    assert_eq!(idle.samples, 0, "idle window must not query monitor refresh rate");
+    assert_eq!(idle.pace, PollPace::Idle);
+
+    // Poll runs 5 ticks at 144 Hz then stops asking -> rests with zero timers armed.
+    let mut finite = SteppedHost::new(stop_after_five);
+    let end = finite.wall_start + Duration::from_secs(1);
+    let mut ticks = 0u32;
+    finite.sync_monitor_mhz(Some(144_000));
+    while let Some(due) = finite.wake_deadline() {
+        if due > end { break; }
+        finite.seek_to(due);
+        ticks += 1;
+        let stale = finite.rt.resting_wake().unwrap_or(true);
+        let frame = stale || finite.rt.stale();
+        finite.rt.resting_wake_frame(frame);
+        if frame {
+            finite.seek_to(due + Duration::from_millis(2));
+            finite.rt.frame(0.0);
+        }
+        finite.sync_monitor_mhz(Some(144_000));
+    }
+    assert_eq!(ticks, 4);
+    assert_eq!(finite.rt.state, 5);
+    assert_eq!(finite.wake_deadline(), None, "window must go completely idle once poll stops asking");
 }

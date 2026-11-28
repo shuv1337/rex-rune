@@ -53,14 +53,35 @@ pub(crate) fn launching() -> bool {
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {
     static kCAGravityTopLeft: &'static objc2::runtime::AnyObject;
+    static kCAGravityTop: &'static objc2::runtime::AnyObject;
+    static kCAGravityTopRight: &'static objc2::runtime::AnyObject;
+    static kCAGravityLeft: &'static objc2::runtime::AnyObject;
+    static kCAGravityCenter: &'static objc2::runtime::AnyObject;
+    static kCAGravityRight: &'static objc2::runtime::AnyObject;
     static kCAGravityBottomLeft: &'static objc2::runtime::AnyObject;
+    static kCAGravityBottom: &'static objc2::runtime::AnyObject;
+    static kCAGravityBottomRight: &'static objc2::runtime::AnyObject;
 }
 
-/// The gravity that keeps a layer's contents at the window's top left. Core Animation names its
-/// gravities for unflipped contents; under a flipped view (winit's is) "bottom" is the top.
-fn top_left_gravity(contents_flipped: bool) -> &'static objc2::runtime::AnyObject {
+/// The gravity that keeps a layer's contents pinned to `anchor` when its bounds change. Core
+/// Animation names its gravities for unflipped contents; under a flipped view (winit's is)
+/// vertical top and bottom swap.
+fn anchor_gravity(anchor: crate::ResizeAnchor, contents_flipped: bool) -> &'static objc2::runtime::AnyObject {
+    use crate::ResizeAnchor::*;
     // SAFETY: QuartzCore's constant strings.
-    unsafe { if contents_flipped { kCAGravityBottomLeft } else { kCAGravityTopLeft } }
+    unsafe {
+        match (anchor, contents_flipped) {
+            (TopLeft, false) | (BottomLeft, true) => kCAGravityTopLeft,
+            (Top, false) | (Bottom, true) => kCAGravityTop,
+            (TopRight, false) | (BottomRight, true) => kCAGravityTopRight,
+            (Left, _) => kCAGravityLeft,
+            (Center, _) => kCAGravityCenter,
+            (Right, _) => kCAGravityRight,
+            (BottomLeft, false) | (TopLeft, true) => kCAGravityBottomLeft,
+            (Bottom, false) | (Top, true) => kCAGravityBottom,
+            (BottomRight, false) | (TopRight, true) => kCAGravityBottomRight,
+        }
+    }
 }
 
 /// Small seam over `NSWindow` so unit tests verify `NSWindow.colorSpace` wiring without
@@ -78,7 +99,12 @@ impl ColorSpaceTarget for NSWindow {
 pub(super) fn apply_window_color_space_to(
     target: &impl ColorSpaceTarget,
     color_space: crate::MacColorSpace,
+    wide_color: bool,
 ) {
+    if wide_color {
+        target.set_color_space(Some(&objc2_app_kit::NSColorSpace::extendedSRGBColorSpace()));
+        return;
+    }
     match color_space {
         crate::MacColorSpace::Srgb => {
             target.set_color_space(Some(&objc2_app_kit::NSColorSpace::sRGBColorSpace()));
@@ -89,11 +115,16 @@ pub(super) fn apply_window_color_space_to(
     }
 }
 
-/// Applies `color_space` to an `NSWindow` or adopted `NSPanel`: `Srgb` sets
-/// `NSColorSpace.sRGBColorSpace` (which colour-manages an untagged `CAMetalLayer`, covering
-/// wgpu-backed windows and overlay panels), and `Unmanaged` clears it to `nil`.
-pub(crate) fn apply_window_color_space(window: &NSWindow, color_space: crate::MacColorSpace) {
-    apply_window_color_space_to(window, color_space);
+/// Applies `color_space` (or `extendedSRGBColorSpace` when `wide_color` is set) to an
+/// `NSWindow` or adopted `NSPanel`: `Srgb` sets `NSColorSpace.sRGBColorSpace` (which
+/// colour-manages an untagged `CAMetalLayer`, covering wgpu-backed windows and overlay panels),
+/// `Unmanaged` clears it to `nil`, and `wide_color` uses `NSColorSpace.extendedSRGBColorSpace`.
+pub(crate) fn apply_window_color_space(
+    window: &NSWindow,
+    color_space: crate::MacColorSpace,
+    wide_color: bool,
+) {
+    apply_window_color_space_to(window, color_space, wide_color);
 }
 
 /// Pins the Metal layer's contents to the window's top left at their own size, disables Core
@@ -111,15 +142,40 @@ pub(crate) fn apply_window_color_space(window: &NSWindow, color_space: crate::Ma
 /// to `nil`. Rune's native Metal backend preserves the layer's colorspace across reconfigures;
 /// wgpu-hal resets it to `nil`, where `NSWindow.colorSpace` (`apply_window_color_space`) keeps
 /// sRGB windows managed and unmanaged windows raw.
-pub(crate) fn pin_contents_top_left(surface: &wgpu::Surface, color_space: crate::MacColorSpace) {
+pub(crate) fn pin_contents_top_left(
+    surface: &wgpu::Surface,
+    color_space: crate::MacColorSpace,
+    wide_color: bool,
+) {
+    pin_contents(surface, color_space, wide_color, crate::ResizeAnchor::TopLeft);
+}
+
+/// Updates `CAMetalLayer.contentsGravity` on a live surface to match `anchor`.
+pub(crate) fn set_contents_gravity(surface: &wgpu::Surface, anchor: crate::ResizeAnchor) {
+    use objc2::runtime::Bool;
+    // SAFETY: `layer` is a live `CAMetalLayer` on the main thread under wgpu's lock.
+    crate::gpu::with_layer(surface, |layer| unsafe {
+        let flipped: Bool = msg_send![layer, contentsAreFlipped];
+        let _: () = msg_send![layer, setContentsGravity: anchor_gravity(anchor, flipped.as_bool())];
+    });
+}
+
+/// Like [`pin_contents_top_left`], pinning the layer's contents to `anchor` so an unresized
+/// drawable stays anchored to the fixed edge while the opposite edge moves.
+pub(crate) fn pin_contents(
+    surface: &wgpu::Surface,
+    color_space: crate::MacColorSpace,
+    wide_color: bool,
+    anchor: crate::ResizeAnchor,
+) {
     use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
+    use objc2_core_graphics::{CGColorSpace, kCGColorSpaceExtendedLinearSRGB, kCGColorSpaceSRGB};
     use objc2_foundation::{NSDictionary, NSString, ns_string};
     // SAFETY: `layer` is a live `CAMetalLayer` on the main thread under wgpu's lock;
     // `+[NSNull null]` returns the process-lifetime `NSNull` singleton.
     crate::gpu::with_layer(surface, |layer| unsafe {
         let flipped: Bool = msg_send![layer, contentsAreFlipped];
-        let _: () = msg_send![layer, setContentsGravity: top_left_gravity(flipped.as_bool())];
+        let _: () = msg_send![layer, setContentsGravity: anchor_gravity(anchor, flipped.as_bool())];
         if let Some(null_cls) = AnyClass::get(c"NSNull") {
             let null: *const AnyObject = msg_send![null_cls, null];
             if let Some(null) = null.as_ref() {
@@ -134,6 +190,13 @@ pub(crate) fn pin_contents_top_left(surface: &wgpu::Surface, color_space: crate:
                 let _: () = msg_send![layer, setActions: &*actions];
             }
         }
+        if wide_color {
+            let _: () = msg_send![layer, setWantsExtendedDynamicRangeContent: Bool::new(true)];
+            if let Some(ext) = CGColorSpace::with_name(Some(kCGColorSpaceExtendedLinearSRGB)) {
+                let _: () = msg_send![layer, setColorspace: &*ext];
+            }
+            return;
+        }
         match color_space {
             crate::MacColorSpace::Srgb => {
                 if let Some(srgb) = CGColorSpace::with_name(Some(kCGColorSpaceSRGB)) {
@@ -145,6 +208,22 @@ pub(crate) fn pin_contents_top_left(surface: &wgpu::Surface, color_space: crate:
                 let _: () = msg_send![layer, setColorspace: nil];
             }
         }
+    });
+}
+
+/// Sets `CAMetalLayer.drawableSize` to `(width, height)` (clamped to at least 1×1) on either
+/// Rune's native Metal backend or wgpu's Metal backend.
+///
+/// Shrinking to `1×1` while a window or overlay is hidden lets Core Animation release unused
+/// full-size drawables from the layer's pool while keeping any currently displayed surface intact;
+/// restoring `(config.width, config.height)` before the next show or draw keeps acquired
+/// drawables aligned with the surface configuration.
+pub(crate) fn set_drawable_size(surface: &wgpu::Surface<'_>, width: u32, height: u32) {
+    use objc2_core_foundation::CGSize;
+    let size = CGSize::new(f64::from(width.max(1)), f64::from(height.max(1)));
+    // SAFETY: `layer` is a live `CAMetalLayer` on the main thread under wgpu's lock.
+    crate::gpu::with_layer(surface, |layer| unsafe {
+        let _: () = msg_send![layer, setDrawableSize: size];
     });
 }
 

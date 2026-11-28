@@ -247,11 +247,21 @@ impl OverlayCore {
         let reused = pooled.and_then(|(gpu, translucent)| make(&gpu.instance).filter(|s| crate::render::translucency::serves(&gpu, s, features, translucent)).map(|s| (gpu, s)));
         let (w, h) = ((self.at.size.0 * scale).round() as u32, (self.at.size.1 * scale).round() as u32);
         let srgb_blend = app.rt().srgb_blend();
+        let wide_color = self.wide_color;
         let prewarm_effects = self.prewarm_effects;
         let frame_latency = crate::window::frame_latency(self.frame_latency);
+        // Layer-shell overlays gate every present on `wl_surface.frame` (`layer.request_frame()`
+        // + `Turn::AwaitingFrame`). Window-backed overlays (including Wayland toplevel fallbacks)
+        // and XWayland surfaces draw through `about_to_wait` and rely on `AutoVsync`.
+        let frame_callback_paced = {
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            { matches!(backing, Backing::Layer(_)) }
+            #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+            { false }
+        };
         let make_surface = |instance: &wgpu::Instance| make(instance).ok_or_else(|| "could not create its GPU surface".to_owned());
         let setup_surface = |gpu: &Gpu, surface: &wgpu::Surface<'_>, existing: Option<Renderer>| -> Result<_, crate::render::SurfaceSetupError> {
-            let (mut config, translucent) = crate::window::surface_config(surface, &gpu.adapter, (w, h), srgb_blend)
+            let (mut config, translucent) = crate::window::surface_config_with(surface, &gpu.adapter, (w, h), srgb_blend, frame_callback_paced, wide_color, false)
                 .ok_or_else(|| crate::render::SurfaceSetupError::unsupported("the GPU adapter can't present to this overlay"))?;
             config.desired_maximum_frame_latency = frame_latency;
             let info = gpu.adapter.get_info();
@@ -273,7 +283,8 @@ impl OverlayCore {
             let prefix = format!("could not configure its GPU surface on {:?} {}", info.backend, info.name);
             crate::window::configure_checked(surface, gpu, &config)
                 .map_err(|error| crate::render::SurfaceSetupError::from_configure(&prefix, error))?;
-            let target_format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
+            let effective_srgb_blend = if crate::window::is_wide_color_config(&config) { false } else { srgb_blend };
+            let target_format = if effective_srgb_blend { config.format.remove_srgb_suffix() } else { config.format };
             let mut renderer = match existing {
                 Some(mut renderer) => {
                     renderer.try_set_format(&gpu.device, target_format).map_err(crate::render::SurfaceSetupError::from_shader)?;
@@ -282,6 +293,7 @@ impl OverlayCore {
                 None => Renderer::try_new_classified(&gpu.device, target_format).map_err(crate::render::SurfaceSetupError::from_shader)?,
             };
             renderer.attach_gpu(gpu);
+            renderer.set_srgb_blend(effective_srgb_blend);
             renderer.set_prewarm_effects(prewarm_effects);
             Ok((config, translucent.is_none(), renderer))
         };
@@ -417,8 +429,12 @@ impl OverlayCore {
         }
         let info = gpu.adapter.get_info();
         *self.shared.surface.lock().unwrap() = Some(format!("{:?} on {} ({:?}), {:?}, {:?}", info.backend, info.name, info.device_type, config.alpha_mode, config.format));
+        let wide_active = crate::window::is_wide_color_config(&config);
+        if wide_active {
+            rt.set_srgb_blend(false);
+        }
         #[cfg(target_os = "macos")]
-        crate::platform::macos::pin_contents_top_left(&surface, self.macos_color_space);
+        crate::platform::macos::pin_contents_top_left(&surface, self.macos_color_space, wide_active);
         let target_format = if rt.srgb_blend() { config.format.remove_srgb_suffix() } else { config.format };
         crate::window::rebuild_renderer_core(&gpu.device, &mut renderer, target_format, rt);
         self.renderer = Some(renderer);
@@ -432,6 +448,7 @@ impl OverlayCore {
             .then(|| crate::render::surface_alpha::AlphaSurface::new(&gpu.device, target_format, (config.width, config.height)));
         rt.transparent = true;
         rt.set_renderer_kind(crate::RendererKind::Gpu);
+        rt.images.set_backing(crate::pixels::Backing::Gpu);
         rt.set_viewport(self.at.size, scale);
         #[cfg(target_os = "macos")]
         let pacing = self.frame_wake.clone().and_then(|wake| {
@@ -466,6 +483,8 @@ impl OverlayCore {
             media_keys,
             #[cfg(target_os = "macos")]
             present: None,
+            #[cfg(target_os = "macos")]
+            hidden_drawable: crate::window::HiddenDrawable::Full,
             #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
             materials: crate::system_material::windows::Materials::new(),
             #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
@@ -473,7 +492,7 @@ impl OverlayCore {
             // A new swap chain holds none of ours, and its waitable object is its own.
             #[cfg(target_os = "windows")]
             slot: Slot::default(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
             poll_pace: crate::window::poll_pace::PollPace::default(),
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
             wayland_backdrop: None,
@@ -503,7 +522,10 @@ impl OverlayCore {
             return;
         }
         #[cfg(target_os = "macos")]
-        crate::platform::macos::sync_contents_scale(&live.surface, scale);
+        {
+            let _ = live.hidden_drawable.step(crate::window::HiddenDrawableEvent::Configured);
+            crate::platform::macos::sync_contents_scale(&live.surface, scale);
+        }
         if let Some(alpha) = &mut live.alpha {
             alpha.resize(&gpu.device, (live.config.width, live.config.height));
         }
@@ -543,6 +565,26 @@ impl Drop for OverlayCore {
 }
 
 impl OverlayCore {
+    #[cfg(target_os = "macos")]
+    pub(super) fn shrink_hidden_drawable(&mut self) {
+        let Some(live) = self.surface.live_mut() else { return };
+        for effect in live.hidden_drawable.step(crate::window::HiddenDrawableEvent::Hide) {
+            if effect == crate::window::HiddenDrawableEffect::Shrink {
+                crate::platform::macos::set_drawable_size(&live.surface, 1, 1);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn restore_hidden_drawable(&mut self) {
+        let Some(live) = self.surface.live_mut() else { return };
+        for effect in live.hidden_drawable.step(crate::window::HiddenDrawableEvent::Wake) {
+            if effect == crate::window::HiddenDrawableEffect::Restore {
+                crate::platform::macos::set_drawable_size(&live.surface, live.config.width, live.config.height);
+            }
+        }
+    }
+
     /// Its surface refused a new configuration: the overlay hides and drops it, so wgpu never
     /// panics on its next drawable. The next show tries a new one.
     pub(super) fn surface_refused(&mut self, app: &mut dyn OverlayApp, reason: String) {

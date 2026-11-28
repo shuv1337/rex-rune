@@ -183,8 +183,9 @@ patches are in [Building and development](docs/building.md). The code layout,
 conventions and platform boundary rules are in [AGENTS.md](AGENTS.md). Release
 signing and verification are in [Publishing a binary release](docs/releases.md).
 
-The Rune toolkit is pinned to `f1b079cc`. See [the vendoring notes](vendor/rune/README.md)
-for the Linux fixes Rex Rune still carries and the release tooling features it enables.
+The Rune toolkit is pinned to `e9233e3881e2eb7e6de2e6f54c9b84bc637bf68b`.
+The [vendoring notes](vendor/rune/README.md) cover the presentation override,
+system appearance, GSettings bus handling and native titlebar drag threshold.
 
 ## Documentation
 

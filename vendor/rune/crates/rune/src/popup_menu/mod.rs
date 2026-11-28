@@ -52,11 +52,9 @@ mod host {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) type Tracking = ();
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn show(_: &Arc<Window>, _: Show, _: Rc<Session>, _: Option<Waker>) -> bool { false }
+    pub(super) fn show(_: &Arc<Window>, _: Show, _: bool, _: Rc<Session>, _: Option<Waker>) -> bool { false }
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn stop(_: Tracking) {}
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn scheme(_: bool) {}
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn start(_: Waker) {}
 }
@@ -295,6 +293,47 @@ impl From<&String> for PopupAnchor { fn from(key: &String) -> Self { Self::Key(k
 impl From<PointerPress> for PopupAnchor { fn from(p: PointerPress) -> Self { Self::Point(p.x, p.y) } }
 impl From<(f32, f32)> for PopupAnchor { fn from((x, y): (f32, f32)) -> Self { Self::Point(x, y) } }
 
+/// Context handed to [`El::field_menu`](crate::El::field_menu) when Rune builds or resolves a
+/// text field's built-in context menu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldMenuContext {
+    point: PointerPress,
+    hit_offset: Option<usize>,
+    caret: usize,
+    selection: (usize, usize),
+    misspelled_word: Option<(usize, usize)>,
+}
+
+impl FieldMenuContext {
+    pub(crate) fn new(
+        point: PointerPress,
+        hit_offset: Option<usize>,
+        caret: usize,
+        selection: (usize, usize),
+        misspelled_word: Option<(usize, usize)>,
+    ) -> Self {
+        Self { point, hit_offset, caret, selection, misspelled_word }
+    }
+
+    /// Where the menu was opened, in window points (the secondary-press point, or the focused
+    /// field's bottom-left for keyboard Menu / Shift+F10).
+    pub fn point(&self) -> PointerPress { self.point }
+
+    /// UTF-8 byte offset in [`TextEdit::text`](crate::TextEdit::text) under the secondary press,
+    /// or `None` when opened from the keyboard or touch selection toolbar.
+    pub fn hit_offset(&self) -> Option<usize> { self.hit_offset }
+
+    /// Current caret byte offset (`edit.focus`) after Rune's right-click caret/word placement.
+    pub fn caret(&self) -> usize { self.caret }
+
+    /// Current ordered selection byte range (`edit.range()`) when the menu opens.
+    pub fn selection(&self) -> (usize, usize) { self.selection }
+
+    /// Byte range of the misspelled word at the click/selection, when Rune's spell checker
+    /// detected one.
+    pub fn misspelled_word(&self) -> Option<(usize, usize)> { self.misspelled_word }
+}
+
 /// A text field's context-menu request handed to [`App::on_field_menu`](crate::App::on_field_menu)
 /// on platforms where [`popup_menu_supported`] is false (such as Linux).
 ///
@@ -369,6 +408,9 @@ pub(crate) struct Request {
     pub on_pick: PickFn,
     /// A text field's own menu, whose picks the runtime acts on.
     pub field: Option<Box<crate::runtime::field_menu::FieldMenu>>,
+    /// True for text-selection menus (a field's menu or selectable text's Copy menu) that a host
+    /// with `host.text_menus` takes through `take_text_menu`.
+    pub text_menu: bool,
 }
 
 impl Request {
@@ -418,7 +460,7 @@ impl Tx {
             // None once the playground has dropped the stage that asked.
             if let Some(s) = s.cast::<S>() { on_pick(s, picked, tx); }
         });
-        let request = Request { menu, anchor: anchor.into(), on_pick, field: None };
+        let request = Request { menu, anchor: anchor.into(), on_pick, field: None, text_menu: false };
         self.popups.push(Call(Rc::new(RefCell::new(Some(request)))));
     }
 
@@ -617,9 +659,9 @@ impl Presenter {
             redraw = true;
             if let (Some(show), Some(window)) = (show, window) {
                 // As dark as what the window draws, which may not be the system's appearance.
-                host::scheme(rt.backdrop_dark().unwrap_or(rt.env.system_dark));
+                let dark = rt.backdrop_dark().unwrap_or(rt.env.system_dark);
                 let session = Rc::new(Session::default());
-                if host::show(window, show, session.clone(), self.wake.clone()) {
+                if host::show(window, show, dark, session.clone(), self.wake.clone()) {
                     self.session = Some(session);
                     return true;
                 }

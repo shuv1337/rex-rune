@@ -155,8 +155,29 @@ impl window_requests::HostState {
     }
 
     pub(super) fn set_languages(&mut self, languages: Vec<String>) -> bool {
+        self.system_languages_override = true;
         let normalized = crate::platform::languages::normalize(languages);
         if self.system_languages.as_deref() == Some(normalized.as_slice()) {
+            return false;
+        }
+        self.system_languages = Some(Rc::from(normalized));
+        self.languages_gen = self.languages_gen.wrapping_add(1);
+        true
+    }
+
+    /// Updates OS-derived languages without marking an explicit override, comparing against the
+    /// effective list (including the lazy platform cache) so unchanged lists keep the runtime idle.
+    #[cfg(any(test, target_os = "windows"))]
+    pub(super) fn set_os_languages(&mut self, languages: Vec<String>) -> bool {
+        if self.system_languages_override {
+            return false;
+        }
+        let normalized = crate::platform::languages::normalize(languages);
+        let same = match &self.system_languages {
+            Some(prev) => prev.as_ref() == normalized.as_slice(),
+            None => crate::platform::languages::cached() == normalized.as_slice(),
+        };
+        if same {
             return false;
         }
         self.system_languages = Some(Rc::from(normalized));
@@ -176,6 +197,21 @@ impl window_requests::HostState {
         if prev == clean {
             return false;
         }
+        self.languages_gen = self.languages_gen.wrapping_add(1);
+        true
+    }
+
+    #[inline]
+    pub(crate) fn keyboard_inset(&self) -> f32 {
+        self.keyboard_inset
+    }
+
+    pub(super) fn set_keyboard_inset(&mut self, points: f32) -> bool {
+        let clean = if points.is_finite() { points.max(0.0) } else { 0.0 };
+        if self.keyboard_inset == clean {
+            return false;
+        }
+        self.keyboard_inset = clean;
         self.languages_gen = self.languages_gen.wrapping_add(1);
         true
     }
@@ -443,6 +479,35 @@ impl RuntimeCore {
         changed
     }
 
+    /// Re-samples Windows preferred languages only when `WM_SETTINGCHANGE` (`"Intl"`) bumped the
+    /// generation and the app has already read (or previously synced) OS languages without an
+    /// explicit [`Self::set_languages`] override.
+    #[cfg(target_os = "windows")]
+    #[inline]
+    pub(crate) fn sync_windows_languages_if_changed(&mut self) -> bool {
+        let current_gen = crate::platform::languages::setting_generation();
+        if current_gen == self.host.languages_setting_gen {
+            return false;
+        }
+        self.host.languages_setting_gen = current_gen;
+        if self.host.system_languages_override
+            || (self.host.system_languages.is_none() && !crate::platform::languages::is_cached())
+        {
+            return false;
+        }
+        self.sync_os_languages_with(crate::platform::languages::current)
+    }
+
+    #[cfg(any(test, target_os = "windows"))]
+    pub(crate) fn sync_os_languages_with(&mut self, read: impl FnOnce() -> Vec<String>) -> bool {
+        if self.host.system_languages_override {
+            return false;
+        }
+        let changed = self.host.set_os_languages(read());
+        if changed { self.commit.dirty = true; }
+        changed
+    }
+
     /// Current safe-area insets `[top, right, bottom, left]` in logical points: the host override
     /// set via [`Self::set_safe_area`], else browser insets on `wasm32`, else `[0.0; 4]`.
     #[inline]
@@ -455,6 +520,25 @@ impl RuntimeCore {
     /// clamp to `0.0`. A change re-runs the view and its memos.
     pub fn set_safe_area(&mut self, insets: [f32; 4]) {
         if self.host.set_safe_area(insets) { self.commit.dirty = true; }
+    }
+
+    /// Current on-screen software keyboard bottom overlap in logical points (`0.0` when closed).
+    #[inline]
+    pub(crate) fn keyboard_inset(&self) -> f32 {
+        self.host.keyboard_inset()
+    }
+
+    /// Sets the bottom overlap of an on-screen software keyboard in logical points reported by
+    /// [`Cx::keyboard_inset`]. Kept separate from [`Self::set_safe_area`] so edge-drag bands stay
+    /// unaffected. Negative or non-finite values clamp to `0.0`. A change re-runs the view and
+    /// its memos, and scrolls a focused text field into view above the keyboard when positive.
+    pub fn set_keyboard_inset(&mut self, points: f32) {
+        if self.host.set_keyboard_inset(points) {
+            self.commit.dirty = true;
+            if self.host.keyboard_inset() > 0.0 {
+                self.edit.caret_follow = true;
+            }
+        }
     }
 
     #[inline]
